@@ -72,4 +72,10 @@ Correcting a typo or clarifying wording in place is fine.
 | [0007](0007-visual-c-runtime-linkage.md) | The recorder links the Visual C++ runtime statically and the universal CRT dynamically | Accepted |
 | [0008](0008-codec-patent-position.md) | AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away | Proposed |
 | [0009](0009-the-recorder-registers-global-hotkeys.md) | The recorder registers the global hotkeys, and a press becomes a protocol command | Accepted |
-| [0010](0010-a-replay-save-does-not-reach-across-a-gap.md) | A replay save never reaches across a gap, and one that lands entirely inside one is refused | Accepted |
+| [0010](0010-user-labelled-event-kinds.md) | A user-labelled event kind carries its own text, and a host subsystem gets its own source | Accepted |
+| [0011](0011-what-the-webview-plays.md) | The window plays the archival recording itself, and the recorder chooses which sound track it carries | Accepted |
+| [0012](0012-a-session-follows-a-resize-with-a-new-file.md) | A session follows a mid-recording size change with a new file, and Clipped does not scale | Accepted |
+| [0013](0013-capture-rounds-an-odd-dimension-away.md) | Capture rounds an odd dimension away, and crops the frame to match | Accepted |
+| [0014](0014-a-milestone-is-not-a-version.md) | A milestone is not a version, and the first release is v1.0.0 | Accepted |
+| [0015](0015-capture-holds-the-display-awake.md) | Capture holds the display awake, and says so when a source goes quiet anyway | Accepted |
+| [0017](0017-a-replay-save-does-not-reach-across-a-gap.md) | A replay save never reaches across a gap, and one that lands entirely inside one is refused | Accepted |

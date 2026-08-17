@@ -15,15 +15,41 @@
 //! behind is the recorder failing. One "frames dropped" number would mean
 //! nothing, and a UI cannot re-separate what the protocol has already mixed
 //! (AGENTS.md section 19).
+//!
+//! # Why a sitting is here at all
+//!
+//! What the product does is record games by itself and group the files into
+//! sittings (SPEC.md section 2, `docs/sessions.md`). A protocol that could only
+//! say "recording, `process 4242`, 03:12" could not describe that, so a window
+//! could not show it ([issue
+//! #241](https://github.com/wildware-uk/clipped/issues/241)). [`SessionSummary`]
+//! is the sitting as the recorder currently holds it: which game, which files so
+//! far, and — once it is over — when and why it ended.
+//!
+//! It is the live counterpart of [`LibrarySession`](crate::LibrarySession) and
+//! deliberately carries the same field names for the same facts, because they
+//! are the same facts about the same sitting a few seconds apart. What it leaves
+//! out is everything the library adds afterwards: a row identifier, a
+//! favourite, a tag, a size on disk. None of those is known while the recording
+//! is still being written, and inventing a place for them here would be
+//! inventing a second answer to a question the library already answers.
 
 use serde::{Deserialize, Serialize};
 
 /// What the recorder is doing right now.
+///
+/// Three states rather than two: **watching and idle are different answers.** A
+/// recorder watching for games with none running will record the next one that
+/// starts; a recorder that is idle will not record anything until it is asked.
+/// Reporting both as `idle` made those indistinguishable, and a window cannot
+/// say what it does not know (AGENTS.md section 27).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RecorderStatus {
-    /// Nothing is being recorded.
+    /// Nothing is being recorded, and nothing will be until something asks.
     Idle,
+    /// Nothing is being recorded, and the next game to start will be.
+    Watching(Watching),
     /// A recording is in progress.
     Recording(ActiveRecording),
 }
@@ -34,6 +60,42 @@ impl RecorderStatus {
     pub const fn is_recording(&self) -> bool {
         matches!(self, Self::Recording(_))
     }
+
+    /// The sitting the recorder is in, if it is in one.
+    ///
+    /// A sitting outlives the recording it is made of — one that is being
+    /// recorded is on [`Self::Recording`], and one waiting out its restart grace
+    /// with no game running is on [`Self::Watching`] — so a window that wants to
+    /// keep showing the same game across both asks here rather than matching on
+    /// the state twice.
+    #[must_use]
+    pub fn session(&self) -> Option<&SessionSummary> {
+        match self {
+            Self::Idle => None,
+            Self::Watching(watching) => watching.session.as_deref(),
+            Self::Recording(recording) => recording.session.as_deref(),
+        }
+    }
+}
+
+/// The recorder is watching for a game to start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watching {
+    /// The sitting that is still open, when one is.
+    ///
+    /// A game that exits keeps its sitting open for a grace period, so that the
+    /// same game launching again rejoins it rather than fragmenting one sitting
+    /// into two (`docs/sessions.md`). During that period the recorder is
+    /// watching *and* in a sitting, and a window that dropped the game's name
+    /// for those few seconds would flicker between "Counter-Strike 2" and
+    /// "watching for games" and back.
+    ///
+    /// Absent when the recorder is watching for anything at all rather than for
+    /// the return of something in particular.
+    ///
+    /// Behind a pointer for the reason [`ActiveRecording::session`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<Box<SessionSummary>>,
 }
 
 /// The recording that is running.
@@ -70,6 +132,136 @@ pub struct ActiveRecording {
     /// reach back further than the window (`docs/replay-buffer.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_seconds: Option<u32>,
+    /// The sitting this recording belongs to, when it belongs to one.
+    ///
+    /// This is where the **game** is. [`Self::target`] is a capture selector —
+    /// `process 4242` — and a window cannot turn one into "Counter-Strike 2"
+    /// without the catalogue, which lives in the recorder. The sitting already
+    /// knows, because being able to name the game is what made it a sitting.
+    ///
+    /// It is also how the second file of one sitting stops looking like an
+    /// unrelated recording: [`SessionSummary::recordings`] holds the ones before
+    /// this one.
+    ///
+    /// Absent for a recording that is not part of a sitting. Nothing the
+    /// recorder makes today is — every recording opens one, automatic or asked
+    /// for (`clipped_session::automatic`) — so this is the field's honest answer
+    /// for a recorder that records without one rather than a state the
+    /// application produces.
+    ///
+    /// Behind a pointer, which is not a wire decision — a [`Box`] is invisible
+    /// to `serde` — but a size one. A sitting is larger than the recording it
+    /// hangs off and is absent as often as not, and [`RecorderStatus`] is
+    /// carried by value inside
+    /// [`RecorderLinkState`](crate::RecorderLinkState) and cloned for every
+    /// subscriber of every status change. Inline it would make the idle case
+    /// pay for the recording one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<Box<SessionSummary>>,
+}
+
+/// One sitting, as the recorder currently holds it.
+///
+/// The live counterpart of [`LibrarySession`](crate::LibrarySession), carrying
+/// the same field names for the same facts — see the module documentation for
+/// what it leaves out and why.
+///
+/// **Whether the sitting is over is [`Self::ended_at`].** There is no separate
+/// "finished" shape: a sitting on a [`RecorderStatus`] is one the recorder is
+/// still in, and the one on a
+/// [`Event::SessionEnded`](crate::Event::SessionEnded) is the same object a
+/// moment later with the two fields that only an ended sitting has. Two types
+/// would have been two things to keep in step for a difference the presence of
+/// a field already states, which is the shape `LibrarySession` settled on for
+/// exactly this question.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// The identifier the recorder generated, shared by the sidecar, the files
+    /// and — once it has been indexed —
+    /// [`LibrarySession::session_id`](crate::LibrarySession::session_id).
+    ///
+    /// It is what makes two `status` events about one sitting recognisable as
+    /// one sitting, and what lets a window that saw a sitting end find it again
+    /// in the library.
+    pub session_id: String,
+    /// The catalogue's identifier for the game.
+    ///
+    /// Absent for a sitting the catalogue would not attribute — it reported a
+    /// tie, or claimed nothing, and the sitting is filed under no game rather
+    /// than under a guess (`docs/sessions.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    /// The game's name as the catalogue knows it.
+    ///
+    /// Absent for the same reason. What to call an unattributed sitting on
+    /// screen is the screen's decision, not the protocol's: the protocol's job
+    /// is to say that there is no name rather than to invent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_name: Option<String>,
+    /// When the sitting started, RFC 3339 with the offset it was recorded in.
+    ///
+    /// A wall-clock reading where [`ActiveRecording::elapsed_ms`] is a duration,
+    /// and the difference is deliberate. A running recording's elapsed time is
+    /// something a window redraws every second and must not have to agree with
+    /// the recorder about the time of day to show; a sitting's start is a fixed
+    /// point that the library also records, and the two must be the same point.
+    pub started_at: String,
+    /// When it ended, RFC 3339 with an offset. Absent while it is still open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    /// Why it ended: `game-exited`, `system-resumed`, `recorder-stopping` or
+    /// `recording-ended`.
+    ///
+    /// The vocabulary of
+    /// [`LibrarySession::end_reason`](crate::LibrarySession::end_reason), and a
+    /// string for the same reason that one is: it is open, a reason this build
+    /// has never heard of is kept and shown rather than failing the frame that
+    /// carried it, and there is nothing here that branches on it.
+    ///
+    /// Absent while the sitting is still open. Why a *recording* ended is
+    /// [`SessionRecording::outcome`] and [`EndReason`], which is a different
+    /// question with a different vocabulary: a sitting can outlive several
+    /// recordings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
+    /// The files it has produced, in the order they were recorded.
+    ///
+    /// Includes the one being written, which is what makes "the second file of
+    /// this sitting" sayable while it is still being recorded. Empty for a
+    /// sitting that has not started its first recording yet, and for one that
+    /// never managed to.
+    pub recordings: Vec<SessionRecording>,
+}
+
+/// One recording within a sitting.
+///
+/// Deliberately smaller than
+/// [`LibraryRecording`](crate::LibraryRecording): this describes a file the
+/// recorder has just written, which has no row identifier, no tags and no
+/// measured size, because nothing has indexed it yet. The library's own view of
+/// the same file arrives later and is the one to ask for any of that.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecording {
+    /// Which recording of the sitting this is, counting from one, as
+    /// [`LibraryRecording::session_index`](crate::LibraryRecording::session_index)
+    /// will also record it.
+    pub session_index: u32,
+    /// The file that was written, or is being written.
+    pub output: String,
+    /// What became of it: `recorded`, `no-window` or `failed`.
+    ///
+    /// Absent while it is still running, which is the answer for the last entry
+    /// of a sitting that is still open. `no-window` and `failed` are entries
+    /// that produced no playable file and are listed anyway: a sitting whose
+    /// recording failed is not a sitting with one fewer recording, and a window
+    /// that could not tell those apart would quietly lose the failure
+    /// (AGENTS.md section 27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// How long it runs for. Absent while it is still running, and for one that
+    /// produced no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// What a finished recording turned out to be.
@@ -269,6 +461,77 @@ pub struct ExportSummary {
     pub losses: Vec<String>,
 }
 
+/// How far an export has got, while it is still going.
+///
+/// The payload of [`Event::ExportProgress`](crate::Event::ExportProgress), and
+/// the answer to a copy of a two-hour recording looking like a hang
+/// ([issue #446](https://github.com/wildware-uk/clipped/issues/446)). It has to
+/// be an event and not a field on the reply, because the reply arrives when the
+/// copy has finished, which is the moment there is nothing left to report.
+///
+/// # What identifies it
+///
+/// [`Self::destination`], which the client chose and named in the request that
+/// started this. There is no request identifier on the event path — a
+/// `CommandHandler` is never shown the [`Request`](crate::Request) — and
+/// inventing one for this would be a change to what `export_recording` means
+/// rather than an addition to the protocol. The destination is enough: a
+/// destination that already exists is refused, so two exports cannot be writing
+/// the same file at once.
+///
+/// # Measurements, not a percentage
+///
+/// A window that wants a percentage divides, and gets to decide what to draw
+/// when there is nothing to divide by. [`Self::total_ms`] is absent for a
+/// recording whose container declares no duration — an interrupted one keeps
+/// every packet it wrote and no total, which is the property ADR 0001 chose
+/// Matroska for — and a single `percent` field could only have spelled that as
+/// zero. Drawing "0 %" for "no idea" is the sort of control that does nothing
+/// AGENTS.md section 27 forbids; [`Self::bytes`] is what still advances, and is
+/// what an unbounded indication should be showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportProgress {
+    /// The recording being copied, unchanged by the copy.
+    pub source: String,
+    /// The file being written. This is what identifies the export.
+    pub destination: String,
+    /// How much of the recording's own timeline has been copied so far.
+    ///
+    /// The same measurement [`ExportSummary::duration_ms`] carries, so the last
+    /// progress event of a copy and the reply that follows it agree rather than
+    /// disagreeing by whatever the reporting interval was.
+    pub written_ms: u64,
+    /// How long the recording says it is, where it says at all.
+    ///
+    /// Absent rather than zero when the container declares no duration. See the
+    /// type's documentation: the two are different things to draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
+    /// How many coded packets have been copied, across every carried track.
+    pub packets: u64,
+    /// How many bytes of coded media have been copied, before the container's
+    /// own overhead.
+    pub bytes: u64,
+}
+
+impl ExportProgress {
+    /// How far through, between zero and one, or [`None`] if the recording never
+    /// said how long it was.
+    ///
+    /// Here rather than in the window so that both ends of the protocol agree
+    /// about what "no total" means, including the clamp: a source's declared
+    /// duration and the end of its last packet need not agree to the
+    /// millisecond, and a progress bar that reads 101 % is a bug report.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f64> {
+        let total = self.total_ms?;
+        if total == 0 {
+            return None;
+        }
+        Some((self.written_ms as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
 /// Why a recording ended.
 ///
 /// Mirrors `clipped_session::EndReason`. It is restated here rather than
@@ -333,6 +596,32 @@ mod tests {
         assert_eq!(json, r#"{"state":"idle"}"#);
     }
 
+    /// A sitting of one game with one file recorded and a second being written.
+    fn a_sitting() -> SessionSummary {
+        SessionSummary {
+            session_id: "cs2-20260811-201400".to_owned(),
+            game_id: Some("cs2".to_owned()),
+            game_name: Some("Counter-Strike 2".to_owned()),
+            started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+            ended_at: None,
+            end_reason: None,
+            recordings: vec![
+                SessionRecording {
+                    session_index: 1,
+                    output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
+                    outcome: Some("recorded".to_owned()),
+                    duration_ms: Some(1_800_000),
+                },
+                SessionRecording {
+                    session_index: 2,
+                    output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+                    outcome: None,
+                    duration_ms: None,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn an_active_recording_round_trips() {
         let status = RecorderStatus::Recording(ActiveRecording {
@@ -341,12 +630,140 @@ mod tests {
             target: "process cs2.exe".to_owned(),
             elapsed_ms: 4_200,
             replay_seconds: None,
+            session: None,
         });
 
         let json = serde_json::to_string(&status).expect("it serialises");
         let back: RecorderStatus = serde_json::from_str(&json).expect("and deserialises");
         assert_eq!(back, status);
         assert!(back.is_recording());
+    }
+
+    #[test]
+    fn a_recording_names_the_game_and_the_sitting_rather_than_only_the_capture_selector() {
+        // The whole of issue #241 in one assertion: "process 4242" is what the
+        // recorder was pointed at, and it is not something a window can show
+        // somebody. The game and the place in the sitting travel beside it.
+        let status = RecorderStatus::Recording(ActiveRecording {
+            recording_id: "r-2".to_owned(),
+            output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+            target: "process 4242".to_owned(),
+            elapsed_ms: 192_000,
+            replay_seconds: None,
+            session: Some(Box::new(a_sitting())),
+        });
+
+        let json = serde_json::to_string(&status).expect("it serialises");
+        let back: RecorderStatus = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(back, status);
+
+        let session = back.session().expect("a recording in a sitting has one");
+        assert_eq!(session.game_name.as_deref(), Some("Counter-Strike 2"));
+        assert_eq!(
+            session.recordings.len(),
+            2,
+            "the file being written is the second of this sitting, and the protocol has to be \
+             able to say so"
+        );
+    }
+
+    #[test]
+    fn a_watching_recorder_is_not_an_idle_one() {
+        // A recorder in `watch` mode with no game running used to report `idle`,
+        // which is the same answer as a recorder that will never record. The two
+        // must not serialise to the same frame.
+        let watching = serde_json::to_string(&RecorderStatus::Watching(Watching::default()))
+            .expect("it serialises");
+        let idle = serde_json::to_string(&RecorderStatus::Idle).expect("it serialises");
+
+        assert_eq!(watching, r#"{"state":"watching"}"#);
+        assert_ne!(watching, idle);
+        assert_eq!(
+            serde_json::from_str::<RecorderStatus>(&watching).expect("and deserialises"),
+            RecorderStatus::Watching(Watching::default())
+        );
+    }
+
+    #[test]
+    fn a_sitting_waiting_out_its_restart_grace_keeps_its_game_while_nothing_is_recording() {
+        // The game exited, the sitting is still open for a few seconds in case it
+        // comes back, and nothing is being recorded. A window that could only read
+        // a game off a *recording* would blank the name for those seconds.
+        let status = RecorderStatus::Watching(Watching {
+            session: Some(Box::new(a_sitting())),
+        });
+
+        let json = serde_json::to_string(&status).expect("it serialises");
+        let back: RecorderStatus = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(back, status);
+        assert!(!back.is_recording());
+        assert_eq!(
+            back.session()
+                .and_then(|session| session.game_name.as_deref()),
+            Some("Counter-Strike 2")
+        );
+    }
+
+    #[test]
+    fn a_sitting_that_is_still_open_says_nothing_about_having_ended() {
+        // The absence is the state, exactly as `LibrarySession` has it: a null
+        // `ended_at` would make every open sitting look like it carried the
+        // field, and a window reading truthiness would call it ended.
+        let json = serde_json::to_string(&a_sitting()).expect("it serialises");
+        assert!(!json.contains("ended_at"), "{json}");
+        assert!(!json.contains("end_reason"), "{json}");
+    }
+
+    #[test]
+    fn an_ended_sitting_carries_when_and_why_it_ended_and_the_files_it_produced() {
+        let mut ended = a_sitting();
+        ended.ended_at = Some("2026-08-11T22:03:00+01:00".to_owned());
+        ended.end_reason = Some("game-exited".to_owned());
+        ended.recordings[1].outcome = Some("recorded".to_owned());
+        ended.recordings[1].duration_ms = Some(1_140_000);
+
+        let json = serde_json::to_string(&ended).expect("it serialises");
+        let back: SessionSummary = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(back, ended);
+        assert_eq!(
+            back.recordings
+                .iter()
+                .map(|recording| recording.output.as_str())
+                .collect::<Vec<_>>(),
+            [
+                r"D:\clips\cs2-20260811-201400-01.mkv",
+                r"D:\clips\cs2-20260811-201400-02.mkv"
+            ],
+            "a sitting that ended without naming its files leaves a window with nothing to offer"
+        );
+    }
+
+    #[test]
+    fn a_sitting_the_catalogue_would_not_attribute_carries_no_game_rather_than_an_empty_one() {
+        // The catalogue refused to guess which game it was, and so does this: an
+        // empty string here would be a game called "".
+        let session = SessionSummary {
+            session_id: "unattributed-20260811-201400".to_owned(),
+            started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+            ..SessionSummary::default()
+        };
+
+        let json = serde_json::to_string(&session).expect("it serialises");
+        assert!(!json.contains("game_id"), "{json}");
+        assert!(!json.contains("game_name"), "{json}");
+    }
+
+    #[test]
+    fn a_session_end_reason_this_build_has_never_heard_of_is_kept() {
+        // The same policy as an unknown recording end reason: kept verbatim and
+        // shown, rather than failing the frame that carried it.
+        let session: SessionSummary = serde_json::from_str(
+            r#"{"session_id":"s-1","started_at":"2026-08-11T20:14:00+01:00",
+                "ended_at":"2026-08-11T22:03:00+01:00","end_reason":"disk_full",
+                "recordings":[]}"#,
+        )
+        .expect("an end reason invented later must still parse");
+        assert_eq!(session.end_reason.as_deref(), Some("disk_full"));
     }
 
     #[test]
@@ -367,5 +784,38 @@ mod tests {
         )
         .expect("an unknown field must not break a known message");
         assert!(status.is_recording());
+    }
+
+    #[test]
+    fn an_export_fraction_is_none_when_there_is_nothing_to_divide_by() {
+        let progress = |written_ms, total_ms| {
+            ExportProgress {
+                source: r"D:\clips\match.mkv".to_owned(),
+                destination: r"D:\clips\match.mp4".to_owned(),
+                written_ms,
+                total_ms,
+                packets: 1,
+                bytes: 1,
+            }
+            .fraction()
+        };
+
+        // An interrupted recording declares no duration. `None` rather than
+        // zero, because a window draws an unbounded indication for one and a bar
+        // at nought for the other, and the second is a control that does nothing
+        // (AGENTS.md section 27).
+        assert_eq!(progress(1_308_000, None), None);
+        // And a total of nought, which would otherwise be a division by zero
+        // producing infinity or a NaN — either of which reaches a `<meter>` as
+        // an attribute nobody can draw.
+        assert_eq!(progress(0, Some(0)), None);
+
+        assert_eq!(progress(0, Some(6_540_000)), Some(0.0));
+        assert_eq!(progress(1_635_000, Some(6_540_000)), Some(0.25));
+        assert_eq!(progress(6_540_000, Some(6_540_000)), Some(1.0));
+        // A recording's declared duration and the end of its last packet need
+        // not agree to the millisecond, and a progress bar reading 101 % is a
+        // bug report.
+        assert_eq!(progress(6_600_000, Some(6_540_000)), Some(1.0));
     }
 }

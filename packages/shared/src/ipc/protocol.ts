@@ -57,8 +57,16 @@ export interface JsonObject {
  */
 export type Extensible<Known extends string> = Known | (string & Record<never, never>);
 
-/** The protocol version this build of the interface speaks. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * The protocol version this build of the interface speaks.
+ *
+ * Version 2 added the `watching` recorder state (issue #241). A state is the one
+ * addition that cannot be additive, because {@link RecorderStatus} has no
+ * catch-all: a build compiled against version 1 would fail to read
+ * `{"state":"watching"}` rather than guess at it, which is the wanted behaviour
+ * and is why the version moved instead.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /**
  * Every protocol version this build can hold a conversation in.
@@ -66,7 +74,7 @@ export const PROTOCOL_VERSION = 1;
  * A recorder may speak more than one at once; the interface speaks exactly one
  * and is told, in the refusal, what the recorder speaks instead.
  */
-export const SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [2] as const;
 
 /** How many connections one recorder serves before refusing more. */
 export const MAX_CONCURRENT_CONNECTIONS = 8;
@@ -90,7 +98,7 @@ export type ConnectionRole = Extensible<KnownConnectionRole>;
 export const DEFAULT_CONNECTION_ROLE = 'control';
 
 /** The streams of events the protocol defines. */
-export const EVENT_STREAMS = ['status', 'errors', 'metrics'] as const;
+export const EVENT_STREAMS = ['status', 'errors', 'metrics', 'exports'] as const;
 
 /** A stream this build knows. `metrics` is defined and refused; see below. */
 export type KnownEventStream = (typeof EVENT_STREAMS)[number];
@@ -102,6 +110,12 @@ export type KnownEventStream = (typeof EVENT_STREAMS)[number];
  * accepted and left silent, so a client that asked for one is told. `metrics`
  * is refused by this recorder with `not_implemented`: nothing measures those
  * figures during a recording yet (issue #100).
+ *
+ * **The refusal takes the whole events connection with it.** So a stream added
+ * later is asked for only when the recorder's welcome advertises it: `exports`
+ * is paired with the `export_progress` feature for exactly that reason, and a
+ * client that asked an older recorder for it would lose its `status`
+ * subscription too (issue #446).
  */
 export type EventStream = Extensible<KnownEventStream>;
 
@@ -114,8 +128,14 @@ export const FEATURES = [
   'shutdown',
   'library',
   'export',
+  'playback',
   'hotkeys',
   'replay',
+  'export_progress',
+  'settings',
+  'microphone_level',
+  'startup',
+  'automatic',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -131,7 +151,7 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the one no build performs yet. */
+/** Every command the protocol defines. There is no longer one no build performs. */
 export const COMMANDS = [
   'ping',
   'get_status',
@@ -146,11 +166,19 @@ export const COMMANDS = [
   'library_trash',
   'restore_from_trash',
   'empty_trash',
+  'set_favourite',
+  'set_lock',
   'plugins',
   'export_recording',
+  'open_playback',
   'get_hotkeys',
-  'shutdown',
+  'get_settings',
   'apply_settings',
+  'get_audio_devices',
+  'get_microphone_level',
+  'get_start_at_login',
+  'set_start_at_login',
+  'shutdown',
 ] as const;
 
 /** A command the protocol defines. */
@@ -182,6 +210,7 @@ export const ERROR_CODES = [
   'shutting_down',
   'destination_exists',
   'export_failed',
+  'playback_failed',
   'library_unavailable',
   'internal',
 ] as const;
@@ -208,7 +237,7 @@ export type KnownEndReason = (typeof END_REASONS)[number];
 export type EndReason = Extensible<KnownEndReason>;
 
 /** The states a recorder reports. Closed, deliberately: see the file header. */
-export const RECORDER_STATES = ['idle', 'recording'] as const;
+export const RECORDER_STATES = ['idle', 'watching', 'recording'] as const;
 
 /** What the recorder is doing. There is no unrecognised state. */
 export type RecorderState = (typeof RECORDER_STATES)[number];
@@ -231,9 +260,16 @@ export const REPLIES = [
   'library_trash',
   'restored',
   'trash_emptied',
+  'favourited',
+  'locked',
   'plugins',
   'recording_exported',
+  'playback_opened',
   'hotkeys',
+  'settings',
+  'audio_devices',
+  'microphone_level',
+  'start_at_login',
   'shutting_down',
 ] as const;
 
@@ -241,7 +277,12 @@ export const REPLIES = [
 export type ReplyName = (typeof REPLIES)[number];
 
 /** The events this build knows. */
-export const EVENTS = ['status_changed', 'recording_failed'] as const;
+export const EVENTS = [
+  'status_changed',
+  'session_ended',
+  'recording_failed',
+  'export_progress',
+] as const;
 
 /** The name of an event this build knows. */
 export type KnownEventName = (typeof EVENTS)[number];
@@ -334,14 +375,27 @@ export type StartRecordingParams = {
   /** `default`, `none`, or part of a device name. */
   readonly system_audio?: string;
   /**
-   * Keep the last this many seconds in memory, so that `save_replay` has
-   * something to save.
+   * Keep the last this many seconds, so that `save_replay` has something to
+   * save.
    *
-   * Absent means no buffer, which is what an ordinary recording is. It belongs
-   * to the recording rather than to the save, because a buffer has to have been
-   * filling since before the thing somebody wants to keep happened.
+   * Absent means no buffer unless {@link StartRecordingParams.replay} asks for
+   * one, which is what an ordinary recording is. It belongs to the recording
+   * rather than to the save, because a buffer has to have been filling since
+   * before the thing somebody wants to keep happened.
    */
   readonly replay_seconds?: number;
+  /**
+   * Keep a replay buffer, at the length the recorder has configured.
+   *
+   * `replay_seconds` names a length; this asks for one without naming it, and
+   * the recorder answers with `replay_window_seconds` resolved for the game it
+   * turns out to be recording. A caller that resolved a length itself would be
+   * a second place that setting is decided, and one that made a length up would
+   * be recording to a duration nobody chose.
+   *
+   * Absent is `false`, and `false` with no `replay_seconds` is no buffer.
+   */
+  readonly replay?: boolean;
 };
 
 /**
@@ -513,6 +567,38 @@ export type ExportRecordingParams = {
 };
 
 /**
+ * What to change in the settings, and to what. A type alias for the reason
+ * {@link StartRecordingParams} is one.
+ *
+ * A map rather than one key and one value, because a settings screen saves what
+ * somebody edited: two changes made together are applied together, and a value
+ * the recorder refuses refuses the whole request rather than leaving half of it
+ * written.
+ *
+ * `null` clears a setting, which is Reset: it returns the setting to the value
+ * Clipped ships with *and* keeps following it, which writing today's default in
+ * as a value would not.
+ */
+export type ApplySettingsParams = {
+  /** The settings to change, by the key each has in the settings file. */
+  readonly values?: Readonly<Record<string, string | null>>;
+};
+
+/**
+ * Which microphone to listen to.
+ *
+ * A setting's value rather than a device name, spelled as the settings file
+ * spells it — `default`, `name:Shure MV7` — because the question is what the
+ * choice somebody is looking at would record. Resolved by the same code a
+ * recording resolves it with, so the meter and the recording cannot end up
+ * pointed at different endpoints.
+ */
+export type MicrophoneLevelParams = {
+  /** The microphone setting to listen to, in the settings file's own spelling. */
+  readonly microphone: string;
+};
+
+/**
  * A recording copied into another container, and what the copy turned out to
  * be.
  *
@@ -548,6 +634,143 @@ export interface ExportSummary {
    * what the recorder puts on the wire.
    */
   readonly losses?: readonly string[];
+}
+
+/**
+ * How far a running export has got.
+ *
+ * The payload of {@link ExportProgressEvent}, and the answer to a copy of a
+ * two-hour recording looking like a hang (issue #446). It has to be an event
+ * and not a field on the reply, because the reply arrives when the MP4's index
+ * has been written — the moment there is nothing left to report.
+ *
+ * {@link ExportProgress.destination} is what identifies the export: there is no
+ * request identifier on the event path, and a destination that already exists
+ * is refused, so two exports cannot be writing the same file at once.
+ */
+export interface ExportProgress {
+  /** The recording being copied, unchanged by the copy. */
+  readonly source: string;
+  /** The file being written. This is what identifies the export. */
+  readonly destination: string;
+  /**
+   * How much of the recording's own timeline has been copied so far.
+   *
+   * The same measurement {@link ExportSummary.duration_ms} carries, so the last
+   * progress event of a copy and the reply that follows it agree.
+   */
+  readonly written_ms: number;
+  /**
+   * How long the recording says it is, where it says at all.
+   *
+   * **Absent, not zero**, when the container declares no duration — an
+   * interrupted recording keeps every packet it wrote and no total. Draw an
+   * unbounded indication from {@link ExportProgress.bytes} then rather than a
+   * percentage: "nought per cent" and "no idea" are different things to show.
+   */
+  readonly total_ms?: number;
+  /** How many coded packets have been copied, across every carried track. */
+  readonly packets: number;
+  /**
+   * How many bytes of coded media have been copied, before container overhead.
+   *
+   * The one figure that still advances when {@link ExportProgress.total_ms} is
+   * absent.
+   */
+  readonly bytes: number;
+}
+
+/**
+ * How far through an export is, between 0 and 1, or `null` if the recording
+ * never said how long it was.
+ *
+ * Clamped, because a source's declared duration and the end of its last packet
+ * need not agree to the millisecond and a progress bar that reads 101 % is a
+ * bug report. It mirrors `ExportProgress::fraction` in `crates/ipc` so that
+ * both ends of the protocol agree about what "no total" means.
+ */
+export function exportFraction(progress: ExportProgress): number | null {
+  const total = progress.total_ms;
+  if (total === undefined || total === 0) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, progress.written_ms / total));
+}
+
+/**
+ * Which recording to open for playback, and which of its tracks to hear.
+ *
+ * The track is a **stream index of the file**, as {@link PlaybackTrack.index}
+ * carries it, rather than an ordinal among the sound tracks: the two differ by
+ * however many picture tracks come first. Absent means the one a player should
+ * choose on its own, which the recorder decides — for a Clipped recording, the
+ * compatibility mix.
+ */
+export type OpenPlaybackParams = {
+  /** The recording to play, as {@link LibraryRecording.path} reported it. */
+  readonly source: string;
+  /** Which sound track to hear. Absent means the recorder's own choice. */
+  readonly audio_track?: number;
+};
+
+/**
+ * A recording, ready to be played, and what could be heard instead.
+ *
+ * The window plays {@link PlaybackStream.path} and offers
+ * {@link PlaybackStream.audio_tracks} beside it. There is deliberately **no
+ * duration and no picture size** here: the media element measures both from the
+ * file it is given, and a figure sent from the recorder would be a second
+ * answer to the same question.
+ */
+export interface PlaybackStream {
+  /** The file to play. */
+  readonly path: string;
+  /**
+   * The source stream index whose sound this carries.
+   *
+   * Absent only for a recording with no sound at all, which a window has to be
+   * able to tell from a track that would not play.
+   */
+  readonly audio_track?: number;
+  /**
+   * Every sound track of the **recording**, in the order the container declares
+   * them — not of the file being played, which may hold one of them.
+   *
+   * Absent rather than an empty array for a recording with no sound, because
+   * that is what the recorder puts on the wire.
+   */
+  readonly audio_tracks?: readonly PlaybackTrack[];
+  /**
+   * Whether {@link PlaybackStream.path} is a copy made for this choice rather
+   * than the recording itself.
+   *
+   * A prepared copy is a cache entry: it is not in anybody's library and must
+   * not be presented to a user as their recording.
+   */
+  readonly prepared?: boolean;
+}
+
+/** One sound track of a recording, as a window offers it. */
+export interface PlaybackTrack {
+  /** The stream index the container declares it at. */
+  readonly index: number;
+  /**
+   * What the track is called, where the recording named it.
+   *
+   * Absent for a file that named none. A window shows the position rather than
+   * inventing a name.
+   */
+  readonly name?: string;
+  /** The track's language tag, where the recording carried one. */
+  readonly language?: string;
+  /**
+   * Whether the container flags this as the track a player should choose on its
+   * own.
+   *
+   * Not a promise about what a media element will play: Chromium ignores the
+   * flag, which is why `open_playback` decides what is served.
+   */
+  readonly default?: boolean;
 }
 
 /** One media file a sitting produced. */
@@ -595,6 +818,21 @@ export interface LibraryRecording {
   readonly missing_since?: string;
   /** Whether the user favourited it. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked this recording itself.
+   *
+   * Its own lock only, which is what a *control* is drawn from: a recording
+   * inside a locked sitting has nothing of its own to release.
+   */
+  readonly locked?: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * `locked`, or its sitting's lock, worked out by the recorder so the
+   * cascade has one expression rather than one per window. This is what a
+   * padlock is drawn from.
+   */
+  readonly protected?: boolean;
   /** The tags on it, alphabetically. */
   readonly tags: readonly string[];
 }
@@ -647,6 +885,14 @@ export interface LibrarySession {
   readonly end_reason?: string;
   /** Whether the user favourited the sitting itself. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked the sitting against automatic cleanup.
+   *
+   * A locked sitting protects every recording in it, so a padlock against a
+   * *recording* is drawn from that recording's `protected` rather than from
+   * this. Absent from a recorder older than locks — that build has none.
+   */
+  readonly locked?: boolean;
   /** The files it recorded, in the order they were recorded. */
   readonly recordings: readonly LibraryRecording[];
   /** The clips cut from it. */
@@ -948,6 +1194,110 @@ export interface TrashEmptiedReply {
   readonly emptied: TrashEmptied;
 }
 
+/**
+ * Marking one thing a favourite, or clearing the mark.
+ *
+ * The target takes two fields because the schema does: a sitting is addressed by
+ * the identifier the recorder generated, which is text, and a recording or a
+ * clip by the integer key the index gave it. `kind` says which of the two to
+ * read, and the recorder refuses a request that filled in neither rather than
+ * marking whatever row is at zero.
+ */
+export interface SetFavourite {
+  /** `session`, `recording` or `clip`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /**
+   * Whether it should be a favourite afterwards.
+   *
+   * The state to be in, not a toggle: two windows open on one library would
+   * disagree about what a toggle means.
+   */
+  readonly favourite: boolean;
+}
+
+/** What the mark is now. */
+export interface FavouriteMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /** Whether it is a favourite now, which is what a screen draws. */
+  readonly favourite: boolean;
+  /**
+   * Whether this request is what changed it.
+   *
+   * `false` for a star that was already full: the difference between "you did
+   * that" and "that was already so".
+   */
+  readonly changed: boolean;
+}
+
+/** A favourite mark was set or cleared. */
+export interface FavouritedReply {
+  /** The tag. */
+  readonly reply: 'favourited';
+  /** Which thing, and what its mark is now. */
+  readonly mark: FavouriteMark;
+}
+
+/**
+ * Locking one thing against automatic cleanup, or unlocking it.
+ *
+ * The same target shape as {@link SetFavourite} over a shorter vocabulary: a
+ * clip cannot be locked, because automatic cleanup deletes recordings and a
+ * mark nothing consults is worse than no mark at all.
+ *
+ * A lock protects against automatic cleanup and nothing else. A locked
+ * recording is deleted by a manual delete exactly as an unlocked one is, and a
+ * window must not imply otherwise.
+ */
+export interface SetLock {
+  /** `session` or `recording`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it should be locked afterwards. */
+  readonly locked: boolean;
+}
+
+/** What the lock is now. */
+export interface LockMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it has a lock of its own now. */
+  readonly locked: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * Not the same question as {@link locked}, and this is the one a padlock is
+   * drawn from: a recording inside a locked sitting is protected without
+   * having a lock of its own.
+   */
+  readonly protected: boolean;
+  /** Whether this request is what changed it. */
+  readonly changed: boolean;
+}
+
+/** A lock was set or cleared. */
+export interface LockedReply {
+  /** The tag. */
+  readonly reply: 'locked';
+  /** Which thing, what its lock is now, and whether cleanup will leave it alone. */
+  readonly lock: LockMark;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1030,6 +1380,14 @@ export interface RecordingExportedReply {
   readonly export: ExportSummary;
 }
 
+/** A recording is ready to be played, and here is what to play. */
+export interface PlaybackOpenedReply {
+  /** The tag. */
+  readonly reply: 'playback_opened';
+  /** The file to play, the track it carries, and the tracks beside it. */
+  readonly playback: PlaybackStream;
+}
+
 /**
  * The states one hotkey binding can be in.
  *
@@ -1091,6 +1449,174 @@ export interface HotkeyBinding {
   readonly unavailable?: string;
 }
 
+/**
+ * One setting, as a window draws it.
+ *
+ * The value crosses as the words the settings file spells it in — `120`,
+ * `hevc`, `name:Shure MV7` — and goes back the same way, so the window keeps no
+ * second vocabulary for settings and no second opinion about what is valid.
+ */
+export interface SettingEntry {
+  /** The key the settings file holds it under, such as `microphone`. */
+  readonly key: string;
+  /** The setting's name in the words a person reads. */
+  readonly label: string;
+  /** What it resolves to, spelled the way the file spells it. Never blank. */
+  readonly value: string;
+  /** Whether this was configured, rather than being the value Clipped ships with. */
+  readonly overridden: boolean;
+  /**
+   * Every value it can take, where the set is closed.
+   *
+   * Absent for the settings whose values are open — a frame rate, a size, a
+   * device name — which is how a list of options is told from a field.
+   */
+  readonly choices?: readonly string[];
+  /** What it would accept, in the words its refusal uses. */
+  readonly accepted: string;
+  /**
+   * Whether anything reads it when a recording starts.
+   *
+   * `false` is a setting the file can carry and no recording acts on. Drawn as
+   * a value with the sentence below rather than as a working control, for the
+   * reason {@link HotkeyBinding.handled} exists (AGENTS.md section 27).
+   */
+  readonly applies: boolean;
+  /** Why changing it would not change a recording, when that is the case. */
+  readonly unavailable?: string;
+}
+
+/** The settings, and the file they came from. */
+export interface SettingsView {
+  /** The settings file they live in, as the recorder resolved it. */
+  readonly file: string;
+  /** Every setting the recorder will accept, in the order a screen lists them. */
+  readonly settings: readonly SettingEntry[];
+}
+
+/** Every setting, as it now stands. The answer to a read and to a change alike. */
+export interface SettingsReply {
+  /** The tag. */
+  readonly reply: 'settings';
+  /** The settings, and the file they live in. */
+  readonly settings: SettingsView;
+}
+
+/** One audio endpoint this machine has. */
+export interface AudioDevice {
+  /** The name Windows gives it, which is what a settings file names it by. */
+  readonly name: string;
+  /** Whether this is the endpoint Windows currently considers the default. */
+  readonly is_default: boolean;
+}
+
+/**
+ * The audio endpoints a recording could be told to use.
+ *
+ * Microphones only: a recording cannot be told to use a playback endpoint that
+ * is not the default one, so an empty list of them would say something untrue
+ * about the machine (issue #316).
+ */
+export interface AudioDevices {
+  /** Every capture endpoint present and active, in the order Windows lists them. */
+  readonly microphones: readonly AudioDevice[];
+}
+
+/** The audio endpoints this machine has. */
+export interface AudioDevicesReply {
+  /** The tag. */
+  readonly reply: 'audio_devices';
+  /** Every microphone, with the default one marked. */
+  readonly devices: AudioDevices;
+}
+
+/**
+ * What a microphone is hearing.
+ *
+ * Asked repeatedly while a meter is on screen rather than streamed: the recorder
+ * opens the endpoint, listens briefly and closes it inside the call, so a window
+ * that is killed mid-choice leaves no capture running.
+ */
+export interface MicrophoneLevel {
+  /**
+   * The endpoint that was listened to, as Windows names it.
+   *
+   * Absent while the device is unplugged or disabled, during which a capture
+   * produces silence rather than failing — which is what tells "nobody is
+   * speaking" from "there is nothing there".
+   */
+  readonly device?: string;
+  /**
+   * The loudest sample heard, from `0` to `1`.
+   *
+   * The loudest in the moment that was listened to, not since the last question:
+   * a screen that kept the highest reading it ever saw would draw a meter that
+   * only ever went up.
+   */
+  readonly peak: number;
+  /**
+   * Whether Windows reports the microphone muted.
+   *
+   * Absent when Windows will not report the switch for this device. A muted
+   * microphone reads as silence, so this is what stops a screen telling somebody
+   * to speak up when what they need is to unmute.
+   */
+  readonly muted?: boolean;
+}
+
+/** What the microphone that was asked about is hearing. */
+export interface MicrophoneLevelReply {
+  /** The tag. */
+  readonly reply: 'microphone_level';
+  /** The reading, and what was listened to. */
+  readonly level: MicrophoneLevel;
+}
+
+/**
+ * Whether the recorder starts when this user signs in, and what is arranged.
+ *
+ * Not a setting: it is a `Run` value Windows reads at sign-in rather than a key
+ * in `settings.json`, and the recorder is what reads and writes it because the
+ * value names the executable to run and that executable is the recorder
+ * (issue #308).
+ */
+export interface StartAtLogin {
+  /**
+   * Whether Windows has an entry for Clipped under this account.
+   *
+   * The switch's position, and nothing more: an entry that is there and names
+   * an executable that is gone is still `true`, because that is what Windows
+   * will try to run.
+   */
+  readonly enabled: boolean;
+  /** Where the entry is, spelled the way a registry editor spells it. */
+  readonly location: string;
+  /** The command line Windows would run. Absent exactly when `enabled` is false. */
+  readonly command?: string;
+  /**
+   * The executable the entry names, when it is no longer there.
+   *
+   * A Clipped that moved or was reinstalled. Absent when the entry is missing
+   * and when it is fine, so its presence is exactly the case to act on — and
+   * the action is turning the switch on again from this installation.
+   */
+  readonly missing_executable?: string;
+}
+
+/** Turn starting at login on, or off. */
+export type SetStartAtLoginParams = {
+  /** `true` writes the entry, `false` removes it. */
+  readonly enabled: boolean;
+};
+
+/** Whether the recorder starts at sign-in, as it now stands. */
+export interface StartAtLoginReply {
+  /** The tag. */
+  readonly reply: 'start_at_login';
+  /** The arrangement: whether it is on, what would run, and whether that exists. */
+  readonly start_at_login: StartAtLogin;
+}
+
 /** Every action a global hotkey can perform, and where each one stands. */
 export interface HotkeysReply {
   /** The tag. */
@@ -1138,15 +1664,114 @@ export type Reply =
   | LibraryTrashReply
   | RestoredReply
   | TrashEmptiedReply
+  | FavouritedReply
+  | LockedReply
   | PluginsReply
   | RecordingExportedReply
+  | PlaybackOpenedReply
   | HotkeysReply
+  | SettingsReply
+  | AudioDevicesReply
+  | MicrophoneLevelReply
+  | StartAtLoginReply
   | ShuttingDownReply;
 
-/** Nothing is being recorded. */
+/** Nothing is being recorded, and nothing will be until something asks. */
 export interface IdleStatus {
   /** The tag. */
   readonly state: 'idle';
+}
+
+/**
+ * Nothing is being recorded, and the next game to start will be.
+ *
+ * A different answer from {@link IdleStatus}, which is the whole point of it: a
+ * recorder watching for games with no game running used to be reported as idle,
+ * which is what a recorder that will never record anything also reports.
+ */
+export interface WatchingStatus {
+  /** The tag. */
+  readonly state: 'watching';
+  /**
+   * The sitting that is still open, when one is.
+   *
+   * A game that exits keeps its sitting open for a grace period so that the same
+   * game launching again rejoins it. During that period the recorder is watching
+   * and in a sitting at once, and an interface that dropped the game's name for
+   * those few seconds would flicker.
+   */
+  readonly session?: SessionSummary;
+}
+
+/**
+ * One sitting, as the recorder currently holds it.
+ *
+ * The live counterpart of {@link LibrarySession}, carrying the same field names
+ * for the same facts. What it leaves out is everything the library adds
+ * afterwards — a row identifier, a favourite, a tag, a size on disk — none of
+ * which is known while the file is still being written.
+ *
+ * Whether the sitting is over is {@link ended_at}. There is no separate finished
+ * shape: the sitting on a status is one the recorder is still in, and the one on
+ * a {@link SessionEndedEvent} is the same object with the two fields only an
+ * ended sitting has.
+ */
+export interface SessionSummary {
+  /** The recorder's identifier for it, shared with the library once indexed. */
+  readonly session_id: string;
+  /**
+   * The catalogue's identifier for the game.
+   *
+   * Absent for a sitting the catalogue would not attribute: it reported a tie,
+   * or claimed nothing, and the sitting is filed under no game rather than under
+   * a guess.
+   */
+  readonly game_id?: string;
+  /** The game's name as the catalogue knows it. Absent for the same reason. */
+  readonly game_name?: string;
+  /** When the sitting started, RFC 3339 with the offset it was recorded in. */
+  readonly started_at: string;
+  /** When it ended, RFC 3339. Absent while it is still open. */
+  readonly ended_at?: string;
+  /**
+   * Why it ended: `game-exited`, `system-resumed`, `recorder-stopping` or
+   * `recording-ended`. Absent while it is still open.
+   *
+   * The vocabulary of `LibrarySession.end_reason`, and open for the same reason:
+   * a reason invented later is kept and shown rather than failing the frame.
+   */
+  readonly end_reason?: string;
+  /**
+   * The files it has produced, in the order they were recorded.
+   *
+   * Includes the one being written, which is what makes "the second file of this
+   * sitting" sayable while it is still being recorded.
+   */
+  readonly recordings: readonly SessionRecording[];
+}
+
+/**
+ * One recording within a sitting.
+ *
+ * Deliberately smaller than {@link LibraryRecording}: this is a file the
+ * recorder has just written, with no row identifier, no tags and no measured
+ * size, because nothing has indexed it yet.
+ */
+export interface SessionRecording {
+  /** Which recording of the sitting this is, counting from one. */
+  readonly session_index: number;
+  /** The file that was written, or is being written. */
+  readonly output: string;
+  /**
+   * What became of it: `recorded`, `no-window` or `failed`.
+   *
+   * Absent while it is still running. The two that produced no playable file are
+   * listed anyway: a sitting whose recording failed is not a sitting with one
+   * fewer recording.
+   */
+  readonly outcome?: string;
+  /** How long it runs for. Absent while running, and for one with no file. */
+  readonly duration_ms?: number;
 }
 
 /**
@@ -1179,6 +1804,17 @@ export interface ActiveRecording {
    * bounds what may be asked for.
    */
   readonly replay_seconds?: number;
+  /**
+   * The sitting this recording belongs to, when it belongs to one.
+   *
+   * This is where the game is. {@link target} is a capture selector —
+   * `process 4242` — and an interface cannot turn one into "Counter-Strike 2"
+   * without the catalogue, which lives in the recorder. It is also how the
+   * second file of one sitting stops looking like an unrelated recording.
+   *
+   * Absent for a recording that is not part of a sitting.
+   */
+  readonly session?: SessionSummary;
 }
 
 /** A recording is in progress. */
@@ -1192,7 +1828,7 @@ export interface RecordingStatus extends ActiveRecording {
  *
  * The one union here with no catch-all. See the file header.
  */
-export type RecorderStatus = IdleStatus | RecordingStatus;
+export type RecorderStatus = IdleStatus | WatchingStatus | RecordingStatus;
 
 /** What a finished recording turned out to be. Every field is measured. */
 export interface RecordingSummary {
@@ -1389,6 +2025,22 @@ export interface StatusChangedEvent {
   readonly status: RecorderStatus;
 }
 
+/**
+ * A sitting ended, and this is what it produced.
+ *
+ * On the `status` stream rather than one of its own, because it is the end of
+ * the thing {@link StatusChangedEvent} has been describing. It carries the
+ * sitting rather than only its identifier because the files are the point: the
+ * recorder is the only side that knows what it wrote, and the library has not
+ * necessarily indexed any of it yet.
+ */
+export interface SessionEndedEvent {
+  /** The tag. */
+  readonly event: 'session_ended';
+  /** The sitting, with `ended_at` and `end_reason` filled in. */
+  readonly session: SessionSummary;
+}
+
 /** A recording ended because something failed, rather than because it was asked to. */
 export interface RecordingFailedEvent {
   /** The tag. */
@@ -1397,6 +2049,23 @@ export interface RecordingFailedEvent {
   readonly recording_id: string;
   /** What failed. The file is still finished and playable. */
   readonly error: ProtocolError;
+}
+
+/**
+ * A running export has got this far.
+ *
+ * On the `exports` stream, which a client asks for only when the recorder
+ * advertises the `export_progress` feature. **Its absence means nothing**: a
+ * recorder without it copies the file exactly as it always did and says nothing
+ * while it does, so silence is neither failure nor completion. The reply to
+ * `export_recording` remains the only thing that says an export finished
+ * (issue #446).
+ */
+export interface ExportProgressEvent {
+  /** The tag. */
+  readonly event: 'export_progress';
+  /** How far it has got, and which export it is. */
+  readonly export: ExportProgress;
 }
 
 /**
@@ -1414,7 +2083,12 @@ export interface UnrecognisedEvent {
 }
 
 /** Something the recorder decided to say without being asked. */
-export type RecorderEvent = StatusChangedEvent | RecordingFailedEvent | UnrecognisedEvent;
+export type RecorderEvent =
+  | StatusChangedEvent
+  | SessionEndedEvent
+  | RecordingFailedEvent
+  | ExportProgressEvent
+  | UnrecognisedEvent;
 
 /** The handshake, on the wire. */
 export type HelloMessage = { readonly type: 'hello' } & Hello;
@@ -1460,6 +2134,6 @@ export function isRecognisedErrorDetail(
 /** Whether an event is one this build knows what to do with. */
 export function isRecognisedEvent(
   event: RecorderEvent,
-): event is StatusChangedEvent | RecordingFailedEvent {
+): event is StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent | ExportProgressEvent {
   return event.event !== undefined;
 }

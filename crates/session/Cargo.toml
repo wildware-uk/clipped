@@ -100,6 +100,14 @@ clipped-hotkeys.workspace = true
 # The standard session context — `session_id`, `capture_backend`, `encoder` —
 # so that every line a recording produces is searchable by the same fields
 # (docs/logging.md). `RedactedPath` keeps the output path out of the logs.
+# Which process owns the window being recorded, so a recording's audio can be
+# scoped to the game's own process tree rather than to everything the machine
+# played (`src/audio`, issues #26 and #27). The call is one line of Win32 and
+# `clipped-windows` already made it for its own window enumeration; AGENTS.md
+# section 5 puts platform code there and section 55 forbids the second copy, so
+# this crate names that one rather than reaching for `GetWindowThreadProcessId`
+# itself. Layer 0, so the direction is the one README.md's table allows.
+clipped-windows.workspace = true
 clipped-logging.workspace = true
 tracing.workspace = true
 # The raw FFmpeg FFI, for `src/screenshot`. A screenshot is one captured frame

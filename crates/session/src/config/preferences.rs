@@ -399,6 +399,36 @@ impl Preferences {
         Ok(())
     }
 
+    /// Sets `key` from the text the settings file spells it with, or clears it.
+    ///
+    /// The one setter a caller that does not know a setting's type can use —
+    /// a settings screen sending `("framerate", "120")` over the control
+    /// protocol, which is the shape a form has. `None` clears the setting, so
+    /// that Reset and "set to the default" stay different things
+    /// ([`Resolved::is_overridden`](crate::config::Resolved::is_overridden)).
+    ///
+    /// It parses with the file reader's own parsers, so a value refused here is
+    /// exactly a value the same text in [`FILE_NAME`](crate::config::FILE_NAME)
+    /// would be refused for, with the same message.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError`] naming the setting, the value and what would have been
+    /// accepted.
+    pub fn set_written(
+        &mut self,
+        key: SettingKey,
+        value: Option<&str>,
+    ) -> Result<(), SettingError> {
+        match value {
+            None => {
+                self.clear(key);
+                Ok(())
+            }
+            Some(token) => crate::config::document::set_written_setting(self, key, token),
+        }
+    }
+
     /// Whether this layer sets `key` at all.
     ///
     /// The question a Reset control asks, without needing to know the type
@@ -743,10 +773,26 @@ fn configured<T: Clone>(resolved: &Resolved<T>) -> Option<T> {
 /// recording is told and this module is what a user configured — and this is
 /// the one conversion between them.
 fn audio_source(device: &AudioDeviceSetting) -> AudioSourceSetting {
-    match device {
-        AudioDeviceSetting::Default => AudioSourceSetting::SystemDefault,
-        AudioDeviceSetting::Disabled => AudioSourceSetting::Off,
-        AudioDeviceSetting::Named(name) => AudioSourceSetting::Named(name.clone()),
+    device.as_source()
+}
+
+impl AudioDeviceSetting {
+    /// What a recording is told to open for this selection.
+    ///
+    /// Public because a caller can hold a configured value without ever
+    /// resolving a whole [`ResolvedSettings`]: the settings screen's level
+    /// check parses one value, and needs the recording engine's name for it in
+    /// order to point a capture at the same endpoint a recording would
+    /// ([issue #109](https://github.com/wildware-uk/clipped/issues/109)). It is
+    /// [`audio_source`]'s implementation rather than a second copy of the same
+    /// three lines, so the two cannot drift apart (AGENTS.md section 55).
+    #[must_use]
+    pub fn as_source(&self) -> AudioSourceSetting {
+        match self {
+            Self::Default => AudioSourceSetting::SystemDefault,
+            Self::Disabled => AudioSourceSetting::Off,
+            Self::Named(name) => AudioSourceSetting::Named(name.clone()),
+        }
     }
 }
 

@@ -165,6 +165,18 @@ fn main() -> ExitCode {
                     .collect::<Vec<&str>>()
                     .join(",")
             )),
+            // How far a running export has got (issue #446). The fraction and
+            // the file, rather than the whole event: a test reading this line
+            // by line asserts that the figure advances, and the destination is
+            // what says which export it belongs to.
+            RecorderLinkEvent::ExportProgress(progress) => say(&format!(
+                "export_progress={} {}",
+                progress.fraction().map_or_else(
+                    || "unmeasured".to_owned(),
+                    |fraction| format!("{:.0}%", fraction * 100.0)
+                ),
+                progress.destination
+            )),
         }
     }
 
@@ -298,6 +310,13 @@ impl Arguments {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         );
+
+        // A fixture starts a real recorder on whatever machine is running the
+        // suite. One that watched for games would create that person's
+        // recordings folder and could start recording a game they had open,
+        // which is what AGENTS.md section 25 rules out — and what these tests
+        // are about is the supervisor, not what the recorder records.
+        settings.watch_for_games = false;
 
         if let Some(attempts) = self.restart_attempts {
             settings.restart.attempts = attempts;

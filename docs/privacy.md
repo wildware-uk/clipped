@@ -30,6 +30,7 @@ Related standards: SPEC.md section 39, AGENTS.md sections 13 and 14.
 - [The rule for introducing network communication](#the-rule-for-introducing-network-communication)
 - [Register of network communication](#register-of-network-communication)
 - [Plugin network access](#plugin-network-access)
+- [Plugin filesystem access](#plugin-filesystem-access)
 - [Logs and diagnostics](#logs-and-diagnostics)
 - [Changing this document](#changing-this-document)
 
@@ -67,15 +68,25 @@ directory you can open, back up or delete.
 | Starting the recorder at sign-in, if you turn it on | One registry value named `Clipped Recorder` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path to `clipped-recorder.exe` | Never |
 
 Everything above the last row is a file or a database row under a directory of
-Clipped's own. **That last row is the one exception**, so it is stated plainly:
-it is the only thing Clipped writes anywhere else on your computer, and it is
-written only when you ask for it. `clipped-recorder start-at-login enable` puts
-it there, `disable` removes it and leaves nothing behind, and `status` tells you
-which it is. No installer writes it for you, nothing else in Clipped reads or
-changes that key, and it is under `HKEY_CURRENT_USER`, so it applies to your
-account and to nobody else signed in to the same machine. The value holds a
-path and nothing about you. The decision is
-[ADR 0006](adr/0006-recorder-lifetime-and-supervision.md).
+Clipped's own. **That last row is the one exception for Clipped itself**, so it
+is stated plainly: it is the only thing the recorder or the desktop application
+writes anywhere else on your computer, and it is written only when you ask for
+it. `clipped-recorder start-at-login enable` puts it there, `disable` removes it
+and leaves nothing behind, and `status` tells you which it is; the Settings
+screen's Startup switch does the same three things, through the same code — it
+asks the recorder, because the value names the recorder's own program and the
+window would have to guess at it. Reading it never changes it, so opening that
+screen writes nothing. No installer writes it for you, nothing else in Clipped
+reads or changes that key, and it is
+under `HKEY_CURRENT_USER`, so it applies to your account and to nobody else
+signed in to the same machine. The value holds a path and nothing about you.
+The decision is [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md).
+
+A *plugin* is a separate case, stated separately rather than folded into this
+table: a highlight plugin is a program that configures a game, and configuring
+Game State Integration means writing a file into the game's own directory,
+which is neither a file of Clipped's own nor the registry key above. That is
+[Plugin filesystem access](#plugin-filesystem-access), below.
 
 Clipped does not delete or move your recordings on your behalf beyond the
 retention rules you configure, and editing is non-destructive: the source
@@ -272,7 +283,11 @@ because a loopback port is reachable by every other process on this machine
 [plugins/cs2/README.md](../plugins/cs2/README.md) documents the file it writes,
 in full, and how to remove it. Recording does not depend on any of it: with the
 plugin absent, disabled or unable to bind, Clipped records exactly as it
-otherwise would.
+otherwise would. Like the Dota 2 plugin, this one writes into a game's own
+directory under a manifest that still declares contract 1, so that write is
+disclosed in `description` rather than the typed `filesystem` field
+[Plugin filesystem access](#plugin-filesystem-access) describes; adopting the
+field is the same remaining step for both plugins.
 
 ### What the Dota 2 row means
 
@@ -280,17 +295,21 @@ otherwise would.
   configuration file into the game's own directory so that the game knows where
   to post, and it opens no outbound connection of any kind.
 - **What it writes, and where the user is told.** That configuration file is
-  the one thing this plugin does to a machine that the manifest has no *typed*
-  declaration for: contract 1's declarations cover the network and nothing
-  else. Until there is a field for it
-  ([issue #343](https://github.com/wildware-uk/clipped/issues/343)) the
-  plugin's manifest `description` carries it in plain terms, because that is
-  the other thing the plugin manager shows before the user enables anything,
-  and a permission the user is never told about is a permission nobody granted.
-  The file is named for Clipped, nothing else in that directory is read or
-  touched, and it is not removed when the plugin detaches — the game reads the
-  directory at start-up, so deleting it on the way out would break the next
-  launch.
+  the one thing this plugin does to a machine that its manifest has no *typed*
+  declaration for: it still declares contract 1, whose vocabulary covers the
+  network and nothing else. A typed field for exactly this — `filesystem`,
+  contract 2 — now exists in `crates/plugins`
+  ([issue #343](https://github.com/wildware-uk/clipped/issues/343),
+  [docs/plugin-api.md](plugin-api.md), "Filesystem access, and what changed in
+  contract 2"); moving this plugin's manifest to declare it, rather than
+  carrying the disclosure in `description` alone, is that issue's remaining
+  step and has not landed yet. In the meantime the `description` carries it in
+  plain terms, because that is the other thing the plugin manager shows before
+  the user enables anything, and a permission the user is never told about is a
+  permission nobody granted. The file is named for Clipped, nothing else in
+  that directory is read or touched, and it is not removed when the plugin
+  detaches — the game reads the directory at start-up, so deleting it on the
+  way out would break the next launch.
 - **What is received:** the components the plugin subscribes to — the provider,
   the map, the player's own counters and their hero — from the game on this
   machine. Every payload has to carry a token the plugin generated and wrote
@@ -392,6 +411,67 @@ decision is argued in [plugin-api.md](plugin-api.md) and belongs in an ADR
 
 **No exemptions.** Plugins shipped with Clipped declare their network access on
 the same terms as third-party ones and appear in the register above.
+
+## Plugin filesystem access
+
+**Status.** The Dota 2 and Counter-Strike 2 plugins each write one
+configuration file into the game they integrate with, which is disclosed above
+and in each plugin's own manifest `description`
+([Register of network communication](#register-of-network-communication)). What
+did not exist until now is a *typed* declaration for it, the way `network`
+already has one: a field a build can validate, summarise in the same plain
+terms `NetworkAccess::summary` uses, and lapse consent over when it changes.
+`filesystem` — contract 2 of the plugin manifest — is that field, implemented
+as `clipped_plugins::FilesystemAccess` and covered by tests
+([docs/plugin-api.md](plugin-api.md), "Filesystem access, and what changed in
+contract 2"). **Adopting it in the bundled manifests has not happened yet**:
+`plugins/dota2/plugin.json` and `plugins/cs2/plugin.json` still declare
+contract 1 and carry the disclosure in `description` alone, because moving them
+is a change to `plugins/` rather than `crates/plugins` and is tracked as the
+remaining step of [issue #343](https://github.com/wildware-uk/clipped/issues/343).
+
+**Declaration** — *implemented*. A plugin declares its filesystem access in its
+manifest: a scope from a closed set (`game-installation` — the directory the
+game it integrates with is installed in; `plugin-data` — its own directory),
+whether it reads, writes or both, and the purpose in one line. A plugin that
+declares nothing is a plugin that is permitted nothing, exactly as `network`
+already works, and a manifest written before this field existed declares
+nothing automatically. The scope is an enumeration rather than a path
+precisely because a path is a string the host would have to trust and cannot
+check: it has no way to confirm that whatever a plugin supplied really is the
+game's own directory without asking the plugin, which is the thing being
+declared in the first place. An enumeration is checkable, and says what a user
+needs to know rather than a string that means nothing until the plugin runs.
+
+**Consent** — *implemented, and not yet shown to anybody*, for the same reason
+[Plugin network access](#plugin-network-access) is not: there is no screen yet
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)). What is
+implemented is that a plugin's stored consent token now covers both halves of
+its declaration together, so a plugin that starts writing into a game's
+directory where it previously touched no files is treated exactly like one
+that starts making an outbound connection where it previously made none — the
+consent it was given no longer matches what it declares, and it does not run
+until it is agreed to again. A manifest that never declares filesystem access
+keeps the exact consent token it always had; only a manifest that starts
+declaring it sees the token change, because a build merely learning the word
+must not, by itself, ask every already-enabled plugin to be agreed to again for
+a change it never made.
+
+**What enforcement can honestly promise.** Identical to
+[the paragraph above](#plugin-network-access) with the syscall changed: a
+plugin is a directory with an executable in it, out of process, which is what
+makes enforcement *possible* rather than what makes it exist today. Nothing yet
+confines the child from opening any file its user account can reach, whatever
+its manifest says.
+[Issue #280](https://github.com/wildware-uk/clipped/issues/280) is where an
+AppContainer or job object is applied, and it would hold a plugin to both its
+network and its filesystem declaration at once, since the mechanism does not
+distinguish which syscall it is confining. Until then this is declaration and
+review, the same as the network — not a sandbox — and no wording claims
+otherwise.
+
+**No exemptions.** Plugins shipped with Clipped declare filesystem access on
+the same terms as third-party ones would, once their manifests adopt the field.
 
 ## Logs and diagnostics
 

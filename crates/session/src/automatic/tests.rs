@@ -335,6 +335,7 @@ fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
         frames_dropped_writer_behind: 0,
         frames_missed_by_source: 0,
         times_target_minimised: 0,
+        longest_source_silence: Duration::ZERO,
         packets_written: 181,
         timestamps_corrected: 0,
         duration: Duration::from_secs(6),
@@ -826,15 +827,21 @@ fn a_suspend_while_a_session_waits_for_a_restart_ends_it_rather_than_extending_i
 
 #[test]
 fn a_recording_that_ends_while_the_game_runs_is_followed_by_another() {
-    // A window destroyed and recreated on a resolution change, which is what
-    // `EndReason::TargetResized` is for: the file has to end, the sitting has
-    // not.
-    let mut harness = Harness::new("resized");
+    // A window destroyed and recreated — a game changing display mode, a
+    // launcher handing over to the game proper. The file has to end, the
+    // sitting has not.
+    //
+    // The wait is the whole point of this one. `EndReason::TargetLost` is the
+    // exit race itself: the window going is exactly what a game quitting looks
+    // like from here, and the process exiting reaches the manager through the
+    // watcher seconds later, so restarting sooner would send the driver looking
+    // for the window of a game that has already gone.
+    let mut harness = Harness::new("window-went");
     let first = started(&mut harness, 11, t(0));
 
     let finished = harness.finished(
         &first,
-        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
         t(20),
     );
     assert!(
@@ -849,6 +856,182 @@ fn a_recording_that_ends_while_the_game_runs_is_followed_by_another() {
     let second = one_start(&restarted);
     assert_eq!(second.recording.session, first.session);
     assert_eq!(second.recording.index, 2);
+}
+
+#[test]
+fn a_recording_that_ended_because_the_window_resized_is_followed_at_once() {
+    // Issue #184, and the whole of what a session does about a resize. The file
+    // has to end — a Matroska track's dimensions and an encoder session's
+    // resolution are both fixed for the length of one file (ADR 0016) — but the
+    // window did not go anywhere. It is on screen, drawing, at a new size.
+    //
+    // So the exit race the restart delay exists for cannot be running, and
+    // waiting it out spends five seconds of a game somebody is still playing on
+    // every dragged window edge and every resolution change. Measured against a
+    // real resize before this was written: `clipped-recorder watch`, a window
+    // taken from 1280x720 to 1000x600 mid-recording, five seconds of nothing
+    // between the two files.
+    //
+    // The start comes back from `recording_finished` itself rather than from a
+    // later poll, which is the difference between "no delay" and "a shorter
+    // one": the driver is told to begin the moment it reports the outcome.
+    let mut harness = Harness::new("resized");
+    let first = started(&mut harness, 11, t(0));
+
+    let finished = harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        t(20),
+    );
+
+    let second = one_start(&finished);
+    assert_eq!(
+        second.recording.session, first.session,
+        "the second file belongs to the sitting the first one did"
+    );
+    assert_eq!(second.recording.index, 2);
+}
+
+#[test]
+fn a_recording_the_user_stopped_is_not_followed_by_another_of_the_same_process() {
+    // The test above is the behaviour this one has to switch off. A stop that
+    // reaches an automatic recording — the tray's Stop, or the toggle hotkey —
+    // ends the file and then, because the game is still running, the manager
+    // treats it exactly as a window that went and starts another recording
+    // seconds later. That is a control that undoes itself (AGENTS.md section
+    // 27, issue #421).
+    let mut harness = Harness::new("stopped-by-user");
+    let first = started(&mut harness, 11, t(0));
+
+    assert!(
+        harness.manager.asked_to_stop_recording(),
+        "there is an open session, so there is something to tell"
+    );
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::Stopped),
+        t(20),
+    );
+
+    for second in [22, 26, 60, 300] {
+        let actions = harness.poll(t(second));
+        assert!(
+            !starts_a_recording(&actions),
+            "the user stopped the recording, so nothing should start at t+{second}: {actions:?}"
+        );
+    }
+    assert!(
+        harness.manager.active_session().is_some(),
+        "the game is still running, so the sitting is still the sitting"
+    );
+}
+
+#[test]
+fn a_stop_the_user_asked_for_does_not_outlive_the_process_it_was_asked_of() {
+    // The clearing half, and the reason the flag is on the session's subject
+    // rather than on the session. Somebody who stopped recording one match has
+    // said nothing about the next one, so a relaunch inside the grace period —
+    // which is one sitting with two recordings in it — records again.
+    let mut harness = Harness::new("stopped-then-relaunched");
+    let first = started(&mut harness, 11, t(0));
+
+    harness.manager.asked_to_stop_recording();
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::Stopped),
+        t(20),
+    );
+    harness.observe(&exit(11, "test-game.exe"), t(25));
+
+    let relaunched = harness.observe(&launch(&[(12, "test-game.exe")]), t(30));
+    let second = one_start(&relaunched);
+    assert_eq!(
+        second.recording.session, first.session,
+        "a relaunch inside the grace is the same sitting"
+    );
+    assert_eq!(second.recording.index, 2);
+}
+
+#[test]
+fn only_a_resize_skips_the_wait_for_an_exit_that_may_be_on_its_way() {
+    // The other direction, and what makes the test above mean something:
+    // without it, a manager that had simply dropped the restart delay would
+    // pass just as well, and every ordinary quit would have the driver
+    // searching the desktop for the window of a game that has gone.
+    //
+    // One case per reason a recording can end while the game is still running.
+    let endings = [
+        EndReason::Stopped,
+        EndReason::TargetLost,
+        EndReason::DiskSpaceLow,
+        EndReason::OutputUnavailable,
+    ];
+
+    for ending in endings {
+        let mut harness = Harness::new("waits");
+        let first = started(&mut harness, 11, t(0));
+
+        let finished = harness.finished(&first, recorded(Path::new("one.mkv"), ending), t(20));
+
+        assert!(
+            !starts_a_recording(&finished),
+            "a recording that ended with {ending:?} must wait out the exit race: {finished:?}"
+        );
+        assert!(
+            starts_a_recording(&harness.poll(t(26))),
+            "and must then be followed by another recording of the same sitting"
+        );
+    }
+}
+
+#[test]
+fn a_failed_recording_waits_even_when_it_failed_after_a_resize() {
+    // The case the reproduction of #184 actually produced. A window resized to
+    // an odd-dimensioned client area cannot be encoded at all — 4:2:0 chroma
+    // has no representation for an odd dimension — so the recording that
+    // follows the resize fails before its first frame, and its outcome is
+    // `Failed` rather than a `Recorded` that ended in a resize.
+    //
+    // That outcome says nothing about whether the process is still there, so it
+    // keeps the delay. Without this the manager would retry a recording that
+    // cannot open as fast as the driver could report it failing.
+    let mut harness = Harness::new("failed-after-resize");
+    let first = started(&mut harness, 11, t(0));
+
+    let resized = harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        t(20),
+    );
+    let second = one_start(&resized).recording.clone();
+
+    let failed = harness.finished(
+        &second,
+        RecordingOutcome::Failed {
+            detail: "no encoder could be opened for this recording".to_owned(),
+        },
+        t(21),
+    );
+
+    assert!(
+        !starts_a_recording(&failed),
+        "a failure is not a resize and must not be retried at once: {failed:?}"
+    );
+    assert!(starts_a_recording(&harness.poll(t(27))));
+}
+
+#[test]
+fn a_stop_asked_for_with_no_session_open_says_there_was_nothing_to_tell() {
+    // `serve` answers `stop_recording` for a recording the window started as
+    // well as one detection started, and tells the manager either way. It has
+    // to be able to tell them apart, because a manual recording is not a
+    // session this manager knows anything about.
+    let mut harness = Harness::new("stopped-with-nothing-open");
+
+    assert!(
+        !harness.manager.asked_to_stop_recording(),
+        "no game has launched, so there is no automatic session to stop"
+    );
 }
 
 #[test]
@@ -891,14 +1074,14 @@ fn a_session_stops_starting_recordings_once_it_reaches_its_cap() {
 
     harness.finished(
         &first,
-        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
         t(1),
     );
     let second = one_start(&harness.poll(t(10))).recording.clone();
 
     harness.finished(
         &second,
-        recorded(Path::new("two.mkv"), EndReason::TargetResized),
+        recorded(Path::new("two.mkv"), EndReason::TargetLost),
         t(11),
     );
     let capped = harness.poll(t(20));
@@ -1015,7 +1198,7 @@ fn an_outcome_for_a_recording_the_session_has_moved_past_is_ignored() {
     let first = started(&mut harness, 11, t(0));
     harness.finished(
         &first,
-        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
         t(1),
     );
     let second = one_start(&harness.poll(t(10))).recording.clone();
@@ -1317,7 +1500,7 @@ fn a_recordings_settings_are_the_ones_it_started_with_however_they_change_after(
     // is where the change arrives.
     let next = harness.finished(
         &recording,
-        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
         t(6),
     );
     assert!(

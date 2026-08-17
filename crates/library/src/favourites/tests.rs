@@ -219,3 +219,31 @@ fn a_recording_marked_in_its_own_right_survives_the_session_being_unfavourited()
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+#[test]
+fn clearing_a_mark_that_was_never_set_changes_nothing_and_says_so() {
+    // The same defect `locks::unlock` had, and it reaches a window: `changed`
+    // on a `favourited` reply is what tells "you did that" from "that was
+    // already so", and unmarking something unmarked claimed the first.
+    let (directory, database) = library("idempotent-unmark");
+
+    for what in [
+        Favourite::Session("sitting".to_owned()),
+        Favourite::Recording(1),
+        Favourite::Clip(1),
+    ] {
+        assert!(
+            !unmark(&database, &what).expect("it is not an error"),
+            "{what} was not marked, so nothing changed"
+        );
+    }
+
+    mark(&database, &Favourite::Recording(1), at(1_000)).expect("it marks");
+    assert!(
+        unmark(&database, &Favourite::Recording(1)).expect("it unmarks"),
+        "a real clearing still reports one, or the guard above would be satisfied by a function \
+         that always answered `false`"
+    );
+
+    let _ = std::fs::remove_dir_all(directory);
+}

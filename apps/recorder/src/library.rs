@@ -54,21 +54,30 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use clipped_ipc::{
-    ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
-    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
-    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem, MAX_FRAME_BYTES,
+    ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
+    LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LockMark,
+    ProtocolError, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
+    TrashListing, TrashedItem, MAX_FRAME_BYTES,
 };
+use clipped_library::favourites::Favourite;
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
     IndexSettings, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
 };
+use clipped_library::locks::Lockable;
 use clipped_library::search::Query;
 use clipped_library::thumbnail::{ServiceOptions, ThumbnailCache, ThumbnailService};
 use clipped_storage::Database;
 use clipped_waveform::{ServiceOptions as WaveformOptions, WaveformCache, WaveformService};
 
 /// The file the library index lives in, under Clipped's per-user directory.
-const LIBRARY_FILE: &str = "library.db";
+///
+/// `pub(crate)` rather than private: `crate::recover`'s `--discard` indexes a
+/// recovered fragment before it sends it to the trash (issue #451), and it
+/// opens the same database this module does. Naming a second `"library.db"`
+/// literal there would be the two answers to one question AGENTS.md
+/// section 55 warns about.
+pub(crate) const LIBRARY_FILE: &str = "library.db";
 
 /// The recording library, as this process reads it for the window.
 #[derive(Debug)]
@@ -93,6 +102,82 @@ fn trash_item(kind: &str, id: i64) -> Result<clipped_library::trash::TrashItem, 
         other => Err(ProtocolError::new(
             ErrorCode::InvalidParameters,
             format!("`{other}` is not something the trash holds; it holds `recording` and `clip`"),
+        )),
+    }
+}
+
+/// What a `set_favourite` request names, or why it names nothing.
+///
+/// The target takes two fields because the schema does — a sitting is keyed by
+/// text and a recording or clip by an integer — and exactly one of them is read.
+/// The half that is not read is *not* checked: a window echoing a whole row back
+/// may well fill in both, and refusing that would be refusing a request whose
+/// meaning is unambiguous.
+///
+/// What is refused is a target that names nothing. A `session` with no
+/// identifier and a `recording` with an identifier of zero are both requests to
+/// favourite something that does not exist, and answering "done" to one would be
+/// a window drawing a star it will lose on the next read.
+fn favourite_target(request: &SetFavourite) -> Result<Favourite, ProtocolError> {
+    let missing = |what: &str| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "a `{}` is favourited by its {what}, and this request carries none",
+                request.kind
+            ),
+        )
+    };
+
+    match request.kind.as_str() {
+        "session" if request.session_id.is_empty() => Err(missing("session_id")),
+        "session" => Ok(Favourite::Session(request.session_id.clone())),
+        "recording" | "clip" if request.id == 0 => Err(missing("id")),
+        "recording" => Ok(Favourite::Recording(request.id)),
+        "clip" => Ok(Favourite::Clip(request.id)),
+        other => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "`{other}` is not something that can be favourited; Clipped favourites \
+                 `session`, `recording` and `clip`"
+            ),
+        )),
+    }
+}
+
+/// What a `set_lock` request names, or why it names nothing.
+///
+/// The same rules as [`favourite_target`], over a shorter vocabulary: a clip
+/// cannot be locked. Asking to lock one is refused rather than ignored, because
+/// a window told "done" would draw a padlock against a clip that automatic
+/// cleanup does not consult (`clipped_library::locks`).
+fn lock_target(request: &SetLock) -> Result<Lockable, ProtocolError> {
+    let missing = |what: &str| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "a `{}` is locked by its {what}, and this request carries none",
+                request.kind
+            ),
+        )
+    };
+
+    match request.kind.as_str() {
+        "session" if request.session_id.is_empty() => Err(missing("session_id")),
+        "session" => Ok(Lockable::Session(request.session_id.clone())),
+        "recording" if request.id == 0 => Err(missing("id")),
+        "recording" => Ok(Lockable::Recording(request.id)),
+        "clip" => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            "a clip cannot be locked: automatic cleanup deletes recordings, and a clip already \
+             keeps the recording it was cut from. Lock that recording instead",
+        )),
+        other => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "`{other}` is not something that can be locked; Clipped locks `session` and \
+                 `recording`"
+            ),
         )),
     }
 }
@@ -429,6 +514,94 @@ impl LibraryReader {
         })
     }
 
+    /// Marks one thing a favourite, or clears the mark.
+    ///
+    /// [Issue #58](https://github.com/wildware-uk/clipped/issues/58). `at` is
+    /// when, and it is passed in rather than read here for the reason
+    /// `clipped_library::favourites` takes one: every write in that crate does,
+    /// so a test does not have to wait for a clock.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] for a kind this build does not know or
+    /// a target that names nothing, and [`ErrorCode::LibraryUnavailable`] when
+    /// the index refuses.
+    pub fn set_favourite(
+        &self,
+        request: &SetFavourite,
+        at: SystemTime,
+    ) -> Result<FavouriteMark, ProtocolError> {
+        let what = favourite_target(request)?;
+
+        self.with_database_mut(|database| {
+            let changed = if request.favourite {
+                clipped_library::favourites::mark(database, &what, at)
+            } else {
+                clipped_library::favourites::unmark(database, &what)
+            }
+            .map_err(unreadable)?;
+
+            // Read back rather than assume. The two disagree for a target that
+            // is not there: nothing was written, and a window told "favourited"
+            // would draw a full star against a row that has none.
+            let favourite =
+                clipped_library::favourites::is_marked(database, &what).map_err(unreadable)?;
+
+            Ok(FavouriteMark {
+                kind: request.kind.clone(),
+                session_id: request.session_id.clone(),
+                id: request.id,
+                favourite,
+                changed,
+            })
+        })
+    }
+
+    /// Locks one thing against automatic cleanup, or unlocks it.
+    ///
+    /// [Issue #472](https://github.com/wildware-uk/clipped/issues/472).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] for a kind that cannot be locked or a
+    /// target that names nothing, and [`ErrorCode::LibraryUnavailable`] when the
+    /// index refuses.
+    pub fn set_lock(&self, request: &SetLock, at: SystemTime) -> Result<LockMark, ProtocolError> {
+        let what = lock_target(request)?;
+
+        self.with_database_mut(|database| {
+            let changed = if request.locked {
+                clipped_library::locks::lock(database, &what, at)
+            } else {
+                clipped_library::locks::unlock(database, &what)
+            }
+            .map_err(unreadable)?;
+
+            // Read back, for the reason `set_favourite` does: a target that is
+            // not there is written to by nothing.
+            let locked = clipped_library::locks::is_locked(database, &what).map_err(unreadable)?;
+
+            // And separately, whether the sweep will leave it alone — which is
+            // a different question for a recording inside a locked sitting, and
+            // is the one a padlock on a screen is drawn from.
+            let protected = match &what {
+                Lockable::Session(_) => locked,
+                Lockable::Recording(id) => {
+                    clipped_library::locks::protects(database, *id).map_err(unreadable)?
+                }
+            };
+
+            Ok(LockMark {
+                kind: request.kind.clone(),
+                session_id: request.session_id.clone(),
+                id: request.id,
+                locked,
+                protected,
+                changed,
+            })
+        })
+    }
+
     /// Where deleted media waits, as this reader was told.
     fn trash_path(&self) -> PathBuf {
         self.trash_directory
@@ -574,13 +747,24 @@ fn session(session: &IndexedSession) -> LibrarySession {
         ended_at: session.ended_at.clone(),
         end_reason: session.end_reason.clone(),
         favourite: session.favourite,
-        recordings: session.recordings.iter().map(recording).collect(),
+        locked: session.locked,
+        // The sitting's lock is passed down rather than looked up again: it is
+        // the cascade, and working it out per recording would be a second
+        // expression of a rule `clipped_library::locks` already owns.
+        recordings: session
+            .recordings
+            .iter()
+            .map(|held| recording(held, session.locked))
+            .collect(),
         clips: session.clips.iter().map(clip).collect(),
     }
 }
 
 /// One recording, on the wire.
-fn recording(recording: &IndexedRecording) -> LibraryRecording {
+///
+/// `locked_session` is whether the sitting it belongs to is locked, which is
+/// what makes a recording with no lock of its own protected.
+fn recording(recording: &IndexedRecording, locked_session: bool) -> LibraryRecording {
     LibraryRecording {
         recording_id: recording.recording_id,
         session_index: u32::try_from(recording.session_index).unwrap_or(u32::MAX),
@@ -600,6 +784,11 @@ fn recording(recording: &IndexedRecording) -> LibraryRecording {
         // section 27).
         missing_since: recording.missing_since.clone(),
         favourite: recording.favourite,
+        locked: recording.locked,
+        // The cascade, expressed once and here rather than in every window:
+        // a recording inside a locked sitting is protected without carrying
+        // a lock of its own (`clipped_library::locks`).
+        protected: recording.locked || locked_session,
         tags: recording.tags.clone(),
     }
 }
@@ -1561,5 +1750,367 @@ mod tests {
             .expect_err("there is no library to read on such a machine");
 
         assert_eq!(refusal.code, ErrorCode::LibraryUnavailable);
+    }
+
+    /// A request to favourite something.
+    fn asking(kind: &str, session_id: &str, id: i64, favourite: bool) -> SetFavourite {
+        SetFavourite {
+            kind: kind.to_owned(),
+            session_id: session_id.to_owned(),
+            id,
+            favourite,
+        }
+    }
+
+    /// When the tests below claim things happened.
+    fn at() -> SystemTime {
+        SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(1_786_000_000)
+    }
+
+    #[test]
+    fn a_sitting_and_the_recording_in_it_can_both_be_favourited_and_unfavourited() {
+        // Issue #58's first acceptance criterion at the boundary the window
+        // actually reaches: the mark has to *persist*, and it is the reads on
+        // this same reader that say whether it did.
+        let library = library_with_a_missing_recording("favourite-round-trip");
+        let recording_id = 1;
+
+        for (kind, session_id, id) in [
+            ("session", "cs2-20260811-201400", 0),
+            ("recording", "", recording_id),
+        ] {
+            let marked = library
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect("a favourite is written");
+            assert!(marked.favourite, "{kind} should be a favourite now");
+            assert!(marked.changed, "{kind} was not one before");
+
+            // Again, which is a second click on a full star. It must not look
+            // like a failure and must not move the instant it was first marked.
+            let again = library
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect("marking twice is not an error");
+            assert!(again.favourite, "{kind}");
+            assert!(!again.changed, "{kind} was already a favourite");
+
+            let cleared = library
+                .set_favourite(&asking(kind, session_id, id, false), at())
+                .expect("a favourite is cleared");
+            assert!(!cleared.favourite, "{kind}");
+            assert!(cleared.changed, "{kind} was a favourite until now");
+        }
+    }
+
+    #[test]
+    fn the_mark_a_favourite_reports_is_the_one_the_library_read_answers_with() {
+        // The reply is not what was asked for, it is what is true. A row the
+        // index does not hold is written to by nothing, and a window told
+        // "favourited" would draw a star it loses on the next read.
+        let library = library_with_a_missing_recording("favourite-read-back");
+
+        let answer = library
+            .set_favourite(&asking("recording", "", 9_999, true), at())
+            .expect("a write against a row that is not there is not an error");
+
+        assert!(
+            !answer.favourite,
+            "nothing was written, so nothing is favourited"
+        );
+        assert!(!answer.changed);
+
+        // And the session listing agrees, which is the read a screen makes.
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        assert!(!page.sessions[0].recordings[0].favourite);
+    }
+
+    #[test]
+    fn a_target_that_names_nothing_is_refused_rather_than_marking_row_zero() {
+        // Both halves of the target are optional on the wire — one kind reads
+        // each — so a request that filled in neither would otherwise favourite
+        // whatever row happens to sit at identifier zero.
+        for (kind, session_id, id, expected) in [
+            ("session", "", 0, "session_id"),
+            ("recording", "", 0, "id"),
+            ("clip", "", 0, "id"),
+        ] {
+            let refusal = LibraryReader::at(None)
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect_err("a target that names nothing is refused");
+
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters, "{kind}");
+            assert!(
+                refusal.message.contains(expected) && refusal.message.contains(kind),
+                "a refusal has to name the field that was missing: {}",
+                refusal.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_nothing_can_be_favourited_by_is_refused_and_says_what_can() {
+        // A screenshot is in issue #58's scope and has no table in the schema,
+        // so this is the message somebody gets when the two disagree.
+        let refusal = LibraryReader::at(None)
+            .set_favourite(&asking("screenshot", "", 1, true), at())
+            .expect_err("screenshots have nowhere to keep a mark");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        for named in ["session", "recording", "clip"] {
+            assert!(
+                refusal.message.contains(named),
+                "the refusal should say what can be favourited: {}",
+                refusal.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_is_read_before_the_library_is_opened() {
+        // A malformed request is the caller's mistake whatever the state of the
+        // machine, and `LibraryReader::at(None)` is a machine with no library at
+        // all: these refusals arrive as `InvalidParameters` rather than as
+        // `LibraryUnavailable`, which is what the tests above rely on.
+        let refusal = LibraryReader::at(None)
+            .set_favourite(&asking("session", "cs2-20260811-201400", 0, true), at())
+            .expect_err("there is no library on such a machine");
+
+        assert_eq!(
+            refusal.code,
+            ErrorCode::LibraryUnavailable,
+            "a well-formed request against no library is the machine's problem, not the caller's"
+        );
+    }
+    /// A request to lock something.
+    fn locking(kind: &str, session_id: &str, id: i64, locked: bool) -> SetLock {
+        SetLock {
+            kind: kind.to_owned(),
+            session_id: session_id.to_owned(),
+            id,
+            locked,
+        }
+    }
+
+    #[test]
+    fn a_sitting_and_the_recording_in_it_can_both_be_locked_and_unlocked() {
+        let library = library_with_a_missing_recording("lock-round-trip");
+
+        for (kind, session_id, id) in [("session", "cs2-20260811-201400", 0), ("recording", "", 1)]
+        {
+            let set = library
+                .set_lock(&locking(kind, session_id, id, true), at())
+                .expect("a lock is written");
+            assert!(set.locked, "{kind} should be locked now");
+            assert!(set.protected, "{kind} should be protected now");
+            assert!(set.changed, "{kind} was not locked before");
+
+            let again = library
+                .set_lock(&locking(kind, session_id, id, true), at())
+                .expect("locking twice is not an error");
+            assert!(again.locked, "{kind}");
+            assert!(!again.changed, "{kind} was already locked");
+
+            let cleared = library
+                .set_lock(&locking(kind, session_id, id, false), at())
+                .expect("a lock is cleared");
+            assert!(!cleared.locked, "{kind}");
+            assert!(cleared.changed, "{kind} was locked until now");
+        }
+    }
+
+    #[test]
+    fn a_recording_in_a_locked_sitting_is_protected_without_being_locked() {
+        // The cascade, at the boundary. `locked` and `protected` are different
+        // questions and this is the case that separates them: a screen drawing
+        // a padlock from `locked` alone would show this recording as one
+        // cleanup may take, and cleanup would not take it.
+        let library = library_with_a_missing_recording("lock-cascade");
+
+        library
+            .set_lock(&locking("session", "cs2-20260811-201400", 0, true), at())
+            .expect("the sitting locks");
+
+        // Asked about the recording without changing it: setting the state it
+        // is already in writes nothing, and the reply still reports both.
+        let recording = library
+            .set_lock(&locking("recording", "", 1, false), at())
+            .expect("it can be asked");
+
+        assert!(
+            !recording.locked,
+            "the recording has no lock of its own, and unlocking the sitting must not have to \
+             find and clear one"
+        );
+        assert!(
+            recording.protected,
+            "it is inside a locked sitting, so automatic cleanup will not take it"
+        );
+        assert!(!recording.changed, "nothing was written");
+    }
+
+    #[test]
+    fn a_recording_reaches_the_window_protected_by_its_sittings_lock() {
+        // The cascade as it crosses the boundary, which is the one place it is
+        // expressed for a window: `protected` is the recording's own lock *or*
+        // its sitting's, worked out here so no window has to know the rule.
+        //
+        // A screen test cannot cover this — it stubs the page read — so without
+        // this case the mapping could drop the sitting's half and nothing would
+        // fail.
+        let library = library_with_a_missing_recording("lock-on-the-wire");
+
+        library
+            .set_lock(&locking("session", "cs2-20260811-201400", 0, true), at())
+            .expect("the sitting locks");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        let session = &page.sessions[0];
+        let recording = &session.recordings[0];
+
+        assert!(session.locked, "the sitting carries its own lock");
+        assert!(
+            !recording.locked,
+            "the recording has none of its own, which is what a control is drawn from"
+        );
+        assert!(
+            recording.protected,
+            "and it is protected anyway, which is what a padlock is drawn from"
+        );
+    }
+
+    #[test]
+    fn a_recordings_own_lock_reaches_the_window_as_its_own_lock() {
+        // The column beside it is `favourited_at`, and reading that one instead
+        // would be invisible to every other test here: the cascade case asks
+        // about a *session's* lock, and the negative case has both columns
+        // empty. So this one locks the recording and favourites nothing, which
+        // is the only arrangement that tells the two columns apart.
+        let library = library_with_a_missing_recording("lock-own-on-the-wire");
+
+        library
+            .set_lock(&locking("recording", "", 1, true), at())
+            .expect("the recording locks");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        let recording = &page.sessions[0].recordings[0];
+
+        assert!(recording.locked, "its own lock is what it carries");
+        assert!(recording.protected, "and its own lock protects it");
+        assert!(
+            !recording.favourite,
+            "nothing favourited it, so a `locked` read off the favourite column \
+             would be false here rather than true"
+        );
+        assert!(
+            !page.sessions[0].locked,
+            "the sitting has no lock of its own"
+        );
+    }
+
+    #[test]
+    fn a_favourite_is_not_mistaken_for_a_lock() {
+        // The other direction of the same off-by-one: favouriting a recording
+        // must not make it look locked.
+        let library = library_with_a_missing_recording("favourite-is-not-a-lock");
+
+        library
+            .set_favourite(&asking("recording", "", 1, true), at())
+            .expect("the recording is favourited");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        let recording = &page.sessions[0].recordings[0];
+
+        assert!(recording.favourite);
+        assert!(!recording.locked, "a favourite is not a lock");
+        assert!(
+            !recording.protected,
+            "and it does not protect against cleanup through the lock path — \
+             `Protection::Favourite` is a different rule, in `accounting::cleanup`"
+        );
+    }
+
+    #[test]
+    fn a_recording_with_no_lock_anywhere_reaches_the_window_unprotected() {
+        // The other side of the same rule, or the assertion above would be
+        // satisfied by a field that was always true.
+        let library = library_with_a_missing_recording("lock-on-the-wire-absent");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+
+        assert!(!page.sessions[0].locked);
+        assert!(!page.sessions[0].recordings[0].locked);
+        assert!(!page.sessions[0].recordings[0].protected);
+    }
+
+    #[test]
+    fn a_clip_cannot_be_locked_and_the_refusal_says_what_to_lock_instead() {
+        // Not silently ignored: a window told "done" would draw a padlock
+        // against a clip that automatic cleanup never consults.
+        let refusal = LibraryReader::at(None)
+            .set_lock(&locking("clip", "", 1, true), at())
+            .expect_err("clips are not what cleanup deletes");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("recording"),
+            "the refusal has to say what to lock instead: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn a_lock_target_that_names_nothing_is_refused_rather_than_locking_row_zero() {
+        for (kind, session_id, id, expected) in
+            [("session", "", 0, "session_id"), ("recording", "", 0, "id")]
+        {
+            let refusal = LibraryReader::at(None)
+                .set_lock(&locking(kind, session_id, id, true), at())
+                .expect_err("a target that names nothing is refused");
+
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters, "{kind}");
+            assert!(
+                refusal.message.contains(expected) && refusal.message.contains(kind),
+                "a refusal has to name the field that was missing: {}",
+                refusal.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_stops_automatic_cleanup_taking_the_recording() {
+        // The whole point of the column, through the boundary a window reaches:
+        // lock it here, and the sweep's own candidate list says why it will not
+        // be taken.
+        let library = library_with_a_missing_recording("lock-protects");
+
+        library
+            .set_lock(&locking("recording", "", 1, true), at())
+            .expect("it locks");
+
+        let protection = library
+            .with_database_mut(|database| {
+                let candidates = clipped_library::accounting::cleanup::candidates(database)
+                    .map_err(unreadable)?;
+                Ok(candidates
+                    .iter()
+                    .find(|candidate| candidate.item.id == 1)
+                    .and_then(|candidate| candidate.protection))
+            })
+            .expect("the candidates can be read");
+
+        assert_eq!(
+            protection,
+            Some(clipped_library::accounting::cleanup::Protection::Locked),
+            "the sweep has to say the lock is what saved it"
+        );
     }
 }

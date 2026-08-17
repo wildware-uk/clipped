@@ -32,8 +32,17 @@
     (docs/ffmpeg.md), and shipping a program nobody runs is a licence obligation
     taken on for nothing.
 
-    It does not stage the licence texts or the third-party notices. Those are
-    issue #123, and scripts/collect-notices.ps1 already produces them.
+    It stages the licence texts and third-party notices too, from the directory
+    scripts/collect-notices.ps1 produces, into `licences` beside the binaries.
+    That is the half of issue #123 that is discharged by what is *installed*:
+    the LGPL wants its notice, both licence texts and an offer of source with
+    each copy, and a build that ships the FFmpeg DLLs without them is a
+    distribution nobody is licensed to make. It is a refusal and not a warning
+    for that reason.
+
+    It does not *produce* them: collecting notices reads `cargo metadata` for
+    several hundred crates and this script copies files. Run
+    scripts/collect-notices.ps1 first, which `npm run build:app` does.
 
 .NOTES
     Why the payload is staged into a directory of its own, rather than
@@ -87,7 +96,8 @@
 param(
     [string] $RecorderExecutable,
     [string] $FfmpegDir,
-    [string] $PayloadDirectory
+    [string] $PayloadDirectory,
+    [string] $LicenceDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -109,6 +119,10 @@ if (-not $FfmpegDir) {
 
 if (-not $PayloadDirectory) {
     $PayloadDirectory = Join-Path $repositoryRoot 'apps\desktop\src-tauri\installer-payload'
+}
+
+if (-not $LicenceDirectory) {
+    $LicenceDirectory = Join-Path $repositoryRoot 'target\licences'
 }
 
 function Write-Refusal {
@@ -152,6 +166,20 @@ if (-not (Test-Path -LiteralPath $RecorderExecutable -PathType Leaf)) {
     exit 1
 }
 
+# Checked with the recorder and the DLLs rather than after them, so a build
+# missing its notices fails before it has written anything.
+$licenceText = Join-Path $LicenceDirectory 'LICENSE.txt'
+$noticesFile = Join-Path $LicenceDirectory 'THIRD-PARTY-NOTICES.md'
+if (-not ((Test-Path -LiteralPath $licenceText -PathType Leaf) -and
+          (Test-Path -LiteralPath $noticesFile -PathType Leaf))) {
+    Write-Refusal `
+        -Missing 'the licence texts and third-party notices an installed copy has to carry' `
+        -LookedIn $LicenceDirectory `
+        -Remedy 'powershell -ExecutionPolicy Bypass -File scripts/collect-notices.ps1' `
+        -Consequence ('Clipped ships FFmpeg''s LGPL v3 libraries and links several hundred permissively licensed crates. Distributing them without their notices is not something the licences permit, so this is refused rather than warned about (docs/licensing.md, issue #123).')
+    exit 1
+}
+
 $ffmpegBin = Join-Path $FfmpegDir 'bin'
 $ffmpegLibraries = @()
 if (Test-Path -LiteralPath $ffmpegBin -PathType Container) {
@@ -191,6 +219,13 @@ foreach ($source in @($RecorderExecutable) + $ffmpegLibraries.FullName) {
     $staged += Get-Item -LiteralPath (Join-Path $PayloadDirectory $name)
 }
 
+# Into a subdirectory rather than beside the DLLs: these are documents a person
+# opens, and a user looking for what Clipped is made of should find one folder
+# rather than four files among seven libraries.
+$stagedLicences = Join-Path $PayloadDirectory 'licences'
+Copy-Item -LiteralPath $LicenceDirectory -Destination $stagedLicences -Recurse -Force
+$licenceFileCount = @(Get-ChildItem -LiteralPath $stagedLicences -Recurse -File).Count
+
 Write-Host "Staged for the installer, beside clipped-desktop.exe, in $PayloadDirectory"
 Write-Host ''
 Write-Host ("  {0,-24} {1,12}  {2}" -f 'File', 'Bytes', 'From')
@@ -202,6 +237,8 @@ foreach ($file in $staged) {
     }
     Write-Host ("  {0,-24} {1,12:N0}  {2}" -f $file.Name, $file.Length, $from)
 }
+
+Write-Host ("  {0,-24} {1,12}  {2}" -f 'licences', "$licenceFileCount files", $LicenceDirectory)
 
 # Which FFmpeg this is, recorded by the fetch script when it installed the pin.
 # A build log that says only "seven DLLs" does not say which build shipped, and

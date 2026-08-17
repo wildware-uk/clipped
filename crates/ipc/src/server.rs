@@ -18,13 +18,11 @@
 //!   [`MAX_FRAME_BYTES`](crate::MAX_FRAME_BYTES). The connection is closed
 //!   after the refusal rather than resynchronised: a peer that cannot frame
 //!   correctly has no defined position in the stream to recover to.
-//! - A **command whose subsystem this build does not contain**
-//!   ([`UnbuiltCommand`]). Refused with the milestone and the issue that build
-//!   it. There is deliberately no way for a handler to answer one, so no
-//!   handler can accidentally answer "done" to a thing it did not do
-//!   (AGENTS.md sections 27 and 54).
+//! - An **event stream this build does not produce** (`metrics`). Refused with
+//!   the milestone and the issue that build it, rather than accepted and never
+//!   delivered (AGENTS.md sections 27 and 54).
 //!
-//! One more never reaches a handler, and it is the opposite case: `shutdown` is
+//! One command never reaches a handler, and it is the opposite case: `shutdown` is
 //! *performed* here. See [`ShutdownRequest`].
 //!
 //! # Threads
@@ -80,9 +78,6 @@ const EVENT_QUEUE_DEPTH: usize = 64;
 /// so it is `Sync` and must not assume it is alone.
 pub trait CommandHandler: Send + Sync {
     /// Performs a command.
-    ///
-    /// [`Command::Unbuilt`] never arrives here: it is refused before dispatch,
-    /// so that "not in this build" cannot be answered with a success.
     ///
     /// # Errors
     ///
@@ -640,18 +635,12 @@ fn accepted_streams(requested: &[EventStream]) -> Result<Vec<EventStream>, Proto
     let mut accepted = Vec::with_capacity(requested.len());
     for stream in requested {
         match stream {
-            EventStream::Status | EventStream::Errors => {
+            EventStream::Status | EventStream::Errors | EventStream::Exports => {
                 if !accepted.contains(stream) {
                     accepted.push(stream.clone());
                 }
             }
-            EventStream::Metrics => {
-                return Err(ProtocolError::not_implemented(
-                    "live recording metrics",
-                    "M14",
-                    100,
-                ))
-            }
+            EventStream::Metrics => return Err(metrics_refusal()),
             EventStream::Other(name) => {
                 return Err(ProtocolError::new(
                     ErrorCode::InvalidParameters,
@@ -662,6 +651,15 @@ fn accepted_streams(requested: &[EventStream]) -> Result<Vec<EventStream>, Proto
     }
 
     Ok(accepted)
+}
+
+/// The refusal an `metrics` subscription gets, wherever it is quoted.
+///
+/// One function rather than one at the refusal and another in the protocol
+/// schema, so that the example in `packages/shared` is the refusal the recorder
+/// really sends (AGENTS.md section 55).
+pub(crate) fn metrics_refusal() -> ProtocolError {
+    ProtocolError::not_implemented("live recording metrics", "M14", 100)
 }
 
 /// Reads requests and writes replies until the client goes away.
@@ -755,19 +753,8 @@ fn dispatch<H: CommandHandler + ?Sized>(
             )),
             AfterReply::KeepServing,
         ),
-        // Refused here, and never handed to a handler: there is no
-        // implementation to reach, and a handler that could be asked is a
-        // handler that could answer wrongly (AGENTS.md section 54).
-        Ok(Command::Unbuilt(command)) => {
-            tracing::debug!(
-                command = command.name(),
-                issue = command.tracking_issue(),
-                "refused a command whose subsystem is not in this build"
-            );
-            (Outcome::Error(command.refusal()), AfterReply::KeepServing)
-        }
-        // Also never handed to a handler, for the opposite reason: what a
-        // shutdown ends is the accept loop, which belongs to this module.
+        // Never handed to a handler: what a shutdown ends is the accept loop,
+        // which belongs to this module.
         Ok(Command::Shutdown(request)) => accept_shutdown(handler, shutdown, request),
         Ok(command) => {
             let outcome = match handler.call(command) {
@@ -806,7 +793,9 @@ fn accept_shutdown<H: CommandHandler + ?Sized>(
     shutdown.begin();
 
     let recording = match handler.status() {
-        RecorderStatus::Idle => None,
+        // A watching recorder has nothing to finalise: it is between recordings,
+        // which is what makes it watching rather than recording.
+        RecorderStatus::Idle | RecorderStatus::Watching(_) => None,
         RecorderStatus::Recording(active) => Some(active),
     };
 
@@ -959,6 +948,7 @@ mod tests {
                     target: "process `cs2.exe`".to_owned(),
                     elapsed_ms: 4_200,
                     replay_seconds: None,
+                    session: None,
                 }),
             }
         }
@@ -1067,6 +1057,40 @@ mod tests {
     }
 
     #[test]
+    fn a_client_from_before_the_watching_state_is_refused_rather_than_half_understood() {
+        // Protocol 1 has no `watching` state and `RecorderStatus` has no
+        // catch-all to put one in, so a client speaking it would fail to read
+        // the first status this recorder sent it — several messages after being
+        // told everything was fine (issue #241, `docs/ipc.md`). It is refused at
+        // the handshake instead, and told which side is behind.
+        let mut script = Scripted::new(&[hello(1, ConnectionRole::Control, Vec::new())]);
+        run(&mut script);
+
+        let replies = script.replies();
+        assert_eq!(
+            replies.len(),
+            1,
+            "the connection should end there: {replies:?}"
+        );
+        match &replies[0] {
+            ServerMessage::Refused(error) => {
+                assert_eq!(error.code, ErrorCode::UnsupportedProtocolVersion);
+                assert_eq!(
+                    error.detail,
+                    Some(ErrorDetail::UnsupportedProtocolVersion {
+                        requested: 1,
+                        supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+                        recorder_version: "0.1.0".to_owned(),
+                    }),
+                    "a refusal that does not name what this recorder speaks leaves the client \
+                     unable to say which side needs updating"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_request_before_the_handshake_is_refused_for_that_reason() {
         let mut script = Scripted::new(&[ClientMessage::Request(Request {
             id: 1,
@@ -1147,36 +1171,6 @@ mod tests {
                 assert_eq!(second.id, 11);
             }
             other => panic!("expected two responses, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_command_whose_subsystem_is_missing_is_refused_without_reaching_the_handler() {
-        // The stub answers everything it is given with an `internal` error, so
-        // a `not_implemented` code here proves the refusal happened before
-        // dispatch — which is what stops a handler answering "saved" to a
-        // replay it did not save.
-        for unbuilt in crate::command::UNBUILT_COMMANDS {
-            let mut script = Scripted::new(&[
-                hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
-                ClientMessage::Request(Request {
-                    id: 1,
-                    command: unbuilt.name().to_owned(),
-                    params: serde_json::Value::Null,
-                }),
-            ]);
-            run(&mut script);
-
-            match &script.replies()[1] {
-                ServerMessage::Response(response) => match &response.outcome {
-                    Outcome::Error(error) => {
-                        assert_eq!(error.code, ErrorCode::NotImplemented, "{}", unbuilt.name());
-                        assert!(error.detail.is_some(), "{}", unbuilt.name());
-                    }
-                    other => panic!("{} should be refused, got {other:?}", unbuilt.name()),
-                },
-                other => panic!("expected a response, got {other:?}"),
-            }
         }
     }
 

@@ -1,12 +1,12 @@
 # Testing capture against controlled test applications
 
-**Status: the video test applications exist and one capture test drives them.**
-`test-apps/video-pattern` and `test-apps/fullscreen-dx11` are built, documented
-here, and exercised end to end by the tests in `tests/capture/`. The audio ones
-AGENTS.md section 26 also names do not exist yet, and
-[the last section](#what-is-not-built-yet) says why and where they are tracked.
+**Status: three of the four test applications AGENTS.md section 26 names exist,
+and the tests in `tests/capture/` and `tests/audio/` drive them.**
+`test-apps/video-pattern`, `test-apps/fullscreen-dx11` and
+`test-apps/process-tree-audio` are built and documented here. The fourth is not,
+and [the last section](#what-is-not-built-yet) says why and where it is tracked.
 
-The other half of testing a recorder is what comes *out* of it, which is
+The other half of testing a recorder is what comes _out_ of it, which is
 [validating produced media](#validating-produced-media) — one harness, used by
 every crate that writes a file.
 
@@ -29,10 +29,11 @@ arrived twice — with nobody watching.
 
 ## The applications
 
-| Application | What it is | Run it |
-| --- | --- | --- |
-| `test-apps/video-pattern` | A window — bordered or borderless — presenting the deterministic pattern at a fixed rate | `cargo run -p clipped-video-pattern --bin video-pattern -- --help` |
-| `test-apps/fullscreen-dx11` | The same pattern covering a whole display, exclusively where Windows allows it | `cargo run -p clipped-fullscreen-dx11 --bin fullscreen-dx11 -- --help` |
+| Application                 | What it is                                                                               | Run it                                                                 |
+| --------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `test-apps/video-pattern`   | A window — bordered or borderless — presenting the deterministic pattern at a fixed rate | `cargo run -p clipped-video-pattern --bin video-pattern -- --help`     |
+| `test-apps/fullscreen-dx11` | The same pattern covering a whole display, exclusively where Windows allows it           | `cargo run -p clipped-fullscreen-dx11 --bin fullscreen-dx11 -- --help` |
+| `test-apps/process-tree-audio` | A silent parent that starts a child which plays a tone, so that process-scoped capture can be proved against a known process *tree* | `cargo run -p clipped-process-tree-audio --bin process-tree-audio -- --help` |
 
 Both are ordinary workspace members, so `cargo build --workspace`,
 `cargo clippy --workspace --all-targets` and `cargo fmt --all` cover them. A
@@ -46,7 +47,7 @@ running.
   politeness: an always-on-top window over somebody's work gets minimised,
   Windows Graphics Capture stops delivering frames for a minimised window, and
   the run stops measuring capture and starts measuring Alt-Tab. `--monitor
-  primary` overrides it.
+primary` overrides it.
 - **They never outlive whoever started them.** A run ends at its `--seconds`
   deadline, when standard input closes or carries `stop`, at Ctrl-C, or when the
   window is closed — and every one of those paths gives back the display and
@@ -85,7 +86,7 @@ Every frame is drawn from the frame counter alone, in BGRA8:
   gap of a quarter of a million frames instead of a decode failure.
 - **Background and marker**: both are functions of the counter, and both are
   checked against it. They are redundant on purpose — they are what makes a
-  *torn* frame, one assembled from two source frames, fail to decode rather than
+  _torn_ frame, one assembled from two source frames, fail to decode rather than
   read as a good frame.
 
 The exact geometry, the palette and the tolerances are in
@@ -95,7 +96,7 @@ agreement is asserted by unit tests that need no GPU and run in CI.
 
 ### What it guarantees
 
-- Frame *n* is drawn identically on every machine, every run.
+- Frame _n_ is drawn identically on every machine, every run.
 - Consecutive frames always differ, so the compositor always has new content and
   never skips composing the window.
 - A frame that decodes is whole: its header, background and marker agree — for
@@ -113,7 +114,7 @@ agreement is asserted by unit tests that need no GPU and run in CI.
   and announces both moments — where the endpoint's own clock puts the tone, and
   the counter reading immediately after the frame went to the compositor. That is
   what gives a capture an event whose sound and picture were simultaneous at the
-  source, and therefore an *absolute* A/V offset rather than a relative one
+  source, and therefore an _absolute_ A/V offset rather than a relative one
   ([av-sync.md](av-sync.md)). The `ready` line names the frames that carry a
   tone, so a test knows which ones to decode before the run starts.
 
@@ -135,6 +136,11 @@ cargo run -p clipped-video-pattern --bin video-pattern -- --ignore-stdin
 # With sound: a quiet 997 Hz tone at the moment a named frame is presented,
 # every five seconds. Silent without this.
 cargo run -p clipped-video-pattern --bin video-pattern -- --tone --seconds 20
+
+# The other kind of sound: one quiet frequency held for the whole run, so that a
+# recording of this window has a source an isolation test can look for on a
+# track. Exclusive with --tone, which places bursts a plateau would swamp.
+cargo run -p clipped-video-pattern --bin video-pattern -- --steady-tone 997 --seconds 20
 ```
 
 `--help` lists every option. A release build is not needed — a debug build
@@ -198,7 +204,7 @@ carries on as a borderless window covering the display. Do not read
 `exclusive=no` as a defect in the application, and do not read a passing test as
 proof that exclusive fullscreen capture works — read the field.
 
-It *can* be granted, and what decides it has been measured: a process that
+It _can_ be granted, and what decides it has been measured: a process that
 synthesised an input event has to still be running when the transition is asked
 for. Not the launch path, not how long the session has been idle, and not
 whether the displays are powered on — all three were varied and none of them
@@ -212,12 +218,24 @@ or the test on its own does not produce a grant, however awake the machine is.
 `tests/capture/` holds the tests that point a real capture backend at these
 applications:
 
-| Test | What it decides |
-| --- | --- |
-| `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted *and* asserted on, and the checker that does it is itself tested without a GPU |
+| Test                     | What it decides                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wgc_video_pattern.rs`   | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted _and_ asserted on, and the checker that does it is itself tested without a GPU                                                                                           |
 | `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards — and, when Windows refused the exclusive transition, that the run says so and fails under `CLIPPED_REQUIRE_CAPTURE` rather than passing as if it had proved something |
-| `av_sync.rs` | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the *absolute* A/V offset of a capture is ([av-sync.md](av-sync.md)) |
-| `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
+| `av_sync.rs`             | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the _absolute_ A/V offset of a capture is ([av-sync.md](av-sync.md))                 |
+| `readback.rs`            | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it                                                                                                                                                                                                                          |
+
+`tests/audio/` holds the one test that points a real _recording_ at these
+applications and asks what landed on each of its tracks:
+
+| Test                  | What it decides                                                                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both |
+
+`test-apps/process-tree-audio` has one of its own,
+`tests/process_loopback_isolation.rs`, which asks a narrower question with no
+recording involved: that a capture scoped to a *parent* picks up a tone played by
+a child it started afterwards, and not one played by an unrelated tree.
 
 ## The end-to-end recorder tests
 
@@ -226,14 +244,14 @@ recorder — capture, encoder and muxer, as a user gets it — live beside the
 binary in `apps/recorder/tests/`, because what they exercise is the executable
 rather than any one crate:
 
-| Test | What it decides |
-| --- | --- |
-| `record_end_to_end.rs` | That `clipped-recorder record` against a real window produces media the harness accepts — and, in `ctrl_c_during_a_recording_leaves_a_playable_file`, that a real `CTRL_C_EVENT` mid-recording leaves a file that **plays**, with the three finalisation lines appearing in the diagnostics *in order*, so "the trailer was written and then the encoder was flushed" fails exactly as a missing line does. Also that a recording ends when its window closes, and still leaves valid media |
-| `ipc_protocol.rs` | That `clipped-recorder serve` speaks the protocol in [ipc.md](ipc.md) over a real named pipe to a real child process: the handshake and a version it does not speak, a frame that is not a message, a length prefix that would allocate the machine, a client that vanishes mid-request, commands whose subsystem is not built, the connection cap and its slot coming back, a second recorder refusing to compete for the endpoint, a recording driven **entirely over the protocol** producing a playable file — and an export driven the same way, whose MP4 is **decoded** from first frame to last, holds the recording's coded bytes packet for packet, refuses a destination that already exists without touching it, and reports a refusal from the muxer in the muxer's own words |
-| `ctrl_c.rs` | The half of Ctrl+C that needs no capture engine: that the finalisation hook runs exactly once and the process exits cleanly, against a real child sent a real console event. `record_end_to_end.rs` is what proves the resulting *file* plays |
-| `supervision.rs` | That the recorder is a process with a lifetime of its own, against real processes ended with a real `TerminateProcess` — no signal, no destructors: that a recorder outlives the process that started it and keeps serving, that a second launch attaches rather than competing and one holding the instance name touches nothing at all, that a killed recorder is reported and replaced rather than left showing a stale state, and that a recorder which cannot start is given up on after a bounded number of attempts. Two of its tests need a GPU and record a real window: one kills the supervisor mid-recording and proves the recording carried on and the file plays, the other kills the *recorder* mid-recording and proves the file it left is playable and that the supervisor named it |
-| `command_line.rs` | The command-line surface: that `record --help` documents a default for every option, that invalid values are usage errors and not panics, that a missing target names all three ways of giving one, that an existing recording is not overwritten without being asked, and that `list-windows` and `capabilities` report what they claim to. Also the one thing about `watch` that only the built program shows: that a settings file it cannot read produces the plain sentence on **standard error**, on a line of its own rather than only inside a log record. It starts `watch` over an unreadable file, waits for it to say it is watching, and stops it |
-| `unreadable_settings.rs` | That a settings file `watch` cannot read is **reported** — once, as a warning, carrying the sentence that says the file was left alone — and that a file which reads cleanly, or is not there at all, is not worth a word. It is a binary of its own because observing a report means installing a subscriber, and a second subscriber in a process makes `tracing` abandon its cached per-callsite decisions; sharing a process with this crate's other tests made it fail about half the time. This is the **log** half of that report; the console half is in `command_line.rs`, because no in-process subscriber can see an `eprintln!`. What such a file does to a *recording* is `watch`'s own tests |
+| Test                     | What it decides                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `record_end_to_end.rs`   | That `clipped-recorder record` against a real window produces media the harness accepts — and, in `ctrl_c_during_a_recording_leaves_a_playable_file`, that a real `CTRL_C_EVENT` mid-recording leaves a file that **plays**, with the three finalisation lines appearing in the diagnostics _in order_, so "the trailer was written and then the encoder was flushed" fails exactly as a missing line does. Also that a recording ends when its window closes, and still leaves valid media                                                                                                                                                                                                                                                                                                            |
+| `ipc_protocol.rs`        | That `clipped-recorder serve` speaks the protocol in [ipc.md](ipc.md) over a real named pipe to a real child process: the handshake and a version it does not speak, a frame that is not a message, a length prefix that would allocate the machine, a client that vanishes mid-request, commands whose subsystem is not built, the connection cap and its slot coming back, a second recorder refusing to compete for the endpoint, a recording driven **entirely over the protocol** producing a playable file — and an export driven the same way, whose MP4 is **decoded** from first frame to last, holds the recording's coded bytes packet for packet, refuses a destination that already exists without touching it, and reports a refusal from the muxer in the muxer's own words             |
+| `ctrl_c.rs`              | The half of Ctrl+C that needs no capture engine: that the finalisation hook runs exactly once and the process exits cleanly, against a real child sent a real console event. `record_end_to_end.rs` is what proves the resulting _file_ plays                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `supervision.rs`         | That the recorder is a process with a lifetime of its own, against real processes ended with a real `TerminateProcess` — no signal, no destructors: that a recorder outlives the process that started it and keeps serving, that a second launch attaches rather than competing and one holding the instance name touches nothing at all, that a killed recorder is reported and replaced rather than left showing a stale state, and that a recorder which cannot start is given up on after a bounded number of attempts. Two of its tests need a GPU and record a real window: one kills the supervisor mid-recording and proves the recording carried on and the file plays, the other kills the _recorder_ mid-recording and proves the file it left is playable and that the supervisor named it |
+| `command_line.rs`        | The command-line surface: that `record --help` documents a default for every option, that invalid values are usage errors and not panics, that a missing target names all three ways of giving one, that an existing recording is not overwritten without being asked, and that `list-windows` and `capabilities` report what they claim to. Also the one thing about `watch` that only the built program shows: that a settings file it cannot read produces the plain sentence on **standard error**, on a line of its own rather than only inside a log record. It starts `watch` over an unreadable file, waits for it to say it is watching, and stops it                                                                                                                                         |
+| `unreadable_settings.rs` | That a settings file `watch` cannot read is **reported** — once, as a warning, carrying the sentence that says the file was left alone — and that a file which reads cleanly, or is not there at all, is not worth a word. It is a binary of its own because observing a report means installing a subscriber, and a second subscriber in a process makes `tracing` abandon its cached per-callsite decisions; sharing a process with this crate's other tests made it fail about half the time. This is the **log** half of that report; the console half is in `command_line.rs`, because no in-process subscriber can see an `eprintln!`. What such a file does to a _recording_ is `watch`'s own tests                                                                                             |
 
 Most of these need a GPU and a display, so they skip themselves without one and
 `CLIPPED_REQUIRE_CAPTURE` turns that skip into a failure. The command-line, the
@@ -293,7 +311,7 @@ Three details worth knowing:
   frame's top-left corner: in a measured run of a 1280x720 window the frame was
   1282x752 and the pattern was at (1, 31). Searching every frame would work and
   would be slow.
-- The readback copies the texture *while the frame is held*, because the texture
+- The readback copies the texture _while the frame is held_, because the texture
   belongs to the backend for exactly that long (`docs/capture-pipeline.md`).
 
 ### Running them
@@ -308,7 +326,19 @@ has (`tests/capture/README.md`, and the `Test` step in
 cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
+cargo test -p clipped-video-pattern --test track_isolation -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test odd_client_area -- --ignored --nocapture
+cargo test -p clipped-capture -- --ignored --nocapture --test-threads=1
 ```
+
+The last two are issue #561's, and the second of them is inside `clipped-capture`'s
+own unit tests rather than a test binary of its own. They are here for a reason
+worth stating: both were written running by default, passed on a developer's
+machine, and turned `main` red — the Graphics Capture one because
+`CreateCaptureItemForWindow` answers `0x80070057` for *any* window on a hosted
+runner, and the Desktop Duplication one because a runner paints no window whose
+pixels can be found. Neither assertion was wrong. Neither environment could
+satisfy it.
 
 `av_sync.rs` additionally needs an audio endpoint, runs for about ninety seconds
 by default, and takes `CLIPPED_AV_SYNC_SECONDS` for the long runs the drift
@@ -352,15 +382,17 @@ backend hand the same source frame over twice.
 They are `#[ignore]`d rather than skipping themselves at runtime, deliberately.
 A test that decides for itself that it could not run reads as a pass, and the
 difference between "it ran and passed" and "it did not run" is exactly what this
-file is for. Where a test *can* usefully skip — the capture unit tests inside
+file is for. Where a test _can_ usefully skip — the capture unit tests inside
 `clipped-capture` — the project has `CLIPPED_REQUIRE_CAPTURE` to turn a skip
 into a failure on a machine that is supposed to be able to capture.
 
 ## Running the suite without making a noise
 
 Some tests play sound. `crates/audio/tests/system_audio.rs` renders a quiet
-997 Hz tone so it can capture it back and measure it, and the A/V sync tests
-drive `video-pattern --tone`. That is the right way to test a capture path —
+997 Hz tone so it can capture it back and measure it, the A/V sync tests drive
+`video-pattern --tone`, and `tests/audio/track_isolation.rs` holds two tones at
+once — `video-pattern --steady-tone` and one of its own — for the length of a
+recording. That is the right way to test a capture path —
 a real reference signal, not a mock — but `cargo test --workspace` is the
 command CONTRIBUTING.md asks every contributor to run before review, and on a
 machine with a sound card it makes noise. On a call, in headphones, or on the
@@ -374,12 +406,12 @@ Every test that opens an audio device or plays a tone then skips, reporting
 `SKIPPED (audio): CLIPPED_SKIP_AUDIO is set` on stderr — loudly, like every
 other skip here, so that a quiet run never looks like a passing one.
 
-It is checked *before* a device is opened rather than after, because by the
+It is checked _before_ a device is opened rather than after, because by the
 time a test has discovered it cannot run it has already made whatever noise it
 was going to make.
 
 `CLIPPED_SKIP_AUDIO` is not the opposite of `CLIPPED_REQUIRE_AUDIO`. That one
-is about whether a machine *can* run these tests; this one is about whether it
+is about whether a machine _can_ run these tests; this one is about whether it
 should right now. Setting both is a contradiction — one says they must not run,
 the other says they must not be skipped — and fails with a message saying so,
 rather than letting either win silently.
@@ -436,9 +468,9 @@ about to stop before you stop it.
 `crates/capture/examples/wgc_probe.rs` also renders a Direct3D 11 window, and
 the overlap is real: a window class, a swap chain, a paced present loop and a
 non-primary monitor choice exist in both. They are separate because they answer
-different questions — the probe *measures the capture backend* (pacing
+different questions — the probe _measures the capture backend_ (pacing
 percentiles, resource drift over half an hour, what happens when a window is
-minimised or closed), and the test applications *are the subject* a test points
+minimised or closed), and the test applications _are the subject_ a test points
 a capture at — and because the layering forbids the merge as things stand:
 `clipped-capture` is layer 1 and `clipped-video-pattern` is layer 5, so the
 probe cannot depend on the application without inverting the dependency
@@ -467,19 +499,81 @@ was actually broken.
 
 ### What it can assert
 
-| Expectation | Method | What it catches |
-| --- | --- | --- |
-| The container opens | `Media::open` | A recording that never got a header, or that is not media at all |
-| The video stream is the one that was asked for | `.video(VideoStream::codec(…).resolution(…).pixel_format(…).frame_rate(…))` | Wrong codec, wrong size, wrong pixel format |
-| The video *plays* | `.decoded_frames(n)` | A stream that is listed but does not decode: the count is what came out of a decoder, not what the container claims |
-| The expected number of audio streams | `.audio_stream_count(n)` | The multi-track failure — sources that were supposed to be separate arriving as one track |
-| Each audio track's codec, rate, channels, name, language, default flag | `.audio(index, AudioStream::…)` | A microphone track silently promoted to stereo, a track that lost its name |
-| Every track got its own packets | `.packets(n)` on a stream | A writer that routed everything to the first stream |
-| The duration is plausible | `.duration_seconds(expected, tolerance)` | A recording that stopped early, or one whose timeline is wrong |
-| Timestamps increase, per stream | `.monotonic_timestamps()` | A clock that stepped backwards |
-| The tracks are in sync | `.synchronised_within(bound)` | Tracks that start apart, and tracks that *drift* apart over the recording |
-| The recording starts at zero | `.streams_start_at(0.0, tolerance)` | A writer that never rebased its timestamps: every track three seconds in, and in sync with itself |
-| A track carries its own tone and none of the others | `.audio_tone(index, Tone::at(440.0).isolated_from(880.0))` | Audio isolation, which no amount of `ffprobe` output can see |
+| Expectation                                                            | Method                                                                      | What it catches                                                                                                     |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| The container opens                                                    | `Media::open`                                                               | A recording that never got a header, or that is not media at all                                                    |
+| The video stream is the one that was asked for                         | `.video(VideoStream::codec(…).resolution(…).pixel_format(…).frame_rate(…))` | Wrong codec, wrong size, wrong pixel format                                                                         |
+| The video _plays_                                                      | `.decoded_frames(n)`                                                        | A stream that is listed but does not decode: the count is what came out of a decoder, not what the container claims |
+| The expected number of audio streams                                   | `.audio_stream_count(n)`                                                    | The multi-track failure — sources that were supposed to be separate arriving as one track                           |
+| Each audio track's codec, rate, channels, name, language, default flag | `.audio(index, AudioStream::…)`                                             | A microphone track silently promoted to stereo, a track that lost its name                                          |
+| Every track got its own packets                                        | `.packets(n)` on a stream                                                   | A writer that routed everything to the first stream                                                                 |
+| The duration is plausible                                              | `.duration_seconds(expected, tolerance)`                                    | A recording that stopped early, or one whose timeline is wrong                                                      |
+| Timestamps increase, per stream                                        | `.monotonic_timestamps()`                                                   | A clock that stepped backwards                                                                                      |
+| The tracks are in sync                                                 | `.synchronised_within(bound)`                                               | Tracks that start apart, and tracks that _drift_ apart over the recording                                           |
+| The recording starts at zero                                           | `.streams_start_at(0.0, tolerance)`                                         | A writer that never rebased its timestamps: every track three seconds in, and in sync with itself                   |
+| A track carries its own tone and none of the others                    | `.audio_tone(index, Tone::at(440.0).isolated_from(880.0))`                  | Audio isolation, which no amount of `ffprobe` output can see                                                        |
+
+### Audio isolation, and what the automated half does not cover
+
+SPEC.md section 11's separation — the game on one track, everything else the
+machine played on another, the microphone on a third — is checked by
+`three_sources_produce_three_tracks_with_no_sound_shared_between_them` and
+`the_compatibility_mix_carries_the_game_the_rest_of_the_machine_and_the_microphone`
+in `crates/session/src/audio/tests.rs`. The tones are AGENTS.md section 26's:
+**440 Hz** for the game, **880 Hz** for the rest of the machine, **1320 Hz** for
+the microphone. Each track's own tone must measure at least **eight times** the
+strength of either tone belonging to another source (`Tone::DEFAULT_RATIO`),
+which is the rejection threshold
+[issue #34](https://github.com/wildware-uk/clipped/issues/34) asks to have
+documented.
+
+Those tests script their sources through `AudioCapture`, so **what they measure
+is the routing**: that the session declares a track per source, puts each
+source's samples on its own track, and writes a file in which they are
+separable. They run on a machine with no sound card, which is every machine CI
+runs on.
+
+**They do not measure Windows.** Whether `ProcessLoopbackCapture`'s include mode
+really captures only the game's process tree, and its exclude mode really
+captures everything else and not the game, is a property of the platform: a
+build that routed the whole endpoint to the game's track passes every one of the
+assertions above, because scripted sources cannot say what Windows actually
+handed over.
+
+That is #34's system half, and it is
+[`tests/audio/track_isolation.rs`](../tests/audio/track_isolation.rs). It starts
+`video-pattern --steady-tone 997` — one process tree that owns a window *and*
+makes a sound, which is what a stand-in for a game has to be — plays 1373 Hz from
+the test process itself, records the window through `record_into`, and measures
+every track of the file by frequency. On this project's development machine each
+track's own tone measures 0.0565 and the neighbour's measures 0.00003, which is
+about **1,900 times** apart against a threshold of eight. It needs a GPU, a
+display, an encoder and an output endpoint, so it is `#[ignore]`d like everything
+in `tests/capture/`; [tests/audio/README.md](../tests/audio/README.md) has the
+command and what to set.
+
+**The microphone leg is still manual.** A simulated microphone at a known
+frequency needs a capture endpoint a test can feed — a virtual audio device,
+installed by somebody — which AGENTS.md section 25 rules out assuming, and
+opening the real microphone of whoever ran the tests would record their room
+(section 14). So the microphone is checked by hand, and so is a real game rather
+than a test application:
+
+1. Start a game, something playing audio that is not the game (a browser tab is
+   enough), and have a microphone connected.
+2. `clipped-recorder record --process <game> --microphone default` for thirty
+   seconds, with sound coming from all three.
+3. Open the recording in an editor that shows tracks separately — Reaper,
+   Audacity via `ffmpeg -i`, DaVinci Resolve.
+4. Solo each track in turn. **Game** must contain the game and nothing else;
+   **Other System Audio** must contain the browser and _not_ the game;
+   **Microphone** must contain only the microphone.
+5. Mute all three and unmute **Compatibility Mix**: it must contain all of them.
+
+Step 4 is the one that matters. The first two thirds of it are now the automated
+test above; the microphone third is not, and is where a run of this procedure
+earns its place. Record what it found on the milestone issue (AGENTS.md
+section 53).
 
 Nothing is asserted until `assert_valid()`, so one run reports every failed
 expectation rather than the first:
@@ -536,16 +630,16 @@ A validator only ever run against good input is not a validator, so
 recorders damage them — the fixtures are written by the pinned FFmpeg build,
 never by the crates being validated, and then taken apart at the byte level:
 
-| The damage | What the harness says |
-| --- | --- |
-| Truncated before the track entries reached the disk | `Media::open` refuses it: `is not media that can be opened: ffprobe found no streams in it. The file is 173 bytes` |
-| Truncated to half its length after it was finished | The duration still reads 2.000s — the segment header survived the cut — and `decoded frames: expected 60, found 30` is what catches it |
-| An audio track that was never written | The report above |
-| A cluster timestamped before the one in front of it | `timestamps: a:0 goes backwards — packet 40 of the file is at 0.000000s, after packet 38 at 0.491000s` |
-| Audio half a second behind the video | `A/V synchronisation: the tracks start 0.500s apart, which is more than the stated 0.050s bound (a:0 starts at 0.500s, v:0 starts at 0.000s)` |
-| Audio that begins with the video and then stops halfway | `A/V synchronisation: the tracks end 1.001s apart, which is more than the stated 0.050s bound (a:0 ends at 0.999s, v:0 ends at 2.000s)` — the start check passes on this file, which is what makes it a test of the *end* |
-| A track another source bled into | `a:1 isolation: 440 Hz belongs to another source and must not be audible here, but it measures 0.1250 against this track's own 1320 Hz at 0.1250 — 1.0x apart` |
-| A track nothing was ever routed into | `the track is silent (peak amplitude 0.00e0 over 2.00s of audio)` |
+| The damage                                                   | What the harness says                                                                                                                                                                                                               |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Truncated before the track entries reached the disk          | `Media::open` refuses it: `is not media that can be opened: ffprobe found no streams in it. The file is 173 bytes`                                                                                                                  |
+| Truncated to half its length after it was finished           | The duration still reads 2.000s — the segment header survived the cut — and `decoded frames: expected 60, found 30` is what catches it                                                                                              |
+| An audio track that was never written                        | The report above                                                                                                                                                                                                                    |
+| A cluster timestamped before the one in front of it          | `timestamps: a:0 goes backwards — packet 40 of the file is at 0.000000s, after packet 38 at 0.491000s`                                                                                                                              |
+| Audio half a second behind the video                         | `A/V synchronisation: the tracks start 0.500s apart, which is more than the stated 0.050s bound (a:0 starts at 0.500s, v:0 starts at 0.000s)`                                                                                       |
+| Audio that begins with the video and then stops halfway      | `A/V synchronisation: the tracks end 1.001s apart, which is more than the stated 0.050s bound (a:0 ends at 0.999s, v:0 ends at 2.000s)` — the start check passes on this file, which is what makes it a test of the _end_           |
+| A track another source bled into                             | `a:1 isolation: 440 Hz belongs to another source and must not be audible here, but it measures 0.1250 against this track's own 1320 Hz at 0.1250 — 1.0x apart`                                                                      |
+| A track nothing was ever routed into                         | `the track is silent (peak amplitude 0.00e0 over 2.00s of audio)`                                                                                                                                                                   |
 | A bare H.264 elementary stream, which has no timeline at all | `start time: v:0 reports no start time at all, so there is nothing to place it on the recording's timeline` — a missing field is a failure, never a silent 0.000s — and `A/V synchronisation: nothing to compare … this file has 1` |
 
 ### Why FFmpeg's programs rather than the linked libraries
@@ -577,13 +671,13 @@ and `CLIPPED_REQUIRE_ENCODER` give the other subsystems.
 CI sets it on the `Test` step. These tests link nothing — they run `ffprobe.exe`
 and `ffmpeg.exe` as subprocesses — so a fetch-script or cache regression that
 left the libraries but not the programs would still compile, and without the
-variable every test proving the harness *detects* anything would skip and leave
+variable every test proving the harness _detects_ anything would skip and leave
 the run green.
 
 ### What it cannot do yet
 
 - **Measure an A/V offset against the source, from a file.** `synchronised_within`
-  compares the tracks against *each other* — where they start, and where they end
+  compares the tracks against _each other_ — where they start, and where they end
   after any drift — which is a container-level check. The real offset is measured
   in `tests/capture/av_sync.rs` instead, by reading the frame counter
   `video-pattern` draws into each frame and comparing it with the onset of the
@@ -621,8 +715,16 @@ purpose rather than stubbed:
   the tone plan from AGENTS.md section 26 (440 Hz, 880 Hz, 1320 Hz) written into
   its acceptance criteria. Much of what it was for is now covered from the other
   end: `crates/session/src/audio/tests.rs` scripts sources through the real
-  muxing path and asserts tone isolation by frequency analysis, and
-  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks.
+  muxing path and asserts tone isolation by frequency analysis,
+  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks, and
+  `tests/audio/track_isolation.rs` does it against real endpoints and real
+  processes with `video-pattern --steady-tone` as the source.
+
+The generator that is missing is a **microphone** one, and it is missing for a
+reason no test application can fix: a simulated microphone needs a capture
+endpoint to render into, which is a virtual audio device rather than a program.
+That is why `track_isolation.rs` records no microphone track and why the
+procedure above still has a manual step for it.
 
 Anything else this document describes is built. Where it describes something
 that is not, it says so — a document that quietly describes intentions as facts

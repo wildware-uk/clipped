@@ -1,4 +1,4 @@
-# 0010. A replay save never reaches across a gap, and one that lands entirely inside one is refused
+# 0017. A replay save never reaches across a gap, and one that lands entirely inside one is refused
 
 - Status: Accepted
 - Date: 2026-08-17

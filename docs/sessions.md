@@ -10,6 +10,52 @@ they start and finalises the recording when they stop
 ([#46]). What is deliberately not built is named as such throughout, with the
 issue that builds it.
 
+## Which process watches
+
+**`clipped-recorder serve --watch-for-games`**, in a shipped build, and
+`clipped-recorder watch` at a terminal. They run the same loop over the same
+session manager; the difference is what can reach the recordings it makes.
+
+```text
+serve --watch-for-games                    watch
+  the launch watcher                         the launch watcher
+  the control protocol   ◀── add_bookmark
+  the global hotkeys     ◀── Ctrl+F9
+```
+
+`serve` is what the desktop supervisor starts, what `start-at-login` writes into
+the `Run` key, and what registers the global hotkeys — so it is the only process
+in which a bookmark, a screenshot or a stop can reach a recording nobody asked
+for ([#421]). Before it gained the watcher, the two halves were in different
+processes and the recordings a user is most likely to want to bookmark were the
+ones nothing could bookmark.
+
+Giving `watch` a control endpoint of its own was the alternative and was
+rejected: [ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md) rests on
+exactly one process registering the combinations, and it is the endpoint that
+decides which one — a second recorder has already exited saying the pipe name
+was taken before it could ask Windows for a key. Two recorders both watching for
+games would be two processes both wanting them.
+
+So `watch` stays as it is: it records, and nothing can reach what it records.
+That is a terminal-facing command's honest shape, and it is why the flag exists
+rather than `serve` always watching — a `serve` started by hand, or by a test,
+must not begin recording whatever game happens to be running (AGENTS.md
+section 25).
+
+**What reaches an automatic recording.** The recording is handed to the same
+state `start_recording` puts one in, from the moment the game's window is found
+until the file is finished, so every command below is the one implementation
+there has ever been of it (`apps/recorder/src/serve.rs`):
+
+| Command | What it does to an automatic recording |
+| --- | --- |
+| `add_bookmark`, and `Ctrl`+`F9` | Marks the moment, in the recording's own bookmark file (`docs/bookmarks.md`) |
+| `take_screenshot` | Writes a still from a frame the recording already captured |
+| `stop_recording` | Finishes the file, and the sitting starts no further recording of a game that is still running — pressing stop is not undone five seconds later |
+| `get_status` | Reports it, so the window shows what is being recorded and offers no control that would be refused |
+| `save_replay` | Refused: an automatic recording keeps no replay buffer. Whether it should is [#427] |
+
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#38]: https://github.com/wildware-uk/clipped/issues/38
 [#41]: https://github.com/wildware-uk/clipped/issues/41
@@ -17,7 +63,11 @@ issue that builds it.
 [#46]: https://github.com/wildware-uk/clipped/issues/46
 [#55]: https://github.com/wildware-uk/clipped/issues/55
 [#240]: https://github.com/wildware-uk/clipped/issues/240
+[#184]: https://github.com/wildware-uk/clipped/issues/184
 [#241]: https://github.com/wildware-uk/clipped/issues/241
+[#421]: https://github.com/wildware-uk/clipped/issues/421
+[#427]: https://github.com/wildware-uk/clipped/issues/427
+[#561]: https://github.com/wildware-uk/clipped/issues/561
 
 ## What a session is
 
@@ -83,9 +133,13 @@ The other three modes are not offered rather than offered and doing nothing.
 Match Recording needs an integration that can say when a match begins, which is
 the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
 replay buffer a clip can be *saved* from: the buffer exists, fills from the same
-encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). What
-is still missing is anything that asks for one — a command ([#38]) or a hotkey
-that reaches the recorder.
+encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). The
+command exists ([#38]) and the hotkey now reaches an automatic recording ([#421])
+— what is still missing is a *buffer* on one. An automatic recording keeps none,
+because a rolling window costs about 140 MiB a minute and nothing has decided to
+spend it on every game somebody launches; that is [#427]. So `save_replay` is
+refused during an automatic session, in the recorder's own words, rather than
+being a key that quietly does nothing.
 
 ## How a launch becomes a recording
 
@@ -268,6 +322,25 @@ through the watcher up to `notification_interval + exit_settle_period` — three
 seconds with the shipped configuration — later. Restarting sooner would have the
 recorder go looking for the window of a game it does not yet know has quit, on
 every ordinary exit.
+
+**A recording that ended because its target changed size does not wait.** There
+is no exit to race: the window is on screen, drawing, at a new size, and the only
+reason the file ended is that a Matroska track's dimensions and an encoder
+session's resolution are both fixed for the length of one file
+([ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md), [#184]).
+Waiting the delay out there would spend five seconds of a game somebody is still
+playing on every dragged window edge and every resolution change, which is the
+opposite of what following a resize with a new file is for. Every other ending
+keeps the delay, including the ones that look similar: a window that was *lost*
+is the exit race itself, a suspend's exits arrive as a batch afterwards, and a
+recording that failed or found no window says nothing about whether the process
+is still there.
+
+Two consequences of that are worth knowing. Every resize spends one of the
+hundred recordings below, so a window dragged repeatedly can reach the cap; and a
+window resized to a client area with an **odd** dimension cannot be encoded at
+all, so the recording that follows such a resize fails to open and the sitting
+records nothing more ([#561]).
 
 A recording that found **no window at all** is not retried for the same process.
 The window timeout has already given the game its chance, and retrying would have
@@ -504,11 +577,12 @@ every session did before.
 `bookmarks` is **still always empty**. It is written so that a reader can tell
 "no bookmarks" from "a file that predates them", and its presence is not a claim
 that a session has none: a session's bookmarks are in its recordings' own files
-(`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
-yet either: `watch` serves no protocol, so no `add_bookmark` can reach it, and
-it registers no hotkey either — the global hotkeys belong to `serve`
-([ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md)). Joining the two
-is [#421](https://github.com/wildware-uk/clipped/issues/421).
+(`docs/bookmarks.md`). Bookmarks *are* taken during an automatic session now —
+`serve --watch-for-games` is one process with the watcher, the protocol and the
+hotkeys in it ([#421], and "Which process watches" above) — and each one is
+written into the bookmark file of the recording it is in, which is where a reader
+looks for it. A sitting recorded by `clipped-recorder watch` still has none,
+because nothing can reach a recording that command makes.
 
 An ambiguous session writes its candidates instead of a name it did not earn:
 
@@ -642,7 +716,7 @@ Three mechanisms carry most of it, and none of them is new to this section:
 | An audio device is unplugged mid-recording | Everything, including the track: it becomes silence of the right length | A warning, and how much of the track was silence when the recording ends | Plug it back in; the capture picks it up again |
 | An audio device cannot be opened at the start | Nothing was recorded; it failed before the file existed | `audio-unavailable`, naming the track | Connect the device, choose another, or record with that source turned off |
 | The recorder process is killed | Everything up to the last closed cluster | Nothing at the time. `clipped-recorder recover` finds it on the next launch | Keep it or discard it — see below |
-| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session | Nothing |
+| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session, at once ([ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)) | Nothing |
 | The machine sleeps | Everything up to the suspend | `system-resumed` in the session's events; a second recording follows | Nothing |
 | A metadata write fails | The video, always | A warning; the session is in memory until the next change | Nothing |
 
@@ -736,7 +810,7 @@ footage is not lost. Nothing knows about it.
 ```text
 clipped-recorder recover                                  list, and change nothing
 clipped-recorder recover --adopt                          keep them
-clipped-recorder recover --discard --session <ID>         delete one, and say so
+clipped-recorder recover --discard --session <ID>         move one to the trash, and say so
 ```
 
 `watch` says the same thing at start-up, once, and does nothing about it —
@@ -753,11 +827,18 @@ container, which `clipped-muxer` cannot do yet
 is that the footage is *known* — named, sized, attributed, and indexed like any
 other recording rather than looking like one still being written.
 
-Discarding deletes the file and writes the `discarded` outcome. It names one
-session, always: this is footage that cannot be made again, so there is
-deliberately no way to throw away everything at once (AGENTS.md section 56). The
-entry stays either way, because the record that a recording existed and was
-thrown away is worth more than a gap.
+Discarding indexes the recording, moves it into `clipped-library`'s trash and
+writes the `discarded` outcome — not `remove_file`, since [issue #451] found
+that a delete a user has not necessarily watched yet was the wrong default
+once a trash existed to catch it. It names one session, always: even a
+recoverable choice is refused in bulk, so there is deliberately no way to
+move everything at once (AGENTS.md section 56). The entry stays either way,
+because the record that a recording existed and was discarded is worth more
+than a gap. [recorder-cli.md](recorder-cli.md#recover) has what moving it to
+the trash means in practice, and the order that keeps a failure partway
+through from stranding it.
+
+[issue #451]: https://github.com/wildware-uk/clipped/issues/451
 
 Both are read-modify-write over the sidecar as JSON rather than through a typed
 mirror of the schema, so a file written by a newer Clipped keeps its newer fields
@@ -773,11 +854,16 @@ into the sidecar and into logs:
 | `recordings[].end_reason` | `disk-space-low` | Stopped deliberately at the reserve; the file is complete |
 | `recordings[].end_reason` | `output-unavailable` | The output drive stopped answering |
 | `recordings[].outcome` | `interrupted` | The recorder was killed; the footage was adopted afterwards |
-| `recordings[].outcome` | `discarded` | The same, and the file was deliberately deleted |
+| `recordings[].outcome` | `discarded` | The same, and the file was sent to the trash |
 
-`clipped-library`'s indexer does not know these four yet. It degrades gracefully
-— an unknown word becomes `NULL` and a reported `IndexProblem` — and teaching it
-is [#278](https://github.com/wildware-uk/clipped/issues/278). The IPC protocol
+`clipped-library`'s indexer knows the two `outcome` words: `recover --discard`
+indexes a recording before it moves it (issue #451), so the row it writes has
+to survive a later reconciliation of the same, now-closed, sidecar, and
+`crates/storage/migrations/0006_recovered_recording_outcomes.sql` widened
+`recordings.outcome`'s vocabulary to match. The two `end_reason` words are the
+gap that is left: it degrades gracefully — an unknown word becomes `NULL` and a
+reported `IndexProblem` — and teaching it the rest is
+[#278](https://github.com/wildware-uk/clipped/issues/278). The IPC protocol
 carries the two end reasons as `EndReason::Other` for the same reason, and
 [#284](https://github.com/wildware-uk/clipped/issues/284) promotes them.
 

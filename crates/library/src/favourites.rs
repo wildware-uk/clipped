@@ -6,6 +6,11 @@
 //! puts it on every row it returns and [`crate::search`] has a `favourite`
 //! filter. **Nothing could set one.** This is the half that was missing.
 //!
+//! Reaching it is the other half, and for a while this module was itself the
+//! thing nobody called: the recorder answers `set_favourite` with it
+//! (`apps/recorder/src/library.rs`) and the Library screen's Keep control is
+//! what sends one, so a mark a user makes ends up here.
+//!
 //! # What favouriting a session means
 //!
 //! The issue asks for this to be documented rather than left to be discovered,
@@ -107,12 +112,22 @@ pub fn mark(
 
 /// Clears the mark on `what`.
 ///
+/// Answers whether this call is what changed it, which means the `WHERE` has to
+/// test the column and not only the key: an `UPDATE` that sets `NULL` where it
+/// is already `NULL` matches its row and reports one change. [`mark`] has
+/// always guarded that way and this did not, so unmarking something that was
+/// never marked reported a change that had not happened — which reaches a
+/// window as `changed` on a `favourited` reply.
+///
 /// # Errors
 ///
 /// Whatever SQLite reported.
 pub fn unmark(database: &Database, what: &Favourite) -> Result<bool, rusqlite::Error> {
     let (table, id_column) = what.table();
-    let statement = format!("UPDATE {table} SET favourited_at = NULL WHERE {id_column} = ?1");
+    let statement = format!(
+        "UPDATE {table} SET favourited_at = NULL \
+         WHERE {id_column} = ?1 AND favourited_at IS NOT NULL"
+    );
 
     let changed = match what {
         Favourite::Session(id) => database.connection().execute(&statement, params![id])?,

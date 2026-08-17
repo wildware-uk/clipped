@@ -24,9 +24,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clipped_media_validation::{
-    require_media_tools, AudioStream, Media, Stream, TemporaryDirectory, VideoStream,
+    require_media_tools, AudioStream, Media, Stream, TemporaryDirectory, Tone, VideoStream,
 };
-use clipped_muxer::{remux_to_mp4, Carriage, Mp4Plan, RemuxError, TrackKind};
+use clipped_muxer::{
+    remux_to_mp4, remux_to_mp4_carrying, remux_to_mp4_with, AudioTracks, Carriage, Mp4Plan,
+    RemuxError, RemuxOptions, RemuxProgress, TrackKind,
+};
 use support::{build_fixture_with_ffmpeg, run_synthetic_recording};
 
 /// How long a recording these tests write.
@@ -666,5 +669,357 @@ fn a_recording_that_cannot_be_read_is_reported_rather_than_half_copied() {
     assert!(
         !destination.exists(),
         "a remux of a recording that does not exist created an MP4"
+    );
+}
+
+// The copy that carries one sound track, which is what a player is served
+// (issue #304). The tones are the ones `examples/synthetic_recording.rs`
+// produces, and they are the whole point of these two tests: a selection that
+// took the wrong stream would still produce a one-audio-track MP4 of the right
+// length with the right codec, and only what is *audible* on it says which
+// track was taken.
+
+/// The frequency each source's track carries, as AGENTS.md section 26 sets them.
+const GAME: f64 = 440.0;
+const OTHER_SYSTEM_AUDIO: f64 = 880.0;
+const MICROPHONE: f64 = 1320.0;
+
+#[test]
+fn every_sound_track_can_be_chosen_and_the_copy_carries_the_one_that_was() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-one-track");
+    // Video, then the compatibility mix, the game, other system audio and the
+    // microphone: the model's order, which is the order the container declares
+    // (`clipped_muxer::AudioSource`).
+    let source = record(&directory, "recording.mkv", &["--audio-tracks", "4"]);
+    let recorded = Media::open(&source).expect("a finished recording opens");
+    let recording_before = std::fs::read(&source).expect("the recording can be read");
+
+    for (stream, title, tone, other_tones) in [
+        (2, "Game", GAME, [OTHER_SYSTEM_AUDIO, MICROPHONE]),
+        (
+            3,
+            "Other System Audio",
+            OTHER_SYSTEM_AUDIO,
+            [GAME, MICROPHONE],
+        ),
+        (4, "Microphone", MICROPHONE, [GAME, OTHER_SYSTEM_AUDIO]),
+    ] {
+        let destination = directory.file(&format!("track-{stream}.mp4"));
+        let summary = remux_to_mp4_carrying(&source, &destination, AudioTracks::Only(stream))
+            .unwrap_or_else(|error| panic!("stream {stream} could not be carried: {error}"));
+
+        // What was made, said by the plan rather than remembered by the caller:
+        // one track copied, the other three named as tracks nobody asked for,
+        // and the picture carried whichever sound was chosen.
+        let carried: Vec<usize> = summary
+            .plan()
+            .tracks()
+            .iter()
+            .filter(|track| track.carriage() == Carriage::Copied)
+            .map(clipped_muxer::PlannedTrack::index)
+            .collect();
+        assert_eq!(
+            carried,
+            vec![0, stream],
+            "the plan for stream {stream} carried the wrong tracks"
+        );
+        assert!(
+            !summary.plan().is_lossless(),
+            "a copy holding one of four sound tracks claimed to hold everything"
+        );
+
+        let copy = Media::open(&destination).expect("the copy opens");
+        copy.validate()
+            .stream_count(2)
+            .audio_stream_count(1)
+            .video(
+                VideoStream::codec("h264")
+                    .decoded_frames((SECONDS * FRAME_RATE) as u64)
+                    .resolution(640, 360),
+            )
+            .audio(
+                0,
+                AudioStream::codec("pcm_s16le")
+                    .sample_rate(48_000)
+                    .channels(2)
+                    .packets((SECONDS * AUDIO_PACKETS_PER_SECOND) as u64),
+            )
+            // The assertion the feature exists for. Anything else on this track
+            // — the mix, or the neighbouring source — fails here.
+            .audio_tone(
+                0,
+                Tone::at(tone)
+                    .isolated_from(other_tones[0])
+                    .isolated_from(other_tones[1]),
+            )
+            .duration_seconds(
+                recorded
+                    .duration_seconds()
+                    .expect("the recording declares a duration"),
+                0.05,
+            )
+            .monotonic_timestamps()
+            .assert_valid();
+
+        // The name follows the track, which is what tells a selector what it is
+        // offering. It moves as `TrackShape` describes above — Matroska's
+        // `Name` becomes MP4's `udta`/`name`, which `ffprobe` reports as `name`
+        // rather than as `title` — so it is read the way that comparison reads
+        // it rather than through `AudioStream::title`, which asks for `title`.
+        let carried = copy
+            .audio_streams()
+            .first()
+            .and_then(|stream| stream.tag("title").or_else(|| stream.tag("name")))
+            .map(str::to_owned);
+        assert_eq!(
+            carried.as_deref(),
+            Some(title),
+            "the copy of stream {stream} carries the wrong track's name"
+        );
+    }
+
+    assert!(
+        std::fs::read(&source).expect("the recording can be read again") == recording_before,
+        "carrying one track changed the recording it was taken from"
+    );
+}
+
+#[test]
+fn a_sound_track_the_recording_has_not_got_is_refused_rather_than_copied_silent() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-no-such-track");
+    let source = record(&directory, "recording.mkv", &["--audio-tracks", "2"]);
+
+    // Stream 0 is the picture and stream 9 is past the end. Both would produce
+    // a file with no sound in it, which is indistinguishable from a recording
+    // that never had any — so both are refused before anything is created.
+    for stream in [0, 9] {
+        let destination = directory.file(&format!("silent-{stream}.mp4"));
+        let error = remux_to_mp4_carrying(&source, &destination, AudioTracks::Only(stream))
+            .expect_err("a stream that is not a sound track is refused");
+
+        assert!(
+            matches!(error, RemuxError::NoSuchAudioTrack { index, .. } if index == stream),
+            "the wrong failure for stream {stream}: {error}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused copy of stream {stream} left an MP4 behind"
+        );
+    }
+}
+
+/// Collects every report a copy makes, from the copying thread.
+///
+/// A `Mutex` because `RemuxOptions::reporting_to` requires the callback to be
+/// `Sync` — the copy is entitled to call it from whichever thread it is running
+/// on, and this test is entitled to read the result afterwards. It is not a
+/// claim that reports arrive concurrently: they do not, and the order of this
+/// vector is the order the copy produced them in.
+#[derive(Default)]
+struct Reports(std::sync::Mutex<Vec<RemuxProgress>>);
+
+impl Reports {
+    fn record(&self, progress: RemuxProgress) {
+        self.0
+            .lock()
+            .expect("no test thread panics here")
+            .push(progress);
+    }
+
+    fn taken(&self) -> Vec<RemuxProgress> {
+        self.0.lock().expect("no test thread panics here").clone()
+    }
+}
+
+#[test]
+fn a_copy_says_how_far_it_has_got_and_the_last_thing_it_says_is_what_it_wrote() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-progress");
+    let source = record(&directory, "recording.mkv", &["--audio-tracks", "2"]);
+    let destination = directory.file("recording.mp4");
+
+    let reports = Reports::default();
+    let report = |progress: RemuxProgress| reports.record(progress);
+
+    // Every packet, which is what a test counting reports asks for and what an
+    // interface should not. The interval is exercised separately below; the
+    // point here is the *sequence*.
+    let summary = remux_to_mp4_with(
+        &source,
+        &destination,
+        &RemuxOptions::new()
+            .reporting_to(&report)
+            .every(Duration::ZERO),
+    )
+    .expect("the recording remuxes");
+
+    let seen = reports.taken();
+    assert!(
+        seen.len() > 10,
+        "a copy of a {SECONDS}-second recording reported {} times; a progress bar needs a \
+         sequence, and one report is the reply arriving early",
+        seen.len()
+    );
+
+    // The whole claim of the feature: it *advances*. A callback wired to a
+    // constant, or one reporting the same figure every time, would satisfy "an
+    // event arrived" and fails this.
+    for pair in seen.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        assert!(
+            after.written_nanos >= before.written_nanos
+                && after.packets > before.packets
+                && after.bytes >= before.bytes,
+            "progress went backwards or stood still: {before:?} then {after:?}"
+        );
+    }
+    let first = *seen.first().expect("there is a report");
+    let last = *seen.last().expect("there is a report");
+    assert!(
+        last.written_nanos > first.written_nanos,
+        "every report carried the same position, so a bar drawn from them would not move"
+    );
+
+    // And the last one is the file that now exists, not wherever the interval
+    // happened to land. A window whose bar stops at 97 % and then vanishes has
+    // been told the copy gave up.
+    assert_eq!(
+        last.packets,
+        summary.packets(),
+        "the last report and the summary disagree about how many packets were copied"
+    );
+    assert_eq!(
+        last.bytes,
+        summary.byte_len(),
+        "the last report and the summary disagree about how many bytes were copied"
+    );
+    assert_eq!(
+        u128::from(last.written_nanos),
+        summary.duration().as_nanos(),
+        "the last report and the summary disagree about how much recording was copied"
+    );
+
+    // The denominator is the source's own declared length, so a bar reaches its
+    // end. Compared against the recording rather than against `SECONDS`: a
+    // total taken from the destination would be the copy measuring itself.
+    let recorded = Media::open(&source).expect("the recording opens");
+    let declared = recorded
+        .duration_seconds()
+        .expect("a finished recording records its duration");
+    let total = last
+        .total_nanos
+        .expect("a finished recording declares how long it is, so progress has a denominator");
+    assert!(
+        (total as f64 / 1e9 - declared).abs() < 0.25,
+        "the denominator is not the recording's own length: {total} ns against {declared} s"
+    );
+    let fraction = last
+        .fraction()
+        .expect("a report carrying a total has a fraction");
+    assert!(
+        fraction > 0.9,
+        "the copy finished and the last report read {:.0}%",
+        fraction * 100.0
+    );
+}
+
+#[test]
+fn reporting_less_often_reports_less_often_and_copies_the_same_file() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-progress-rate");
+    let source = record(&directory, "recording.mkv", &[]);
+
+    // The interval is what stands between a two-hour recording and tens of
+    // thousands of frames down a bounded event queue, so it has to be a real
+    // throttle rather than a field nothing reads. Measured as a *ratio* between
+    // two intervals over the same recording, because an absolute count would
+    // depend on how the encoder happened to packetise it.
+    let quiet = remux_to_mp4(&source, &directory.file("quiet.mp4"))
+        .expect("the recording remuxes without reporting");
+
+    let mut counts = Vec::new();
+    for (name, interval) in [
+        ("often.mp4", Duration::from_millis(250)),
+        ("rarely.mp4", Duration::from_millis(2_000)),
+    ] {
+        let destination = directory.file(name);
+        let reports = Reports::default();
+        let report = |progress: RemuxProgress| reports.record(progress);
+
+        let summary = remux_to_mp4_with(
+            &source,
+            &destination,
+            &RemuxOptions::new().reporting_to(&report).every(interval),
+        )
+        .expect("the recording remuxes");
+
+        // Reporting must not change what is written. A copy that skipped a
+        // packet to make a report would be a far worse bug than silence.
+        assert_eq!(
+            (summary.packets(), summary.byte_len()),
+            (quiet.packets(), quiet.byte_len()),
+            "reporting every {interval:?} changed what the copy wrote"
+        );
+
+        counts.push(reports.taken().len());
+    }
+
+    let (often, rarely) = (counts[0], counts[1]);
+    assert!(
+        often > rarely,
+        "a quarter-second interval reported {often} times and a two-second interval {rarely}; \
+         the interval throttles nothing, so a long export would flood the channel"
+    );
+    assert!(
+        rarely >= 2,
+        "a two-second interval over a {SECONDS}-second recording reported {rarely} times, which \
+         is not a bar that moves"
+    );
+}
+
+#[test]
+fn a_copy_that_is_refused_before_it_starts_reports_nothing() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-progress-refused");
+    let source = record(&directory, "recording.mkv", &[]);
+    let destination = directory.file("taken.mp4");
+    std::fs::write(&destination, b"somebody else's footage").expect("the file is written");
+
+    let reports = Reports::default();
+    let report = |progress: RemuxProgress| reports.record(progress);
+
+    remux_to_mp4_with(
+        &source,
+        &destination,
+        &RemuxOptions::new()
+            .reporting_to(&report)
+            .every(Duration::ZERO),
+    )
+    .expect_err("a destination that already exists is refused");
+
+    // Nothing was copied, so nothing may be reported. A report of "0 of 4
+    // seconds" for a copy that never began is a bar somebody watches waiting
+    // for a file that is not coming.
+    assert!(
+        reports.taken().is_empty(),
+        "a refused copy reported progress: {:?}",
+        reports.taken()
+    );
+    assert_eq!(
+        std::fs::read(&destination).expect("the file is still there"),
+        b"somebody else's footage",
+        "a refused copy touched what was already there"
     );
 }

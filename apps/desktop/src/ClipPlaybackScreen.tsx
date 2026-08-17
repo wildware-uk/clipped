@@ -1,43 +1,51 @@
 import type { ReactNode } from 'react';
-import { useParams } from 'react-router';
+import { useRef } from 'react';
+import { useLocation, useParams } from 'react-router';
 
 import {
   describeClip,
   formatElapsed,
+  type HandedRecording,
   MISSING,
-  PLAYBACK_BLOCKERS,
+  playbackSource,
   recordingOf,
   resolveClip,
 } from './clipPlayback';
+import { fileName } from './recordingActions';
+import {
+  describePlaybackProblem,
+  headlinePlaybackProblem,
+  trackLabel,
+  usePlayback,
+} from './playback';
 import type { RecorderLinkView } from './useRecorderLink';
 
 /**
- * The clip playback screen (issue #52).
+ * The clip playback screen (issue #52), and the player on it (issue #304).
  *
- * # Why there is no player on it
+ * # Where the picture comes from
  *
- * SPEC.md section 42 asks for playback with transport controls, keyboard
- * shortcuts, frame-accurate seeking and a track selector. **None of it is
- * drawn, because this window cannot play a Clipped recording at all** — four
- * separate facts stand in the way and each is enough on its own. They are the
- * table below, with the evidence for each, and `docs/desktop-ui.md` ("Playing a
- * recording") has the design that follows from them. Issue #304 builds it.
+ * The recorder. This window has no file-system permission and no asset
+ * protocol, so it asks the Tauri host to open a recording for playback; the
+ * host asks the recorder, which answers with a file, and the host serves that
+ * one file over its own `clip` scheme (`playback.ts`,
+ * `src-tauri/src/playback.rs`). The element is pointed at an address, never at
+ * a path.
  *
- * A transport bar over a black rectangle was the tempting alternative and is
- * the one AGENTS.md section 27 rules out twice: controls that do nothing, above
- * a picture Clipped never made. The scrubber would be the worst of them — a
- * scrubber implies a duration, and nothing in this window has measured one.
+ * # Why the track selector is a set of buttons and not a control on the video
  *
- * # What it does show
+ * `HTMLMediaElement.audioTracks` is not implemented in Chromium, which WebView2
+ * is, so a `<video>` given a recording with four sound tracks plays the first
+ * and offers no way off it. Each button asks the recorder for that track, which
+ * answers with a file carrying it — and the position is carried across, because
+ * changing track is not a request to start again.
  *
- * The one thing that is real: what the recorder link says about *this*
- * recording. The window follows one recorder, so it learns of exactly two
- * recordings — the one being written now, and the one a recorder died in the
- * middle of, whose file ADR 0006 says naming is the whole of recovery. Any
- * other identifier is one this screen has not looked up, which it says rather
- * than reporting the recording as missing: it has not looked. The library the
- * lookup would go to reaches the window since issue #301; doing the lookup here
- * is issue #52.
+ * # What is drawn only when it is true
+ *
+ * A recording still being written gets no player: its container has no trailer,
+ * so there is nothing whose length a transport could describe. A recording
+ * whose file has gone gets the recorder's own sentence about it. Neither draws
+ * a transport over nothing, which is AGENTS.md section 27.
  */
 
 /** What the playback screen is given. */
@@ -58,16 +66,41 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
   // empty string is what a route without one would give, and it resolves to
   // "not known to this window" like any other identifier the link never named.
   const { recordingId = '' } = useParams();
+  // What the screen somebody came from handed over. The Library has the row in
+  // its hand when the Play button is pressed, and passing it is what saves a
+  // second read of the same thing; a reload has none, and the screen says so
+  // rather than inventing one (issue #52).
+  const handed = (useLocation().state as { recording?: HandedRecording } | null)?.recording ?? null;
+
   const resolution = resolveClip(recordingId, view);
   const description = describeClip(resolution);
   const recording = recordingOf(resolution);
+  const source = playbackSource(resolution, handed);
+  const playback = usePlayback(source.file);
+
+  const video = useRef<HTMLVideoElement>(null);
+  /** Where the recording was when a different track was asked for. */
+  const resumeAt = useRef<number | null>(null);
 
   return (
     <>
       <h1 className="clipped-screen__title">Playback</h1>
 
+      {/*
+       * The file in full, and exactly once. A recording the link knows about has
+       * it in the table below — that table is what the *recorder* said — so this
+       * names it only for a recording handed over by another screen, which has
+       * no table (AGENTS.md section 28: a path with an ellipsis in it cannot be
+       * typed into Explorer).
+       */}
       <p className="clipped-screen__lead">
-        Recording <code>{recordingId}</code>.
+        {source.file !== null && recording === null ? (
+          <code className="clipped-path">{source.file}</code>
+        ) : (
+          <>
+            Recording <code>{recordingId}</code>.
+          </>
+        )}
       </p>
 
       {/*
@@ -81,22 +114,95 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
         <p className="clipped-panel__body">{description.detail}</p>
       </section>
 
+      <section className="clipped-panel" aria-label="Player">
+        {source.file === null ? (
+          <p className="clipped-panel__body">{source.why}</p>
+        ) : playback.problem !== null ? (
+          <>
+            {/*
+             * The recorder's own sentence, which for the commonest failure
+             * names the file and says it has gone. A player drawn over it would
+             * be a control that does nothing (AGENTS.md sections 27 and 45).
+             */}
+            <h2 className="clipped-panel__heading">{headlinePlaybackProblem(playback.problem)}</h2>
+            <p className="clipped-panel__body">{describePlaybackProblem(playback.problem)}</p>
+          </>
+        ) : playback.stream === null ? (
+          <p className="clipped-panel__body">Opening {fileName(source.file)}…</p>
+        ) : (
+          <>
+            {/*
+             * `controls` is the element's own transport: play, pause, a
+             * scrubber over a duration it measured, and the volume. Clipped
+             * draws none of its own, because every one of them would be a
+             * second answer to something the element already knows (SPEC.md
+             * section 42's frame-accurate seeking is issue #52).
+             */}
+            {/* eslint-disable-next-line jsx-a11y/media-has-caption -- a recording of somebody's game has no caption track, and there is nothing to write one from. */}
+            <video
+              ref={video}
+              className="clipped-player"
+              src={playback.stream.url}
+              controls
+              aria-label={`Playing ${fileName(source.file)}`}
+              onLoadedMetadata={() => {
+                // Choosing a track is a different file, so the element starts
+                // at zero; putting it back where it was is what makes the
+                // choice a choice about sound rather than a restart.
+                const resume = resumeAt.current;
+                resumeAt.current = null;
+                if (resume !== null && video.current !== null) {
+                  video.current.currentTime = resume;
+                }
+              }}
+            />
+
+            {playback.stream.audio_tracks.length > 1 && (
+              <fieldset className="clipped-tracks">
+                <legend>Sound</legend>
+                <p className="clipped-muted">
+                  One track at a time: a media element cannot switch between them, so choosing one
+                  asks the recorder for it.
+                </p>
+                {playback.stream.audio_tracks.map((track, position) => {
+                  const chosen = track.index === playback.stream?.audio_track;
+                  return (
+                    <button
+                      key={track.index}
+                      type="button"
+                      className="clipped-btn clipped-btn--secondary"
+                      aria-pressed={chosen}
+                      disabled={playback.busy}
+                      onClick={() => {
+                        resumeAt.current = video.current?.currentTime ?? null;
+                        playback.choose(track.index);
+                      }}
+                    >
+                      {trackLabel(track, position)}
+                    </button>
+                  );
+                })}
+              </fieldset>
+            )}
+          </>
+        )}
+      </section>
+
       {recording === null ? null : (
         <>
           <h2 className="clipped-screen__heading">What the recorder said</h2>
           <p className="clipped-screen__lead clipped-muted">
-            All of it, and no more. There is no duration and no picture: nothing here has measured
-            the file or looked at a frame of it.
+            All of it, and no more. The length and the position under the picture are the player’s
+            own measurements of the file; nothing here has counted a clock.
           </p>
           <table className="clipped-table">
             <tbody>
               <tr>
                 <th scope="row">File</th>
                 {/*
-                 * Named in full and never abbreviated. It is the only thing on
-                 * this screen anybody can act on — the recording can be opened in
-                 * a player that does handle Matroska (AGENTS.md sections 28 and
-                 * 45).
+                 * Named in full and never abbreviated. It is the thing anybody
+                 * can act on — the recording can be opened in another player,
+                 * or found in Explorer (AGENTS.md sections 28 and 45).
                  */}
                 <td>
                   <code>{recording.output}</code>
@@ -120,29 +226,6 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
           </table>
         </>
       )}
-
-      <h2 className="clipped-screen__heading">Why nothing is playing</h2>
-      <p className="clipped-screen__lead clipped-muted">
-        Four facts, and each one on its own is enough, so fixing any single one changes nothing.
-        Issue #304 carries the design that answers all four.
-      </p>
-
-      <table className="clipped-table">
-        <thead>
-          <tr>
-            <th scope="col">What stops it</th>
-            <th scope="col">Where that can be checked</th>
-          </tr>
-        </thead>
-        <tbody>
-          {PLAYBACK_BLOCKERS.map((blocker) => (
-            <tr key={blocker.fact}>
-              <td>{blocker.fact}</td>
-              <td className="clipped-muted">{blocker.evidence}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
 
       <h2 className="clipped-screen__heading">What this screen will do</h2>
       <p className="clipped-screen__lead clipped-muted">

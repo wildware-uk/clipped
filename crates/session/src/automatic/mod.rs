@@ -158,7 +158,7 @@ pub use settings::{
 };
 pub use sidecar::SCHEMA_VERSION as SESSION_SCHEMA_VERSION;
 
-use crate::report::RecordingReport;
+use crate::report::{EndReason, RecordingReport};
 
 /// Which recording of which session.
 ///
@@ -369,6 +369,14 @@ struct Active {
     /// one. Cleared when the game relaunches, which is a new process and a new
     /// question.
     no_window: bool,
+    /// Set when the user asked for the recording to stop, so the manager does
+    /// not start another one of a game that is still running.
+    ///
+    /// Cleared on a relaunch, exactly as [`Self::no_window`] is and for the same
+    /// reason: a new process is a new question, and somebody who stopped
+    /// recording one match has not said anything about the next one
+    /// ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+    stop_asked_for: bool,
     /// Set once the cap has been reported, so it is reported once.
     limit_reported: bool,
 }
@@ -525,6 +533,43 @@ impl SessionManager {
             .is_some_and(|active| active.recording.is_some())
     }
 
+    /// Records that the user asked for the recording that is running to stop.
+    ///
+    /// Returns whether there was an open session to tell.
+    ///
+    /// **It does not raise the stop signal**, and deliberately so: whoever the
+    /// user asked already holds it — in `serve` that is the recorder answering
+    /// `stop_recording`, which has to wait for the file to be finalised in order
+    /// to answer at all. What this decides is the *next* recording, which is a
+    /// question only the session owns. Without it, a stop that reaches an
+    /// automatic recording would be undone by
+    /// [`recording_restart_delay`](AutomaticSettings::recording_restart_delay)
+    /// seconds later: the game is still running, so the manager would treat the
+    /// end of the recording as a window that went and start another one
+    /// ([issue #421](https://github.com/wildware-uk/clipped/issues/421),
+    /// AGENTS.md section 27).
+    ///
+    /// It does not end the session. The sitting is still the sitting — the game
+    /// is still running, its plugins still belong to it, and a relaunch still
+    /// joins it — there is simply no more footage of it until the game restarts,
+    /// which is what somebody who pressed stop asked for.
+    pub fn asked_to_stop_recording(&mut self) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        active.stop_asked_for = true;
+        // A restart that had already been scheduled — by an outcome that
+        // arrived before this did — is cancelled here, so that the order the
+        // two arrive in cannot decide whether the stop holds.
+        active.pending_start = None;
+        tracing::info!(
+            session = active.session.id().as_str(),
+            "the recording was stopped by the user, so no further recording of this session will \
+             start while the game keeps running"
+        );
+        true
+    }
+
     /// Which of the processes that were already running are games.
     ///
     /// None of them will be recorded — see the module documentation — and this
@@ -603,8 +648,8 @@ impl SessionManager {
         }
 
         let stopping = self.stopping;
-        let delay = self.settings.recording_restart_delay();
         let summary = outcome.summarise();
+        let delay = restart_delay_after(&summary, self.settings.recording_restart_delay());
         let produced_a_file = summary.produced_a_file();
         let outcome_token = summary.token();
 
@@ -629,11 +674,13 @@ impl SessionManager {
         );
 
         if !stopping {
-            if active.subject.alive && !active.no_window {
+            if active.subject.alive && !active.no_window && !active.stop_asked_for {
                 // The game is still running, so the session is not over: the
                 // window went, or changed size, or the machine slept. Another
-                // recording follows, after long enough that an exit the watcher
-                // has not reported yet has time to arrive.
+                // recording follows, after [`restart_delay_after`] — which is
+                // long enough for an exit the watcher has not reported yet to
+                // arrive, except where the recording's own ending already
+                // proves there is no exit to wait for.
                 active.pending_start = Some(now + delay);
             } else if !active.subject.alive && active.live_children.is_empty() {
                 active.idle_since = Some(now);
@@ -833,6 +880,9 @@ impl SessionManager {
             active.live_children = matched.child_pids;
             active.idle_since = None;
             active.no_window = false;
+            // A relaunch is a new process and a new question, so a stop the
+            // user asked for during the last one does not carry into it.
+            active.stop_asked_for = false;
             persist(self.settings.directory(), &active.session);
             active.recording.is_some()
         };
@@ -974,6 +1024,7 @@ impl SessionManager {
             idle_since: None,
             started_recordings: 0,
             no_window: false,
+            stop_asked_for: false,
             limit_reported: false,
         });
 
@@ -1133,6 +1184,42 @@ impl SessionManager {
             (GameIdentity::Unidentified, _) => None,
             identified => Some(identified),
         }
+    }
+}
+
+/// How long to wait before recording this game again, given how the recording
+/// that just ended ended.
+///
+/// [`AutomaticSettings::recording_restart_delay`] is a race and not politeness.
+/// A recording ends the instant the game's window goes, and the *process*
+/// exiting reaches the manager through the watcher up to three seconds later, so
+/// restarting sooner would have the driver searching the desktop for the window
+/// of a game that has already quit — on every ordinary exit.
+///
+/// **A recording that ended because its target changed size has no such race to
+/// wait out.** The window did not go: it is on screen, drawing, at a new size,
+/// and the only reason the file ended is that a Matroska track's dimensions and
+/// an encoder session's resolution are both fixed for the length of one file
+/// ([ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md),
+/// [issue #184](https://github.com/wildware-uk/clipped/issues/184)). Waiting out
+/// the exit race there spends five seconds of a game somebody is still playing,
+/// every time they drag a window's edge or a game changes resolution — and the
+/// whole point of following a resize with a new file rather than ending the
+/// sitting is that the seam between the two files is as small as the pipeline
+/// can make it.
+///
+/// Every other ending keeps the delay, including the ones that look similar.
+/// A window that was *lost* is the exit race itself. A recording that failed, or
+/// found no window, says nothing about whether the process is still there. A
+/// suspend is a wall-clock jump whose exits arrive as a batch afterwards
+/// ([`SessionManager::resumed`]), so it wants the delay most of all.
+fn restart_delay_after(summary: &RecordingOutcomeSummary, configured: Duration) -> Duration {
+    match summary {
+        RecordingOutcomeSummary::Recorded {
+            end_reason: EndReason::TargetResized,
+            ..
+        } => Duration::ZERO,
+        _ => configured,
     }
 }
 

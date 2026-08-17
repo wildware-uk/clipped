@@ -97,13 +97,26 @@ jobs:
       - name: Fetch main, so ancestry can be established
         run: git fetch --no-tags origin main
 
+      # A tag name and a dispatch input both arrive from outside this file, and
+      # neither is interpolated into the script below. `${{ }}` is substituted
+      # into the text of the step before PowerShell parses it, so a tag
+      # containing a quote is not a string here - it is code, running before the
+      # first gate has been consulted, which is the one place where running
+      # arbitrary code would let somebody choose the version the gates then
+      # check. Git happily accepts a ref name containing quotes, semicolons and
+      # `$`. Passing both through `env:` makes them values: the runner puts them
+      # in the environment, and $env:CLIPPED_TAG is read rather than pasted.
       - name: Work out what is being released
         id: subject
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          PUSHED_TAG: ${{ github.ref_name }}
         run: |
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-              $tag = '${{ inputs.tag }}'
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+              $tag = $env:DISPATCH_TAG
           } else {
-              $tag = '${{ github.ref_name }}'
+              $tag = $env:PUSHED_TAG
           }
           $version = $tag -replace '^v', ''
           # A pre-release version carries a hyphenated part: 1.0.0-rc.1. GitHub
@@ -154,6 +167,19 @@ jobs:
           & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The licence texts and third-party notices an installed copy is obliged to
+      # carry (issue #123). Produced here rather than by the staging script,
+      # which copies files: collecting them reads `cargo metadata` for several
+      # hundred crates and the FFmpeg build's own licence, and the CI job that
+      # checks the installer refuses without a recorder has neither.
+      - name: Collect the licence texts and notices
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/collect-notices.ps1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The notices could not be collected, so nothing may be distributed.' -ForegroundColor Red
+              exit 1
+          }
+
       # A file called clipped-recorder.exe that is not a recorder. The staging
       # script copies files and reads their names; it never loads one, so the
       # recorder's bytes cannot change which licence texts end up in the bundle.
@@ -193,20 +219,27 @@ jobs:
       # below is what makes the verdict binding.
       - name: Decide whether this tag may become a release
         shell: powershell
+        env:
+          # Through the environment for the reason the subject step gives: the
+          # tag came from outside, and this is the step whose exit code is the
+          # verdict.
+          EVENT_NAME: ${{ github.event_name }}
+          CLIPPED_TAG: ${{ steps.subject.outputs.tag }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Continue'
           $rehearse = @()
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') { $rehearse = @('-Rehearse') }
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') { $rehearse = @('-Rehearse') }
           $output = & powershell -ExecutionPolicy Bypass -File scripts/check-release-gates.ps1 `
-              -Tag '${{ steps.subject.outputs.tag }}' `
-              -CommitSha '${{ github.sha }}' `
+              -Tag $env:CLIPPED_TAG `
+              -CommitSha $env:COMMIT_SHA `
               -MilestonesJson evidence/milestones.json `
               -ReleasesJson evidence/releases.json `
               -CiRunsJson evidence/ci-runs.json `
               @rehearse 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $output
-          "## Release gates for ${{ steps.subject.outputs.tag }}`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "## Release gates for $($env:CLIPPED_TAG)`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit $code
 
@@ -257,22 +290,26 @@ jobs:
           "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "LIBCLANG_PATH=$found"
 
-      - name: Read the pinned FFmpeg asset name
-        id: ffmpeg-pin
-        run: |
-          $printed = & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PrintPin
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $asset = ($printed | Select-String -Pattern '^asset=(.+)$' | Select-Object -First 1)
-          if (-not $asset) { exit 1 }
-          "asset=$($asset.Matches[0].Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Cache the pinned FFmpeg build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: third-party/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg-pin.outputs.asset }}
-
-      - name: Fetch FFmpeg
+      # Deliberately not cached, which is the one place this job differs from the
+      # gate job and from ci.yml.
+      #
+      # These seven DLLs are copied verbatim into the installer and end up on
+      # the machine of everybody who downloads it, and `fetch-ffmpeg.ps1`
+      # verifies the archive's SHA-256 when it downloads one - but not when it
+      # finds the directory already populated. Restored from a cache, it checks
+      # the pin record and that the required files exist; the pin record lives
+      # inside the cached directory, so anything able to write that cache
+      # entry supplies both the libraries and the note vouching for them.
+      # Nothing downstream would notice: the payload is staged by copying, and
+      # the SHA-256 in the release notes would faithfully attest the result.
+      #
+      # So the release job pays for the download every time, and gets bytes
+      # whose checksum was verified during this run. It is a couple of minutes
+      # against a job that spends half an hour compiling, and it is the only
+      # job here whose output a stranger installs. The gate job keeps its cache:
+      # it reads file names to decide what the bundle would carry, and no
+      # substitution of the libraries changes that answer.
+      - name: Fetch FFmpeg, verifying its checksum rather than trusting a cache
         run: |
           & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -298,6 +335,16 @@ jobs:
       - name: Build the recorder
         run: cargo build --release --locked -p clipped-recorder
 
+      # As in the gates job: the notices are produced before anything stages
+      # them, and `npm run build:app` refuses without them (issue #123).
+      - name: Collect the licence texts and notices
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/collect-notices.ps1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The notices could not be collected, so nothing may be distributed.' -ForegroundColor Red
+              exit 1
+          }
+
       - name: Build the installer
         run: npm run build:app
 
@@ -321,22 +368,26 @@ jobs:
       # download by eye or with a tool. Publishing it beside an unsigned build
       # is the only thing that makes the download checkable at all.
       - name: Write the release notes and the checksum
+        env:
+          CLIPPED_TAG: ${{ needs.gate.outputs.tag }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.path }}
+          INSTALLER_NAME: ${{ steps.installer.outputs.name }}
         run: |
           & powershell -ExecutionPolicy Bypass -File scripts/write-release-notes.ps1 `
-              -Tag '${{ needs.gate.outputs.tag }}' `
-              -InstallerPath '${{ steps.installer.outputs.path }}' `
+              -Tag $env:CLIPPED_TAG `
+              -InstallerPath $env:INSTALLER_PATH `
               -OutFile release-notes.md `
               -FfmpegPinPath third-party/ffmpeg/current/.clipped-ffmpeg-pin.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $hash = (Get-FileHash -LiteralPath '${{ steps.installer.outputs.path }}' -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hash = (Get-FileHash -LiteralPath $env:INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
           # The `sha256sum -c` format, so the sidecar is usable by a tool and
           # not only by eye.
-          "$hash *${{ steps.installer.outputs.name }}" |
-              Out-File -FilePath '${{ steps.installer.outputs.name }}.sha256' -Encoding ascii -NoNewline
+          "$hash *$($env:INSTALLER_NAME)" |
+              Out-File -FilePath "$($env:INSTALLER_NAME).sha256" -Encoding ascii -NoNewline
 
-          "## ${{ needs.gate.outputs.tag }}`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "``````text`n${{ steps.installer.outputs.name }}`nSHA-256 $hash`n``````" |
+          "## $($env:CLIPPED_TAG)`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n$($env:INSTALLER_NAME)`nSHA-256 $hash`n``````" |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           Get-Content -LiteralPath release-notes.md -Raw | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
@@ -352,23 +403,28 @@ jobs:
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_REF_FULL: ${{ github.ref }}
+          CLIPPED_TAG: ${{ needs.gate.outputs.tag }}
+          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.path }}
+          INSTALLER_NAME: ${{ steps.installer.outputs.name }}
         run: |
-          if (-not '${{ github.ref }}'.StartsWith('refs/tags/')) {
+          if (-not $env:GITHUB_REF_FULL.StartsWith('refs/tags/')) {
               Write-Host 'This step only ever runs for a tag push.' -ForegroundColor Red
               exit 1
           }
           $prerelease = @()
-          if ('${{ needs.gate.outputs.prerelease }}' -eq 'true') { $prerelease = @('--prerelease') }
+          if ($env:PRERELEASE -eq 'true') { $prerelease = @('--prerelease') }
           # --verify-tag so that the release is attached to the tag that exists,
           # rather than gh creating one from the default branch if it does not.
-          gh release create '${{ needs.gate.outputs.tag }}' `
+          gh release create $env:CLIPPED_TAG `
               --draft `
               --verify-tag `
-              --title 'Clipped ${{ needs.gate.outputs.tag }}' `
+              --title "Clipped $($env:CLIPPED_TAG)" `
               --notes-file release-notes.md `
               @prerelease `
-              '${{ steps.installer.outputs.path }}' `
-              '${{ steps.installer.outputs.name }}.sha256'
+              $env:INSTALLER_PATH `
+              "$($env:INSTALLER_NAME).sha256"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host 'Drafted. It is not visible to anybody until a human publishes it.'
 

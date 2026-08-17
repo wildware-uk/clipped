@@ -44,10 +44,11 @@ use std::time::Duration;
 use clipped_ipc::frame::{read_message, write_message};
 use clipped_ipc::transport::connect;
 use clipped_ipc::{
-    features, Client, ClientError, ClientMessage, Command as IpcCommand, ConnectionRole, Endpoint,
-    ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, HotkeyBinding, PeerIdentity,
-    RecorderStatus, Reply, SaveReplay, ServerMessage, StartRecording, StopRecording,
-    MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
+    features, ApplySettings, Client, ClientError, ClientMessage, Command as IpcCommand,
+    ConnectionRole, Endpoint, ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello,
+    HotkeyBinding, PeerIdentity, RecorderStatus, Reply, SaveReplay, ServerMessage, SettingEntry,
+    SettingsView, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
 };
 
 use support::{
@@ -88,11 +89,17 @@ impl ServedRecorder {
     /// recordings of whoever is running it and write to their library
     /// (AGENTS.md section 25).
     fn start_under(label: &str, home: Option<&Path>) -> Self {
+        Self::started_with(label, home, &[])
+    }
+
+    /// The same, with further arguments after `--endpoint`.
+    fn started_with(label: &str, home: Option<&Path>, extra: &[&str]) -> Self {
         ensure_console();
 
         let name = unique_endpoint_name(label);
         let mut command = Command::new(recorder_binary());
         command.args(["serve", "--endpoint", &name]);
+        command.args(extra);
         if let Some(home) = home {
             command
                 .env("USERPROFILE", home)
@@ -221,16 +228,18 @@ fn a_client_handshakes_with_a_real_recorder_and_gets_answers_to_real_commands() 
 
 #[test]
 fn save_replay_is_a_command_this_recorder_performs_rather_than_one_it_refuses_by_name() {
-    // Issue #38 turned `save_replay` from an `UnbuiltCommand` into a real one,
-    // and this is the difference against a real process: the refusal a recorder
+    // Issue #38 turned `save_replay` from a command that was parsed only so it
+    // could be refused into a real one, and this is the difference against a
+    // real process: the refusal a recorder
     // with nothing recording gives is `not_recording` — a fact about right now,
     // which changes when a recording starts — and **not** `not_implemented`,
     // which is a fact about the build and never changes.
     //
     // The mistake it guards against is the one `add_bookmark` and the library
-    // commands already record: a command left in `UNBUILT_COMMANDS` after its
-    // subsystem landed refuses every request with a plausible sentence about a
-    // milestone, and nobody questions it.
+    // commands already record: a command still refused as unbuilt after its
+    // subsystem landed answers every request with a plausible sentence about a
+    // milestone, and nobody questions it. `apply_settings` was the last of
+    // them, until issue #51.
     let recorder = ServedRecorder::start("save-replay");
     let mut client = recorder.client();
 
@@ -419,41 +428,369 @@ fn a_client_that_disappears_mid_request_leaves_the_recorder_serving() {
     recorder.stop();
 }
 
+/// One setting out of a view, by the key the settings file holds it under.
+fn setting(view: &SettingsView, key: &str) -> SettingEntry {
+    view.settings
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| {
+            panic!(
+                "the recorder sent no `{key}` setting: {:?}",
+                view.settings
+                    .iter()
+                    .map(|entry| &entry.key)
+                    .collect::<Vec<_>>()
+            )
+        })
+        .clone()
+}
+
+/// The settings a `get_settings` or an `apply_settings` answered with.
+fn settings_of(reply: Reply) -> SettingsView {
+    match reply {
+        Reply::Settings { settings } => settings,
+        other => panic!("expected the settings, got {other:?}"),
+    }
+}
+
+/// One change, as a settings screen sends it.
+fn change(key: &str, value: Option<&str>) -> ApplySettings {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert(key.to_owned(), value.map(str::to_owned));
+    ApplySettings { values }
+}
+
 #[test]
-fn every_command_whose_subsystem_is_not_built_is_refused_with_where_it_is_being_built() {
-    // AGENTS.md sections 27 and 54: not silence, and not a success it did not
-    // perform. The UI has to be able to say "not in this build" and point
-    // somewhere.
-    let recorder = ServedRecorder::start("unbuilt");
+fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_records_by() {
+    // Step 3 of SPEC.md section 45's MVP, against a real recorder over a real
+    // pipe: pick a microphone, and it is in the file the recorder reads and in
+    // the answer the next window gets. Until issue #51 the window could not
+    // read or write a setting at all — `apply_settings` was refused by every
+    // build with `not_implemented`.
+    let home = scratch_home("settings");
+    let recorder = ServedRecorder::start_under("settings", Some(&home));
     let mut client = recorder.client();
 
-    for unbuilt in UNBUILT_COMMANDS {
-        let error = client
-            .call_raw(unbuilt.name(), serde_json::json!({}))
-            .expect_err("this build cannot do that");
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::SETTINGS),
+        "a build that can change settings has to say so, or the window never draws the \
+         controls: {:?}",
+        client.welcome()
+    );
 
-        match error {
-            ClientError::Refused(refusal) => {
-                assert_eq!(
-                    refusal.code,
-                    ErrorCode::NotImplemented,
-                    "{}",
-                    unbuilt.name()
+    let before = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("a recorder that is serving can be asked for its settings"),
+    );
+    let microphone = setting(&before, "microphone");
+    assert_eq!(microphone.value, "default");
+    assert!(
+        !microphone.overridden,
+        "a machine whose settings file does not exist has configured nothing",
+    );
+    assert!(
+        microphone.applies,
+        "the microphone is read when a recording starts, so it is offered as a control",
+    );
+
+    let after = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "microphone",
+                Some("name:Shure MV7"),
+            )))
+            .expect("a device name is a value the settings file can hold"),
+    );
+    assert_eq!(setting(&after, "microphone").value, "name:Shure MV7");
+    assert!(setting(&after, "microphone").overridden);
+
+    // The file the recorder owns, not this process's idea of it: what makes
+    // "close the window and recording works from then on" true is that the
+    // choice is on disk (SPEC.md section 45).
+    let file = std::path::PathBuf::from(&after.file);
+    assert!(
+        file.starts_with(&home),
+        "the recorder saved to {} rather than under the home this test gave it",
+        file.display(),
+    );
+    let written = std::fs::read_to_string(&file).expect("the settings file was written");
+    assert!(
+        written.contains("Shure MV7"),
+        "the microphone did not reach the file: {written}",
+    );
+
+    // And a window opening afterwards is told the same thing.
+    let mut second = recorder.client();
+    let again = settings_of(
+        second
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read again"),
+    );
+    assert_eq!(setting(&again, "microphone").value, "name:Shure MV7");
+
+    drop(second);
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_recorder_that_can_listen_to_a_microphone_says_so_and_answers_about_one() {
+    // The first run's meter, over the wire (issue #109). Two things are checked
+    // and neither needs a microphone plugged into the machine running the test:
+    //
+    // - the capability is advertised **separately** from `settings`, because a
+    //   window that cannot get a level should still draw the device chooser
+    //   rather than refuse the whole screen;
+    // - `none` is refused rather than answered with a reading of zero. That is
+    //   the distinction the meter exists for: a setting somebody chose and a
+    //   microphone that heard nothing must not arrive looking the same
+    //   (AGENTS.md section 27).
+    //
+    // What is *not* checked here is the number, because that needs an endpoint.
+    // `crates/session/src/audio/tests.rs` holds the reduction of a buffer of
+    // samples to a peak, which is the part of it that is arithmetic.
+    let home = scratch_home("microphone-level");
+    let recorder = ServedRecorder::start_under("microphone-level", Some(&home));
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::MICROPHONE_LEVEL),
+        "a build that can measure a microphone has to say so, or the window draws a meter that          will never move: {:?}",
+        client.welcome()
+    );
+
+    match client.call(&IpcCommand::GetMicrophoneLevel(
+        clipped_ipc::MicrophoneLevelRequest {
+            microphone: "none".to_owned(),
+        },
+    )) {
+        Err(ClientError::Refused(refusal)) => {
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+            assert!(
+                refusal.message.contains("no microphone"),
+                "the refusal has to say why there is no level: {}",
+                refusal.message,
+            );
+        }
+        other => panic!("`none` has no level to report, got {other:?}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_notification_switched_off_in_the_window_is_in_the_one_settings_file() {
+    // Issue #252's first two acceptance criteria, against a real recorder over a
+    // real pipe. The switches were `notifications.json` in the *window's* own
+    // configuration directory — a second store with a second version field and a
+    // second reader — and they are settings now: the window sends the same
+    // `apply_settings` it sends for a frame rate, and what comes back is what a
+    // window opening afterwards is told.
+    //
+    // Nothing in this recorder reads them. That is the point: the process that
+    // acts on them may link one crate of this workspace and so cannot open the
+    // file, so it asks.
+    let home = scratch_home("notifications");
+    let recorder = ServedRecorder::start_under("notifications", Some(&home));
+    let mut client = recorder.client();
+
+    let before = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("a recorder that is serving can be asked for its settings"),
+    );
+    for key in [
+        "recording_failed",
+        "recording_interrupted",
+        "recorder_unavailable",
+        "hotkey_unavailable",
+    ] {
+        let switch = setting(&before, key);
+        assert_eq!(switch.value, "true", "{key} should default to on");
+        assert!(!switch.overridden);
+        assert!(
+            switch.applies,
+            "the window acts on {key}, so it must not be drawn as a dead control",
+        );
+        assert_eq!(
+            switch.choices,
+            vec!["true".to_owned(), "false".to_owned()],
+            "a switch is a closed set of two, which is what makes a window draw one",
+        );
+    }
+
+    let after = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "recorder_unavailable",
+                Some("false"),
+            )))
+            .expect("a switch takes true or false"),
+    );
+    assert_eq!(setting(&after, "recorder_unavailable").value, "false");
+    assert!(setting(&after, "recorder_unavailable").overridden);
+    assert_eq!(
+        setting(&after, "recording_failed").value,
+        "true",
+        "switching one category off must leave the others alone",
+    );
+
+    // One file, which is the whole of the first acceptance criterion: it is the
+    // settings file the recording settings are in, not a second one beside it.
+    let file = std::path::PathBuf::from(&after.file);
+    assert!(file.ends_with("settings.json"), "{}", file.display());
+    let written = std::fs::read_to_string(&file).expect("the settings file was written");
+    assert!(
+        written.contains("\"notifications\"") && written.contains("\"recorder_unavailable\""),
+        "the switch did not reach the settings file: {written}",
+    );
+
+    // And a window opening afterwards is told the same thing, which is how a
+    // switch survives a restart now that nothing keeps a copy of it.
+    let mut second = recorder.client();
+    let again = settings_of(
+        second
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read again"),
+    );
+    assert_eq!(setting(&again, "recorder_unavailable").value, "false");
+
+    drop(second);
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_setting_the_file_would_refuse_is_refused_with_what_would_have_been_accepted() {
+    // AGENTS.md section 45, over the wire: not "invalid", but the value, the
+    // range and the setting — the same sentence the file's own reader gives,
+    // because it is the same validation (`clipped_session::config`).
+    let home = scratch_home("settings-refused");
+    let recorder = ServedRecorder::start_under("settings-refused", Some(&home));
+    let mut client = recorder.client();
+
+    match client.call(&IpcCommand::ApplySettings(change("framerate", Some("900")))) {
+        Err(ClientError::Refused(refusal)) => {
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+            assert!(
+                refusal.message.contains("900") && refusal.message.contains("480"),
+                "the refusal should name the value and the range: {}",
+                refusal.message,
+            );
+        }
+        other => panic!("900 frames per second should be refused, got {other:?}"),
+    }
+
+    // And nothing was saved: a refused change leaves the settings alone.
+    let view = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can still be read"),
+    );
+    assert_eq!(setting(&view, "framerate").value, "60");
+    assert!(!setting(&view, "framerate").overridden);
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn the_recorder_lists_the_microphones_it_would_record_from_or_says_why_it_cannot() {
+    // AGENTS.md section 27: an empty list drawn as though the machine had been
+    // looked at is the failure this reply exists to prevent, so either there is
+    // a list or there is a reason. Which of the two this machine gives depends
+    // on the machine, and both are answers.
+    let recorder = ServedRecorder::start("audio-devices");
+    let mut client = recorder.client();
+
+    match client.call(&IpcCommand::GetAudioDevices) {
+        Ok(Reply::AudioDevices { devices }) => {
+            for device in &devices.microphones {
+                assert!(
+                    !device.name.trim().is_empty(),
+                    "a device somebody is asked to choose has to have a name: {devices:?}",
                 );
-                match refusal.detail {
-                    Some(ErrorDetail::NotImplemented {
-                        subsystem,
-                        milestone,
-                        tracking_issue,
-                    }) => {
-                        assert!(!subsystem.is_empty());
-                        assert!(!milestone.is_empty());
-                        assert_eq!(tracking_issue, unbuilt.tracking_issue());
-                    }
-                    other => panic!("{} should say where it is built: {other:?}", unbuilt.name()),
-                }
             }
-            other => panic!("{} should be refused, not {other}", unbuilt.name()),
+        }
+        Err(ClientError::Refused(refusal)) => {
+            assert!(
+                !refusal.message.trim().is_empty(),
+                "a recorder that cannot list the devices has to say why",
+            );
+        }
+        other => panic!("expected a device list or a reason, got {other:?}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn the_recorder_says_whether_it_starts_at_login_without_changing_whether_it_does() {
+    // **A read only.** `set_start_at_login` is deliberately not exercised from
+    // here: the only entry a served recorder can be asked about is the real one
+    // under this account, and a test that turned it on would arrange for the
+    // machine running the suite to start a recorder at every sign-in afterwards
+    // (AGENTS.md section 25). What the write does is
+    // `clipped_recorder::start_at_login`'s own tests, against a scratch key.
+    //
+    // What this proves is the half those cannot: that a `serve` really answers
+    // the command, so a window asking it gets an arrangement or a reason rather
+    // than `unknown_command`.
+    let recorder = ServedRecorder::start("start-at-login");
+    let mut client = recorder.client();
+
+    let before = client.call(&IpcCommand::GetStartAtLogin);
+    match &before {
+        Ok(Reply::StartAtLogin { start_at_login }) => {
+            assert!(
+                start_at_login.location.contains(r"CurrentVersion\Run"),
+                "the window is told where the entry is, and it is the key Windows reads: {:?}",
+                start_at_login.location,
+            );
+            assert_eq!(
+                start_at_login.enabled,
+                start_at_login.command.is_some(),
+                "on and no command, or off and a command, is a state that cannot be drawn: {start_at_login:?}",
+            );
+        }
+        Err(ClientError::Refused(refusal)) => {
+            assert!(
+                !refusal.message.trim().is_empty(),
+                "a recorder that cannot read the entry has to say why, so a window can say it \
+                 too rather than drawing the switch off",
+            );
+        }
+        other => panic!("expected an arrangement or a reason, got {other:?}"),
+    }
+
+    // And asking twice changes nothing, which is the property that makes this
+    // safe to run on somebody's machine: reading is not repairing.
+    let again = client.call(&IpcCommand::GetStartAtLogin);
+    match (&before, &again) {
+        (
+            Ok(Reply::StartAtLogin {
+                start_at_login: first,
+            }),
+            Ok(Reply::StartAtLogin {
+                start_at_login: second,
+            }),
+        ) => {
+            assert_eq!(first, second, "reading the arrangement changed it");
+        }
+        (Err(_), Err(_)) => {}
+        (first, second) => {
+            panic!("the same question was answered two ways: {first:?} then {second:?}")
         }
     }
 
@@ -1716,6 +2053,85 @@ fn a_recorder_whose_games_file_cannot_be_read_still_serves_and_says_so() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[test]
+fn a_recorder_watching_for_games_serves_the_protocol_and_stops_cleanly() {
+    // Issue #421 joined the two halves of the recorder: the process that serves
+    // the protocol and owns the hotkeys is now also the one that records games
+    // as they launch. Everything about that is in one process, so the things
+    // most likely to go wrong with it are the ones only a real process shows —
+    // a watcher thread that stops `serve` from ever announcing its endpoint,
+    // and a shutdown that waits for a thread nobody asked to stop.
+    //
+    // The home is redirected because this recorder really does create its
+    // recordings folder and really does watch this machine for launches
+    // (AGENTS.md section 25).
+    let home = scratch_home("watching");
+
+    let recorder = ServedRecorder::started_with("watching", Some(&home), &["--watch-for-games"]);
+    let mut client = recorder.client();
+
+    assert_eq!(
+        client.call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong,
+        "a recorder that watches for games still serves the protocol",
+    );
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        // Nothing has launched, so nothing is being recorded. A recorder that
+        // reported otherwise would be claiming a recording it is not making.
+        Reply::Status { status } => assert_eq!(status, RecorderStatus::Idle),
+        other => panic!("expected a status, got {other:?}"),
+    }
+
+    drop(client);
+    // `stop` asserts the exit was clean rather than a kill, which is the half
+    // that catches a shutdown waiting on the watcher for ever.
+    let diagnostics = recorder.stop();
+    assert!(
+        diagnostics.contains("Watching for games"),
+        "a recorder asked to watch has to say so, or nobody can tell it from one that was \
+         not:\n{diagnostics}"
+    );
+    assert!(
+        home.join("Videos").join("Clipped").is_dir(),
+        "recordings go where the settings say and to the videos folder when they say nothing, \
+         and the folder is made at start-up rather than when a game launches",
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_recorder_that_was_not_asked_to_watch_for_games_does_not() {
+    // The other direction, and what makes the test above mean anything: a build
+    // that watched regardless would pass it just as well, and every `serve`
+    // somebody started at a terminal would begin recording whatever game they
+    // had open.
+    let home = scratch_home("not-watching");
+
+    let recorder = ServedRecorder::start_under("not-watching", Some(&home));
+    let mut client = recorder.client();
+    assert_eq!(
+        client.call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong
+    );
+
+    drop(client);
+    let diagnostics = recorder.stop();
+    assert!(
+        !diagnostics.contains("Watching for games"),
+        "nothing asked this recorder to watch for games:\n{diagnostics}"
+    );
+    assert!(
+        !home.join("Videos").join("Clipped").exists(),
+        "and it must not have made a recordings folder for a user who did not ask it to record",
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// A home directory of this test's own, for a recorder that must not touch the
 /// library or the recordings of whoever is running the tests.
 fn scratch_home(label: &str) -> std::path::PathBuf {
@@ -1739,4 +2155,433 @@ fn assert_still_serving(recorder: &ServedRecorder) {
         Reply::Pong,
         "the recorder should still be serving after refusing a connection"
     );
+}
+
+/// The frequency each sound track of the playback fixture carries.
+///
+/// The same three AGENTS.md section 26 uses, so that "which track is this" is
+/// answered by listening to the file rather than by trusting its metadata.
+const PLAYBACK_MIX: f64 = 440.0;
+const PLAYBACK_GAME: f64 = 880.0;
+const PLAYBACK_MICROPHONE: f64 = 1320.0;
+
+/// Builds a recording shaped like a Clipped one — a picture and three named
+/// sound tracks, the first of them flagged as the default — and returns it.
+///
+/// Built with the pinned build's own `ffmpeg` for the reason
+/// [`recording_to_export`] is, and with **uncompressed** sound for the same
+/// reason: that is what Clipped writes, and it is the half that would go
+/// untested if the fixture were convenient instead.
+fn recording_with_three_sound_tracks(ffmpeg: &std::path::Path, into: &std::path::Path) {
+    let output = Command::new(ffmpeg)
+        .arg("-nostdin")
+        .args([
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=1320:sample_rate=48000"])
+        .args(["-t", EXPORT_FIXTURE_SECONDS])
+        .args(["-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a"])
+        .args(["-c:v", "mpeg4", "-c:a", "pcm_s16le"])
+        .args(["-metadata:s:a:0", "title=Compatibility Mix"])
+        .args(["-metadata:s:a:1", "title=Game"])
+        .args(["-metadata:s:a:2", "title=Microphone"])
+        .args(["-disposition:a:0", "default"])
+        .args(["-disposition:a:1", "0"])
+        .args(["-disposition:a:2", "0"])
+        .arg(into)
+        .output()
+        .expect("the pinned ffmpeg can be run");
+
+    assert!(
+        output.status.success(),
+        "the recording to play could not be built: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Sends `open_playback` and returns what the recorder answered with.
+fn open_playback(
+    client: &mut Client,
+    source: &std::path::Path,
+    audio_track: Option<usize>,
+) -> clipped_ipc::PlaybackStream {
+    match client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: source.to_string_lossy().into_owned(),
+            audio_track,
+        }))
+        .unwrap_or_else(|error| panic!("playback was refused: {error}"))
+    {
+        Reply::PlaybackOpened { playback } => playback,
+        other => panic!("expected a playback stream, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_recording_opened_for_playback_is_served_whole_and_costs_nothing_to_open() {
+    // Issue #304's first criterion, from the recorder's side: what the window
+    // is told to play is the recording itself, because a WebView2 plays it
+    // (`docs/adr/0011-what-the-webview-plays.md`). A regression that started
+    // remuxing every recording somebody watched would leave the player working
+    // and cost a pass over the file every time, so `prepared` is asserted as
+    // hard as the path is.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-playback");
+    let source = directory.file("match.mkv");
+    recording_with_three_sound_tracks(tools.ffmpeg(), &source);
+    let recording_before = std::fs::read(&source).expect("the recording can be read");
+
+    let recorder = ServedRecorder::start("playback");
+    let mut client = recorder.client();
+
+    let playback = open_playback(&mut client, &source, None);
+
+    assert_eq!(
+        playback.path,
+        source.to_string_lossy(),
+        "the recording itself is what plays when nothing has to be prepared"
+    );
+    assert!(
+        !playback.prepared,
+        "opening a recording on its own default track must not copy it: {playback:?}"
+    );
+    // Stream 1: the picture is stream 0, and the index is the container's own
+    // rather than an ordinal among the sound tracks.
+    assert_eq!(playback.audio_track, Some(1));
+
+    let names: Vec<Option<&str>> = playback
+        .audio_tracks
+        .iter()
+        .map(|track| track.name.as_deref())
+        .collect();
+    assert_eq!(
+        names,
+        vec![Some("Compatibility Mix"), Some("Game"), Some("Microphone")],
+        "the window needs the recording's own track names to draw a selector"
+    );
+    assert_eq!(
+        playback
+            .audio_tracks
+            .iter()
+            .map(|track| track.index)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        playback
+            .audio_tracks
+            .iter()
+            .map(|track| track.default)
+            .collect::<Vec<_>>(),
+        vec![true, false, false]
+    );
+
+    assert!(
+        std::fs::read(&source).expect("the recording can be read again") == recording_before,
+        "opening a recording for playback changed it"
+    );
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_track_chosen_for_playback_is_the_one_that_can_be_heard_in_what_is_served() {
+    // Issue #304's second criterion, and the reason any of this exists: a media
+    // element cannot choose an audio track, so choosing one means being handed a
+    // file that holds it. The assertion is on what is *audible* in that file — a
+    // selection that took the wrong stream would still produce a one-track MP4
+    // of the right length with the right codec.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-playback-track");
+    let source = directory.file("match.mkv");
+    recording_with_three_sound_tracks(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("playback-track");
+    let mut client = recorder.client();
+
+    for (stream, tone, others) in [
+        (2, PLAYBACK_GAME, [PLAYBACK_MIX, PLAYBACK_MICROPHONE]),
+        (3, PLAYBACK_MICROPHONE, [PLAYBACK_MIX, PLAYBACK_GAME]),
+    ] {
+        let playback = open_playback(&mut client, &source, Some(stream));
+
+        assert_eq!(playback.audio_track, Some(stream));
+        assert!(
+            playback.prepared,
+            "a track a media element cannot reach has to be prepared: {playback:?}"
+        );
+        assert_ne!(
+            playback.path,
+            source.to_string_lossy(),
+            "a prepared copy must never be the recording itself"
+        );
+        assert_eq!(
+            playback.audio_tracks.len(),
+            3,
+            "the tracks offered are the recording's, not the copy's: {playback:?}"
+        );
+
+        clipped_media_validation::Media::open(std::path::Path::new(&playback.path))
+            .unwrap_or_else(|error| panic!("what was served does not open: {error}"))
+            .validate()
+            .audio_stream_count(1)
+            .audio_tone(
+                0,
+                clipped_media_validation::Tone::at(tone)
+                    .isolated_from(others[0])
+                    .isolated_from(others[1]),
+            )
+            .video_stream_count(1)
+            .assert_valid();
+    }
+
+    // And asking for a track the recording has not got says so, rather than
+    // quietly playing the default: a window that asked for the microphone and
+    // was handed the mix would look exactly as though it had worked.
+    let error = client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: source.to_string_lossy().into_owned(),
+            audio_track: Some(9),
+        }))
+        .expect_err("a track that is not there is refused");
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::PlaybackFailed);
+            assert!(
+                refusal.message.contains('9'),
+                "the refusal should name the track: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_recording_whose_file_has_gone_is_refused_with_something_a_person_can_act_on() {
+    // Issue #304's fourth criterion. The window draws this sentence instead of a
+    // player, so it has to name the file and say what probably happened to it
+    // rather than being "playback failed" (AGENTS.md sections 15, 27 and 45).
+    let recorder = ServedRecorder::start("playback-missing");
+    let mut client = recorder.client();
+
+    let error = client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: r"D:\clips\a recording nobody has\match.mkv".to_owned(),
+            audio_track: None,
+        }))
+        .expect_err("a recording that is not there cannot be played");
+
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::PlaybackFailed);
+            assert!(
+                refusal.message.contains("match.mkv")
+                    && refusal.message.contains("not there any more"),
+                "the refusal should name the file and say it has gone: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn an_export_says_how_far_it_has_got_while_it_runs_and_ends_where_the_reply_does() {
+    // Issue #446, over a real recorder process, a real named pipe and a real
+    // file. The reply to `export_recording` arrives when the MP4's index has
+    // been written, so anything a window can draw during the copy has to have
+    // come down the events connection while the control connection was blocked
+    // — which is what this drives both halves of.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export-progress");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("export-progress");
+
+    // The recorder has to *say* it can do this before a window may ask, because
+    // asking for a stream a recorder does not have is refused by name and the
+    // refusal takes the whole events connection with it. A recorder that
+    // published progress without advertising it would leave every window
+    // choosing between no progress and no status.
+    let mut control = recorder.client();
+    assert!(
+        control
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == clipped_ipc::features::EXPORT_PROGRESS),
+        "this recorder publishes export progress and does not advertise it, so no window could \
+         safely subscribe: {:?}",
+        control.welcome().features
+    );
+
+    let events = EventClient::subscribe(
+        recorder.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Exports],
+        PATIENCE,
+    )
+    .expect("the exports stream is delivered");
+    assert_eq!(events.streams(), [EventStream::Exports]);
+
+    // Read on a thread of its own, because the export below blocks this one
+    // until the copy has finished. That is the whole point: if progress only
+    // arrived with the reply there would be nothing for this thread to have
+    // missed. The loop ends when the recorder closes the connection at
+    // shutdown.
+    let reader = std::thread::spawn(move || {
+        let mut events = events;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.next_event() {
+            match event {
+                Event::ExportProgress { export } => seen.push(export),
+                other => panic!("the exports stream carried something else: {other:?}"),
+            }
+        }
+        seen
+    });
+
+    let summary = match export(&mut control, &source, &destination) {
+        Reply::RecordingExported { export } => export,
+        other => panic!("expected an export, got {other:?}"),
+    };
+
+    drop(control);
+    recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+
+    assert!(
+        seen.len() >= 2,
+        "a copy of a {EXPORT_FIXTURE_SECONDS}-second recording produced {} progress events; one \
+         is a bar that never moves, and none is the silence this ticket is about",
+        seen.len()
+    );
+
+    // Every event names the export it belongs to, because nothing else does:
+    // there is no request identifier on the event path, and a window matches
+    // these against the files it asked for.
+    for progress in &seen {
+        assert_eq!(progress.source, summary.source, "{progress:?}");
+        assert_eq!(progress.destination, summary.destination, "{progress:?}");
+    }
+
+    // It advances. A recorder that published the same figure repeatedly, or one
+    // that published a single event, would satisfy "an event arrived" and fail
+    // here.
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1].written_ms > pair[0].written_ms && pair[1].packets > pair[0].packets,
+            "export progress went backwards or stood still: {:?} then {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // And the last thing said during the copy agrees with the reply that ended
+    // it. A bar that stopped at 80 % and was then replaced by "exported" leaves
+    // somebody wondering what happened to the other fifth.
+    let last = seen.last().expect("there is a progress event");
+    assert_eq!(
+        (last.written_ms, last.packets, last.bytes),
+        (summary.duration_ms, summary.packets, summary.bytes),
+        "the last progress event and the reply disagree about what was copied"
+    );
+    assert_eq!(
+        last.fraction()
+            .map(|fraction| (fraction * 100.0).round() as u32),
+        Some(100),
+        "the copy finished and the last event did not read as finished: {last:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(directory.path());
+}
+
+#[test]
+fn a_client_that_does_not_ask_for_export_progress_is_not_sent_any() {
+    // The other half of the compatibility claim. A window that subscribes to
+    // `status` — which is every window built before issue #446 — must not have
+    // its subscription changed by this feature existing, and must not receive
+    // events it has no case for.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export-unasked");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("export-unasked");
+
+    let events = EventClient::subscribe(
+        recorder.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Status],
+        PATIENCE,
+    )
+    .expect("the status stream is delivered");
+
+    let reader = std::thread::spawn(move || {
+        let mut events = events;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.next_event() {
+            seen.push(event);
+        }
+        seen
+    });
+
+    let mut control = recorder.client();
+    match export(&mut control, &source, &destination) {
+        Reply::RecordingExported { .. } => {}
+        other => panic!("expected an export, got {other:?}"),
+    }
+
+    drop(control);
+    recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, Event::ExportProgress { .. })),
+        "a `status` subscriber was sent export progress it never asked for: {seen:?}"
+    );
+    // And it still got what it did ask for, so the subscription was not broken
+    // in the course of not being sent the other thing.
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, Event::StatusChanged { .. })),
+        "a `status` subscriber received nothing at all: {seen:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(directory.path());
 }

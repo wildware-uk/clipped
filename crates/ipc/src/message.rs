@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::Reply;
 use crate::error::ProtocolError;
-use crate::status::RecorderStatus;
+use crate::status::{ExportProgress, RecorderStatus, SessionSummary};
 
 /// The protocol version this build speaks.
 ///
@@ -71,14 +71,29 @@ use crate::status::RecorderStatus;
 /// a field removed or given a new meaning, a command's parameters changed, a
 /// reply restructured. Adding a command, a field, an event, an error code or a
 /// feature does not touch it (AGENTS.md section 43).
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 added [`RecorderStatus::Watching`](crate::RecorderStatus::Watching)
+/// ([issue #241](https://github.com/wildware-uk/clipped/issues/241)). A
+/// *state* is the one addition that cannot be additive: [`RecorderStatus`] has
+/// no catch-all on purpose, so a client compiled against version 1 that met
+/// `{"state":"watching"}` would fail to read the message rather than guess —
+/// which is the wanted behaviour, and which is why the version moved instead.
+/// The rest of the same change — the sitting on a recording, the
+/// [`Event::SessionEnded`] event, the `automatic` feature — would each have
+/// cost nothing.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Every version this build will accept from a client.
 ///
 /// A recorder may speak more than one version at once, which is how a breaking
 /// change is deployed without requiring the two processes to be updated in the
-/// same instant. Today there has only ever been one version, so there is one
-/// entry.
+/// same instant. This build speaks one, and version 1 is deliberately not on the
+/// list: serving it would mean promising never to say `watching` down that
+/// connection, and a recorder that watches cannot keep that promise without
+/// reporting a state it is not in. A version 1 client is therefore refused with
+/// [`ErrorCode::UnsupportedProtocolVersion`](crate::ErrorCode::UnsupportedProtocolVersion)
+/// and told which side is behind, which is the outcome the handshake exists to
+/// produce (`docs/ipc.md`).
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
 /// The names of the capabilities a recorder can advertise in
@@ -167,6 +182,16 @@ pub mod features {
         /// after the user had chosen a file name for a file that was never
         /// going to be written.
         EXPORT = "export";
+        /// The recorder can open a finished recording for playback in the
+        /// desktop window: `open_playback`.
+        ///
+        /// A UI asks for this before drawing a player, for the reason the
+        /// others give: a recorder built before
+        /// [issue #304](https://github.com/wildware-uk/clipped/issues/304) has
+        /// no `open_playback` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// after a screen had already drawn a transport over nothing.
+        PLAYBACK = "playback";
         /// The recorder registers the global hotkeys and can report where each
         /// one stands: `get_hotkeys`.
         ///
@@ -196,6 +221,94 @@ pub mod features {
         /// [`ActiveRecording::replay_seconds`](crate::ActiveRecording), because
         /// it is a property of the recording rather than of the build.
         REPLAY = "replay";
+        /// The recorder says how far an export has got while it is running:
+        /// the `exports` event stream and
+        /// [`Event::ExportProgress`](crate::Event::ExportProgress).
+        ///
+        /// This one is checked before *subscribing*, not before drawing a
+        /// button, and that is why it has to exist. An event stream a recorder
+        /// does not have is refused **by name, and the refusal takes the whole
+        /// events connection with it** (`accepted_streams` in
+        /// `crate::server`) — so a window that asked a recorder built before
+        /// [issue #446](https://github.com/wildware-uk/clipped/issues/446) for
+        /// `exports` would lose its status subscription as well, and trade a
+        /// missing progress bar for a window that no longer knows whether
+        /// anything is recording.
+        ///
+        /// A recorder without it exports exactly as it always did and says
+        /// nothing while it does. That is the case a client must not read as
+        /// failure or as completion: silence here means "this recorder cannot
+        /// tell you", and the reply is still what says the copy finished.
+        EXPORT_PROGRESS = "export_progress";
+        /// The recorder can read and change the settings, and can list this
+        /// machine's microphones: `get_settings`, `apply_settings` and
+        /// `get_audio_devices`.
+        ///
+        /// A UI asks for this before drawing a settings form, for the reason
+        /// the seven above give — but with a sharper failure than most. A
+        /// recorder built before
+        /// [issue #51](https://github.com/wildware-uk/clipped/issues/51) *has*
+        /// an `apply_settings` command and refuses every call to it with
+        /// [`ErrorCode::NotImplemented`](crate::ErrorCode::NotImplemented), so
+        /// a window that did not check would draw a full form of controls and
+        /// discover that none of them save only when somebody pressed Save.
+        SETTINGS = "settings";
+        /// The recorder can say what a microphone is hearing right now:
+        /// `get_microphone_level`.
+        ///
+        /// Its own capability rather than part of [`SETTINGS`], because it is
+        /// the one thing a settings form asks for that has no fallback. A
+        /// window that cannot read the settings can say so and offer nothing; a
+        /// window that can read them but cannot meter a microphone still has a
+        /// working list of devices to choose from, and should draw the list
+        /// without the meter rather than refuse the whole screen. A recorder
+        /// built before
+        /// [issue #109](https://github.com/wildware-uk/clipped/issues/109) has
+        /// no `get_microphone_level` command and refuses it with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand),
+        /// which is what the check turns into "this recorder cannot show you a
+        /// level" before a meter is drawn that would never move.
+        MICROPHONE_LEVEL = "microphone_level";
+        /// The recorder can say whether it starts when this user signs in, and
+        /// turn that on and off: `get_start_at_login` and
+        /// `set_start_at_login`.
+        ///
+        /// A capability of its own rather than part of
+        /// [`SETTINGS`](self::SETTINGS), because it is not a setting: it is a
+        /// `Run` value Windows reads at sign-in rather than a key in
+        /// `settings.json`, and a recorder built before
+        /// [issue #308](https://github.com/wildware-uk/clipped/issues/308) has
+        /// the settings commands and neither of these — it would refuse both
+        /// with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand)
+        /// after a screen had already drawn a switch.
+        ///
+        /// It says the recorder *can be asked*, not that this is a machine
+        /// where the answer is useful: a build with no registry answers both
+        /// with [`ErrorCode::Internal`](crate::ErrorCode::Internal) and the
+        /// reason, which is a refusal a window renders rather than a switch it
+        /// draws in the wrong position.
+        STARTUP = "startup";
+        /// The recorder watches for games and records them by itself: its
+        /// status can be
+        /// [`RecorderStatus::Watching`](crate::RecorderStatus::Watching), a
+        /// recording carries the sitting it belongs to, and a sitting ending is
+        /// an [`Event::SessionEnded`].
+        ///
+        /// The protocol version says a recorder can *describe* an automatic
+        /// sitting; this says it *makes* them. A recorder serving a window and
+        /// recording only what it is asked to speaks the same version and
+        /// reports `idle` for ever, and a window that drew "Watching for games"
+        /// from the version alone would be saying something untrue about a
+        /// recorder that will never record on its own — the whole distinction
+        /// [issue #241](https://github.com/wildware-uk/clipped/issues/241) is
+        /// about, arrived at from the other side.
+        ///
+        /// It is therefore also the switch
+        /// [issue #421](https://github.com/wildware-uk/clipped/issues/421) turns
+        /// on: converging `serve` and `watch` is a recorder that advertises this
+        /// where today's does not, and needs nothing here to change.
+        AUTOMATIC = "automatic";
     }
 }
 
@@ -273,6 +386,20 @@ pub enum EventStream {
     /// ([issue #100](https://github.com/wildware-uk/clipped/issues/100),
     /// AGENTS.md section 27).
     Metrics,
+    /// `exports` — how far a running export has got.
+    ///
+    /// A stream of its own rather than more traffic on [`Self::Status`], for
+    /// two reasons. A subscriber's queue is bounded and shared across the
+    /// streams it asked for, so progress from a copy of a two-hour recording
+    /// sharing a queue with `status_changed` would mean a slow reader losing
+    /// *status* to make room for percentages. And a client that does not want
+    /// it can then decline it, which is the whole point of a stream being
+    /// something a client asks for.
+    ///
+    /// Asking a recorder that does not have it refuses the whole events
+    /// connection, so a client asks only when the recorder advertises
+    /// [`features::EXPORT_PROGRESS`].
+    Exports,
     /// A stream this build does not have. Refused, by name.
     Other(String),
 }
@@ -285,6 +412,7 @@ impl EventStream {
             Self::Status => "status",
             Self::Errors => "errors",
             Self::Metrics => "metrics",
+            Self::Exports => "exports",
             Self::Other(name) => name,
         }
     }
@@ -296,6 +424,7 @@ impl From<String> for EventStream {
             "status" => Self::Status,
             "errors" => Self::Errors,
             "metrics" => Self::Metrics,
+            "exports" => Self::Exports,
             _ => Self::Other(stream),
         }
     }
@@ -392,6 +521,26 @@ pub enum Event {
         /// The new state.
         status: RecorderStatus,
     },
+    /// A sitting ended, and this is what it produced.
+    ///
+    /// On the `status` stream rather than a stream of its own, because it is the
+    /// end of the thing [`Event::StatusChanged`] has been describing: the
+    /// recorder leaving a sitting is a change in what it is doing, and a client
+    /// that wanted one of these and not the other would be a client that
+    /// watched a sitting start and never saw it finish.
+    ///
+    /// It carries the sitting rather than only its identifier because the files
+    /// are the point. A window is told a sitting is over at the moment it can
+    /// offer to open it, and the recorder is the only side that knows what it
+    /// wrote — the library has not necessarily indexed any of it yet
+    /// (`docs/library.md`), so an identifier alone would be an announcement
+    /// with nothing to act on.
+    SessionEnded {
+        /// The sitting, with
+        /// [`ended_at`](crate::SessionSummary::ended_at) and
+        /// [`end_reason`](crate::SessionSummary::end_reason) filled in.
+        session: SessionSummary,
+    },
     /// A recording ended because something failed, rather than because it was
     /// asked to.
     ///
@@ -402,6 +551,29 @@ pub enum Event {
         recording_id: String,
         /// What failed.
         error: ProtocolError,
+    },
+    /// A running export has got this far.
+    ///
+    /// An event and not a field on the reply, because the reply arrives when
+    /// the MP4's index has been written — which is the moment there is nothing
+    /// left to report ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+    /// A four-second recording copies in milliseconds and needs none of this; a
+    /// two-hour one is gigabytes, and a window with no indication that anything
+    /// is happening reads as a hang and invites somebody to kill the recorder
+    /// mid-write.
+    ///
+    /// Being an event is also what makes it safe to add. A client that does not
+    /// subscribe to `exports` never sees one, and a recorder too old to send
+    /// one is silent rather than answering something untrue — which a new
+    /// optional field on `export_recording`'s reply could not have managed
+    /// (`docs/ipc.md`, "An unknown field inside a known version: ignored").
+    ///
+    /// **Silence is not completion.** The reply is still the only thing that
+    /// says an export finished, and the last progress event of a copy is not a
+    /// promise that there will not be another.
+    ExportProgress {
+        /// How far it has got, and which export it is.
+        export: ExportProgress,
     },
     /// An event this build has never heard of, kept exactly as it arrived.
     ///
@@ -429,8 +601,9 @@ impl Event {
     #[must_use]
     pub const fn stream(&self) -> Option<EventStream> {
         match self {
-            Self::StatusChanged { .. } => Some(EventStream::Status),
+            Self::StatusChanged { .. } | Self::SessionEnded { .. } => Some(EventStream::Status),
             Self::RecordingFailed { .. } => Some(EventStream::Errors),
+            Self::ExportProgress { .. } => Some(EventStream::Exports),
             Self::Other(_) => None,
         }
     }
@@ -573,6 +746,132 @@ mod tests {
             }
             .stream(),
             Some(EventStream::Errors)
+        );
+        assert_eq!(
+            Event::SessionEnded {
+                session: SessionSummary::default(),
+            }
+            .stream(),
+            Some(EventStream::Status),
+            "a sitting ending is the end of what the status stream has been describing, and a \
+             client subscribed to it must not have to ask for a second stream to see one"
+        );
+        assert_eq!(
+            Event::ExportProgress {
+                export: exemplar_progress(Some(6_540_000)),
+            }
+            .stream(),
+            Some(EventStream::Exports),
+            "export progress routed onto `status` would reach every window watching for a \
+             recording, down the same 64-deep queue, at up to a hundred events per copy"
+        );
+    }
+
+    /// An export part-way through, measured or not.
+    fn exemplar_progress(total_ms: Option<u64>) -> ExportProgress {
+        ExportProgress {
+            source: r"D:\clips\match.mkv".to_owned(),
+            destination: r"D:\clips\match.mp4".to_owned(),
+            written_ms: 1_308_000,
+            total_ms,
+            packets: 117_624,
+            bytes: 1_962_240_822,
+        }
+    }
+
+    #[test]
+    fn the_exports_stream_survives_the_round_trip_through_its_wire_name() {
+        // A stream is named on the wire in the `hello` a client sends, and it is
+        // the one vocabulary where being unrecognised is refused rather than
+        // ignored. A misspelling here would reach a recorder as
+        // `EventStream::Other` and take the whole events connection with it.
+        assert_eq!(EventStream::Exports.as_str(), "exports");
+        assert_eq!(
+            EventStream::from("exports".to_owned()),
+            EventStream::Exports
+        );
+        assert_eq!(
+            String::from(EventStream::Exports),
+            "exports",
+            "a client serialising this as anything else would be asking for a stream no recorder \
+             has"
+        );
+        assert!(
+            matches!(
+                EventStream::from("export".to_owned()),
+                EventStream::Other(name) if name == "export"
+            ),
+            "a name that is not this one must not be quietly read as this one"
+        );
+    }
+
+    #[test]
+    fn an_export_progress_event_keeps_an_absent_total_absent_across_the_wire() {
+        // `total_ms` absent and `total_ms: 0` are different answers — "this
+        // recording never said how long it was" and "it is nought long" — and a
+        // client draws an unbounded indication for the first. A
+        // `skip_serializing_if` lost in a refactor would turn every interrupted
+        // recording's export into a bar sitting at nought for the whole copy.
+        let unmeasured = Event::ExportProgress {
+            export: exemplar_progress(None),
+        };
+
+        let json = serde_json::to_string(&unmeasured).expect("it serialises");
+        assert!(
+            !json.contains("total_ms"),
+            "an absent total reached the wire, so a reader cannot tell it from a measured one: \
+             {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Event>(&json).expect("and deserialises"),
+            unmeasured
+        );
+
+        let measured = Event::ExportProgress {
+            export: exemplar_progress(Some(6_540_000)),
+        };
+        let json = serde_json::to_string(&measured).expect("it serialises");
+        assert!(
+            json.contains("\"total_ms\":6540000"),
+            "a measured export lost the denominator a bar is drawn against: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Event>(&json).expect("and deserialises"),
+            measured
+        );
+    }
+
+    #[test]
+    fn a_sitting_ending_reaches_the_wire_with_the_files_it_produced() {
+        let event = ServerMessage::Event(Event::SessionEnded {
+            session: SessionSummary {
+                session_id: "cs2-20260811-201400".to_owned(),
+                game_id: Some("cs2".to_owned()),
+                game_name: Some("Counter-Strike 2".to_owned()),
+                started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+                ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+                end_reason: Some("game-exited".to_owned()),
+                recordings: vec![crate::status::SessionRecording {
+                    session_index: 1,
+                    output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
+                    outcome: Some("recorded".to_owned()),
+                    duration_ms: Some(6_540_000),
+                }],
+            },
+        });
+
+        let json = serde_json::to_string(&event).expect("it serialises");
+        assert!(
+            json.starts_with(r#"{"type":"event","event":"session_ended","session":{"#),
+            "a sitting ending is one tagged event like any other: {json}"
+        );
+        assert!(
+            json.contains(r"cs2-20260811-201400-01.mkv"),
+            "an announcement with no files in it is nothing a window can act on: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("and deserialises"),
+            event
         );
     }
 

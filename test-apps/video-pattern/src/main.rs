@@ -63,6 +63,17 @@ struct Arguments {
     /// were simultaneous at the source.
     #[arg(long)]
     tone: bool,
+
+    /// Play one quiet frequency, continuously, for the whole run.
+    ///
+    /// Off by default, like `--tone`, and exclusive with it: that one places
+    /// short bursts against the frame counter, and a continuous tone underneath
+    /// them would leave a detector measuring a plateau. This one exists so that
+    /// a recording of this application has a *source* an audio isolation test
+    /// can look for on a track — the window and the sound come from one process
+    /// tree, which is what makes it a stand-in for a game.
+    #[arg(long, value_name = "HERTZ", conflicts_with = "tone")]
+    steady_tone: Option<f32>,
 }
 
 /// The presentations this binary offers.
@@ -118,6 +129,7 @@ fn main() -> ExitCode {
         size: arguments.size,
         stop_on_stdin_end: !arguments.ignore_stdin,
         tone: arguments.tone,
+        steady_tone: arguments.steady_tone,
     };
 
     match clipped_video_pattern::run(options) {

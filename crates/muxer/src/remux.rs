@@ -63,6 +63,39 @@
 //! caller can warn somebody before they wait for a copy that is going to be
 //! refused, or before they accept one that will not be complete.
 //!
+//! # A copy that carries one sound track
+//!
+//! [`remux_to_mp4_carrying`] is the same copy with one of the recording's audio
+//! tracks named, and every other one left out. It is here because of something
+//! a browser cannot do: `HTMLMediaElement.audioTracks` is not implemented in
+//! Chromium, so a `<video>` handed a multi-track file plays whichever track its
+//! demuxer reaches first and offers no way off it. A window that lets somebody
+//! hear the microphone track on its own therefore has to be handed a file that
+//! holds the microphone track and nothing else — the selection happens on the
+//! way out of the recorder rather than in the element
+//! ([issue #304](https://github.com/wildware-uk/clipped/issues/304),
+//! `docs/desktop-ui.md`).
+//!
+//! A track left out that way is [`Carriage::NotChosen`] rather than a loss: it
+//! does not make the copy refuse, and it is what was asked for. The plan still
+//! lists every track of the source, so the caller can say what it made.
+//!
+//! # Saying how far it has got
+//!
+//! [`remux_to_mp4_with`] takes a [`RemuxOptions`] carrying a callback, and calls
+//! it as the copy runs. A four-second recording copies in milliseconds and needs
+//! none of this; a two-hour one is gigabytes, and a caller that could say
+//! nothing until the trailer was written would leave a window looking like a
+//! hang ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+//!
+//! The callback runs **on the copying thread**, between one packet and the next,
+//! which fixes what it may do: whatever it costs is added to the copy. It is
+//! called at most once per [`RemuxOptions::every`] of *source media* copied —
+//! media rather than wall clock, so there is no clock read per packet and the
+//! reports are spread evenly over the file rather than bunched wherever the disk
+//! was slow. Nothing here waits on the callback's reader, and nothing here takes
+//! a lock (AGENTS.md section 20).
+//!
 //! # The source is never touched
 //!
 //! `avformat_open_input` opens for reading and nothing here ever opens the
@@ -167,6 +200,14 @@ impl fmt::Display for TrackKind {
 pub enum Carriage {
     /// The coded packets are copied into the MP4 unchanged.
     Copied,
+    /// The caller asked for a copy carrying one audio track, and this is not it.
+    ///
+    /// Different from [`Self::CodecUnsupported`] in the one way that matters:
+    /// nothing is wrong. The track could have been carried and was not asked
+    /// for, so it is a track left out rather than a recording that cannot be
+    /// stored, and it does not make [`remux_to_mp4_carrying`] refuse. See
+    /// [`AudioTracks`].
+    NotChosen,
     /// MP4 has no registered mapping for this codec in the linked FFmpeg build,
     /// so the track cannot be stored at all.
     CodecUnsupported,
@@ -177,6 +218,47 @@ impl Carriage {
     #[must_use]
     pub const fn is_copied(self) -> bool {
         matches!(self, Self::Copied)
+    }
+}
+
+/// Which of a recording's sound tracks a copy is to carry.
+///
+/// The whole reason this is a choice: **a media element cannot select an audio
+/// track.** `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a
+/// multi-track file handed to a `<video>` plays whichever track its demuxer
+/// reaches first and offers no way off it. A player that lets somebody hear the
+/// microphone track on its own therefore has to be given a file that holds that
+/// track and no other — the choice happens here, on the way out, rather than in
+/// the element ([issue #304](https://github.com/wildware-uk/clipped/issues/304),
+/// `docs/desktop-ui.md`).
+///
+/// Picture is never affected: the video track is carried either way, and it is
+/// copied rather than re-encoded in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AudioTracks {
+    /// Every sound track the source holds, which is what an export wants.
+    #[default]
+    All,
+    /// One source stream, named by the index the container declares it at.
+    ///
+    /// It must be a sound track of that source, or the copy is refused with
+    /// [`RemuxError::NoSuchAudioTrack`] — an index that turned out to be the
+    /// video track, or one past the end, would otherwise produce a silent file
+    /// that looks exactly like a recording which never had sound.
+    Only(usize),
+}
+
+impl AudioTracks {
+    /// Whether a source stream at this index is to be carried.
+    ///
+    /// Only sound tracks are ever excluded. A subtitle or an attached font is
+    /// governed by what MP4 can store, exactly as it is for an export.
+    const fn carries(self, index: usize, kind: TrackKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(chosen) => !matches!(kind, TrackKind::Audio) || chosen == index,
+        }
     }
 }
 
@@ -239,6 +321,19 @@ impl PlannedTrack {
     pub const fn carriage(&self) -> Carriage {
         self.carriage
     }
+
+    /// What this track's absence costs, in a sentence, where it is absent.
+    ///
+    /// [`None`] for a track that is carried. The two absences are worded
+    /// differently on purpose: one is something the container cannot do, and
+    /// the other is what the caller asked for.
+    fn loss(&self) -> Option<String> {
+        match self.carriage {
+            Carriage::Copied => None,
+            Carriage::NotChosen => Some(format!("{self} was not the track asked for")),
+            Carriage::CodecUnsupported => Some(format!("{self} cannot be stored in MP4")),
+        }
+    }
 }
 
 impl fmt::Display for PlannedTrack {
@@ -292,17 +387,30 @@ impl Mp4Plan {
     /// Unicode.
     pub fn inspect(source: &Path) -> Result<Self, RemuxError> {
         let input = open_source(source)?;
-        Self::read(&input, source)
+        Self::read(&input, source, AudioTracks::All)
     }
 
-    /// The plan for an already-open source.
-    fn read(input: &InputContext, source: &Path) -> Result<Self, RemuxError> {
+    /// The plan for an already-open source, carrying the sound the caller asked
+    /// for.
+    fn read(input: &InputContext, source: &Path, audio: AudioTracks) -> Result<Self, RemuxError> {
         let mut tracks = Vec::with_capacity(input.stream_count());
         for index in 0..input.stream_count() {
             let Some(stream) = input.stream(index) else {
                 break;
             };
-            tracks.push(describe(index, stream));
+            tracks.push(describe(index, stream, audio));
+        }
+
+        if let AudioTracks::Only(chosen) = audio {
+            let is_audio = tracks
+                .iter()
+                .any(|track| track.index == chosen && matches!(track.kind, TrackKind::Audio));
+            if !is_audio {
+                return Err(RemuxError::NoSuchAudioTrack {
+                    source: source.to_path_buf(),
+                    index: chosen,
+                });
+            }
         }
 
         if tracks.is_empty() {
@@ -342,11 +450,16 @@ impl Mp4Plan {
     /// While this is not empty, [`remux_to_mp4`] refuses: an MP4 missing one of
     /// a recording's audio tracks is indistinguishable from one that never had
     /// it.
+    ///
+    /// A track the caller *chose* to leave out ([`Carriage::NotChosen`]) is not
+    /// in here, and that is the distinction the two variants exist for: an
+    /// export that would silently drop sound is refused, and a player's copy of
+    /// one named track is exactly what was asked for.
     #[must_use]
     pub fn blocking(&self) -> Vec<&PlannedTrack> {
         self.tracks
             .iter()
-            .filter(|track| track.kind.is_media() && !track.carriage.is_copied())
+            .filter(|track| track.kind.is_media() && track.carriage == Carriage::CodecUnsupported)
             .collect()
     }
 
@@ -364,11 +477,27 @@ impl Mp4Plan {
     /// asked wants one list rather than two.
     #[must_use]
     pub fn losses(&self) -> Vec<String> {
+        self.losses_where(|_| true)
+    }
+
+    /// The losses nobody asked for.
+    ///
+    /// What [`Self::losses`] holds, minus the tracks the caller chose to leave
+    /// out. That is what belongs in the log: a warning per unchosen track would
+    /// mean three lines every time somebody played a recording, saying that the
+    /// tracks they did not select are not in the copy made because they did not
+    /// select them.
+    fn unasked_losses(&self) -> Vec<String> {
+        self.losses_where(|track| track.carriage != Carriage::NotChosen)
+    }
+
+    /// The losses of the tracks a predicate admits, and the chapters.
+    fn losses_where(&self, admit: impl Fn(&PlannedTrack) -> bool) -> Vec<String> {
         let mut losses: Vec<String> = self
             .tracks
             .iter()
-            .filter(|track| !track.carriage.is_copied())
-            .map(|track| format!("{track} cannot be stored in MP4"))
+            .filter(|track| admit(track))
+            .filter_map(PlannedTrack::loss)
             .collect();
         if self.chapters > 0 {
             losses.push(format!(
@@ -492,6 +621,157 @@ impl fmt::Display for RemuxSummary {
     }
 }
 
+/// How far a remux has got.
+///
+/// Deliberately measurements rather than a percentage: `fraction` is derived
+/// from them and is [`None`] when the source declares no duration, which a
+/// single `f64` could only have spelled as zero — and "nought per cent" and "no
+/// idea" are different things to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemuxProgress {
+    /// How much of the recording's own timeline has been copied, in nanoseconds.
+    ///
+    /// Measured from the packets that were written, not from the file position:
+    /// this is the same figure [`RemuxSummary::duration`] ends up holding, so a
+    /// last report and the summary agree.
+    pub written_nanos: u64,
+    /// How long the recording says it is, in nanoseconds, where it says at all.
+    ///
+    /// [`None`] for a recording whose container declares no duration. That is
+    /// not a corrupt file: a recording interrupted by a power cut keeps every
+    /// packet it wrote and no total, which is the property ADR 0001 chose
+    /// Matroska for. A caller shows an unbounded indication for it rather than
+    /// inventing a denominator.
+    pub total_nanos: Option<u64>,
+    /// How many packets have been copied, across every carried track.
+    pub packets: u64,
+    /// How many bytes of coded media have been copied, before the container's
+    /// own overhead.
+    ///
+    /// The one figure that still advances when [`Self::total_nanos`] is [`None`],
+    /// which is what makes an unbounded indication honest rather than decorative.
+    pub bytes: u64,
+}
+
+impl RemuxProgress {
+    /// How far through, between zero and one, or [`None`] if the recording never
+    /// said how long it was.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f64> {
+        let total = self.total_nanos?;
+        if total == 0 {
+            return None;
+        }
+        // Clamped because a source's declared duration and the end of its last
+        // packet need not agree to the nanosecond, and a progress bar that reads
+        // 101 % is a bug report.
+        Some((self.written_nanos as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
+/// How much of the recording is copied between progress reports by default.
+///
+/// A quarter of a second of the *recording*, not of wall clock, matching
+/// `clipped_export::DEFAULT_PROGRESS_INTERVAL`: a copy runs many times faster
+/// than real time, so this is a handful of reports for a short recording and
+/// thousands for a long one. A caller sending each report somewhere that costs
+/// more than a function call — the IPC event stream, say — passes a coarser
+/// interval rather than accepting this one.
+pub const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// What a caller wants copied, and what it wants told while it happens.
+///
+/// Deliberately not `Clone` and not `Debug`-derived: it holds a callback, and
+/// the copy borrows it for the length of the run.
+pub struct RemuxOptions<'callback> {
+    audio: AudioTracks,
+    progress: Option<&'callback (dyn Fn(RemuxProgress) + Sync)>,
+    progress_interval: Duration,
+}
+
+impl Default for RemuxOptions<'_> {
+    fn default() -> Self {
+        Self {
+            audio: AudioTracks::All,
+            progress: None,
+            progress_interval: DEFAULT_PROGRESS_INTERVAL,
+        }
+    }
+}
+
+impl<'callback> RemuxOptions<'callback> {
+    /// Every sound track carried, and nothing reported.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Carries the sound tracks named. See [`remux_to_mp4_carrying`].
+    #[must_use]
+    pub const fn carrying(mut self, audio: AudioTracks) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    /// Reports progress to `callback`, **on the copying thread**.
+    ///
+    /// Whatever the callback costs is added to the copy, so it may not wait on
+    /// anything (AGENTS.md section 20). The recorder's passes the report to
+    /// `EventPublisher::publish`, which is a `try_send` on a bounded queue and
+    /// drops rather than waiting for a window that has stopped reading.
+    #[must_use]
+    pub fn reporting_to(mut self, callback: &'callback (dyn Fn(RemuxProgress) + Sync)) -> Self {
+        self.progress = Some(callback);
+        self
+    }
+
+    /// Reports at most once per `interval` of the recording copied.
+    ///
+    /// Zero means every packet, which is what a test counting reports asks for
+    /// and what an interface should not.
+    #[must_use]
+    pub const fn every(mut self, interval: Duration) -> Self {
+        self.progress_interval = interval;
+        self
+    }
+
+    /// Which sound tracks this copy carries.
+    #[must_use]
+    pub const fn audio(&self) -> AudioTracks {
+        self.audio
+    }
+
+    /// How much of the recording is copied between reports.
+    #[must_use]
+    pub const fn progress_interval(&self) -> Duration {
+        self.progress_interval
+    }
+
+    /// Calls the callback, if there is one.
+    fn report(&self, progress: RemuxProgress) {
+        if let Some(callback) = self.progress {
+            callback(progress);
+        }
+    }
+
+    /// Whether anybody is listening, so the loop can skip the bookkeeping when
+    /// nobody is.
+    const fn reports(&self) -> bool {
+        self.progress.is_some()
+    }
+}
+
+impl fmt::Debug for RemuxOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemuxOptions")
+            .field("audio", &self.audio)
+            .field("reports_progress", &self.progress.is_some())
+            .field("progress_interval", &self.progress_interval)
+            .finish()
+    }
+}
+
 /// Copies `source` into `destination` as an MP4, without decoding anything.
 ///
 /// The coded packets are copied unchanged, so the result is the same picture and
@@ -537,10 +817,99 @@ impl fmt::Display for RemuxSummary {
 /// # }
 /// ```
 pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, RemuxError> {
+    remux_to_mp4_with(source, destination, &RemuxOptions::new())
+}
+
+/// Copies `source` into `destination` as an MP4, carrying the sound named.
+///
+/// Everything [`remux_to_mp4`] does — the packets are copied rather than
+/// decoded, the source is opened for reading only, a destination that exists is
+/// refused — with one difference: [`AudioTracks::Only`] leaves every other sound
+/// track out.
+///
+/// That exists for the player and not for the export. A `<video>` cannot choose
+/// an audio track, so hearing one track of a recording on its own means being
+/// handed a file that holds one track
+/// ([issue #304](https://github.com/wildware-uk/clipped/issues/304)). The
+/// returned [`Mp4Plan`] still describes **every** track of the source, with the
+/// ones left out marked [`Carriage::NotChosen`], so a caller can say what it
+/// made rather than having to remember what it asked for.
+///
+/// # Errors
+///
+/// Everything [`remux_to_mp4`] returns, and one more:
+/// [`RemuxError::NoSuchAudioTrack`] when the chosen index is not a sound track
+/// of the source. Nothing is created — the check happens before the destination
+/// is opened, because the alternative is a file with no sound in it that looks
+/// exactly like a recording which never had any.
+pub fn remux_to_mp4_carrying(
+    source: &Path,
+    destination: &Path,
+    audio: AudioTracks,
+) -> Result<RemuxSummary, RemuxError> {
+    remux_to_mp4_with(source, destination, &RemuxOptions::new().carrying(audio))
+}
+
+/// Copies `source` into `destination` as an MP4, saying how far it has got.
+///
+/// The one entry point that takes everything: [`remux_to_mp4`] and
+/// [`remux_to_mp4_carrying`] are this with the options they name, so there is
+/// one copy of the copying and not three.
+///
+/// What it adds over those two is [`RemuxOptions::reporting_to`]. A four-second
+/// recording copies in milliseconds and needs no progress; a two-hour one is
+/// gigabytes, and a caller that said nothing until the trailer was written would
+/// leave a window looking like a hang
+/// ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+///
+/// The callback runs on **this** thread, between one packet and the next. It is
+/// called at most once per [`RemuxOptions::every`] of the recording copied, and
+/// once more when the copy finishes so that the last report is the whole file
+/// rather than whatever the interval last happened to land on.
+///
+/// A copy that fails simply stops reporting. Nothing announces the failure
+/// through the callback — the [`Err`] is what says that, and it says it with a
+/// sentence — so a caller must not treat the last report it received as a
+/// finished export. A refusal that happens before any packet is copied, which
+/// is every refusal in the list below except a write that failed part-way,
+/// produces no report at all.
+///
+/// # Errors
+///
+/// Exactly [`remux_to_mp4_carrying`]'s. Reporting adds no failure of its own —
+/// the callback returns nothing and cannot refuse the copy.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use std::time::Duration;
+/// use clipped_muxer::{remux_to_mp4_with, RemuxOptions, RemuxProgress};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let say = |progress: RemuxProgress| match progress.fraction() {
+///     Some(fraction) => eprintln!("{:.0}%", fraction * 100.0),
+///     None => eprintln!("{} MB copied", progress.bytes / 1_000_000),
+/// };
+///
+/// let summary = remux_to_mp4_with(
+///     Path::new("recording.mkv"),
+///     Path::new("recording.mp4"),
+///     &RemuxOptions::new().reporting_to(&say).every(Duration::from_secs(1)),
+/// )?;
+/// println!("{summary}");
+/// # Ok(())
+/// # }
+/// ```
+pub fn remux_to_mp4_with(
+    source: &Path,
+    destination: &Path,
+    options: &RemuxOptions<'_>,
+) -> Result<RemuxSummary, RemuxError> {
     let started = Instant::now();
 
     let input = open_source(source)?;
-    let plan = Mp4Plan::read(&input, source)?;
+    let plan = Mp4Plan::read(&input, source, options.audio())?;
 
     let blocking = plan.blocking();
     if !blocking.is_empty() {
@@ -554,7 +923,7 @@ pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, R
     // diagnostic log explains a short MP4 without anyone having to reproduce it.
     // A static message with the detail in a field, which is the habit
     // docs/logging.md sets.
-    for loss in plan.losses() {
+    for loss in plan.unasked_losses() {
         warn!(
             source = %RedactedPath::new(source),
             loss = %loss,
@@ -562,10 +931,11 @@ pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, R
         );
     }
 
-    let copied = write_mp4(&input, &plan, destination).map_err(|source| RemuxError::Output {
-        destination: destination.to_path_buf(),
-        source,
-    })?;
+    let copied =
+        write_mp4(&input, &plan, destination, options).map_err(|source| RemuxError::Output {
+            destination: destination.to_path_buf(),
+            source,
+        })?;
 
     let summary = RemuxSummary {
         plan,
@@ -611,7 +981,7 @@ fn open_source(source: &Path) -> Result<InputContext, RemuxError> {
 }
 
 /// Reads one source stream into the plan's description of it.
-fn describe(index: usize, stream: *mut ffi::AVStream) -> PlannedTrack {
+fn describe(index: usize, stream: *mut ffi::AVStream, audio: AudioTracks) -> PlannedTrack {
     // SAFETY: `stream` came from the input context's own array and points at a
     // stream that context owns and outlives this call. `codecpar` is allocated
     // with the stream and is never null, and `disposition` is a plain integer.
@@ -624,14 +994,22 @@ fn describe(index: usize, stream: *mut ffi::AVStream) -> PlannedTrack {
         )
     };
 
+    let kind = TrackKind::from_media_type(media_type);
+
     PlannedTrack {
         index,
-        kind: TrackKind::from_media_type(media_type),
+        kind,
         codec: codec_name(codec_id),
         name: metadata(stream, c"title"),
         language: metadata(stream, c"language"),
         default,
-        carriage: if mp4_can_carry(codec_id) {
+        // What the container can hold is asked first, so that a track which is
+        // both unchosen and unstorable is reported as unchosen: it is the
+        // answer that is true of this copy, and the one that does not send
+        // somebody looking for a codec problem in a file they never asked for.
+        carriage: if !audio.carries(index, kind) {
+            Carriage::NotChosen
+        } else if mp4_can_carry(codec_id) {
             Carriage::Copied
         } else {
             Carriage::CodecUnsupported
@@ -720,6 +1098,19 @@ impl Copied {
         };
         Duration::try_from_secs_f64((last - first).max(0.0)).unwrap_or_default()
     }
+
+    /// This much copied, as a caller's callback is told it.
+    ///
+    /// `total` is the source's declared duration, read once before the loop
+    /// rather than per packet.
+    fn progress(&self, total: Option<Duration>) -> RemuxProgress {
+        RemuxProgress {
+            written_nanos: u64::try_from(self.duration().as_nanos()).unwrap_or(u64::MAX),
+            total_nanos: total.map(|total| u64::try_from(total.as_nanos()).unwrap_or(u64::MAX)),
+            packets: self.packets,
+            bytes: self.bytes,
+        }
+    }
 }
 
 /// One carried stream, and everything needed to move a packet across.
@@ -747,7 +1138,12 @@ struct StreamMap {
 ///
 /// Separated from [`remux_to_mp4`] so that every failure after the destination
 /// exists leaves through one place, which is where it is removed again.
-fn write_mp4(input: &InputContext, plan: &Mp4Plan, destination: &Path) -> Result<Copied, MuxError> {
+fn write_mp4(
+    input: &InputContext,
+    plan: &Mp4Plan,
+    destination: &Path,
+    options: &RemuxOptions<'_>,
+) -> Result<Copied, MuxError> {
     // `to_str` cannot fail: the constant is an ASCII literal. Written as a
     // fallback rather than an unwrap so that a remux never ends in a panic
     // (AGENTS.md section 15).
@@ -781,7 +1177,7 @@ fn write_mp4(input: &InputContext, plan: &Mp4Plan, destination: &Path) -> Result
 
     // The destination exists from here on, so a failure has to take it away
     // again.
-    copy_packets(input, &format, &mut streams, destination).inspect_err(|_| {
+    copy_packets(input, &format, &mut streams, destination, options).inspect_err(|_| {
         // The context, and with it the open file, was dropped by the call above;
         // Windows would refuse to remove it otherwise.
         if let Err(error) = std::fs::remove_file(destination) {
@@ -937,6 +1333,7 @@ fn copy_packets(
     format: &OutputContext,
     streams: &mut StreamMap,
     destination: &Path,
+    options: &RemuxOptions<'_>,
 ) -> Result<Copied, MuxError> {
     write_header(format)?;
 
@@ -958,6 +1355,25 @@ fn copy_packets(
 
     let slot = PacketSlot::allocate()?;
     let mut copied = Copied::default();
+
+    // Read once, before the loop. The source's declared length is the
+    // denominator of every report, and it does not change while the file is
+    // being read.
+    let total = input.duration();
+    // The point in the recording's own timeline at which the next report is due.
+    // Media rather than wall clock, so this loop reads no clock at all: a
+    // two-hour recording is millions of packets, and `Instant::now()` per packet
+    // to decide whether to say something would be the reporting charging the
+    // copy for itself (AGENTS.md sections 18 and 20). It starts at zero so the
+    // first packet reports, which is what tells a window the copy has begun
+    // rather than leaving it to infer it from silence.
+    let interval = options.progress_interval();
+    let mut report_due_at = Duration::ZERO;
+    // What the caller was last told, so the report after the trailer is not a
+    // second copy of it. The interval can land exactly on the final packet —
+    // a four-second recording reported once a second does — and a progress bar
+    // told the same thing twice is a bar that appears to stall at the end.
+    let mut last_reported: Option<RemuxProgress> = None;
 
     loop {
         // SAFETY: both pointers are live and exclusively owned. `av_read_frame`
@@ -1036,6 +1452,19 @@ fn copy_packets(
         copied.bytes += size.unsigned_abs();
         copied.first_seconds = Some(copied.first_seconds.map_or(start, |first| first.min(start)));
         copied.last_seconds = Some(copied.last_seconds.map_or(end, |last| last.max(end)));
+
+        // Guarded by `reports` so that a caller which asked for nothing pays for
+        // nothing beyond the branch — which is the common case, because both
+        // older entry points ask for nothing.
+        if options.reports() {
+            let written = copied.duration();
+            if written >= report_due_at {
+                let progress = copied.progress(total);
+                options.report(progress);
+                last_reported = Some(progress);
+                report_due_at = written.saturating_add(interval);
+            }
+        }
     }
 
     // SAFETY: the context is live and the header was written above, so the
@@ -1046,6 +1475,18 @@ fn copy_packets(
             operation: "writing the MP4's index",
             source: AvError::new(code),
         });
+    }
+
+    // One last report, after the trailer rather than before it, so that the
+    // final thing a caller was told is the file that now exists. Without it the
+    // last report is wherever the interval happened to land — 97 % of a
+    // two-hour recording, say — and a progress bar that stops short of the end
+    // and then vanishes reads as a copy that gave up.
+    if options.reports() {
+        let final_progress = copied.progress(input.duration());
+        if last_reported != Some(final_progress) {
+            options.report(final_progress);
+        }
     }
 
     info!(
@@ -1224,6 +1665,18 @@ pub enum RemuxError {
         tracks: Vec<PlannedTrack>,
     },
 
+    /// The sound track a copy was asked to carry is not one the recording has.
+    ///
+    /// Nothing was created. A copy made anyway would be silent, and a silent
+    /// file is indistinguishable from a recording that never had sound — so the
+    /// index is named instead ([`AudioTracks::Only`]).
+    NoSuchAudioTrack {
+        /// The recording that was being read.
+        source: PathBuf,
+        /// The stream index that was asked for.
+        index: usize,
+    },
+
     /// The MP4 could not be written.
     Output {
         /// Where the MP4 was going.
@@ -1267,6 +1720,12 @@ impl fmt::Display for RemuxError {
                      is",
                 )
             }
+            Self::NoSuchAudioTrack { source, index } => write!(
+                formatter,
+                "{} has no sound track at index {index}, so a copy carrying that track alone \
+                 would have no sound at all. Nothing was written",
+                RedactedPath::new(source)
+            ),
             Self::Output {
                 destination,
                 source,
@@ -1284,7 +1743,9 @@ impl Error for RemuxError {
         match self {
             Self::SourceUnreadable { error, .. } => Some(error),
             Self::Output { source, .. } => Some(source),
-            Self::SourceNotRepresentable { .. } | Self::MediaNotCarried { .. } => None,
+            Self::SourceNotRepresentable { .. }
+            | Self::MediaNotCarried { .. }
+            | Self::NoSuchAudioTrack { .. } => None,
         }
     }
 }

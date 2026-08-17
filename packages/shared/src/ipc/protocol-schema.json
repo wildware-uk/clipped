@@ -1,9 +1,9 @@
 {
   "schema_format": 1,
   "regenerate_with": "cargo run -p clipped-ipc --bin protocol-schema",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "supported_protocol_versions": [
-    1
+    2
   ],
   "framing": {
     "length_prefix_bytes": 4,
@@ -46,11 +46,19 @@
         "library_trash",
         "restore_from_trash",
         "empty_trash",
+        "set_favourite",
+        "set_lock",
         "plugins",
         "export_recording",
+        "open_playback",
         "get_hotkeys",
-        "shutdown",
-        "apply_settings"
+        "get_settings",
+        "apply_settings",
+        "get_audio_devices",
+        "get_microphone_level",
+        "get_start_at_login",
+        "set_start_at_login",
+        "shutdown"
       ],
       "tolerates_unrecognised": true
     },
@@ -86,6 +94,7 @@
         "shutting_down",
         "destination_exists",
         "export_failed",
+        "playback_failed",
         "library_unavailable",
         "internal"
       ],
@@ -101,7 +110,9 @@
     "event": {
       "values": [
         "status_changed",
-        "recording_failed"
+        "session_ended",
+        "recording_failed",
+        "export_progress"
       ],
       "tolerates_unrecognised": true
     },
@@ -109,7 +120,8 @@
       "values": [
         "status",
         "errors",
-        "metrics"
+        "metrics",
+        "exports"
       ],
       "tolerates_unrecognised": true
     },
@@ -122,8 +134,14 @@
         "shutdown",
         "library",
         "export",
+        "playback",
         "hotkeys",
-        "replay"
+        "replay",
+        "export_progress",
+        "settings",
+        "microphone_level",
+        "startup",
+        "automatic"
       ],
       "tolerates_unrecognised": true
     },
@@ -145,6 +163,7 @@
     "recorder_state": {
       "values": [
         "idle",
+        "watching",
         "recording"
       ],
       "tolerates_unrecognised": false
@@ -161,12 +180,19 @@
         "library_sessions",
         "library_games",
         "recording_exported",
+        "playback_opened",
         "hotkeys",
+        "settings",
+        "audio_devices",
+        "microphone_level",
+        "start_at_login",
         "shutting_down",
         "library_events",
         "library_trash",
         "restored",
         "trash_emptied",
+        "favourited",
+        "locked",
         "plugins"
       ],
       "tolerates_unrecognised": false
@@ -190,7 +216,8 @@
         "target"
       ],
       "optional": [
-        "replay_seconds"
+        "replay_seconds",
+        "session"
       ]
     },
     "add_bookmark": {
@@ -202,6 +229,25 @@
         "lead_seconds",
         "recording_id"
       ]
+    },
+    "apply_settings": {
+      "required": [],
+      "optional": [
+        "values"
+      ]
+    },
+    "audio_device": {
+      "required": [
+        "is_default",
+        "name"
+      ],
+      "optional": []
+    },
+    "audio_devices": {
+      "required": [
+        "microphones"
+      ],
+      "optional": []
     },
     "bookmark_summary": {
       "required": [
@@ -236,11 +282,25 @@
       ],
       "optional": []
     },
+    "event.export_progress": {
+      "required": [
+        "event",
+        "export"
+      ],
+      "optional": []
+    },
     "event.recording_failed": {
       "required": [
         "error",
         "event",
         "recording_id"
+      ],
+      "optional": []
+    },
+    "event.session_ended": {
+      "required": [
+        "event",
+        "session"
       ],
       "optional": []
     },
@@ -250,6 +310,18 @@
         "status"
       ],
       "optional": []
+    },
+    "export_progress": {
+      "required": [
+        "bytes",
+        "destination",
+        "packets",
+        "source",
+        "written_ms"
+      ],
+      "optional": [
+        "total_ms"
+      ]
     },
     "export_recording": {
       "required": [
@@ -358,8 +430,10 @@
         "end_reason",
         "ended_at",
         "height",
+        "locked",
         "missing_since",
         "outcome",
+        "protected",
         "size_bytes",
         "width"
       ]
@@ -376,7 +450,8 @@
         "end_reason",
         "ended_at",
         "game_id",
-        "game_name"
+        "game_name",
+        "locked"
       ]
     },
     "library_session_page": {
@@ -393,6 +468,29 @@
         "after",
         "limit",
         "query"
+      ]
+    },
+    "microphone_level": {
+      "required": [
+        "peak"
+      ],
+      "optional": [
+        "device",
+        "muted"
+      ]
+    },
+    "microphone_level_request": {
+      "required": [
+        "microphone"
+      ],
+      "optional": []
+    },
+    "open_playback": {
+      "required": [
+        "source"
+      ],
+      "optional": [
+        "audio_track"
       ]
     },
     "outcome.error": {
@@ -413,6 +511,26 @@
         "version"
       ],
       "optional": []
+    },
+    "playback_stream": {
+      "required": [
+        "path"
+      ],
+      "optional": [
+        "audio_track",
+        "audio_tracks",
+        "prepared"
+      ]
+    },
+    "playback_track": {
+      "required": [
+        "index"
+      ],
+      "optional": [
+        "default",
+        "language",
+        "name"
+      ]
     },
     "protocol_error": {
       "required": [
@@ -438,7 +556,16 @@
         "target"
       ],
       "optional": [
-        "replay_seconds"
+        "replay_seconds",
+        "session"
+      ]
+    },
+    "recorder_status.watching": {
+      "required": [
+        "state"
+      ],
+      "optional": [
+        "session"
       ]
     },
     "recording_summary": {
@@ -473,9 +600,23 @@
       ],
       "optional": []
     },
+    "reply.audio_devices": {
+      "required": [
+        "devices",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.bookmark_added": {
       "required": [
         "bookmark",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.favourited": {
+      "required": [
+        "mark",
         "reply"
       ],
       "optional": []
@@ -512,6 +653,27 @@
       "required": [
         "reply",
         "trash"
+      ],
+      "optional": []
+    },
+    "reply.locked": {
+      "required": [
+        "lock",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.microphone_level": {
+      "required": [
+        "level",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.playback_opened": {
+      "required": [
+        "playback",
+        "reply"
       ],
       "optional": []
     },
@@ -572,6 +734,13 @@
       ],
       "optional": []
     },
+    "reply.settings": {
+      "required": [
+        "reply",
+        "settings"
+      ],
+      "optional": []
+    },
     "reply.shutting_down": {
       "required": [
         "reply"
@@ -579,6 +748,13 @@
       "optional": [
         "finalising"
       ]
+    },
+    "reply.start_at_login": {
+      "required": [
+        "reply",
+        "start_at_login"
+      ],
+      "optional": []
     },
     "reply.status": {
       "required": [
@@ -631,10 +807,70 @@
         "recording_id"
       ]
     },
+    "session_recording": {
+      "required": [
+        "output",
+        "session_index"
+      ],
+      "optional": [
+        "duration_ms",
+        "outcome"
+      ]
+    },
+    "session_summary": {
+      "required": [
+        "recordings",
+        "session_id",
+        "started_at"
+      ],
+      "optional": [
+        "end_reason",
+        "ended_at",
+        "game_id",
+        "game_name"
+      ]
+    },
+    "set_start_at_login": {
+      "required": [
+        "enabled"
+      ],
+      "optional": []
+    },
+    "setting_entry": {
+      "required": [
+        "accepted",
+        "applies",
+        "key",
+        "label",
+        "overridden",
+        "value"
+      ],
+      "optional": [
+        "choices",
+        "unavailable"
+      ]
+    },
+    "settings_view": {
+      "required": [
+        "file",
+        "settings"
+      ],
+      "optional": []
+    },
     "shutdown": {
       "required": [],
       "optional": [
         "finalise_recording"
+      ]
+    },
+    "start_at_login": {
+      "required": [
+        "enabled",
+        "location"
+      ],
+      "optional": [
+        "command",
+        "missing_executable"
       ]
     },
     "start_recording": {
@@ -648,6 +884,7 @@
         "overwrite",
         "pid",
         "process",
+        "replay",
         "replay_seconds",
         "resolution",
         "system_audio",
@@ -762,6 +999,18 @@
       "available_in_this_build": true
     },
     {
+      "name": "set_favourite",
+      "params": "set_favourite",
+      "reply": "reply.favourited",
+      "available_in_this_build": true
+    },
+    {
+      "name": "set_lock",
+      "params": "set_lock",
+      "reply": "reply.locked",
+      "available_in_this_build": true
+    },
+    {
       "name": "plugins",
       "params": null,
       "reply": "reply.plugins",
@@ -774,9 +1023,51 @@
       "available_in_this_build": true
     },
     {
+      "name": "open_playback",
+      "params": "open_playback",
+      "reply": "reply.playback_opened",
+      "available_in_this_build": true
+    },
+    {
       "name": "get_hotkeys",
       "params": null,
       "reply": "reply.hotkeys",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_settings",
+      "params": null,
+      "reply": "reply.settings",
+      "available_in_this_build": true
+    },
+    {
+      "name": "apply_settings",
+      "params": "apply_settings",
+      "reply": "reply.settings",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_audio_devices",
+      "params": null,
+      "reply": "reply.audio_devices",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_microphone_level",
+      "params": "microphone_level_request",
+      "reply": "reply.microphone_level",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_start_at_login",
+      "params": null,
+      "reply": "reply.start_at_login",
+      "available_in_this_build": true
+    },
+    {
+      "name": "set_start_at_login",
+      "params": "set_start_at_login",
+      "reply": "reply.start_at_login",
       "available_in_this_build": true
     },
     {
@@ -784,12 +1075,6 @@
       "params": "shutdown",
       "reply": "reply.shutting_down",
       "available_in_this_build": true
-    },
-    {
-      "name": "apply_settings",
-      "params": null,
-      "reply": null,
-      "available_in_this_build": false
     }
   ],
   "samples": [
@@ -801,7 +1086,7 @@
           "name": "clipped-desktop",
           "version": "0.1.0"
         },
-        "protocol_version": 1,
+        "protocol_version": 2,
         "role": "control",
         "streams": [
           "status"
@@ -819,7 +1104,7 @@
           "name": "clipped-desktop",
           "version": "0.1.0"
         },
-        "protocol_version": 1,
+        "protocol_version": 2,
         "role": "events",
         "streams": [
           "status",
@@ -856,6 +1141,7 @@
           "overwrite": false,
           "pid": 4242,
           "process": "cs2.exe",
+          "replay": true,
           "replay_seconds": 60,
           "resolution": "source",
           "system_audio": "none",
@@ -909,6 +1195,21 @@
       "discriminant": "request.export_recording"
     },
     {
+      "name": "asking for a recording to be opened for playback, on one of its tracks",
+      "direction": "client",
+      "frame": {
+        "command": "open_playback",
+        "id": 13,
+        "params": {
+          "audio_track": 3,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.open_playback"
+    },
+    {
       "name": "asking the recorder to exit",
       "direction": "client",
       "frame": {
@@ -948,10 +1249,16 @@
           "shutdown",
           "library",
           "export",
+          "playback",
           "hotkeys",
-          "replay"
+          "replay",
+          "export_progress",
+          "settings",
+          "microphone_level",
+          "startup",
+          "automatic"
         ],
-        "protocol_version": 1,
+        "protocol_version": 2,
         "recorder": {
           "name": "clipped-recorder",
           "version": "0.1.0"
@@ -973,12 +1280,12 @@
         "detail": {
           "detail": "unsupported_protocol_version",
           "recorder_version": "0.1.0",
-          "requested": 2,
+          "requested": 3,
           "supported": [
-            1
+            2
           ]
         },
-        "message": "this recorder speaks protocol version 1, and 2 was asked for",
+        "message": "this recorder speaks protocol version 2, and 3 was asked for",
         "type": "refused"
       },
       "parses": true,
@@ -1018,6 +1325,60 @@
       "discriminant": "response.ok.status.idle"
     },
     {
+      "name": "the status of a recorder watching for a game to start",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "state": "watching"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.watching"
+    },
+    {
+      "name": "the status of a recorder watching for a game that just exited to come back",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
+              "state": "watching"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.watching"
+    },
+    {
       "name": "the status of a recorder that is recording",
       "direction": "server",
       "frame": {
@@ -1027,7 +1388,48 @@
             "reply": "status",
             "status": {
               "elapsed_ms": 4200,
-              "output": "D:\\clips\\session.mkv",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "recording_id": "r-1",
+              "replay_seconds": 60,
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
+              "state": "recording",
+              "target": "process `cs2.exe`"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.recording"
+    },
+    {
+      "name": "the status of a recording that belongs to no sitting",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "elapsed_ms": 4200,
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "recording_id": "r-1",
               "replay_seconds": 60,
               "state": "recording",
@@ -1220,6 +1622,7 @@
                   "favourite": true,
                   "game_id": "cs2",
                   "game_name": "Counter-Strike 2",
+                  "locked": true,
                   "recordings": [
                     {
                       "duration_seconds": 6540.0,
@@ -1227,9 +1630,11 @@
                       "ended_at": "2026-08-11T22:03:00+01:00",
                       "favourite": false,
                       "height": 1440,
+                      "locked": false,
                       "missing_since": "2026-08-12T09:00:00+01:00",
                       "outcome": "recorded",
                       "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "protected": true,
                       "recording_id": 12,
                       "session_index": 1,
                       "size_bytes": 9812009112,
@@ -1287,6 +1692,7 @@
                   "favourite": true,
                   "game_id": "cs2",
                   "game_name": "Counter-Strike 2",
+                  "locked": true,
                   "recordings": [
                     {
                       "duration_seconds": 6540.0,
@@ -1294,9 +1700,11 @@
                       "ended_at": "2026-08-11T22:03:00+01:00",
                       "favourite": false,
                       "height": 1440,
+                      "locked": false,
                       "missing_since": "2026-08-12T09:00:00+01:00",
                       "outcome": "recorded",
                       "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "protected": true,
                       "recording_id": 12,
                       "session_index": 1,
                       "size_bytes": 9812009112,
@@ -1426,6 +1834,51 @@
       },
       "parses": true,
       "discriminant": "response.ok.trash_emptied"
+    },
+    {
+      "name": "a sitting marked a favourite, which is what cleanup then protects",
+      "direction": "server",
+      "frame": {
+        "id": 17,
+        "outcome": {
+          "ok": {
+            "mark": {
+              "changed": true,
+              "favourite": true,
+              "id": 0,
+              "kind": "session",
+              "session_id": "counter-strike-2-20260814-201500"
+            },
+            "reply": "favourited"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.favourited"
+    },
+    {
+      "name": "a recording locked against automatic cleanup, and nothing else",
+      "direction": "server",
+      "frame": {
+        "id": 18,
+        "outcome": {
+          "ok": {
+            "lock": {
+              "changed": true,
+              "id": 1,
+              "kind": "recording",
+              "locked": true,
+              "protected": true,
+              "session_id": ""
+            },
+            "reply": "locked"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.locked"
     },
     {
       "name": "what is installed, and what each plugin asks for",
@@ -1560,6 +2013,78 @@
       },
       "parses": true,
       "discriminant": "response.ok.recording_exported.lossy"
+    },
+    {
+      "name": "a recording opened for playback on the track a player would have taken anyway",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "playback": {
+              "audio_track": 1,
+              "audio_tracks": [
+                {
+                  "default": false,
+                  "index": 3,
+                  "language": "eng",
+                  "name": "Microphone"
+                }
+              ],
+              "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+              "prepared": false
+            },
+            "reply": "playback_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.playback_opened.as_recorded"
+    },
+    {
+      "name": "a recording opened for playback on a track that needed a copy of its own",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "playback": {
+              "audio_track": 3,
+              "audio_tracks": [
+                {
+                  "default": false,
+                  "index": 3,
+                  "language": "eng",
+                  "name": "Microphone"
+                }
+              ],
+              "path": "C:\\Users\\sam\\AppData\\Local\\Clipped\\playback\\cs2-20260811-201400-1-3.mp4",
+              "prepared": true
+            },
+            "reply": "playback_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.playback_opened.prepared"
+    },
+    {
+      "name": "playback refused because the recording's file has gone",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "error": {
+            "code": "playback_failed",
+            "message": "cs2-20260811-201400-1.mkv is not there any more. It may have been moved or deleted, or the drive it is on may not be connected"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.playback_failed"
     },
     {
       "name": "an export refused because the file it would write already exists",
@@ -1703,9 +2228,27 @@
           "ok": {
             "finalising": {
               "elapsed_ms": 4200,
-              "output": "D:\\clips\\session.mkv",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "recording_id": "r-1",
               "replay_seconds": 60,
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
               "target": "process `cs2.exe`"
             },
             "reply": "shutting_down"
@@ -1733,26 +2276,185 @@
       "discriminant": "response.error.already_recording"
     },
     {
-      "name": "a command this build cannot perform",
+      "name": "a subscription this build cannot serve",
       "direction": "server",
       "frame": {
-        "id": 3,
+        "code": "not_implemented",
+        "detail": {
+          "detail": "not_implemented",
+          "milestone": "M14",
+          "subsystem": "live recording metrics",
+          "tracking_issue": 100
+        },
+        "message": "live recording metrics is not in this build",
+        "type": "refused"
+      },
+      "parses": true,
+      "discriminant": "refused.not_implemented.not_implemented"
+    },
+    {
+      "name": "the settings, one of which nothing reads yet",
+      "direction": "server",
+      "frame": {
+        "id": 13,
         "outcome": {
-          "error": {
-            "code": "not_implemented",
-            "detail": {
-              "detail": "not_implemented",
-              "milestone": "M7",
-              "subsystem": "the settings API",
-              "tracking_issue": 108
-            },
-            "message": "the settings API is not in this build"
+          "ok": {
+            "reply": "settings",
+            "settings": {
+              "file": "C:\\Users\\alex\\AppData\\Local\\Clipped\\settings.json",
+              "settings": [
+                {
+                  "accepted": "\"default\", \"none\" or a device name",
+                  "applies": true,
+                  "key": "microphone",
+                  "label": "Microphone",
+                  "overridden": true,
+                  "value": "name:Shure MV7"
+                },
+                {
+                  "accepted": "\"game-window\" or \"display\"",
+                  "applies": false,
+                  "choices": [
+                    "game-window",
+                    "display"
+                  ],
+                  "key": "capture_target",
+                  "label": "Capture target",
+                  "overridden": false,
+                  "unavailable": "a recording still captures the game's own window; reading this setting when a recording starts is issue #61",
+                  "value": "game-window"
+                }
+              ]
+            }
           }
         },
         "type": "response"
       },
       "parses": true,
-      "discriminant": "response.error.not_implemented.not_implemented"
+      "discriminant": "response.ok.settings"
+    },
+    {
+      "name": "the microphones this machine has, with the default one marked",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "devices": {
+              "microphones": [
+                {
+                  "is_default": true,
+                  "name": "Shure MV7"
+                },
+                {
+                  "is_default": false,
+                  "name": "Line In (Realtek High Definition Audio)"
+                }
+              ]
+            },
+            "reply": "audio_devices"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.audio_devices"
+    },
+    {
+      "name": "the recorder does not start at sign-in",
+      "direction": "server",
+      "frame": {
+        "id": 16,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "enabled": false,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.off"
+    },
+    {
+      "name": "the recorder starts at sign-in, and the command it will run",
+      "direction": "server",
+      "frame": {
+        "id": 17,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "command": "\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games",
+              "enabled": true,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.on"
+    },
+    {
+      "name": "the recorder is set to start at sign-in from a Clipped that moved",
+      "direction": "server",
+      "frame": {
+        "id": 18,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "command": "\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games",
+              "enabled": true,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder",
+              "missing_executable": "C:\\Program Files\\Clipped\\clipped-recorder.exe"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.missing"
+    },
+    {
+      "name": "what a microphone is hearing, from a device that is plugged in",
+      "direction": "server",
+      "frame": {
+        "id": 19,
+        "outcome": {
+          "ok": {
+            "level": {
+              "device": "Shure MV7",
+              "muted": false,
+              "peak": 0.5
+            },
+            "reply": "microphone_level"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.microphone_level"
+    },
+    {
+      "name": "a setting refused with what would have been accepted",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "error": {
+            "code": "invalid_parameters",
+            "message": "`framerate` cannot be 900: 1-480 frames per second"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.invalid_parameters"
     },
     {
       "name": "a refusal with no detail",
@@ -1790,9 +2492,27 @@
         "event": "status_changed",
         "status": {
           "elapsed_ms": 4200,
-          "output": "D:\\clips\\session.mkv",
+          "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
           "recording_id": "r-1",
           "replay_seconds": 60,
+          "session": {
+            "game_id": "cs2",
+            "game_name": "Counter-Strike 2",
+            "recordings": [
+              {
+                "duration_ms": 1800000,
+                "outcome": "recorded",
+                "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                "session_index": 1
+              },
+              {
+                "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                "session_index": 2
+              }
+            ],
+            "session_id": "cs2-20260811-201400",
+            "started_at": "2026-08-11T20:14:00+01:00"
+          },
           "state": "recording",
           "target": "process `cs2.exe`"
         },
@@ -1800,6 +2520,99 @@
       },
       "parses": true,
       "discriminant": "event.status_changed.recording"
+    },
+    {
+      "name": "a recorder settling back to watching after a game exited",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "session": {
+            "game_id": "cs2",
+            "game_name": "Counter-Strike 2",
+            "recordings": [
+              {
+                "duration_ms": 1800000,
+                "outcome": "recorded",
+                "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                "session_index": 1
+              },
+              {
+                "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                "session_index": 2
+              }
+            ],
+            "session_id": "cs2-20260811-201400",
+            "started_at": "2026-08-11T20:14:00+01:00"
+          },
+          "state": "watching"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.status_changed.watching"
+    },
+    {
+      "name": "a sitting ending, with the files it produced",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "game-exited",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "game_id": "cs2",
+          "game_name": "Counter-Strike 2",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            },
+            {
+              "duration_ms": 1140000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "session_index": 2
+            }
+          ],
+          "session_id": "cs2-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.game-exited"
+    },
+    {
+      "name": "a sitting of a game the catalogue would not attribute ending",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "recorder-stopping",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            },
+            {
+              "duration_ms": 1140000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "session_index": 2
+            }
+          ],
+          "session_id": "unattributed-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.recorder-stopping"
     },
     {
       "name": "a recording that ended by itself",
@@ -1815,6 +2628,41 @@
       },
       "parses": true,
       "discriminant": "event.recording_failed"
+    },
+    {
+      "name": "an export part-way through a recording that said how long it was",
+      "direction": "server",
+      "frame": {
+        "event": "export_progress",
+        "export": {
+          "bytes": 3924481644,
+          "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+          "packets": 235248,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv",
+          "total_ms": 6540000,
+          "written_ms": 2616000
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.export_progress.measured"
+    },
+    {
+      "name": "an export of a recording that never said how long it was",
+      "direction": "server",
+      "frame": {
+        "event": "export_progress",
+        "export": {
+          "bytes": 3924481644,
+          "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+          "packets": 235248,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv",
+          "written_ms": 2616000
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.export_progress.unmeasured"
     },
     {
       "name": "an error code invented later",
@@ -1907,6 +2755,32 @@
       },
       "parses": true,
       "discriminant": "event.unrecognised"
+    },
+    {
+      "name": "a reason for a sitting to end invented later",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "disk_full",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "game_id": "cs2",
+          "game_name": "Counter-Strike 2",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            }
+          ],
+          "session_id": "cs2-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.disk_full"
     },
     {
       "name": "a feature invented later",

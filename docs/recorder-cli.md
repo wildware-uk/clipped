@@ -43,9 +43,11 @@ be discovered in a file:
   silently recorded at the source size.
 
 A recording also ends if the window changes size, because Matroska fixes a
-track's dimensions in its header and the encoder is configured for one size. The
-file is finished at that point and says so; what a session should do instead is
-[#184](https://github.com/wildware-uk/clipped/issues/184).
+track's dimensions in its header and the encoder session is configured for one
+size — neither can change part way through a file. The file is finished at that
+point, complete and seekable, and says why. **A `watch` session carries on in the
+next file; a `record` run does not**, and the section below says what each one
+does.
 
 **`replay` keeps the last few minutes and saves them on a key.** It is `record`
 with a rolling buffer beside it: the recording runs as usual, every encoded
@@ -78,9 +80,10 @@ clipped-recorder replay --window <TITLE> [--duration <SECONDS>]
 clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
-clipped-recorder serve [--endpoint <NAME>]
+clipped-recorder serve [--endpoint <NAME>] [--watch-for-games]
 clipped-recorder start-at-login <enable|disable|status>
 clipped-recorder plugins <list|enable <ID>|disable <ID>>
+clipped-recorder recover [--directory <PATH>] [--session <ID>] [--adopt | --discard]
 ```
 
 Nothing is currently specified without being declared: `record`,
@@ -89,6 +92,8 @@ Nothing is currently specified without being declared: `record`,
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
 `capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
 `serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)),
+`recover` ([#103](https://github.com/wildware-uk/clipped/issues/103),
+[#451](https://github.com/wildware-uk/clipped/issues/451)),
 `start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) and
 `plugins` ([#492](https://github.com/wildware-uk/clipped/issues/492)) are
 all implemented below (AGENTS.md section 27).
@@ -232,6 +237,39 @@ Alt-tabbing out of an exclusive fullscreen game minimises it, and stopping there
 would cost the rest of the session for two keystrokes; everything before the
 minimise and everything after the restore is in the one file, on one timeline.
 
+A window **resized** is the other answer, and the sentence says so:
+
+```text
+Recorded 229 frames of 1282x752 AV1 in 7.66s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 29.8 fps sustained; 0 frames dropped). Stopped because the recorded window changed size, which one file cannot follow.
+```
+
+Dragging a window's edge, a game changing resolution and a borderless window
+going fullscreen all reach the recorder as the same thing: the capture's frames
+are a different shape from the ones the file was opened for. A Matroska track's
+dimensions live in the header and an encoder session's resolution is fixed when
+it opens, so the file is finished there rather than filled with pictures of a
+size it does not declare. Nothing is lost — everything up to the change is in
+that file, flushed, finalised and seekable.
+
+**`record` stops; `watch` carries straight on.** `record` was given one path to
+write and writes that file; there is no second file for it to make and no session
+to put one in. An automatic session treats the change as a seam and starts the
+next recording of the same sitting immediately — a resize is proof that the
+window is still there, so it does not wait out the delay that exists for a game
+that may have quit. Two files, one sitting, joined by the session record
+([sessions.md](sessions.md), [ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+
+Clipped does **not** scale the new size back to the old one to keep a single
+file. Doing so would put a resample on the frame path the game is paying for, and
+would record an enlarged window as an upscale of the smaller picture in a track
+that admits nothing about it. The ADR has the full argument.
+
+One size change cannot be followed at all: a window whose new client area has an
+**odd** width or height has no 4:2:0 representation, so no encoder will open for
+it and the recording that follows the resize fails with `encoder-unavailable`.
+That is [#561](https://github.com/wildware-uk/clipped/issues/561) and is not
+specific to resizing — such a window cannot be recorded from the start either.
+
 **A recording that captured nothing at all leaves no file.** If capture never
 produced a frame the file would be a header with no picture in it — which the
 media library would index and draw as a tile that cannot be played — so it is
@@ -364,7 +402,7 @@ it costs somebody a session.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--output-directory <PATH>` | the Clipped folder of your videos directory | Where recordings and session records go |
+| `--output-directory <PATH>` | `recording_directory` from the settings file, or the Clipped folder of your videos directory | Where recordings and session records go |
 | `--window-timeout <SECONDS>` | 120 | How long a game may take to put a window on screen |
 | `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording the settings file says nothing about |
 | `--microphone`, `--system-audio` | `default` | As `record`: one named audio track per source, `none` to record without it |
@@ -378,6 +416,12 @@ gives everything, in its global layer — is what that game records at. **Every
 setting it does not mention is what this command line asked for**, so
 `watch --framerate 144` records at 144 on a machine with no settings file, and
 on one whose file says nothing about the frame rate.
+
+The recording directory follows the same rule the other way round: it is the one
+setting the flag wins, because `--output-directory` is what somebody typed for
+*this* run, and where a run writes is decided before any game has launched. With
+no flag, `recording_directory` from the settings file is where recordings go —
+which is what a directory picked on the Settings screen sets.
 
 A setting configured for a game therefore wins over the same option typed here.
 Which of the two should win is
@@ -475,6 +519,80 @@ The desktop application cannot drive this yet, and cannot see a session even
 when the recorder is running one: the control protocol describes a recording by
 its capture target and has no vocabulary for a game or a session. That is
 [#241](https://github.com/wildware-uk/clipped/issues/241).
+
+## `recover`
+
+Lists the recordings an interrupted recorder left behind, and lets you keep or
+discard them. [sessions.md](sessions.md#recovering-what-a-killed-recorder-left)
+is where the vocabulary lives — what an interrupted recording is, what adopting
+and discarding write into the session record, and the words `interrupted` and
+`discarded` mean once they are there. This is the reference for the command
+line over it.
+
+```text
+clipped-recorder recover
+clipped-recorder recover --adopt
+clipped-recorder recover --discard --session <ID>
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--directory <PATH>` | the Clipped folder of your videos directory, same as `watch` | Where to look for session records and the recordings they name |
+| `--session <ID>` | every interrupted recording | Only the one named — the identifier `recover` prints for each |
+| `--adopt` | off | Keep every recording found, or the one `--session` names |
+| `--discard` | off | Move one recording's file to the trash. Requires `--session` |
+
+**Listing is the default, and it changes nothing.** Running `recover` with no
+arguments prints what there is — session, game, when it started, how large the
+file is — and touches neither the recordings directory nor the session records.
+That is deliberate: this is the command somebody runs to answer "where did my
+recording go", and answering it must not itself change the answer.
+
+```text
+2 interrupted recordings in D:\clips:
+  cs2-20260811-143205 of Counter-Strike 2, started 2026-08-11T14:32:05+01:00, 1.2 GB at D:\clips\clipped-cs2-20260811-143205.mkv
+  cs2-20260811-150102 of Counter-Strike 2, started 2026-08-11T15:01:02+01:00, no file was written
+
+These recordings play from the start. They have no index, so seeking scans the file
+until it is rewritten (issue #283).
+  --adopt                    keep them, and stop listing them here
+  --discard --session <ID>   move one recording to the trash and record that you did
+```
+
+**`--adopt` never touches the file.** What changes is the session record: the
+entry gains an end time and the `interrupted` outcome, so the recording is
+indexed like any other and is not offered again. It does not rewrite the file
+to give it back the index a normal recording ends with — that is
+[#283](https://github.com/wildware-uk/clipped/issues/283) — so the footage
+still plays from the start and seeks by scanning.
+
+**`--discard` moves the file into `clipped-library`'s real trash rather than
+deleting it** ([#451](https://github.com/wildware-uk/clipped/issues/451)). It
+indexes the recording first — the recording has no library row until this
+point, because the library only indexes one once its session record exists —
+and only then sends that row to the trash, the same call a deletion made from
+the library uses. The session record gets an end time and the `discarded`
+outcome, the same shape as `--adopt`'s, because the record that a recording
+existed and was thrown away is worth more than a gap. What `--discard` prints
+names where the file went:
+
+```text
+Discarded D:\clips\clipped-cs2-20260811-143205.mkv: moved to the trash at D:\clips.trash\20260811-090000\clipped-cs2-20260811-143205.mkv, and listed there -- restorable until the trash is emptied or its retention expires it.
+```
+
+That is not a courtesy — it is the same trash [storage-management.md](storage-management.md#the-trash)
+describes for everything else deleted from the library: listed on the trash
+screen, counted towards what emptying it would reclaim, restorable, and swept
+by whatever retention is configured. `storage-management.md`'s
+["Getting a row before there is one"](storage-management.md#getting-a-row-before-there-is-one-clipped-recorder-recover---discard)
+has the ordering that makes this safe — which of indexing, moving and closing
+the sidecar record runs first, and what a failure between two of them leaves
+behind.
+
+**`--discard` always requires `--session`.** Even though the choice is
+recoverable now, a bulk action nobody chose item by item is still refused
+(AGENTS.md section 56) — `recover --discard` on its own is rejected rather than
+moving everything it found.
 
 ## `plugins`
 
@@ -724,12 +842,33 @@ actually runs in beside a user interface: it listens on a named pipe and takes
 its instructions over the control protocol, for as long as it is left running.
 
 ```text
-clipped-recorder serve [--endpoint <NAME>]
+clipped-recorder serve [--endpoint <NAME>] [--watch-for-games]
 ```
 
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--endpoint <NAME>` | `clipped-recorder.<session>` | A name, never a path |
+| `--watch-for-games` | off | Also record games as they launch, in this process |
+
+**`--watch-for-games` is what a shipped build passes.** It runs the same launch
+watcher `watch` runs, on a thread of its own, in the process that serves the
+protocol and owns the global hotkeys — so a bookmark, a screenshot and a stop
+reach a recording nobody had to start, through the same commands they reach one
+somebody did ([#421](https://github.com/wildware-uk/clipped/issues/421),
+[sessions.md](sessions.md)). `start-at-login` writes it into the `Run` key and
+the desktop supervisor passes it when it starts a recorder.
+
+It is a flag rather than the default because a `serve` started by hand, or by a
+test, must not begin recording whatever game happens to be running on the
+machine, or create that person's recordings folder (AGENTS.md section 25).
+Recordings go where the settings file says, and to the Clipped folder of the
+videos directory when it says nothing — the same three layers `watch` resolves,
+minus the flag it has no command line to read.
+
+Nothing about it can stop the recorder serving. A recordings folder that cannot
+be made, or a machine that cannot be watched for launches, is reported and then
+left: a recorder that refused to answer the window because it could not create a
+folder would be a far worse thing to ship (AGENTS.md sections 16 and 17).
 
 [ipc.md](ipc.md) is the protocol itself — the framing, the handshake, the
 compatibility policy, every command and event, and what the transport does and
@@ -828,8 +967,13 @@ It writes exactly one value, under this account only:
 
 ```text
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-    "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve
+    "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve --watch-for-games
 ```
+
+`--watch-for-games` because a recorder started at login that did not watch for
+games would record nothing until somebody opened the window and pressed a
+button, which is the opposite of what it is for
+([#421](https://github.com/wildware-uk/clipped/issues/421)).
 
 `HKEY_CURRENT_USER` rather than `HKEY_LOCAL_MACHINE`, so it needs no elevation
 and applies to one person on a shared machine — and so the recorder runs in the
@@ -850,8 +994,12 @@ installation you want.
 ([#220](https://github.com/wildware-uk/clipped/issues/220)). That is worth
 knowing before turning it on.
 
-There is no setting for this in the desktop application yet; the settings screen
-is [#108](https://github.com/wildware-uk/clipped/issues/108).
+The Settings screen's **Startup** section has the same switch
+([#308](https://github.com/wildware-uk/clipped/issues/308)), and it is the same
+code: the window has no registry of its own and could not name the executable to
+run if it did, so it asks the recorder over `get_start_at_login` and
+`set_start_at_login` ([ipc.md](ipc.md)). Turning it on there and running `enable`
+here do exactly the same thing, and either can undo the other.
 
 ## Exit codes
 
@@ -882,6 +1030,17 @@ all.
 be written to, the game catalogue cannot be read, or process detection stopped
 while it was watching — the last of which means no further game would have been
 noticed, so continuing would be a recorder that quietly records nothing.
+
+`recover` exits 2 for `--discard` with no `--session`, and for a `--session`
+that names nothing waiting to be recovered — both are the command line to
+blame, not the recordings directory. It exits 1 for everything else that can
+go wrong: the directory could not be read, the library index could not be
+opened or indexed, a recording could not be moved into the trash, or a
+session record could not be rewritten. None of those is the footage being
+lost — for every one but the last, nothing has moved and the sidecar is
+still open, so the next `recover` offers exactly what this one did; for the
+last, the recording is already safely in the trash and only its sidecar
+still says otherwise.
 
 `start-at-login` exits 0 for all three actions, including `disable` when nothing
 was configured: that is the state being asked for, and treating it as a failure

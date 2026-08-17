@@ -11,11 +11,30 @@ milestone M6.
 
 ## What exists today
 
-The generator, the cache and the background worker exist and are tested.
-**Nothing draws the result.** The library screen is
-[#52](https://github.com/wildware-uk/clipped/issues/52) and no process hosts the
-worker yet, so on a real machine no thumbnail is generated until one of those
-lands. This document describes behaviour that is written and covered by
+The generator, the cache and the background worker exist, are tested, and
+**are running**: `apps/recorder` starts `ThumbnailService` when it opens the
+library (`apps/recorder/src/library.rs:787`) and asks for a thumbnail for every
+recording worth reading after each successful reconciliation (`:852`, `:1101`),
+so thumbnails are made on a real machine as recordings are indexed
+([#57](https://github.com/wildware-uk/clipped/issues/57)).
+
+**Nothing draws the result yet.** The library screen is
+[#52](https://github.com/wildware-uk/clipped/issues/52), and carrying a
+thumbnail to the window is
+[#448](https://github.com/wildware-uk/clipped/issues/448). So the files are
+generated and cached, and no user has seen one.
+
+One half of the "never interferes with a recording" promise is also mechanism
+without a caller. `ThumbnailService::suspend_for_recording` and `resume` are
+built and tested — a real blocking suspend, not a flag — and **nothing outside
+this crate calls either**. What protects a recording today is entirely the
+worker's thread and I/O priority (`crates/background/src/windows/priority.rs`,
+moved out of this module by
+[#293](https://github.com/wildware-uk/clipped/issues/293)), which is real and
+proven by reading the priority back. Suspending the worker while a recording
+runs needs a caller in `apps/recorder`, and there is none.
+
+This document describes behaviour that is written and covered by
 `crates/library/tests/thumbnails.rs`, and says so where it does not.
 
 ## Which frame
@@ -51,13 +70,13 @@ library. Measured figures are below.
 
 Rejected, and why:
 
-| Alternative | Why not |
-| --- | --- |
-| The first frame | The failure above. It is free and it is usually wrong. |
-| A fixed offset, e.g. 30 seconds in | A 20-second replay clip has no 30-second mark, and a game with a two-minute loading screen still gets the loading screen. Fractions of the duration scale to both. |
-| Scene-change detection, motion analysis | Needs continuous decoding of a large part of the file, which is the cost this design exists to avoid — hundreds of frames rather than one. |
-| Face or object detection | A model, a dependency and an order of magnitude more processor, to choose between frames that all cost 20 kB. |
-| Letting the user pick | Worth having later as an override (no issue yet), but a library only becomes browsable if the default is good without being asked. |
+| Alternative                             | Why not                                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The first frame                         | The failure above. It is free and it is usually wrong.                                                                                                             |
+| A fixed offset, e.g. 30 seconds in      | A 20-second replay clip has no 30-second mark, and a game with a two-minute loading screen still gets the loading screen. Fractions of the duration scale to both. |
+| Scene-change detection, motion analysis | Needs continuous decoding of a large part of the file, which is the cost this design exists to avoid — hundreds of frames rather than one.                         |
+| Face or object detection                | A model, a dependency and an order of magnitude more processor, to choose between frames that all cost 20 kB.                                                      |
+| Letting the user pick                   | Worth having later as an override (no issue yet), but a library only becomes browsable if the default is good without being asked.                                 |
 
 Sampling is over a fixed grid of about 4,096 pixels rather than the whole plane,
 so scoring a 4K frame costs the same as scoring a 720p one.
@@ -81,13 +100,13 @@ width that is sharp where a thumbnail is actually shown.
 **Is one size enough?** Measured on the recording in the table below, at the
 default quality:
 
-| Width | Height | Bytes | Per 10,000 recordings |
-| --- | --- | --- | --- |
-| 320 | 180 | 6,698 | 64 MB |
-| **640** | **360** | **20,073** | **191 MB** |
-| 1,280 | 720 | 126,108 | 1.2 GB |
+| Width   | Height  | Bytes      | Per 10,000 recordings |
+| ------- | ------- | ---------- | --------------------- |
+| 320     | 180     | 6,698      | 64 MB                 |
+| **640** | **360** | **20,073** | **191 MB**            |
+| 1,280   | 720     | 126,108    | 1.2 GB                |
 
-A second stored size would cost almost nothing in *time* — the frame is decoded
+A second stored size would cost almost nothing in _time_ — the frame is decoded
 once, and a second scale and encode is a few milliseconds — so the decision is
 about bytes and about cleanup, not about speed. 640 alone serves the one place a
 thumbnail is drawn at size; 320 as well would save nothing worth a second file
@@ -138,7 +157,7 @@ small file read rather than hashing a two-gigabyte recording.
 AGENTS.md section 31 forbids media blobs in SQLite and
 [#55](https://github.com/wildware-uk/clipped/issues/55)'s schema deliberately has
 no BLOB column, so the picture is a file whatever else happens. That leaves where
-the *bookkeeping* goes, and it is the sidecar rather than a `thumbnail_path`
+the _bookkeeping_ goes, and it is the sidecar rather than a `thumbnail_path`
 column on `recordings`:
 
 - A column needs a migration in `clipped-storage`, whose migrations are
@@ -155,7 +174,7 @@ That makes this a documented sidecar format, which is what AGENTS.md section 32
 asks of application metadata that is not in SQLite.
 
 Thumbnails are already the `Thumbnails` category in storage accounting
-([storage-management.md](storage-management.md)), which is marked *regenerable*:
+([storage-management.md](storage-management.md)), which is marked _regenerable_:
 losing one costs the tens of milliseconds below and nothing else.
 
 ### The sidecar
@@ -202,7 +221,7 @@ not know.
 ### Invalidation
 
 The sidecar names the recording it was made from — path, length and modification
-time. A lookup compares that against the file on disk *now*, so a recording that
+time. A lookup compares that against the file on disk _now_, so a recording that
 was trimmed, re-encoded or replaced never shows its previous picture. There is no
 separate invalidation step to forget to run, and a remembered failure stops
 applying the moment the file changes, so a repaired recording is attempted again.
@@ -223,7 +242,7 @@ three fields.
    deletes one: a lookup only opens `<key>.json` and `<key>.jpg`, so an
    abandoned `<key>.jpg.writing` is invisible to every other path in the module.
 3. Pictures with no sidecar to say what they are.
-4. The least recently *written* entries, until the directory is inside its byte
+4. The least recently _written_ entries, until the directory is inside its byte
    budget — 256 MB by default, which at 20 kB a picture is about 13,000
    recordings.
 
@@ -249,23 +268,23 @@ Issue #57's third acceptance criterion: a failure to generate a thumbnail leaves
 the recording usable. `ThumbnailState` has exactly three answers, and none of
 them is an error a screen has to handle:
 
-| State | What a screen does |
-| --- | --- |
-| `Pending` | Draw the tile with no picture. One is being made. |
-| `Ready(Thumbnail)` | Draw `image_path()`. |
+| State                | What a screen does                                 |
+| -------------------- | -------------------------------------------------- |
+| `Pending`            | Draw the tile with no picture. One is being made.  |
+| `Ready(Thumbnail)`   | Draw `image_path()`.                               |
 | `Unavailable(error)` | Draw the tile with no picture, and it may say why. |
 
 Every one of these is reached by a real case:
 
-| What happened | Answer |
-| --- | --- |
-| Never made | `Pending` |
-| The recording was trimmed or replaced | `Pending` — the entry no longer matches |
-| Somebody deleted the picture but not the sidecar | `Pending` |
-| The sidecar is corrupt, or from another build | `Pending` — and a corrupt one is deleted on the spot |
-| The recording is gone from the disk | `Unavailable` — it cannot be stat-ed |
-| The recording holds no video stream | `Unavailable` — an audio-only file has no frame to show |
-| The container cannot be opened at all | `Unavailable`, and remembered so it is not retried per tile |
+| What happened                                    | Answer                                                      |
+| ------------------------------------------------ | ----------------------------------------------------------- |
+| Never made                                       | `Pending`                                                   |
+| The recording was trimmed or replaced            | `Pending` — the entry no longer matches                     |
+| Somebody deleted the picture but not the sidecar | `Pending`                                                   |
+| The sidecar is corrupt, or from another build    | `Pending` — and a corrupt one is deleted on the spot        |
+| The recording is gone from the disk              | `Unavailable` — it cannot be stat-ed                        |
+| The recording holds no video stream              | `Unavailable` — an audio-only file has no frame to show     |
+| The container cannot be opened at all            | `Unavailable`, and remembered so it is not retried per tile |
 
 A recording whose every candidate frame is a flat colour still gets a picture,
 marked `is_blank()`. That is what the recording looks like; a screen may show it
@@ -293,15 +312,15 @@ truthfully. Nothing hosts it yet.
 
 ### What bounds it
 
-| Bound | Value | Why |
-| --- | --- | --- |
-| Threads | 1 | above |
-| Queue | 128 paths | a library scan must not become an unbounded allocation; the **oldest** waiting request is dropped when it is full, because the newest is what somebody just scrolled to |
-| Work per recording | 3 seeks, at most 12 decoded frames, 1 JPEG | `src/thumbnail/choose.rs` |
-| Packets per candidate | 512 | a container whose index is wrong must not turn one candidate into a full read of the file |
-| Thread priority | `THREAD_PRIORITY_LOWEST` | run only when nothing else wants the processor |
-| I/O priority | `THREAD_MODE_BACKGROUND_BEGIN` | reads must not take disk bandwidth from a recording |
-| Suspension | while a recording is running | below |
+| Bound                 | Value                                      | Why                                                                                                                                                                     |
+| --------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Threads               | 1                                          | above                                                                                                                                                                   |
+| Queue                 | 128 paths                                  | a library scan must not become an unbounded allocation; the **oldest** waiting request is dropped when it is full, because the newest is what somebody just scrolled to |
+| Work per recording    | 3 seeks, at most 12 decoded frames, 1 JPEG | `src/thumbnail/choose.rs`                                                                                                                                               |
+| Packets per candidate | 512                                        | a container whose index is wrong must not turn one candidate into a full read of the file                                                                               |
+| Thread priority       | `THREAD_PRIORITY_LOWEST`                   | run only when nothing else wants the processor                                                                                                                          |
+| I/O priority          | `THREAD_MODE_BACKGROUND_BEGIN`             | reads must not take disk bandwidth from a recording                                                                                                                     |
+| Suspension            | while a recording is running               | below                                                                                                                                                                   |
 
 ### Suspension is the "deferred" half
 
@@ -334,25 +353,25 @@ build, because background mode is lower still).
 Taken by `crates/library/tests/thumbnails.rs`, which runs on every `cargo test`
 and prints the figures with `--nocapture`. Measured on:
 
-| | |
-| --- | --- |
-| Machine | AMD Ryzen 9 9950X3D, 16 cores, 62 GB, Crucial P5 Plus NVMe SSD |
-| Operating system | Windows 11 Pro, 10.0.26200 |
-| File cache | warm |
-| Date | 2026-08-12 |
+|                  |                                                                |
+| ---------------- | -------------------------------------------------------------- |
+| Machine          | AMD Ryzen 9 9950X3D, 16 cores, 62 GB, Crucial P5 Plus NVMe SSD |
+| Operating system | Windows 11 Pro, 10.0.26200                                     |
+| File cache       | warm                                                           |
+| Date             | 2026-08-12                                                     |
 
 ### The ordinary case
 
-| | |
-| --- | --- |
+|          |                                                                    |
+| -------- | ------------------------------------------------------------------ |
 | Workload | 12 s of 1920×1080 30 fps H.264 at 20,000 kb/s in Matroska, 29.4 MB |
-| Content | a test pattern with noise over it, so nothing compresses away |
-| Outcome | a 640×360 JPEG of 20,073 bytes, from the frame at 1.1 s |
+| Content  | a test pattern with noise over it, so nothing compresses away      |
+| Outcome  | a 640×360 JPEG of 20,073 bytes, from the frame at 1.1 s            |
 
-| Build | Per thumbnail |
-| --- | --- |
+| Build       | Per thumbnail                     |
+| ----------- | --------------------------------- |
 | `--release` | 45–112 ms (5 runs, median ~50 ms) |
-| debug | 44–47 ms (4 runs) |
+| debug       | 44–47 ms (4 runs)                 |
 
 The two builds are the same because essentially all of this time is inside
 FFmpeg's own libraries, which are the pinned prebuilt ones either way; the Rust
@@ -365,15 +384,15 @@ recording of a game normally costs.
 
 ### When every early candidate is blank
 
-| | |
-| --- | --- |
+|          |                                                                                 |
+| -------- | ------------------------------------------------------------------------------- |
 | Workload | 12 s of 1280×720 30 fps H.264, black for its first 6 s and a test pattern after |
-| Outcome | the frame at 7.0 s, from the third candidate |
+| Outcome  | the frame at 7.0 s, from the third candidate                                    |
 
-| Build | Per thumbnail |
-| --- | --- |
+| Build       | Per thumbnail     |
+| ----------- | ----------------- |
 | `--release` | 21–26 ms (2 runs) |
-| debug | 11–13 ms (3 runs) |
+| debug       | 11–13 ms (3 runs) |
 
 Three seeks and several decoded frames, and still cheaper than the row above —
 because this file is 720p at a fraction of the bitrate, and the cost of a
@@ -397,22 +416,22 @@ there for.
 **Not measured here:** the effect on a game's frame times while generation runs.
 That needs a game, a GPU and a machine to itself, so it is a manual measurement
 rather than a test. What is asserted instead is the second half of #57's
-criterion — that generation is *deferred*: the worker is suspended while a
+criterion — that generation is _deferred_: the worker is suspended while a
 recording is running, and
 `suspending_generation_stops_the_worker_and_resuming_lets_it_finish` fails if
 suspension is a flag nobody reads.
 
 ## Where the code is
 
-| | |
-| --- | --- |
-| Module | `crates/library/src/thumbnail` |
-| Choosing a frame | `choose.rs` |
-| Decoding, scaling and encoding | `render.rs` |
-| The cache | `cache.rs` |
-| The background worker | `service.rs` |
-| Thread priority | `windows/priority.rs` |
-| Tests | `crates/library/tests/thumbnails.rs`, and unit tests in each module |
+|                                                                  |                                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Module                                                           | `crates/library/src/thumbnail`                                      |
+| Choosing a frame                                                 | `choose.rs`                                                         |
+| Decoding, scaling and encoding                                   | `render.rs`                                                         |
+| The cache                                                        | `cache.rs`                                                          |
+| Wiring this module's cache and renderer to the background worker | `service.rs`                                                        |
+| The queue, the thread, suspension and thread priority            | `crates/background` (issue #293)                                    |
+| Tests                                                            | `crates/library/tests/thumbnails.rs`, and unit tests in each module |
 
 ```text
 cargo test -p clipped-library
@@ -428,7 +447,7 @@ configured.
 A thumbnail is a property of a library item, and this crate already owns what one
 costs on disk. `clipped-library` is layer 1, so it may name `rusty_ffmpeg`
 directly: `clipped-muxer` owns the workspace's safe wrappers over the container
-API and sits at layer 2, *above* this crate, so depending on it would invert the
+API and sits at layer 2, _above_ this crate, so depending on it would invert the
 direction `tests/integration/tests/workspace_layering.rs` asserts.
 [ADR 0004](adr/0004-ffmpeg-dependency-strategy.md) permits exactly that case, and
 `clipped-encoder` and `clipped-waveform` are the other two crates that use the
@@ -443,11 +462,14 @@ call.
 
 The alternative is a `clipped-thumbnails` crate beside `clipped-waveform`, which
 is the shape [#66](https://github.com/wildware-uk/clipped/issues/66) chose for the
-same kind of work. That was not done here because creating a crate means editing
-the layer table, the layering test and the architecture document — shared files
-that several M6 tickets were touching in the same week — and because it is worth
-deciding together with the duplication it would fix:
-[#293](https://github.com/wildware-uk/clipped/issues/293) covers extracting the
-source identity, the background worker and the thread-priority calls that this
-module and `clipped-waveform` now each have their own copy of, and the crate
-placement is a question on it.
+same kind of work. That is still not done: the source identity, the background
+worker and the thread-priority calls this module and `clipped-waveform` used to
+each have their own copy of moved into `clipped-background`
+([#293](https://github.com/wildware-uk/clipped/issues/293),
+`crates/background/src/lib.rs`), a new layer-0 crate rather than the
+layer-1 `clipped-thumbnails` #66 chose — because layer 0 is what let both
+`clipped-waveform` and this module depend on it without either depending on the
+other. What stays here is the frame-choosing, the decode-scale-encode pipeline
+and the JPEG-plus-JSON cache format, which is thumbnail-specific in a way the
+worker never was. Moving *that* out from under `clipped-library` — the
+`clipped-thumbnails` question above — is still open.

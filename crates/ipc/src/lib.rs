@@ -119,9 +119,12 @@ pub mod frame;
 pub mod hotkeys;
 pub mod library;
 pub mod message;
+pub mod playback;
 mod plugins;
 pub mod schema;
 pub mod server;
+pub mod settings;
+pub mod startup;
 pub mod status;
 pub mod supervisor;
 pub mod transport;
@@ -129,28 +132,35 @@ pub mod transport;
 pub use client::{Client, ClientError, EventClient};
 pub use command::{
     AddBookmark, Command, ExportRecording, Reply, SaveReplay, Shutdown, StartRecording,
-    StopRecording, TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
+    StopRecording, TakeScreenshot,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
-    EmptyTrash, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
-    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LibraryTrash,
-    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem,
+    EmptyTrash, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
+    LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+    LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
+    TrashListing, TrashedItem,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+pub use playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 pub use plugins::{PluginDeclaration, PluginState, RefusedPlugin};
 pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
 };
+pub use settings::{
+    ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
+    SettingEntry, SettingsView,
+};
+pub use startup::{SetStartAtLogin, StartAtLogin};
 pub use status::{
-    ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
-    ReplaySummary, ScreenshotSummary,
+    ActiveRecording, BookmarkSummary, EndReason, ExportProgress, ExportSummary, RecorderStatus,
+    RecordingSummary, ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,

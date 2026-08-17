@@ -53,6 +53,7 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
 use crate::windows::apartment::ensure_multi_threaded_apartment;
+use crate::windows::crop::{recordable_size, EvenCrop};
 use crate::windows::device::CaptureDevice;
 use crate::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
@@ -366,8 +367,10 @@ impl CaptureBackend for GraphicsCaptureBackend {
         let format = running.recreate_frame_pool(size)?;
 
         tracing::info!(
-            width = size.width(),
-            height = size.height(),
+            target_width = size.width(),
+            target_height = size.height(),
+            width = format.size().width(),
+            height = format.size().height(),
             "Windows Graphics Capture frame pool recreated"
         );
 
@@ -551,9 +554,18 @@ struct Running {
     item_closed: i64,
     /// The size the pool is currently configured for. A frame whose
     /// `ContentSize` differs from this is what a resize looks like.
+    ///
+    /// **The content's own size, never the rounded one.** The pool is what the
+    /// compositor composes into, and the comparison above is the whole of how a
+    /// resize is recognised; a pool deliberately a row shorter than the content
+    /// would report a size change for ever (issue #561).
     pool_size: SizeInt32,
-    /// The format `initialise` or `resize` last reported.
+    /// The format `initialise` or `resize` last reported, which is
+    /// [`pool_size`](Self::pool_size) rounded down to even.
     format: FrameFormat,
+    /// Where a frame is cropped to an even size, for a target whose content has
+    /// an odd dimension. [`None`] — and no copy at all — for every even one.
+    crop: Option<EvenCrop>,
     /// The frame lent to the caller, still owned here.
     held: Option<HeldFrame>,
     /// A size change that has been reported and not yet acted on. While this is
@@ -574,16 +586,21 @@ impl Running {
         let pool_size = item
             .Size()
             .map_err(|error| starting_error(window, "reading the capture item's size", error))?;
-        let size = frame_size(pool_size).ok_or(CaptureError::UnsupportedTarget {
+        let content = frame_size(pool_size).ok_or(CaptureError::UnsupportedTarget {
             method: METHOD,
             target: target.properties().kind(),
             reason: "it currently has no visible content — a minimised window has a \
                      zero-sized client area, so there is nothing to capture until it is \
                      restored",
         })?;
+        let size = recordable_size(content, METHOD, target.properties().kind())?;
 
         let device = CaptureDevice::create()
             .map_err(|error| backend_error("creating the Direct3D 11 device", error))?;
+
+        // Only for a target whose content has an odd dimension, which is the
+        // only case that needs a copy at all; see `super::crop`.
+        let crop = even_crop(&device, content, size)?;
 
         // Free-threaded so that frames are delivered on a thread-pool thread
         // rather than through a message loop the capture thread would have to
@@ -639,6 +656,7 @@ impl Running {
             item_closed,
             pool_size,
             format: FrameFormat::new(size, PixelFormat::Bgra8Unorm),
+            crop,
             held: None,
             awaiting_resize: None,
             gaps: FrameGaps::default(),
@@ -754,6 +772,23 @@ impl Running {
         // released when `HeldFrame` drops.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }
             .map_err(|error| backend_error("reading a frame's Direct3D 11 texture", error))?;
+
+        // The one place a frame is not the compositor's own texture. A target
+        // whose content has an odd dimension cannot be encoded at that shape, so
+        // the even crop of it is copied into a texture this backend owns and
+        // *that* is what the caller is handed — because the size a frame
+        // declares has to be the size of the picture in it, not a smaller number
+        // beside a larger texture (`super::crop`, AGENTS.md section 22). The
+        // frame pool buffer is still held below: releasing it early would let
+        // the compositor recycle the source of a copy that has been issued and
+        // may not have retired.
+        let texture = match self.crop.as_ref() {
+            Some(crop) => {
+                crop.fill_from(&texture);
+                crop.texture().clone()
+            }
+            None => texture,
+        };
 
         // `TimeSpan::Duration` is signed and counts from an arbitrary
         // system-relative origin. It is never negative for a captured frame;
@@ -898,8 +933,23 @@ impl Running {
     }
 
     /// Rebuilds the frame pool for a new target size.
+    ///
+    /// `size` is the *target's* new size, as the acquisition that reported it
+    /// read it from the compositor, so it may have an odd dimension. The pool
+    /// takes it unchanged — it has to match what the compositor composes — and
+    /// the format returned is what will actually be recorded.
     fn recreate_frame_pool(&mut self, size: FrameSize) -> Result<FrameFormat, CaptureError> {
         self.release_held_frame();
+
+        let kind = if self.window.is_some() {
+            TargetKind::Window
+        } else {
+            TargetKind::Monitor
+        };
+        let recorded = recordable_size(size, METHOD, kind)?;
+        // Before the pool is touched, so that a target that cannot be recorded
+        // at all leaves the capture as it was rather than half reconfigured.
+        let crop = even_crop(&self.device, size, recorded)?;
 
         let pool_size = SizeInt32 {
             Width: i32::try_from(size.width()).unwrap_or(i32::MAX),
@@ -920,7 +970,8 @@ impl Running {
             .map_err(|error| backend_error("recreating the capture frame pool", error))?;
 
         self.pool_size = pool_size;
-        self.format = FrameFormat::new(size, PixelFormat::Bgra8Unorm);
+        self.format = FrameFormat::new(recorded, PixelFormat::Bgra8Unorm);
+        self.crop = crop;
         self.awaiting_resize = None;
         // Whatever the source did while the caller was reconfiguring its
         // encoder is not something this backend dropped.
@@ -1165,6 +1216,38 @@ fn configure_session(session: &GraphicsCaptureSession, config: &CaptureConfig) {
              have one"
         );
     }
+}
+
+/// The crop a capture of `content` needs in order to hand out `recorded`-sized
+/// frames, or [`None`] when the content is already even and nothing has to be
+/// copied.
+///
+/// The log line is once per capture start or resize, and it is there because a
+/// recording one row shorter than the window is a surprise worth being able to
+/// explain from a log rather than from a pixel ruler (AGENTS.md section 19).
+fn even_crop(
+    device: &CaptureDevice,
+    content: FrameSize,
+    recorded: FrameSize,
+) -> Result<Option<EvenCrop>, CaptureError> {
+    if recorded == content {
+        return Ok(None);
+    }
+
+    let crop = EvenCrop::create(device.d3d11(), recorded)
+        .map_err(|error| backend_error("creating the cropped frame texture", error))?;
+
+    tracing::info!(
+        content_width = content.width(),
+        content_height = content.height(),
+        width = recorded.width(),
+        height = recorded.height(),
+        "this target has an odd dimension, which 4:2:0 chroma cannot represent, so the \
+         recording is one row or column short of it and every frame is copied into a \
+         texture of the size the track declares"
+    );
+
+    Ok(Some(crop))
 }
 
 /// A [`SizeInt32`] as a [`FrameSize`], or [`None`] if either side is not
@@ -1884,5 +1967,210 @@ mod tests {
             }),
             FrameSize::new(1920, 1080)
         );
+    }
+
+    /// # Why this is `#[ignore]`d
+    ///
+    /// It is the only test in this file that asks Windows Graphics Capture for
+    /// a real window, and the CI runner will not give one: `CreateCaptureItem    /// ForWindow` answers `0x80070057` there for any window, odd-sized or not.
+    /// So this ran green on a developer's machine and red on `main`, which is
+    /// the worst way to find out.
+    ///
+    /// It is a real check and it passes on a machine with a desktop — run it
+    /// with `cargo test -p clipped-capture -- --ignored`. What it cannot be is
+    /// a gate, because the gate has no desktop. `docs/testing.md` lists it with
+    /// the other suites that need real hardware.
+    #[test]
+    #[ignore = "needs a real desktop session; WGC refuses a window capture item on a CI runner"]
+    fn a_window_with_an_odd_dimension_is_captured_one_row_short_of_it_rather_than_not_at_all() {
+        // Issue #561, end to end through this backend. Before it, a window like
+        // this reached the encoder at its own odd size and *every* encoder
+        // refused it, so the recording failed before its first frame — and under
+        // ADR 0012 a window resized into this shape failed every recording after
+        // it for the rest of the sitting.
+        //
+        // Three things have to hold together, and getting any one of them wrong
+        // is silent:
+        //
+        // 1. the size reported is even, or nothing can encode it;
+        // 2. the texture handed over is *that* size, or the track declares a
+        //    shape the pictures in it do not have (AGENTS.md section 22);
+        // 3. the frame pool keeps the content's own odd size, or every frame's
+        //    `ContentSize` disagrees with it and the backend reports a resize for
+        //    ever — which under ADR 0012 is a new file every few milliseconds.
+        if !WindowsGraphicsCapture::is_supported_here()
+            && skipped("GraphicsCaptureSession::IsSupported reports false here")
+        {
+            return;
+        }
+        let Some(window) = a_real_popup_window(987, 593) else {
+            skipped("this machine would not create a window");
+            return;
+        };
+        let _window = OwnedWindow(window);
+        paint(window);
+
+        let measured =
+            crate::windows::client_size(window).expect("a visible window has a client area");
+        let target = CaptureTarget::new(
+            TargetHandle::from_raw(window.0 as u64),
+            TargetProperties::new(TargetKind::Window, measured),
+        );
+
+        // `Running` rather than the trait, because the pool's size is the third
+        // fact above and nothing outside this file can see it.
+        let running = match Running::start(&target, &CaptureConfig::default()) {
+            Ok(running) => running,
+            Err(error) => {
+                skipped(&format!(
+                    "this machine would not capture a plain window: {error}"
+                ));
+                return;
+            }
+        };
+
+        let content = frame_size(running.pool_size).expect("a visible window has content");
+        assert!(
+            content.width() % 2 == 1 || content.height() % 2 == 1,
+            "the compositor reports {content} for a window created with a 987x593 client \
+             area, so this test is no longer exercising an odd size at all"
+        );
+        assert_eq!(
+            running.format.size(),
+            content
+                .rounded_down_to_even()
+                .expect("987x593 has an even picture inside it"),
+            "the size reported is what the encoder is configured for and what the Matroska \
+             track declares, and an odd one is refused by all four encoders"
+        );
+        assert!(
+            running.crop.is_some(),
+            "an odd source with no crop means the texture is a row taller than the frame \
+             says it is"
+        );
+
+        let recorded = running.format.size();
+        let mut backend = GraphicsCaptureBackend {
+            running: Some(running),
+        };
+
+        let mut seen = 0_u32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && seen < 2 {
+            paint(window);
+            pump_messages();
+            match backend.acquire(Duration::from_millis(200)) {
+                Ok(Acquisition::Frame(frame)) => {
+                    seen += 1;
+                    assert_eq!(
+                        frame.format().size(),
+                        recorded,
+                        "every frame declares the size the encoder was configured for"
+                    );
+                    assert_eq!(
+                        texture_size(&frame),
+                        Some((recorded.width(), recorded.height())),
+                        "the frame declares {recorded} and hands over a texture of another \
+                         size; the software encoder refuses that outright and the three \
+                         hardware encoders are handed a surface their session was not opened \
+                         for"
+                    );
+                }
+                Ok(Acquisition::Timeout | Acquisition::TargetMinimised) => {}
+                Ok(Acquisition::SizeChanged(size)) => panic!(
+                    "nothing resized this window: a frame pool one row shorter than the \
+                     content reports {size} for ever, and a session follows every one of \
+                     them with a new file (ADR 0012)"
+                ),
+                Err(error) => panic!("a window that is on screen must be capturable: {error}"),
+            }
+        }
+
+        assert!(
+            seen > 0,
+            "five seconds of acquisitions against a painted window produced no frame at all, \
+             so nothing above about the texture was checked"
+        );
+        backend.shut_down();
+    }
+
+    /// The dimensions of a frame's own texture, which is the half of
+    /// [`FrameFormat`] nothing else can check.
+    fn texture_size(frame: &CapturedFrame<'_>) -> Option<(u32, u32)> {
+        let raw = frame.texture().as_raw();
+        // SAFETY: the pointer came from a live `CapturedFrame`, whose texture the
+        // backend guarantees is a valid `ID3D11Texture2D` for as long as the
+        // frame exists. `from_raw_borrowed` takes no reference of its own.
+        let texture = unsafe { ID3D11Texture2D::from_raw_borrowed(&raw) }?;
+
+        let mut description = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `texture` is live and `description` is a live local the call
+        // writes into; `GetDesc` reads what the runtime already holds.
+        unsafe { texture.GetDesc(&raw mut description) };
+        Some((description.Width, description.Height))
+    }
+
+    /// Creates a borderless top-level window whose *client* area is exactly
+    /// `width` by `height`.
+    ///
+    /// `WS_POPUP` rather than [`a_real_window`]'s `WS_OVERLAPPEDWINDOW`, because
+    /// a popup has no border and no caption: the size asked for is the client
+    /// area, which is the thing a test about an odd client area has to control.
+    fn a_real_popup_window(width: i32, height: i32) -> Option<HWND> {
+        // SAFETY: `STATIC` is a system window class; both strings are static
+        // wide literals living for the whole program; no parent, menu, instance
+        // or creation parameter is passed. The caller destroys the window.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+                windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE,
+                windows::core::w!("STATIC"),
+                windows::core::w!("clipped odd size test window"),
+                windows::Win32::UI::WindowsAndMessaging::WS_POPUP
+                    | windows::Win32::UI::WindowsAndMessaging::WS_VISIBLE,
+                60,
+                60,
+                width,
+                height,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .ok()
+    }
+
+    /// Fills the window with a colour, which is what makes the compositor
+    /// produce a frame for it.
+    fn paint(window: HWND) {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        // SAFETY: `rect` is a live local, which is all `GetClientRect` needs.
+        let _ = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetClientRect(window, &raw mut rect)
+        };
+
+        // SAFETY: the window is live; the device context is released below, and
+        // the brush is deleted after the fill that uses it.
+        unsafe {
+            let context = windows::Win32::Graphics::Gdi::GetDC(Some(window));
+            let brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(
+                windows::Win32::Foundation::COLORREF(0x0020_A0F0),
+            );
+            let _ = windows::Win32::Graphics::Gdi::FillRect(context, &raw const rect, brush);
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(brush.into());
+            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(window), context);
+        }
+    }
+
+    /// Destroys a test window however its test ends, including a panic.
+    struct OwnedWindow(HWND);
+
+    impl Drop for OwnedWindow {
+        fn drop(&mut self) {
+            // SAFETY: the window was created on this thread by the test and is
+            // destroyed exactly once, here.
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+            pump_messages();
+        }
     }
 }

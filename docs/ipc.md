@@ -291,13 +291,13 @@ The first frame on every connection is a `hello`. It is answered by exactly one
 closing.
 
 ```json
-{"type":"hello","protocol_version":1,
+{"type":"hello","protocol_version":2,
  "client":{"name":"clipped-desktop","version":"0.1.0"},
  "role":"control"}
 ```
 
 ```json
-{"type":"welcome","protocol_version":1,
+{"type":"welcome","protocol_version":2,
  "recorder":{"name":"clipped-recorder","version":"0.1.0"},
  "role":"control",
  "features":["recording","status_events","bookmarks","screenshots"]}
@@ -315,7 +315,7 @@ An `events` connection adds the streams it wants, and its `welcome` says which
 it will get:
 
 ```json
-{"type":"hello","protocol_version":1,
+{"type":"hello","protocol_version":2,
  "client":{"name":"clipped-desktop","version":"0.1.0"},
  "role":"events","streams":["status","errors"]}
 ```
@@ -331,7 +331,15 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `hotkeys`, `replay`.
+`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`,
+`export_progress`, `settings`, `microphone_level`, `startup`, `automatic`.
+
+`automatic` is the clearest case of why a feature is not a version. Protocol 2
+says a recorder can *describe* an automatic sitting; `automatic` says it
+*makes* them. A recorder that serves a window and records only what it is asked
+to speaks protocol 2 and reports `idle` for ever, and a window that drew
+"Watching for games" from the version number alone would be saying something
+untrue about a recorder that will never record on its own.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -350,6 +358,11 @@ before [`export_recording`](#export_recording) refuses it with
 library: the person has already chosen a file name for a file that was never
 going to be written.
 
+`playback` is the check in front of a player. A recorder built before
+[`open_playback`](#open_playback) has no way to open a recording for playback and
+refuses the command by name, and a window that had already drawn a transport
+would be showing a control that cannot work.
+
 `hotkeys` is the one where the two answers are *opposites*. A recorder built
 before [`get_hotkeys`](#get_hotkeys) registers no global hotkey at all, so every
 one of the user's keys does nothing; a recorder that answers with no conflicts
@@ -365,6 +378,45 @@ nobody would question it. Whether the recording that is running has a buffer to
 save from is `active_recording.replay_seconds`, because that is a property of
 the recording rather than of the build: a window offering the control needs both
 to be true.
+
+`export_progress` is the one a client checks before *subscribing* rather than
+before drawing anything, and that difference is the whole reason it exists. What
+it gates is the [`exports`](#events) stream, and a stream a recorder does not
+have is refused **by name, and the refusal takes the whole events connection
+with it**. A window that asked a recorder built before
+[issue #446](https://github.com/wildware-uk/clipped/issues/446) for `exports`
+would therefore lose its `status` subscription as well, and would have traded a
+missing progress bar for a window that no longer knows whether anything is being
+recorded. A recorder without the feature exports exactly as it always did and
+says nothing while it does, which is neither failure nor completion: the reply
+is still the thing that says the copy finished.
+
+`settings` says the build has all three of [`get_settings`](#the-settings),
+`apply_settings` and [`get_audio_devices`](#get_audio_devices) — one build has
+either all of them or none. It is the sharpest of these to get wrong: a recorder
+built before issue #51 *has* an `apply_settings` command and refuses every call
+to it with `not_implemented`, so a window that drew a form and checked nothing
+would find out that none of it saves only when somebody pressed Save. Clipped's
+own Settings screen reaches the same place from the other end — it asks
+`get_settings` when it opens and draws no control until that is answered, so an
+older recorder produces the refusal in place of the form rather than a form that
+does not work.
+
+`microphone_level` is deliberately *not* part of `settings`, and the reason is
+what a window does without it. A window that cannot read the settings can say so
+and offer nothing; a window that can read them but cannot measure a microphone
+still has a working list of devices, so it must draw the chooser and leave out
+the meter rather than refuse the whole screen. It is also the one capability a
+build can lack for a reason other than its age: a recorder compiled without an
+audio backend does not claim it.
+`startup` says the build has both [`get_start_at_login`](#get_start_at_login)
+and `set_start_at_login`. It is separate from `settings` because starting at
+login is not a setting — it is a `Run` value Windows reads at sign-in rather
+than a key in `settings.json` — and because a recorder built before issue #308
+has every settings command and neither of these, so it refuses both with
+`unknown_command`. That refusal and "Clipped does not start at sign-in" are
+opposite answers, and a switch drawn without checking would show the second for
+the first.
 
 ## Compatibility policy
 
@@ -429,6 +481,41 @@ does without; a state it cannot read is a lie it would otherwise tell. Adding
 one is a version bump, and the handshake is then what stops the two ever
 meeting.
 
+### Version 2, which is that rule being applied
+
+Protocol 2 is the first bump, and it is the case the paragraph above was
+written for: `status` gained a third state, `watching` — a recorder that is
+going to record the next game to start, which used to answer `idle` and so was
+indistinguishable from one that will never record anything.
+
+Three things came with it, and none of them would have needed a bump on their
+own:
+
+- `active_recording` gained `session`, the sitting a recording belongs to. That
+  is where the **game** is; `target` is a capture selector, and a window cannot
+  turn `process 4242` into "Counter-Strike 2" without the catalogue that lives
+  in the recorder.
+- `watching` carries the same `session`, because a game that exits keeps its
+  sitting open for a restart grace period. A window reading the game off the
+  *recording* would blank the name for those seconds and then bring it back.
+- `session_ended` is a new event, carrying the sitting's files rather than an
+  identifier to look up. It fires when the sitting ends, which may be before
+  the library has indexed anything.
+
+**`SUPPORTED_PROTOCOL_VERSIONS` is `[2]`, not `[1, 2]`,** which is a deliberate
+departure from the transitional advice above — ship a recorder accepting both,
+then a UI asking for the newer, then drop the older. That path is available
+only when a recorder can honestly serve both versions at once, and this
+recorder cannot. Serving version 1 would be a promise never to say `watching`,
+and a watching recorder has no way to keep it: the state is not an optional
+field it can omit, it is what the recorder *is* at that moment. A recorder that
+answered `idle` to a version 1 client while watching would be telling that
+client the one lie this whole change exists to stop.
+
+So the two builds refuse each other at the handshake, in both directions, with
+a message naming the versions and which side is behind. That is the wanted
+outcome and the reason `hello` and `refused` are frozen.
+
 ### An unknown command: refused by name
 
 `unknown_command`, naming the command. Deliberately not a parse failure: a
@@ -464,6 +551,25 @@ showing an empty panel with no explanation. The difference is that a stream is
 something a client *asks for* and can be told about, while an event and a detail
 arrive unannounced.
 
+**That refusal takes the whole events connection with it, and it is the sharp
+edge in this policy.** A `hello` naming three streams is one handshake with one
+answer, so a recorder that has never heard of one of the three refuses all of
+them — including the ones it does have — and closes. A client that asked an
+older recorder for a stream added last month is therefore not left without that
+stream; it is left without `status` and `errors` as well, having traded a panel
+it could have done without for a window that no longer knows whether anything is
+being recorded.
+
+So **a new stream is only additive if it is paired with a feature name, and the
+client checks that name before it asks**. Adding a stream is on the additive
+list above and costs no version bump, but what makes that harmless is a client
+reading [`welcome.features`](#the-handshake) rather than subscribing hopefully.
+`exports` and `export_progress` are that pair
+([#446](https://github.com/wildware-uk/clipped/issues/446)), and
+`clipped-ipc`'s own link is where the check is made — `subscription` in
+`crates/ipc/src/supervisor/link.rs` asks for `status` and `errors`
+unconditionally and for `exports` only when the recorder named the feature.
+
 ## Commands
 
 Sent on a `control` connection:
@@ -478,6 +584,19 @@ Sent on a `control` connection:
 
 `id` is chosen by the client and quoted in the response. `params` may be omitted
 when a command's parameters are all optional.
+
+`status` is a tagged union on `state`, with three tags and no catch-all:
+
+| `state` | Means | Carries |
+| --- | --- | --- |
+| `idle` | Nothing is being recorded, and nothing will be until something asks | nothing |
+| `watching` | Nothing is being recorded, and the next game to start will be | `session`, when a sitting is waiting out its restart grace |
+| `recording` | A recording is in progress | `recording_id`, `output`, `target`, `elapsed_ms`, and optionally `replay_seconds` and `session` |
+
+`session` appears on both `watching` and `recording` and is the same shape in
+each, so a window that wants to keep showing one game across the moment a
+recording stops reads it from the status rather than matching on the state
+twice. It is absent for a recording that is not part of a sitting.
 
 | Command | Parameters | Reply | This build |
 | --- | --- | --- | --- |
@@ -496,9 +615,15 @@ when a command's parameters are all optional.
 | `empty_trash` | `items`, `bytes` | `trash_emptied` | yes |
 | `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
+| `open_playback` | `source`, `audio_track` (optional) | `playback_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
+| `get_settings` | none | `settings` | yes |
+| `apply_settings` | `values`, below | `settings` | yes |
+| `get_audio_devices` | none | `audio_devices` | yes |
+| `get_microphone_level` | `microphone` | `microphone_level` | yes |
+| `get_start_at_login` | none | `start_at_login` | yes |
+| `set_start_at_login` | `enabled` | `start_at_login` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
-| `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
 
 ### `save_replay`
 
@@ -551,12 +676,13 @@ exactly what was asked for:
   `complete: false` and `shortfall_seconds` — which is a clip worth having and
   worth labelling, not a failure.
 
-**Which recordings can be saved from.** A buffer costs memory in proportion to
-its duration, so one is kept only when `start_recording` asked for it with
-`replay_seconds`. `active_recording.replay_seconds` says whether the recording
-that is running has one and how much it keeps, which is what a window reads
-before offering the control; the `replay` feature says only that the build has
-the command.
+**Which recordings can be saved from.** A buffer costs a recording a spill
+directory and the newest few seconds in memory, so one is kept only when
+`start_recording` asked for it — either by naming a length with `replay_seconds`
+or by asking for the configured one with `replay`.
+`active_recording.replay_seconds` says whether the recording that is running has
+one and how much it keeps, which is what a window reads before offering the
+control; the `replay` feature says only that the build has the command.
 
 Refusals: `not_recording` when nothing is being recorded, when a named recording
 is not the one running, or when the recording that is running keeps no buffer —
@@ -588,6 +714,26 @@ the same default the command line has. The reply names the recording:
   "reply":"recording_started","recording_id":"r-1",
   "output":"D:\\clips\\session.mkv"}}}
 ```
+
+**Asking for a replay buffer.** Two parameters, and they are the two halves of
+`clipped-recorder replay`: `replay` asks for a buffer, and `replay_seconds`
+names how long it keeps — exactly as the subcommand asks for one and
+`--duration` overrides the configured window.
+
+| Sent | What the recording keeps |
+| --- | --- |
+| neither | no buffer |
+| `"replay": true` | the configured window: `replay_window_seconds`, resolved for the game this recording turns out to be of |
+| `"replay_seconds": 120` | 120 seconds |
+| both | the length that was named |
+
+Neither, meaning no buffer, is what every client that predates `replay` sends
+and what an ordinary recording is. `replay` exists because the length is a
+*setting*, and a caller cannot resolve it: `replay_window_seconds` inherits per
+game (`docs/configuration.md`), and which game a `pid` is, is what the recorder
+asks its catalogue once the window is resolved. The desktop window sends
+`replay` for exactly that reason — it may link `clipped-ipc` and nothing else
+of the workspace, so a length it named would be one nobody chose.
 
 A `recording_id` is unique for the life of the recorder process. It exists so
 that a stop meant for a recording that has already ended by itself cannot stop
@@ -1024,6 +1170,107 @@ says what, in words. It is never a picture or a sound track: a container that
 cannot carry one of those is a refusal, because a file missing one of its audio
 tracks looks exactly like a file that never had it.
 
+**How far the copy has got arrives as events while it runs**, on the
+[`exports`](#events) stream, because the reply is in no position to say it: the
+reply arrives when the index has been written, which is the moment there is
+nothing left to report
+([#446](https://github.com/wildware-uk/clipped/issues/446)). A four-second
+recording copies in milliseconds and needs none of this; a two-hour one is
+gigabytes, and a window with nothing on screen reads as a hang and invites
+somebody to kill the recorder mid-write. A client asks for that stream only when
+the recorder advertises `export_progress` — see
+[the handshake](#the-handshake) for what asking without checking costs — and a
+recorder that does not advertise it copies exactly as it always did and says
+nothing meanwhile.
+
+**The progress and the reply travel on different connections**, which is the
+[roles](#connections-and-roles) split showing through, and it means a connection
+going away part-way through has two different answers:
+
+- **the events connection drops.** Progress stops arriving and the export
+  carries on: nothing about the copy was being driven by a subscriber, and the
+  reply still lands on the control connection.
+- **the control connection drops.** The request fails — the desktop host reports
+  it as `recorder_unreachable`, deliberately not one of the protocol's own codes,
+  so that "there was no recorder" cannot be read as "the recorder said no"
+  (`docs/desktop-ui.md`) — but the copy on the recorder's side runs to
+  completion regardless, so the MP4 may very well be sitting there. What was lost
+  is the answer, not the file.
+
+**Silence is never completion**, on either path. The reply is the only thing
+that says an export finished, and the last progress event before a gap is no
+promise that there was not another.
+
+### `open_playback`
+
+Opens a finished recording so that the desktop window can play it, on one of its
+sound tracks ([#304](https://github.com/wildware-uk/clipped/issues/304)).
+
+```json
+{"type":"request","id":13,"command":"open_playback",
+ "params":{"source":"D:\clips\cs2-20260811-201400-1.mkv","audio_track":3}}
+```
+
+`source` is required and has no default, for the reason
+[`export_recording`](#export_recording)'s has none. `audio_track` is optional and
+is a **stream index of the file** rather than an ordinal among the sound tracks
+— the two differ by however many picture tracks come first. Absent means the
+track a player should choose on its own, which the recorder decides: the one the
+container flags as the default, falling back to the first.
+
+```json
+{"type":"response","id":13,"outcome":{"ok":{
+  "reply":"playback_opened",
+  "playback":{"path":"D:\clips\cs2-20260811-201400-1.mkv",
+              "audio_track":1,
+              "audio_tracks":[
+                {"index":1,"name":"Compatibility Mix","default":true},
+                {"index":2,"name":"Game","default":false},
+                {"index":3,"name":"Microphone","default":false}],
+              "prepared":false}}}}
+```
+
+**`path` is usually the recording itself, and `prepared` says so.** A WebView2
+plays a Clipped recording as it stands — Matroska, AV1 picture, uncompressed PCM
+sound — which [ADR 0011](adr/0011-what-the-webview-plays.md) measures rather than
+assumes. So opening a recording on its default track writes nothing at all: the
+file is opened, its streams are described, and it is closed.
+
+`prepared` is `true` when `path` is a **copy carrying one sound track**, which is
+what a request for any track other than the first produces. That exists because
+a media element cannot choose one: `HTMLMediaElement.audioTracks` is not
+implemented in Chromium, and its demuxer takes the first sound track the
+container declares — ignoring Matroska's default-track flag. So hearing the
+microphone on its own means being handed a file that holds the microphone. The
+copy is still a stream copy (`clipped_muxer::remux_to_mp4_carrying`); nothing is
+decoded and nothing is encoded, and it goes in
+`%LOCALAPPDATA%\Clipped\playback`, never beside the recording. A prepared copy is
+a cache entry: it is in nobody's library, and it is swept after a day.
+
+`audio_tracks` is every sound track of the **recording**, not of the file being
+played, because it is what a window offers next. It is absent for a recording
+with no sound at all — a capture that found no audio device — which a window has
+to be able to tell from a track that would not play.
+
+**There is deliberately no duration and no picture size.** The media element
+measures both from the file it is given; a figure sent from here would be a
+second answer to the same question, and the two would disagree for exactly the
+files where it matters — a recording a killed recorder left, whose container may
+carry no duration at all
+([#283](https://github.com/wildware-uk/clipped/issues/283)).
+
+Two refusals, both `playback_failed` and both saying which:
+
+- **the recording's file has gone** — checked before the muxer, so the answer
+  names the file and says what probably happened to it rather than being
+  FFmpeg's account of an I/O error;
+- **the sound track asked for is not one the recording has** — refused rather
+  than quietly answered with the default, because a window that asked for the
+  microphone and was handed the compatibility mix would play something, with
+  sound, and look exactly as though it had worked.
+
+The recording is opened for reading and is never modified, on either path.
+
 ### `get_hotkeys`
 
 Where every global hotkey stands. The recorder registers them —
@@ -1203,38 +1450,267 @@ has to allow for finalising a file.
 rather than a request that was ignored. A client that would rather not ask at all
 checks `shutdown` in [`welcome.features`](#the-handshake) first.
 
-## Commands this build cannot perform
+### The settings
 
-**One** command is defined by the protocol and refused by this build —
-`apply_settings` — with `not_implemented` and a detail naming the subsystem, the
-milestone and the issue:
+`get_settings` and `apply_settings` are how a window reads and changes
+`settings.json`, which the **recorder** owns: its defaults, its validation, its
+layering and its migrations are `clipped_session::config`
+(`docs/configuration.md`), and the desktop application may link
+`clipped-ipc` and nothing else of the workspace. A window that read that file
+itself would be a second implementation of all of it, against the file
+somebody's settings live in (AGENTS.md section 55, [#252]).
 
 ```json
-{"type":"response","id":3,"outcome":{"error":{
-  "code":"not_implemented",
-  "message":"the settings API is not in this build",
-  "detail":{"detail":"not_implemented",
-            "subsystem":"the settings API",
-            "milestone":"M7","tracking_issue":108}}}}
+{"type":"request","id":13,"command":"get_settings"}
 ```
 
-`save_replay` was in this list until issue #38 built it, and is now an ordinary
-command with a schema of its own — see [`save_replay`](#save_replay) above.
-`UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` is the list this section
-describes, and it is the one to check rather than this prose.
+```json
+{"type":"response","id":13,"outcome":{"ok":{"reply":"settings","settings":{
+  "file":"C:\\Users\\alex\\AppData\\Local\\Clipped\\settings.json",
+  "settings":[
+    {"key":"microphone","label":"Microphone","value":"name:Shure MV7",
+     "overridden":true,"accepted":"\"default\", \"none\" or a device name",
+     "applies":true},
+    {"key":"capture_target","label":"Capture target","value":"game-window",
+     "overridden":false,"choices":["game-window","display"],
+     "accepted":"\"game-window\" or \"display\"","applies":false,
+     "unavailable":"every recording captures the game's own window. Reading this setting when a recording starts is issue #61"}]}}}}
+```
 
-It is refused **before dispatch**, so there is no handler for it to be wired
-to. That is the point: a command that could be handled is a command that could
-be answered "applied" by something that applied nothing (AGENTS.md sections 27 and
-54). The UI is expected to render the refusal as what it is — "the settings API is
-not in this build" — rather than showing a dead control.
+Every value crosses as **the words the settings file spells it in** — `120`,
+`hevc`, `name:Shure MV7` — and goes back the same way. A variant per setting on
+the wire would have been a second vocabulary beside the file's own and a
+protocol change for every setting added; instead the recorder parses what comes
+back with the file reader's own parsers, so a value a window can save is exactly
+a value the file would accept.
 
-Its *parameters* are deliberately left as an open object rather than given a
-schema, because nobody yet knows what the settings API takes; inventing a shape
-now would be a public API designed against a guess, and
-one the milestone that builds it would have to break (AGENTS.md section 43).
-That is what happened to `save_replay`, which got its shape from the work that
-built it rather than from a guess made in advance.
+Two fields decide what a screen may draw, and both are the recorder's answer
+rather than the window's guess:
+
+- `choices` is the closed set of values, and is **absent** when the set is open
+  — a frame rate, a size, a device name. That is how a list of options is told
+  from a field without the window keeping a copy of either.
+- `applies` is whether anything in *this build* acts on the setting. `false`
+  carries `unavailable`, the recorder's sentence naming what would have to land,
+  and a window draws the value and that sentence rather than a control — a
+  control that changed nothing being the defect AGENTS.md section 27 is about. It
+  is the same pair a `hotkeys` row carries.
+
+#### The switches the window itself acts on
+
+Four of the settings are read by nothing in the recorder: `recording_failed`,
+`recording_interrupted`, `recorder_unavailable` and `hotkey_unavailable`, which
+decide what Clipped interrupts somebody with (`docs/desktop-ui.md`). They cross
+as `true` or `false`, which is what the settings file holds, and `applies` is
+`true` for all four — the reader is the window rather than a recording, and the
+question a screen is asking is the same either way: would changing this change
+anything?
+
+They are on these two commands for the rule above read backwards. The window
+decides whether to show a toast, so the window needs the switch; the window may
+not open the settings file, so the recorder hands it over. Until [#252] the
+window kept them in a `notifications.json` of its own — a second store of user
+preferences with a second version field, a second missing-key policy and a
+second reader (AGENTS.md section 55) — and the file that exists on a machine
+which ran that build is migrated into `settings.json` and deleted the first time
+a link attaches.
+
+`apply_settings` sends only what changed. `null` clears a setting, which is
+Reset: it returns the setting to the value Clipped ships with *and* keeps
+following it, which writing today's default in as a value would not.
+
+```json
+{"type":"request","id":14,"command":"apply_settings",
+ "params":{"values":{"microphone":"name:Shure MV7","framerate":null}}}
+```
+
+The reply is `settings` again — the settings **as they now stand** — so a window
+draws what was saved rather than what it hoped had been: a value the recorder
+refused, or one another window changed a moment earlier, cannot be drawn as
+applied. Nothing is written unless every value is accepted, so a request naming
+one good value and one bad one leaves the file exactly as it was, and the
+refusal is `invalid_parameters` carrying `clipped_session`'s own sentence, which
+names the setting, the value and what would have been accepted.
+
+A recorder that cannot work out where settings live at all refuses with
+`internal` and says so, rather than accepting a change it has nowhere to keep.
+
+### `get_audio_devices`
+
+Which microphones this machine has, so that picking one is a choice from a list
+rather than a name somebody has to type and cannot see ([#308]). The window
+cannot enumerate them: `clipped-audio` is in the recorder's process, and a
+configured name is matched against the endpoints present when a recording
+starts — so the list has to be the recorder's own.
+
+```json
+{"type":"response","id":15,"outcome":{"ok":{"reply":"audio_devices","devices":{
+  "microphones":[{"name":"Shure MV7","is_default":true},
+                 {"name":"Line In (Realtek)","is_default":false}]}}}}
+```
+
+The default one is **marked** rather than being first: Windows lists endpoints
+in its own order, and `default` follows whichever endpoint it is currently
+using. Playback endpoints are not listed at all, because a recording cannot be
+told to use one that is not the default ([#316]) — an empty list of them would
+say something untrue about the machine, so there is no field for them.
+
+A recorder that could not enumerate the endpoints refuses with `internal` and
+the reason, so a window says why there is no list rather than drawing an empty
+one as though it had looked (AGENTS.md section 27).
+
+### `get_microphone_level`
+
+What one microphone is hearing at this moment, so that choosing one is a thing
+somebody can *check* rather than guess at ([#109]). A list of endpoint names says
+which microphones exist and nothing about which of them can hear the person
+choosing, and on a machine with a webcam, a headset and a monitor's array
+microphone that is the whole of the question.
+
+```json
+{"type":"request","id":19,"command":"get_microphone_level",
+ "params":{"microphone":"name:Shure MV7"}}
+```
+
+```json
+{"type":"response","id":19,"outcome":{"ok":{"reply":"microphone_level","level":{
+  "device":"Shure MV7","peak":0.5,"muted":false}}}}
+```
+
+`microphone` is a **setting's value**, spelled as the settings file spells it —
+`default`, `none`, `name:Shure MV7` — and not a device name. The question is
+what the choice somebody is looking at would record, asked before it is saved,
+so the recorder parses it with the settings file's own parser and resolves it to
+an endpoint with the code a recording resolves it with: a value that can be asked
+about is exactly a value that could be saved, and the meter cannot end up pointed
+at a different endpoint from the recording.
+
+`peak` is the loudest sample in the moment that was listened to — **not** since
+the last question — as a linear amplitude from 0 to 1. The endpoint is opened,
+listened to and closed inside the call, so a window that is killed mid-choice
+leaves no capture behind and no microphone-in-use indicator; the cost is that
+between two questions there is a gap nothing measured, which is why a client asks
+again rather than accumulating.
+
+The other two fields are the ones a meter cannot say for itself, and both are
+absent rather than guessed at:
+
+- `device` is missing while the endpoint is unplugged or disabled, during which a
+  capture produces silence rather than failing. It is what tells "nobody is
+  speaking" from "there is nothing there";
+- `muted` is missing when Windows will not report the switch for that device,
+  which some virtual devices do not have. A muted microphone reads as exactly the
+  silence of a quiet room, and telling somebody to speak up when the answer is a
+  switch is the vague message AGENTS.md section 28 is about.
+
+`none` is refused with `invalid_parameters` rather than answered with a peak of
+zero: it is a setting somebody chose, and a reading of silence would be drawn as
+a dead meter over a deliberate choice (AGENTS.md section 27). A device that
+cannot be opened is `internal` carrying the reason, for the same reason
+`get_audio_devices` refuses rather than sending an empty list.
+
+[#109]: https://github.com/wildware-uk/clipped/issues/109
+[#252]: https://github.com/wildware-uk/clipped/issues/252
+[#308]: https://github.com/wildware-uk/clipped/issues/308
+[#316]: https://github.com/wildware-uk/clipped/issues/316
+
+### `get_start_at_login`
+
+Whether the recorder starts when this user signs in, and what is arranged. Not
+part of the settings: it is one value under
+`HKEY_CURRENT_USER\…\CurrentVersion\Run` that Windows reads once, at sign-in,
+and that Windows also lists in **Settings > Apps > Startup** with a switch of
+its own. `settings.json` does not carry it, and a copy there could disagree with
+the registry — which is the thing that actually decides ([#308]).
+
+```json
+{"type":"response","id":16,"outcome":{"ok":{"reply":"start_at_login",
+  "start_at_login":{"enabled":true,
+    "location":"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder",
+    "command":"\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games"}}}}
+```
+
+`enabled` is the switch's position and nothing more. `command` is what Windows
+would run, present exactly when `enabled` is true, and it is worth sending
+because there is nowhere else to see it short of a registry editor. `location`
+is sent rather than known by the caller, so that a window can say where the
+value lives without keeping its own copy of a path only the recorder changes.
+
+`missing_executable` is the third state, and it is neither on nor off:
+
+```json
+{"type":"response","id":18,"outcome":{"ok":{"reply":"start_at_login",
+  "start_at_login":{"enabled":true,"location":"…",
+    "command":"\"C:\\Old\\clipped-recorder.exe\" serve --watch-for-games",
+    "missing_executable":"C:\\Old\\clipped-recorder.exe"}}}}
+```
+
+A Clipped that was moved or reinstalled leaves a value naming a path that is no
+longer there. `enabled` stays **true**, because Windows will still try it — a
+caller that drew that as "off" would offer to turn on something already on — and
+the path that is missing is named so that the caller can say what was looked
+for. It is **reported rather than repaired**: rewriting somebody's startup entry
+because a status was read, or because a settings screen was opened, is the
+surprising behaviour this whole arrangement avoids
+([privacy.md](privacy.md)). The repair is `set_start_at_login` with `true`,
+which writes the running recorder's own path.
+
+### `set_start_at_login`
+
+Turns it on or off. One boolean, because it is one switch:
+
+```json
+{"type":"request","id":17,"command":"set_start_at_login","params":{"enabled":true}}
+```
+
+Answered with `start_at_login` as it now stands, read back out of the registry —
+for the reason `apply_settings` answers with the settings as they now stand: a
+window that drew the switch where the user put it would show "on" for a write
+the registry refused.
+
+Both are idempotent. `true` over an entry that is already there rewrites it with
+this recorder's path, which is the repair above; `false` over nothing is the
+state being asked for rather than a failure.
+
+**The recorder writes it, and no other process can.** The value is a command
+line naming the executable to run, and that executable is the recorder — a
+window writing a path it worked out from its own location would leave a startup
+entry pointing at nothing whenever the two were not where it assumed, and a
+startup entry that points at nothing fails silently, once, at a sign-in nobody
+is watching. `clipped-recorder start-at-login` and these two commands are the
+same code (`apps/recorder/src/start_at_login.rs`,
+[recorder-cli.md](recorder-cli.md)).
+
+A build with no registry — anything that is not Windows — refuses both with
+`internal` and the reason, so a caller says why it cannot offer the switch
+rather than drawing one in the off position as though it had looked (AGENTS.md
+section 27).
+
+## Commands this build cannot perform
+
+**None.** The protocol used to define commands it could not perform: they parsed
+— so that the refusal could name the command rather than rejecting the name —
+and were then refused with `not_implemented` and a detail naming the subsystem,
+the milestone and the issue. `save_replay` was one until issue #38 built it, and
+`apply_settings` was the last, until the settings reached the protocol (issue
+#51). Every command this build defines, it performs.
+
+The shape is still in the protocol, for the thing that still needs it: an
+`events` connection asking for the `metrics` stream is refused the same way,
+because nothing measures those figures during a recording yet ([#100]).
+
+```json
+{"type":"refused","code":"not_implemented",
+ "message":"live recording metrics is not in this build",
+ "detail":{"detail":"not_implemented","subsystem":"live recording metrics",
+           "milestone":"M14","tracking_issue":100}}
+```
+
+A client should render that as what it is — "live metrics are not in this build"
+— rather than as a stream that is simply quiet, which is the same rule that
+applied to the commands.
+
+[#100]: https://github.com/wildware-uk/clipped/issues/100
 
 ## Events
 
@@ -1252,14 +1728,43 @@ Sent on an `events` connection, unprompted:
 ```
 
 ```json
+{"type":"event","event":"status_changed",
+ "status":{"state":"watching",
+           "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+                      "game_name":"Counter-Strike 2",
+                      "started_at":"2026-08-11T20:14:00+01:00"}}}
+```
+
+```json
+{"type":"event","event":"session_ended",
+ "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+            "game_name":"Counter-Strike 2",
+            "started_at":"2026-08-11T20:14:00+01:00",
+            "ended_at":"2026-08-11T22:03:00+01:00",
+            "end_reason":"disk_full",
+            "recordings":[{"session_index":1,
+                           "output":"D:\\clips\\cs2-20260811-201400-01.mkv",
+                           "outcome":"recorded","duration_ms":1800000}]}}
+```
+
+```json
 {"type":"event","event":"recording_failed","recording_id":"r-1",
  "error":{"code":"recording_failed","message":"the encoder stopped accepting frames"}}
 ```
 
+```json
+{"type":"event","event":"export_progress",
+ "export":{"source":"D:\\clips\\cs2-20260811-201400-1.mkv",
+           "destination":"D:\\clips\\cs2-20260811-201400-1.mp4",
+           "written_ms":2616000,"total_ms":6540000,
+           "packets":235248,"bytes":3924481644}}
+```
+
 | Stream | Events | This build |
 | --- | --- | --- |
-| `status` | `status_changed` | yes |
+| `status` | `status_changed`, `session_ended` | yes |
 | `errors` | `recording_failed` | yes |
+| `exports` | `export_progress` | yes |
 | `metrics` | live throughput, dropped frames, encoder load | no — M14, [#100](https://github.com/wildware-uk/clipped/issues/100) |
 
 **A `status` subscription opens with the current state**, before anything
@@ -1280,6 +1785,58 @@ rather than a delta, a client that missed one recovers on the next.
 `target` is the selector the user gave — `process `cs2.exe`` — and never the
 window title. A title is user content and the most reliable way to put somebody's
 document name into a screenshot of a bug report (AGENTS.md section 13).
+
+**`session_ended` carries the sitting itself, not an identifier to look up.** A
+sitting ends the moment the game does, and the library may not have indexed a
+thing by then — a client sent only an identifier would have nothing to show and
+no way to know when it would. It is the same `session` shape the status carries,
+with the two fields only an ended sitting has: `ended_at`, and `end_reason` when
+there is one to give. Whether a sitting is over is therefore the presence of
+`ended_at` rather than a separate type, which is the answer `library_sessions`
+had already settled on for the same question.
+
+**`export_progress` is how far a running [`export_recording`](#export_recording)
+has got**, which the reply cannot say because it arrives when the MP4's index
+has been written — the moment there is nothing left to report
+([#446](https://github.com/wildware-uk/clipped/issues/446)). It is a stream of
+its own rather than more traffic on `status`, and the bounded queue above is the
+reason: a copy of a two-hour recording sharing one 64-deep queue with
+`status_changed` would mean a slow reader losing *status* — whether anything is
+being recorded, which is what the window is for — to make room for percentages.
+A stream is also something a client can decline, which an event on a stream it
+already wanted is not.
+
+**The rate is chosen so that a bar moves rather than flickers.** The muxer
+reports once per second of the *recording* copied — media time rather than wall
+clock, so the copying thread never reads a clock — which for a two-hour
+recording is 7,200 reports. The recorder then thins those to one event per whole
+percentage point, at most 101 for a copy of any length, and every one of them
+moves a bar by an amount somebody can see. Where there is no total to divide by
+it sends one per ten seconds of recording copied instead
+(`apps/recorder/src/export.rs`).
+
+**`total_ms` is absent when the recording's container declares no duration.**
+That is not a rare case: an interrupted recording keeps every packet it wrote
+and no total, which is the property
+[ADR 0001](adr/0001-mkv-archival-container.md) chose Matroska for. A client shows
+an unbounded indication then, moving on `bytes`, rather than inventing a
+denominator. It is also why these are measurements rather than a `percent`
+field: a single number could only have spelled "no idea" as zero, and a bar
+sitting at 0 % for the length of a copy is exactly the control that does nothing
+AGENTS.md section 27 forbids. Whoever draws the bar divides, and decides what to
+draw when there is nothing to divide by.
+
+**`destination` is what identifies the export**, and there is nothing else it
+could be: an event carries no request identifier, because a `CommandHandler` is
+never shown the `Request`. The destination is enough, because a destination that
+already exists is refused — so two exports cannot be writing the same file at
+once.
+
+A client asks for `exports` only when the recorder advertises `export_progress`
+in [`welcome.features`](#the-handshake); asking one that does not costs it every
+other stream it asked for in the same handshake, which
+[the compatibility policy](#an-unknown-error-code-error-detail-end-reason-or-event-kept)
+sets out.
 
 ## Errors
 
@@ -1304,6 +1861,7 @@ person reads, written to AGENTS.md section 28.
 | `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |
 | `destination_exists` | Something is already where a file was going to be written, and Clipped does not overwrite (AGENTS.md section 56). Choose another name; nothing was changed. |
 | `export_failed` | A finished recording could not be copied into the container asked for. The message is the muxer's own, naming what stopped it. |
+| `playback_failed` | A recording could not be opened for playback: its file has gone, it could not be read, or the sound track asked for is not one it has. The message says which. |
 | `library_unavailable` | The recording library could not be read, and the message says why. **Never an empty library**, which is a successful reply carrying no sessions. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 
@@ -1403,7 +1961,7 @@ function Read-Frame($pipe) {
     [Text.Encoding]::UTF8.GetString($payload)
 }
 
-Send-Frame $pipe @{ type = 'hello'; protocol_version = 1; role = 'control'
+Send-Frame $pipe @{ type = 'hello'; protocol_version = 2; role = 'control'
                     client = @{ name = 'powershell'; version = '0' } }
 Read-Frame $pipe
 

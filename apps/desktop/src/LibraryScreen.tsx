@@ -1,6 +1,9 @@
-import type { TrashListing, TrashedItem } from '@clipped/shared';
+import type { ExportProgress, LibraryRecording, TrashListing, TrashedItem } from '@clipped/shared';
+import { exportFraction } from '@clipped/shared';
 import { type ReactNode, useState } from 'react';
+import { useNavigate } from 'react-router';
 
+import { clipPath } from './clipPlayback';
 import {
   asProblem,
   describeProblem,
@@ -12,10 +15,13 @@ import {
 } from './library';
 import {
   describeActionProblem,
+  describeExportProgress,
   fileName,
   headlineActionProblem,
   useRecordingActions,
 } from './recordingActions';
+import { describeFavouriteProblem, useFavourites } from './favourites';
+import { describeLockProblem, useLocks } from './locks';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -60,7 +66,8 @@ const PAGE = 25;
  *
  * A promise to the reader rather than a derived list. The rows that named issue
  * #301 for the session list, the search and a missing file are gone, because
- * those three are on the screen now.
+ * those three are on the screen now, and so is the one for favouriting: every
+ * sitting and every recording has a Keep control, which is issue #58.
  */
 const WAITING: readonly Waiting[] = [
   {
@@ -69,9 +76,9 @@ const WAITING: readonly Waiting[] = [
       'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
   },
   {
-    shows: 'Favourites, and filtering the list down to them (SPEC.md section 29)',
+    shows: 'Filtering the list down to favourites with one control',
     needs:
-      'Favouriting anything at all. Issue #58. The read already carries which things are favourited',
+      'A control on this screen (#60). Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`)',
   },
   {
     shows: 'A thumbnail against each recording, and a waveform under each track',
@@ -79,13 +86,9 @@ const WAITING: readonly Waiting[] = [
       'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission, and how the bytes should reach it is issue #301',
   },
   {
-    shows: 'Playing a recording inside this window, rather than in your own player',
-    needs:
-      'WebView2 cannot decode the uncompressed sound the archival file carries (#392), and three other blockers. Issue #304. Open plays it in whatever you already use',
-  },
-  {
     shows: 'Playing a clip, from the list',
-    needs: 'The playback screen. Issue #52',
+    needs:
+      'Clips themselves: the virtual clip model (#74) and clip creation (#91). A recording plays from here already (#304)',
   },
 ];
 
@@ -292,6 +295,33 @@ function Trash(): ReactNode {
 }
 
 /** The Library screen. */
+/**
+ * How far a running export has got, as a bar.
+ *
+ * A native `<meter>`, which is the pattern `SetupScreen`'s input level already
+ * uses: it is the element this is, it is announced as one, and it needs no
+ * stylesheet of its own.
+ *
+ * **With no `value` when the recording never said how long it was.** That is a
+ * meter's own way of saying "something is happening and I cannot say how much",
+ * and it is the honest drawing for an interrupted recording — which keeps every
+ * packet it wrote and no total (ADR 0001). A `value` of nought would be a claim,
+ * and one that never moved for the length of the copy. What advances in that
+ * case is the bytes, which are in the sentence above this.
+ */
+function ExportBar({ of }: { readonly of: ExportProgress }): ReactNode {
+  const fraction = exportFraction(of);
+
+  return (
+    <meter
+      aria-label={`Export progress for ${fileName(of.destination)}`}
+      min={0}
+      max={1}
+      value={fraction ?? undefined}
+    />
+  );
+}
+
 export function LibraryScreen(): ReactNode {
   /**
    * What has been typed, and what has been searched for.
@@ -304,6 +334,22 @@ export function LibraryScreen(): ReactNode {
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
   const actions = useRecordingActions();
+  const favourites = useFavourites();
+  const locks = useLocks();
+  const navigate = useNavigate();
+
+  /**
+   * Opens a recording on the playback screen, handing over the row.
+   *
+   * The address carries the index's own identifier, and the row goes with it:
+   * this screen has it in its hand, and the playback screen would otherwise
+   * have to read the whole library back to find the one file it needs. A
+   * reload has no row, and that screen says so rather than inventing one —
+   * looking one up cold is issue #52.
+   */
+  const play = (recording: LibraryRecording): void => {
+    void navigate(clipPath(String(recording.recording_id)), { state: { recording } });
+  };
 
   return (
     <>
@@ -383,7 +429,15 @@ export function LibraryScreen(): ReactNode {
 
       {read.state === 'read' && read.value.length > 0 && (
         <section aria-label="Sessions">
-          <SessionList sessions={read.value} label="Sessions" actions={actions} />
+          <SessionList
+            sessions={read.value}
+            label="Sessions"
+            actions={actions}
+            favourites={favourites}
+            locks={locks}
+            onPlay={play}
+          />
+
           {/*
            * One region for the outcome of the last thing somebody asked for,
            * announced rather than only drawn: opening a recording and showing
@@ -392,14 +446,46 @@ export function LibraryScreen(): ReactNode {
            * did anything at all (AGENTS.md sections 45 and 46).
            */}
           <p role="status" className="clipped-panel__body">
-            {actions.outcome.state === 'working' &&
-              `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}
-            {actions.outcome.state === 'done' && actions.outcome.message}
-            {actions.outcome.state === 'failed' &&
+            {favourites.outcome.state === 'failed' &&
+              `That could not be kept. ${describeFavouriteProblem(favourites.outcome.problem)}`}
+            {locks.outcome.state === 'failed' &&
+              `That could not be kept from cleanup. ${describeLockProblem(locks.outcome.problem)}`}
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'working' &&
+              (actions.outcome.progress === null
+                ? `${actions.outcome.what} ${fileName(actions.outcome.path)}…`
+                : `${actions.outcome.what} ${fileName(actions.outcome.path)} — ${describeExportProgress(
+                    actions.outcome.progress,
+                  )}`)}
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'done' &&
+              actions.outcome.message}
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'failed' &&
               `${headlineActionProblem(actions.outcome.problem)}. ${describeActionProblem(
                 actions.outcome.problem,
               )}`}
           </p>
+          {/*
+           * The bar, drawn only once the recorder has actually said something.
+           *
+           * A copy of a four-second recording finishes before there is anything
+           * to report and this never appears; a copy of a two-hour one is what
+           * it exists for (issue #446). It is deliberately absent rather than
+           * sitting at nought against a recorder without the `export_progress`
+           * feature — that recorder copies the file exactly as it always did
+           * and cannot say how far it has got, and a bar that never moves is a
+           * control that does nothing (AGENTS.md section 27). The sentence
+           * above still says an export is running, which is what that recorder
+           * can honestly support.
+           *
+           * `max` is 1 with no value when the recording never said how long it
+           * was, which is what a native meter draws as "something is happening
+           * and I cannot say how much" — the bytes copied are in the sentence.
+           */}
+          {actions.outcome.state === 'working' && actions.outcome.progress !== null && (
+            <ExportBar of={actions.outcome.progress} />
+          )}
           {hasMore && (
             <button
               type="button"

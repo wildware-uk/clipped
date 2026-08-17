@@ -209,6 +209,66 @@ is authoritative and why, where a conversion is allowed to happen, what is done
 about a dropped frame, an audio gap or a clock that steps, and how far the audio
 device's own clock was measured to drift against the reference over a long run.
 
+## An odd width or height: which row goes, and where
+
+**Every frame this crate hands over has an even width and an even height.** A
+target whose size has an odd dimension is captured at
+`FrameSize::rounded_down_to_even` of it — the bottom row, the right-hand column,
+or both — and `FrameFormat` reports that smaller size.
+
+The reason is downstream. H.264, HEVC and AV1 all sample 4:2:0 chroma at half
+resolution in both directions, so an odd width or height has no representation
+in any of them, and all four backends in `clipped-encoder` refuse one at `open`
+with the same sentence: *"has an odd dimension, and 4:2:0 chroma needs both to
+be even"*. That is not an exotic shape. An ordinary bordered window sized to
+1000x600 has a client area of **986x593** on Windows 11 at 96 DPI, and before
+[issue #561](https://github.com/wildware-uk/clipped/issues/561) such a window
+could not be recorded at all: the recording failed before its first frame with
+`encoder-unavailable`, and under
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md) a window
+*resized* into that shape failed every recording for the rest of the sitting.
+
+**The texture is genuinely that size.** Reporting 986x592 while handing over a
+986x593 texture would be cheaper and is what
+[ADR 0013](adr/0013-capture-rounds-an-odd-dimension-away.md) refuses: a track
+declares the size of the pictures in it (AGENTS.md section 22), the software
+encoder's readback compares the texture's description against the session's
+resolution and refuses a mismatch outright, and what a vendor's driver does with
+a surface a row taller than the session it was opened for is a question about
+three drivers rather than about this code.
+
+So each backend crops, and what that costs depends on what it was already doing:
+
+| Backend and target | What happens | Cost |
+| --- | --- | --- |
+| Desktop Duplication, window | The destination texture the window is already copied into is created one row or column smaller, and `place_window_in_output` clamps the copy to it. | Nothing. The copy was already happening. |
+| Desktop Duplication, display | Zero-copy unless the *display mode* has an odd dimension, which no physical monitor does and a remote-desktop session sized to its window often does. Then the even crop is copied into a texture the backend owns. | One GPU copy per frame, for that case only. |
+| Windows Graphics Capture, either | The frame pool keeps the content's own odd size, and the even crop of each frame is copied into a texture the backend owns. | One GPU copy per frame, for an odd source only. |
+
+The frame pool keeps the odd size deliberately. A pool one row shorter than the
+content would make every frame's `ContentSize` disagree with it — which is
+exactly how this backend recognises a resize — so it would report
+`Acquisition::SizeChanged` for ever, and under ADR 0012 a session follows every
+one of those with a new file. What the compositor would do with the row that did
+not fit is undocumented besides: a crop and a rescale are indistinguishable
+through the API, and only one of them is honest.
+
+`crates/capture/src/windows/crop.rs` is the copy, and it is a
+`CopySubresourceRegion` on the capture thread — a GPU-to-GPU copy of one frame,
+not a readback: no `Map`, no CPU wait, nothing that leaves video memory.
+
+Two consequences worth knowing:
+
+- **A resize that does not change the even size is not a resize.** Desktop
+  Duplication compares the window's client area against the frame *as it would
+  be recorded*, so a window taken from 986x593 to 987x593 keeps recording into
+  the same file — the picture is the same shape and the crop simply takes a
+  different column. Windows Graphics Capture cannot do the same, because its
+  pool has to match the compositor exactly, and reports the change.
+- **A target one pixel wide or one pixel high is refused**, by
+  `CaptureError::UnsupportedTarget` naming 4:2:0, rather than by an encoder that
+  can only say that nothing could be opened.
+
 ## Choosing a backend
 
 `select(candidates, target, setting)` is a pure function. With
@@ -395,7 +455,7 @@ Two things it does not do, stated rather than glossed:
 
 | What happens | What the backend does |
 | --- | --- |
-| The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. |
+| The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. The pool's size is the content's own, odd or not, which is why an odd-sized window is cropped rather than composed into a smaller pool ("An odd width or height" above). |
 | The window is minimised | It stops composing, so acquisitions report `Acquisition::TargetMinimised` — and go on reporting it until the window comes back, rather than deciding the window has gone. `IsIconic` is asked on the same path `IsWindow` is, so it costs a handful of calls a second and never one per frame. The silence is not counted as dropped frames. |
 | The window is restored | Frames resume, and **no size change is reported**. This needs saying because the obvious implementation gets it wrong: measured on Windows 11 build 26200, restoring a minimised 1280x720 window makes the compositor produce one frame whose `ContentSize` is **160x28** — the legacy shape a minimised window is reduced to — and it arrives *after* `IsIconic` has gone false again. Reported as a `SizeChanged` it finishes the recording of a window that is back on screen at the size it always was. It is told apart by asking the window: `GetClientRect` answers 0x0 while a window is minimised or part way through being restored, and a window that has genuinely been resized has a client area. This one is verified end to end rather than in a unit test, and the test says why: the crate's own test window is a `STATIC` window whose thread is inside `acquire`, so its restore never completes and it *really is* 146x28 — asserting on it would be asserting on the test's own artefact. The evidence is on the issue: `test-apps/video-pattern` minimised for five seconds mid-recording produced one 823-frame file that ended only when the window closed. |
 | Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
@@ -408,7 +468,7 @@ the recording loop tells the buffer how long the source has been quiet, and a
 save that would otherwise have answered with the video from before the minimise
 comes back short or is refused. `docs/replay-buffer.md`'s "When the source stops
 producing pictures" and
-[ADR 0010](adr/0010-a-replay-save-does-not-reach-across-a-gap.md) are the rule
+[ADR 0017](adr/0017-a-replay-save-does-not-reach-across-a-gap.md) are the rule
 and the reasoning.
 
 That last row is worth its own paragraph, because the obvious implementation of
@@ -702,6 +762,54 @@ the displays are off**, which is what the earlier draft of
 `tests/capture/README.md` said; the reliable tell is the frame count itself,
 because the 4 Hz state is an order of magnitude, not a few percent.
 
+#### Desktop Duplication does not degrade in that state. It stops.
+
+Windows Graphics Capture at 4 Hz is a ten-fold loss. Desktop Duplication is a
+total one, and it was found by
+[issue #461](https://github.com/wildware-uk/clipped/issues/461) rather than
+inferred. Measured on 2026-08-17 with
+`cargo run -p clipped-capture --example duplication_probe`, which drives raw DXGI
+and takes this crate out of the path. Three seconds per pass per output; the two
+runs are about a minute apart and the only thing that changed between them is one
+synthetic mouse-move event, which is the only thing that turns a powered-down
+display back on:
+
+| Output | Pass | Displays off | Displays on |
+| --- | --- | ---: | ---: |
+| `\\.\DISPLAY2` | idle desktop | 0 frames, 12 timeouts | 496 frames, 0 timeouts |
+| `\\.\DISPLAY2` | window repainting | **0 frames, 12 timeouts** | **542 frames, 0 timeouts** |
+| `\\.\DISPLAY1` | idle desktop | 0 frames, 12 timeouts | 3 frames, 12 timeouts |
+| `\\.\DISPLAY1` | window repainting | **0 frames, 12 timeouts** | **541 frames, 0 timeouts** |
+
+The idle-desktop row for `DISPLAY1` with the displays *on* is the ordinary
+behaviour none of this must be confused with: a screen where nothing is changing
+produces timeouts, and that is correct. The rows that carry the finding are the
+repainting ones, because a window drawing in alternating colours is a real
+present rather than a redraw of the same pixels — 0 with the display off and 541
+with it on, from the same binary on the same machine within the minute.
+
+Nothing in the API says so. Throughout the dark pass `DuplicateOutput` succeeded,
+`DXGI_OUTPUT_DESC.AttachedToDesktop` was true, `WmiMonitorBasicDisplayParams`
+reported `Active=True`, and every `AcquireNextFrame` answered
+`DXGI_ERROR_WAIT_TIMEOUT` — the same value an idle desktop gives.
+
+**What the recorder does about it**, since
+[ADR 0015](adr/0015-capture-holds-the-display-awake.md): a capture holds the
+display on for exactly as long as it is open, through
+`clipped_capture::DisplayAwake` and
+`SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)`, taken on the
+thread that runs the capture loop. The state is per thread and Windows drops it
+when that thread ends, so `DisplayAwake` is deliberately not `Send`.
+`ES_SYSTEM_REQUIRED` is not set: keeping a computer out of sleep is a much larger
+decision than keeping a monitor lit.
+
+The hold prevents a capture going dark. It does **not** wake a display that is
+already off, and neither does anything else a background process can call, so a
+capture that starts into a dark screen stays dark — which is why the recording
+also reports how long its source produced nothing ("Silence is reported, not
+acted on", below) and why `SessionError::NoFrames` now names a powered-down
+display among the reasons a recording produced nothing at all.
+
 ### What is not covered
 
 - **HDR.** The pool is created as `B8G8R8A8UIntNormalized` and the backend always
@@ -880,8 +988,14 @@ on screen for six seconds, which is precisely what `DXGI_ERROR_ACCESS_DENIED`
 means here and precisely what a game recorder has to survive. Acquisitions report
 `Acquisition::Timeout` throughout, and the log says why every five seconds. The
 one case that cannot be retried away is a display rotated mid-recording, which is
-refused every time until it is rotated back
-([issue #138](https://github.com/wildware-uk/clipped/issues/138)).
+refused every time until it is rotated back. [Issue
+#138](https://github.com/wildware-uk/clipped/issues/138) looked at correcting
+this instead — rotating the duplicated image on the GPU — and declined to: it
+would be the first GPU blit anywhere in this pipeline, and getting the
+direction of the transpose wrong is exactly the kind of bug that stays
+invisible without a physically rotated display to check it against, which
+nothing running this project's tests has. A wrongly-rotated recording would
+look like a fix and be one nobody could tell was broken, so the refusal stays.
 
 ### What it will not do
 
@@ -889,7 +1003,7 @@ refused every time until it is rotated back
 | --- | --- |
 | The cursor | Never appears. Desktop Duplication does not draw the pointer into the desktop image; it reports the position and shape separately for an application to composite. So `CaptureConfig::capture_cursor` cannot be honoured in either direction, `BackendCapabilities::is_cursor_optional` is false, and asking for a cursor logs that there will not be one. |
 | Occlusion | Anything drawn over the target is in the recording, because this is a duplicate of the screen. `is_occlusion_independent` is false, and this is the main reason SPEC.md section 8 ranks the method below Windows Graphics Capture. |
-| A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*, so a portrait display would record sideways, and a window cropped out of it would be cropped from the wrong pixels entirely. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) owns rotation. |
+| A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*: a monitor target would simply record sideways, and a window target would be worse — cropped from the wrong pixels entirely, because window positions and the duplicated image disagree about which orientation they are in. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) considered correcting this on the GPU and chose to keep refusing instead, since nothing in this pipeline could verify the direction of the rotation without a physically rotated display. Windows Graphics Capture composes the rotation itself and is unaffected. |
 | A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::TargetMinimised` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
 | A protected window | Declined at `availability`, like the other backend. `WDA_MONITOR` renders the window black and `WDA_EXCLUDEFROMCAPTURE` leaves whatever is behind it in the frame; neither is the recording anybody asked for. |
 | A machine with no display output | Declined at `initialise` with `UnsupportedTarget`, naming the case: a remote session, a headless server or a virtual machine with no display. A basic display driver that has outputs but cannot duplicate them is declined the same way, naming that instead. |
@@ -1052,13 +1166,22 @@ is fixed at 1920x1080 BGRA8 unorm
 This is the honest answer rather than a limitation nobody mentioned: continuing
 would write frames of one size into a track that declares another, and a player
 would show the difference as a stretched or torn picture in a file that looks
-finished. It is also the same answer the pipeline already gives to a window
-resized mid-recording, which is
-[issue #184](https://github.com/wildware-uk/clipped/issues/184). When #184
-decides how a session follows a size change — by scaling in the capture path, or
-by starting a second file — the rule here relaxes in that same change, and the
-seam it relaxes at is `CaptureFallback::resize`, which is how a caller that
-followed a resize tells the fallback what size the recording now is.
+finished. It is also the same answer the pipeline gives to a window resized
+mid-recording, and that is now a decision rather than a limitation:
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md) settled
+[issue #184](https://github.com/wildware-uk/clipped/issues/184) as **finish this
+file and let the session start the next one**, and ruled out scaling in the
+capture path — a resample per frame on the path the game is paying for, recording
+an enlarged window as an upscale of the smaller picture in a track that admits
+nothing about it.
+
+So the rule here stands as written for a replacement *within* one file: a
+recording committed to a size cannot change it, whatever produced the change. It
+relaxes in exactly one direction, which is that a caller who has followed a resize
+into a new file tells the fallback so through `CaptureFallback::resize`, and the
+next replacement is judged against the size the recording now uses. Wiring that
+into the recording loop is
+[issue #285](https://github.com/wildware-uk/clipped/issues/285).
 
 In practice the mismatch is rare: both Windows backends produce the target's
 client area in `B8G8R8A8`, so a replacement normally produces exactly what the
@@ -1131,6 +1254,21 @@ change the fallback policy — a minimised window is still not a backend failure
 and is still not fallen back from — but it is what lets the layer above tell a
 paused game from an empty recording. See "A minimised window, from end to end"
 below.
+
+Since [issue #461](https://github.com/wildware-uk/clipped/issues/461) the
+*recording* keeps its own account of the rest, because `note_silence` is inside
+`CaptureFallback` and the session does not yet call anything on it beyond
+`start` (see [Automatic capture fallback](#automatic-capture-fallback) for where
+that boundary is). `clipped_session::recording` accumulates the acquisition
+timeout on every `Acquisition::Timeout`, keeps the longest unbroken stretch, says
+so once at `warn` past thirty seconds, and puts
+`RecordingReport::longest_source_silence` on the report and in the sentence the
+user reads. The threshold is the same thirty seconds `note_silence` uses, so the
+two cannot disagree about the same recording when the fallback is finally
+threaded through the loop.
+
+That number exists because of the case below, where the source is not idle at
+all.
 
 ### What the user and the diagnostics see
 
@@ -1297,7 +1435,11 @@ platform actually exists is a question for then.
 6. **Write the `SAFETY` comment.** `FrameTexture::new` is `unsafe` precisely so
    that a backend author has to state why the texture outlives the frame
    (AGENTS.md section 58).
-7. **Test it for real.** Selection logic is unit tested; a backend cannot be.
+7. **Round the size down to even, and crop to match.** `FrameSize::rounded_down_to_even`
+   and `windows/crop.rs` are the shared halves of it; "An odd width or height"
+   above is why, and the rule is that the texture handed over must be the size
+   the format declares, not merely no smaller than it.
+8. **Test it for real.** Selection logic is unit tested; a backend cannot be.
    There are two patterns to follow, and which one fits depends on what the
    backend can be asked. `crates/capture/examples/wgc_probe.rs` is a controlled
    test window, a real capture of it, and measured pacing, dropped frames and

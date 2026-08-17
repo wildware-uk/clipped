@@ -2,6 +2,7 @@ import type { LibrarySession, LibrarySessionPage } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -56,6 +57,21 @@ function renderApp(): void {
     <StrictMode>
       <App />
     </StrictMode>,
+  );
+}
+
+/**
+ * Mounts the screen by itself, inside a router.
+ *
+ * The router is not decoration: the Play control on every row navigates to that
+ * recording's playback screen (issue #304), so a screen rendered without one is
+ * a screen whose rows cannot be drawn at all.
+ */
+function renderScreen(): void {
+  render(
+    <MemoryRouter>
+      <LibraryScreen />
+    </MemoryRouter>,
   );
 }
 
@@ -319,10 +335,13 @@ describe('the Library screen', () => {
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
-    ['favourites', /^favourites, and filtering/i, [58]],
+    ['filtering by favourite', /^filtering the list down to favourites/i, [60]],
     ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
-    ['playing in this window', /^playing a recording inside this window/i, [392, 304]],
-    ['playing a clip', /^playing a clip/i, [52]],
+    // Playing a *recording* is no longer on this list: Play is a control on
+    // every row since issue #304, and a row promising what the screen already
+    // does is worse than no row. Playing a **clip** is still waiting, and on
+    // clips existing rather than on a player.
+    ['playing a clip', /^playing a clip/i, [74, 91]],
   ];
 
   it('names each part it still owes, and the issue that lands it', async () => {
@@ -366,6 +385,39 @@ describe('the Library screen', () => {
    * suggestion instead of what the person chose, a Show in Explorer that sent
    * `open_recording`.
    */
+  it('plays a recording in this window, on the screen that draws a player', async () => {
+    // Issue #304's way in. The row is handed over rather than looked up again:
+    // this screen has it, and the playback screen would otherwise have to read
+    // the whole library back to find one file (issue #52).
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      openPlayback: () => ({
+        url: 'http://clip.localhost/1',
+        audio_track: 1,
+        audio_tracks: [{ index: 1, name: 'Compatibility Mix', default: true }],
+        prepared: false,
+      }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const play = await screen.findByRole('button', { name: /^Play / });
+    await user.click(play);
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Playback');
+    const main = screen.getByRole('main');
+    await waitFor(() => {
+      expect(main.querySelector('video')?.getAttribute('src')).toBe('http://clip.localhost/1');
+    });
+    // The file the row was drawn for, and no track named: which one plays by
+    // default is the recorder's answer, not this window's.
+    expect(runtime.invocations).toContainEqual({
+      command: 'open_playback',
+      args: { source: 'D:\\clips\\cs2-20260811-201400-1.mkv', audioTrack: undefined },
+    });
+  });
+
   it('opens a recording in the system player, naming the file the row was drawn for', async () => {
     const user = userEvent.setup();
     const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
@@ -478,6 +530,184 @@ describe('the Library screen', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       /Exported ace on mirage\.mp4 .* 9\.1 GB copied in 4\.2 s, without re-encoding\./,
     );
+  });
+
+  /*
+   * Issue #446, from the window's side. A copy of a four-second recording
+   * finishes before there is anything to draw; a copy of a two-hour one is what
+   * this is for, and the only thing that reaches the window while the control
+   * connection is blocked on the reply is an event.
+   *
+   * The export here never resolves until the test says so, which is what a long
+   * one looks like from here.
+   */
+  it('shows how far a long export has got, and stops showing it when the file is written', async () => {
+    const user = userEvent.setup();
+    let finish: (summary: unknown) => void = () => undefined;
+    const written = new Promise((resolve) => {
+      finish = resolve;
+    });
+
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => written,
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    // Before the recorder has said anything. The screen says an export is
+    // running — which it can honestly support against any recorder — and draws
+    // no bar, because a bar at nought that has never moved is a control that
+    // does nothing (AGENTS.md section 27). This is also exactly what an older
+    // recorder, which sends no progress at all, looks like for the whole copy.
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting cs2-20260811-201400-1\.mkv…/);
+    });
+    expect(
+      screen.queryByRole('meter'),
+      'a bar was drawn before the recorder had said how far it had got',
+    ).toBeNull();
+
+    const progress = (written_ms: number, packets: number, bytes: number): unknown => ({
+      event: 'export_progress',
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      written_ms,
+      total_ms: 6_540_000,
+      packets,
+      bytes,
+    });
+
+    runtime.emit(progress(1_308_000, 117_624, 1_962_240_822));
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exporting cs2-20260811-201400-1\.mkv — 20%/,
+      );
+    });
+    expect(Number(screen.getByRole('meter').getAttribute('value'))).toBeCloseTo(0.2, 2);
+
+    // And it advances. A screen that drew the first event and ignored the rest
+    // would satisfy every assertion above.
+    runtime.emit(progress(4_905_000, 441_090, 7_358_403_084));
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exporting cs2-20260811-201400-1\.mkv — 75%/,
+      );
+    });
+    expect(Number(screen.getByRole('meter').getAttribute('value'))).toBeCloseTo(0.75, 2);
+
+    // The reply is the only thing that says an export finished, and when it
+    // lands the bar goes with the sentence it replaced.
+    finish({
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      duration_ms: 6_540_000,
+      packets: 588_120,
+      bytes: 9_811_204_112,
+      elapsed_ms: 4_182,
+      lossless: true,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exported ace on mirage\.mp4 .* 9\.1 GB copied/,
+      );
+    });
+    expect(screen.queryByRole('meter'), 'the bar outlived the export it was drawn for').toBeNull();
+  });
+
+  /*
+   * An interrupted recording keeps every packet it wrote and no total, which is
+   * the property ADR 0001 chose Matroska for. There is no percentage to draw for
+   * one, and a denominator invented in the window would be a bar that lied — so
+   * what it shows is what advances.
+   */
+  it('says how much has been copied when the recording never said how long it was', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => new Promise(() => undefined),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    runtime.emit({
+      event: 'export_progress',
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      written_ms: 1_308_000,
+      packets: 117_624,
+      bytes: 1_962_240_822,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/1\.8 GB copied so far/);
+    });
+    // A meter with no value is the element's own way of saying "something is
+    // happening and I cannot say how much", which is the honest drawing here. A
+    // value of nought would be a claim.
+    expect(screen.getByRole('meter').getAttribute('value')).toBeNull();
+  });
+
+  /*
+   * Progress for somebody else's export must not move this one's bar. The
+   * events name the file they belong to precisely so that this is answerable,
+   * and matching on nothing would make a second window's copy of a different
+   * recording repaint this screen.
+   */
+  it('ignores progress for a recording it is not exporting', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => new Promise(() => undefined),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting/);
+    });
+
+    runtime.emit({
+      event: 'export_progress',
+      source: 'D:\\clips\\dota2-20260810-190000-1.mkv',
+      destination: 'E:\\share\\somebody else.mp4',
+      written_ms: 3_270_000,
+      total_ms: 6_540_000,
+      packets: 294_060,
+      bytes: 4_905_602_056,
+    });
+
+    // Nothing to wait for, which is the difficulty: give the subscription the
+    // same turn of the loop the accepted events above got, then assert nothing
+    // moved.
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting cs2-20260811-201400-1\.mkv…/);
+    });
+    expect(
+      screen.queryByRole('meter'),
+      'a bar was drawn from another recording’s export',
+    ).toBeNull();
   });
 
   it('says nothing at all when the Save As dialog is dismissed', async () => {
@@ -674,7 +904,7 @@ describe('the Library screen', () => {
       sessions: () => Promise.resolve(page([])),
       trash: () => Promise.resolve(emptyTrash()),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Library');
     await waitFor(() => {
@@ -702,7 +932,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       restoreFromTrash: restored,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
 
@@ -728,7 +958,7 @@ describe('the Library screen', () => {
           renamed: false,
         }),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
 
@@ -747,7 +977,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       emptyTrash: emptied,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     expect(emptied).not.toHaveBeenCalled();
@@ -767,7 +997,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       emptyTrash: emptied,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     await user.click(screen.getByRole('button', { name: 'Keep them' }));
@@ -793,7 +1023,7 @@ describe('the Library screen', () => {
           }),
         ),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     await user.click(screen.getByRole('button', { name: 'Empty the trash' }));
@@ -824,7 +1054,7 @@ describe('the Library screen', () => {
           directory: 'D:/Clips.trash',
         }),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     const trash = await screen.findByRole('region', { name: 'Trash' });
     // The path it *had*: a file inside the trash is named for the trash, and
@@ -842,7 +1072,7 @@ describe('the Library screen', () => {
       sessions: () => Promise.resolve(page([])),
       trash: () => Promise.resolve(emptyTrash()),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     const trash = await screen.findByRole('region', { name: 'Trash' });
     expect(trash).toHaveTextContent('Nothing has been deleted');
@@ -865,11 +1095,319 @@ describe('the Library screen', () => {
           }),
         ),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     expect(
       await screen.findByRole('heading', { name: 'The trash could not be read' }),
     ).toBeInTheDocument();
     expect(screen.queryByText('Nothing has been deleted.')).not.toBeInTheDocument();
+  });
+
+  /*
+   * Favouriting (issue #58, SPEC.md section 29).
+   *
+   * The read has always carried `favourite` and automatic cleanup has always
+   * protected what is marked. What did not exist was any way to *set* one, so
+   * these are the tests that the star reaches the recorder rather than filling
+   * itself in: the runtime rejects `set_favourite` unless a test stubs it, so a
+   * screen that drew a star and asked nobody fails here rather than passing.
+   */
+  it('marks a sitting as one to keep, and says so as a pressed control', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: args['favourite'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    expect(star).toHaveAttribute('aria-pressed', 'false');
+    await user.click(star);
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'set_favourite'),
+      ).toEqual([
+        {
+          command: 'set_favourite',
+          args: {
+            kind: 'session',
+            sessionId: 'cs2-20260811-201400',
+            id: 0,
+            favourite: true,
+          },
+        },
+      ]);
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: /^Stop keeping the Counter-Strike 2 sitting from /,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('addresses a recording by its identifier and a sitting by its name', async () => {
+    // The one thing about this command that a careless wiring gets wrong: the
+    // two kinds are addressed by different fields, because the schema keys them
+    // differently. A recording sent as a `session_id` names nothing.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: true,
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Keep cs2-20260811-201400-1.mkv, Counter-Strike 2',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'set_favourite'),
+      ).toEqual([
+        {
+          command: 'set_favourite',
+          args: { kind: 'recording', sessionId: '', id: 12, favourite: true },
+        },
+      ]);
+    });
+  });
+
+  it('clears a mark that is already on, rather than setting it again', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session({ favourite: true })])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: args['favourite'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: /^Stop keeping the Counter-Strike 2 sitting from /,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations
+          .filter((invocation) => invocation.command === 'set_favourite')
+          .map((invocation) => invocation.args['favourite']),
+      ).toEqual([false]);
+    });
+  });
+
+  it('draws the mark the library holds rather than the one that was asked for', async () => {
+    // A row that has gone is written to by nothing. The recorder reads the mark
+    // back after the write and answers with what is true, and a star that
+    // filled in anyway would be the window disagreeing with its own next read
+    // (AGENTS.md section 27).
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: false,
+          changed: false,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    await user.click(star);
+
+    await waitFor(() => {
+      expect(star).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  it('says a mark that would not go on did not, rather than drawing it anyway', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: () =>
+        Promise.reject(
+          Object.assign(new Error('the library could not be written'), {
+            code: 'library_unavailable',
+            message: 'the recording library could not be opened: the drive is not there',
+          }),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    await user.click(star);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'That could not be kept. the recording library could not be opened: the drive is not there Nothing was changed.',
+    );
+    expect(star).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  /*
+   * Keeping a recording out of automatic cleanup's reach (issue #472).
+   *
+   * The column existed nowhere before this: `cleanup::Protection` named locked
+   * recordings among the things it would not take, and there was no lock. These
+   * are the tests that the padlock reaches the recorder, and that it tells
+   * "you locked this" from "cleanup will not take this" — which are different
+   * for every recording inside a locked sitting.
+   */
+  it('protects a recording from automatic cleanup, and says so as a pressed control', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: args['locked'],
+          protected: args['locked'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(runtime.invocations.filter((invocation) => invocation.command === 'set_lock')).toEqual(
+        [{ command: 'set_lock', args: { kind: 'recording', sessionId: '', id: 12, locked: true } }],
+      );
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('says a recording inside a protected sitting is protected by it, and offers no control', async () => {
+    // The case that separates `locked` from `protected`. A padlock drawn from
+    // `locked` alone would show this recording as one cleanup may take, and
+    // cleanup would not take it. A *control* drawn from `protected` would offer
+    // to unlock something that has no lock to release.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () =>
+        Promise.resolve(
+          page([
+            {
+              ...session(),
+              locked: true,
+              recordings: [{ ...session().recordings[0]!, locked: false, protected: true }],
+            },
+          ]),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const bySitting = await screen.findByRole('button', {
+      name: 'cs2-20260811-201400-1.mkv, Counter-Strike 2 is protected from automatic cleanup because its sitting is',
+    });
+    expect(bySitting).toBeDisabled();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('draws the lock the library holds rather than the one that was asked for', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: false,
+          protected: false,
+          changed: false,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  it('says a lock that would not go on did not, rather than drawing it anyway', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: () =>
+        Promise.reject(
+          Object.assign(new Error('the library could not be written'), {
+            code: 'library_unavailable',
+            message: 'the recording library could not be opened: the drive is not there',
+          }),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'That could not be kept from cleanup. the recording library could not be opened: the drive is not there Nothing was changed.',
+    );
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
   });
 });

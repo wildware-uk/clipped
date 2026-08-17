@@ -60,6 +60,21 @@ export interface CommandAnswers {
   readonly restoreFromTrash?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `empty_trash` answers, given the confirmation it was sent. */
   readonly emptyTrash?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `set_favourite` answers, given the target and the state asked for.
+   *
+   * The default is a rejection, like the reads: a stub that quietly answered
+   * would let a screen test watch a star fill in while the recorder was never
+   * asked, which is the whole thing issue #58 was missing.
+   */
+  readonly setFavourite?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `set_lock` answers, given the target and the state asked for.
+   *
+   * A rejection by default, like the rest: a padlock that filled itself in
+   * while the recorder was never asked is exactly what issue #472 is about.
+   */
+  readonly setLock?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
@@ -71,6 +86,63 @@ export interface CommandAnswers {
    * the one thing the hotkey list exists to prevent (AGENTS.md section 27).
    */
   readonly recorderHotkeys?: () => unknown;
+  /**
+   * What `recorder_settings` answers: every setting, as the recorder holds it.
+   *
+   * The default is a rejection, as every recorder command's is. A stub that
+   * quietly answered with an empty list of settings would let a screen test
+   * pass while the screen drew a form over a recorder nobody asked (issue #51).
+   */
+  readonly recorderSettings?: () => unknown;
+  /**
+   * What `apply_recorder_settings` answers, given the values it was sent.
+   *
+   * The answer is the settings as they now stand, which is what the screen
+   * redraws from — so a stub that returns the previous view is a recorder that
+   * refused nothing and changed nothing, and the screen has to show that.
+   */
+  readonly applySettings?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `audio_devices` answers: the microphones this machine has.
+   *
+   * The default is a rejection, because "this machine has no microphone" and
+   * "nobody asked" must not look the same on screen (AGENTS.md section 27).
+   */
+  readonly audioDevices?: () => unknown;
+  /**
+   * What `microphone_level` answers, given the microphone it was asked about.
+   *
+   * The default is a rejection, because a meter reading zero and a recorder
+   * that was never asked must not look the same: one means "say something" and
+   * the other means the screen is drawing a control over nothing (AGENTS.md
+   * section 27, issue #109).
+   */
+  readonly microphoneLevel?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `start_at_login` answers: whether the recorder starts at sign-in.
+   *
+   * The default is a rejection, for the reason `audioDevices`' is: "Clipped
+   * does not start at sign-in" and "nobody could find out" are opposite
+   * answers, and a stub that quietly said the first would let a screen that
+   * draws them the same way pass.
+   */
+  readonly startAtLogin?: () => unknown;
+  /**
+   * What `set_start_at_login` answers, given the switch it was sent.
+   *
+   * The answer is the arrangement as it now stands, which is what the switch
+   * redraws from — so a stub that returns the previous state is a registry that
+   * refused nothing and changed nothing, and the screen has to show that.
+   */
+  readonly setStartAtLogin?: (args: Record<string, unknown>) => unknown;
+  /**
+   * Which folder the directory dialog says to record into, given what it was
+   * opened with.
+   *
+   * `null` is the dialog being dismissed, which is a real answer and not a
+   * failure.
+   */
+  readonly openDialog?: (args: Record<string, unknown>) => unknown;
   /**
    * What `get_status` answers, once per ask.
    *
@@ -90,6 +162,15 @@ export interface CommandAnswers {
   readonly exportRecording?: (args: Record<string, unknown>) => unknown;
   /** What `open_recording` answers, given the path it was sent. */
   readonly openRecording?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `open_playback` answers, given the recording and the track it was
+   * asked for.
+   *
+   * The default is a rejection, like the other recorder commands: a stub that
+   * quietly answered with an address would let a screen test pass while the
+   * screen drew a player over a recorder nobody asked (issue #304).
+   */
+  readonly openPlayback?: (args: Record<string, unknown>) => unknown;
   /** What `reveal_recording` answers, given the path it was sent. */
   readonly revealRecording?: (args: Record<string, unknown>) => unknown;
   /**
@@ -215,11 +296,50 @@ export function stubRecorderLinkRuntime(
       if (command === 'empty_trash') {
         return commands.emptyTrash?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
+      if (command === 'set_favourite') {
+        return commands.setFavourite?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'set_lock') {
+        return commands.setLock?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);
       }
       if (command === 'recorder_hotkeys') {
         return answered(commands.recorderHotkeys);
+      }
+      if (command === 'recorder_settings') {
+        return answered(commands.recorderSettings);
+      }
+      if (command === 'apply_recorder_settings') {
+        return answered(
+          commands.applySettings === undefined ? undefined : () => commands.applySettings?.(args),
+        );
+      }
+      if (command === 'audio_devices') {
+        return answered(commands.audioDevices);
+      }
+      if (command === 'microphone_level') {
+        return answered(
+          commands.microphoneLevel === undefined
+            ? undefined
+            : () => commands.microphoneLevel?.(args),
+        );
+      }
+      if (command === 'start_at_login') {
+        return answered(commands.startAtLogin);
+      }
+      if (command === 'set_start_at_login') {
+        return answered(
+          commands.setStartAtLogin === undefined
+            ? undefined
+            : () => commands.setStartAtLogin?.(args),
+        );
+      }
+      if (command === 'plugin:dialog|open') {
+        return answered(
+          commands.openDialog === undefined ? undefined : () => commands.openDialog?.(args),
+        );
       }
       if (command === 'recorder_status') {
         return answered(commands.recorderStatus);
@@ -244,6 +364,11 @@ export function stubRecorderLinkRuntime(
       if (command === 'open_recording') {
         return answered(
           commands.openRecording === undefined ? undefined : () => commands.openRecording?.(args),
+        );
+      }
+      if (command === 'open_playback') {
+        return answered(
+          commands.openPlayback === undefined ? undefined : () => commands.openPlayback?.(args),
         );
       }
       if (command === 'reveal_recording') {

@@ -1,7 +1,7 @@
 # Audio routing
 
-**Status: three captures and a mixer exist; nothing assembles them into a
-recording's tracks yet.**
+**Status: a recording of a window now assembles them — a game track, an
+everything-else track and a microphone track, plus the compatibility mix.**
 [Issue #19](https://github.com/wildware-uk/clipped/issues/19) built system audio
 capture: `clipped-audio` can record the output device Windows is playing
 through, as a continuous, timestamped stream of `f32` samples.
@@ -12,11 +12,26 @@ product exists for: **everything one game's process tree plays, and nothing
 else**. [Issue #29](https://github.com/wildware-uk/clipped/issues/29) added the
 other end of the model — the **compatibility mix**, the single track a player
 that takes one arbitrarily should take — which is the only place in Clipped where
-sources are deliberately combined. What is still to come is the routing that
-decides which captures a recording opens and which track each one feeds, and
-capturing the complement of a game
-([issue #27](https://github.com/wildware-uk/clipped/issues/27)); the sections at
-the end that describe those are unwritten because describing behaviour before it
+sources are deliberately combined.
+[Issue #27](https://github.com/wildware-uk/clipped/issues/27) added the
+complement — everything the machine played *except* one process tree — and with
+both modes present, `clipped_session::audio` now decides which captures a
+recording opens and which track each one feeds.
+
+**The rule is that the two scoped captures are opened together or not at all.**
+A recording of a window opens the include mode against that window's process tree
+and the exclude mode against the same tree, so every sample the machine played
+lands on exactly one of the two tracks. Opening one alone would leave the other
+half unrecorded; opening a scoped capture beside a whole-endpoint one would put
+the game's audio on two tracks, which nobody discovers until they mute the game
+in an editor and it is still audible. A recording with no process to scope to —
+a monitor capture, or a window whose process has already exited — records the
+whole endpoint on the other-system-audio track instead, which is coarser rather
+than broken.
+
+What is still to come is routing a *named* application to a track of its own
+([issue #33](https://github.com/wildware-uk/clipped/issues/33)); the sections at
+the end that describe it are unwritten because describing behaviour before it
 is built produces a page that is wrong from the day it is committed (AGENTS.md
 section 7).
 
@@ -84,12 +99,28 @@ Because the comparison is always against the anchor rather than against the
 previous packet, an ignored difference is still there next time; the deadband
 bounds the offset instead of letting it accumulate. The deadband is 20 ms,
 which is about two thousand times the packet-to-packet jitter measured on
-Windows 11 build 26200 and well under a perceptible synchronisation error. Its
-cost, stated plainly, is that a device whose sample clock genuinely differs
-from the performance counter is corrected in one 20 ms step roughly once an
-hour rather than continuously. Removing that step needs resampling against a
-reference clock, which is
-[issue #30](https://github.com/wildware-uk/clipped/issues/30).
+Windows 11 build 26200 and well under a perceptible synchronisation error.
+
+Left alone, a device whose sample clock genuinely differs from the performance
+counter would be corrected in one 20 ms step roughly once an hour rather than
+continuously — inside the deadband on every single packet, and still 20 ms out
+an hour later, because the same small ignored error is added every time.
+[Issue #30](https://github.com/wildware-uk/clipped/issues/30) removed that
+step for a *steady* clock error: `Timeline::correction_ratio` measures the
+rate the offset has been growing at since the timeline was last known to be
+right, and `crate::resample::LinearResampler` applies it to every real
+packet's own samples, by linear interpolation, before the packet ever reaches
+the table above. A source running a few parts per million fast or slow is
+therefore nudged continuously, by a resampling ratio too small to hear, and
+the correction that used to be one 20 ms event an hour is now nothing a
+listener could point to. The table above still governs — a real gap or a
+device change is not a rate to track, it is silence to fill or samples to
+trim — but a steady clock no longer needs either. The rate estimate itself
+resets whenever the table above fires, because an ignored offset erased by a
+step correction, or a gap, may describe a different piece of hardware than the
+one the estimate was measuring; `crates/audio/src/timeline.rs` and
+`crates/audio/src/resample.rs` are the arithmetic and the reasoning behind it,
+respectively.
 
 While an endpoint is quiet the timeline is topped up to `now - 60 ms` rather
 than to `now`, because audio for the last few milliseconds may still be inside
@@ -173,9 +204,16 @@ range and nothing downstream has to clip. The sample rate and channel count are
 passed through untouched, and the endpoint's `dwChannelMask` is reported as a
 `ChannelMask` so that a 5.1 recording is not labelled by guesswork.
 
-Resampling belongs to the stage that reconciles several capture clocks
-(issue #30) and downmixing is a decision about what the user hears, which this
-crate is not entitled to make on its own (AGENTS.md section 21).
+**Sample rate and channel count are still untouched, but every source's own
+samples are now nudged by a fraction of a percent to stay aligned with the
+reference clock** (issue #30, [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
+That is a correction against drift within one source's declared rate, not a
+conversion between two different declared rates: two sources captured at
+genuinely different sample rates still cannot be combined without a real
+resampling stage, which is why the compatibility mix still refuses one (see
+[What it will not do](#the-compatibility-mix)). Downmixing is a decision about
+what the user hears, which this crate is not entitled to make on its own
+(AGENTS.md section 21).
 
 ## Device changes during a recording
 
@@ -209,10 +247,12 @@ silence in somebody's recording.
 The last row of the second kind — a different sample rate — is the one
 compromise. A track's format is fixed when the capture opens, because a muxer
 that has written a stream header cannot be handed 44.1 kHz halfway through, and
-this crate has no resampler yet (issue #30). Changing shape underneath the
-caller would be worse than silence, and ending the recording over a headset
-would be worse still, so the capture says what happened, keeps the timeline
-running, and waits.
+this crate has no rate-conversion resampler: issue #30 keeps one source's own
+clock aligned with the reference clock over a long recording, which is a
+different problem from converting between two endpoints that disagree about
+the shape of a frame. Changing shape underneath the caller would be worse than
+silence, and ending the recording over a headset would be worse still, so the
+capture says what happened, keeps the timeline running, and waits.
 
 Opening is the one asymmetry: `SystemAudioCapture::open` fails with
 `AudioError::NoEndpoint` on a machine with no output device, because there is
@@ -359,14 +399,86 @@ questions the activation cannot answer:
 | What happens | What the capture does |
 | --- | --- |
 | A process of the game starts or exits | nothing: Windows follows the tree itself |
-| The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence |
+| The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence. The other side of a pair follows it onto the same process — see below |
 | …and more than one member survives, in separate trees | re-scopes onto the lowest-numbered one and logs a `warn` naming the members whose audio is therefore not in this track ([issue #311](https://github.com/wildware-uk/clipped/issues/311)) |
-| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the track continues as silence until the caller stops it |
+| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the including side continues as silence until the caller stops it. What the excluding side then carries is [an open question](#what-the-excluding-side-does-after-the-game-exits) |
 | A process of the game cannot be opened | it is not a member — an unpinned identifier is not one to scope a capture to — and its name is logged at `debug` |
 
 The tree is rooted at the game rather than at the launcher, for the reason
 [The tree is rooted at the game](#the-tree-is-rooted-at-the-game-not-at-the-launch)
 gives: Steam's notification chime does not belong in a track named after a game.
+
+**Windows offers both sides, and a recording takes both or neither.**
+`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` is everything the machine
+played *except* the tree — the other-system-audio track. A recording with a
+`Game` track scoped to the tree and a system track that is the whole endpoint
+has the game's audio on **two** tracks, which is worse than one honest track and
+a note saying separation was unavailable (ADR 0003). So:
+
+```rust
+// What a recording opens. Two captures, one thread each, one agreement.
+let (game, other) = ProcessLoopbackCapture::open_pair(game_process)?;
+```
+
+`open` and `open_excluding` are still there for a caller that wants one side,
+but a recording that opened both of them separately would carry a defect that
+only appears when a game's launcher exits partway through. Each capture then
+resolves the surviving tree from its **own** `ProcessTree`, refreshed on its own
+schedule, and nothing makes them land on the same process: a process in one
+side's tree and not the other's has its audio on both tracks, or on neither.
+
+`open_pair` gives the two captures one `AtomicU32` naming the process both are
+scoped to. An atomic rather than a shared tree behind a lock, because both sides
+are read on capture threads and a capture thread waits on nothing (AGENTS.md
+section 20). The rule, in `decide_scope`:
+
+| What the cell says | What the capture does |
+| --- | --- |
+| something other than what this capture names | follows it, even if this side's tree has not listed that process yet — being briefly scoped to something invisible is a moment of silence, disagreeing is the wrong audio on a track |
+| what this capture names, and it is alive | nothing |
+| what this capture names, it is dead, and this capture is *following* | nothing: a follower does not lead. This is what makes the rule terminate — without it, two captures whose trees disagree would move away from each other for ever |
+| what this capture names, it is dead, and this capture is not following | publishes the lowest-numbered living member. If the other side published first, in the window between the read and the write, that one wins |
+
+A capture opened on its own owns its cell, always reads back what it wrote, and
+therefore behaves exactly as it did before pairs existed.
+
+The two sides are distinct in the log: `audio_source` is `game` for the
+including side and `other_system` for the excluding one, and the `device` field
+names which side it is. Two captures whose lines were indistinguishable would
+make the one question worth asking of them — which track did this audio go to —
+unanswerable (AGENTS.md section 35).
+
+### What the excluding side does after the game exits
+
+**Not known, and deliberately not claimed.** Once the tree is empty, the
+excluding activation names a process that no longer exists. An already-open
+stream is left alone — nothing asks it to reopen — but whether Windows then
+delivers everything the machine plays, or nothing, has not been measured on
+hardware, so neither the log line nor this document says which.
+
+What *is* certain from the code is the reopen path: `open_stream` refuses an
+empty tree, so if anything does ask the excluding side to reopen after the game
+has gone, that track becomes synthesised silence for the rest of the recording.
+For a user still playing a browser after closing the game, that is a track that
+should have audio on it and does not. Fixing it means either activating an
+exclude-mode client against a dead identifier, or falling back to
+`SystemAudioCapture` on the whole endpoint — and choosing between those needs
+the measurement above, not a guess.
+
+### Proving the contents are separated
+
+What none of this proves on its own is that the *contents* are separated. That is
+a measurement on real hardware, and it is
+[`tests/audio/track_isolation.rs`](../tests/audio/track_isolation.rs)
+([issue #34](https://github.com/wildware-uk/clipped/issues/34)): it records a
+window whose process tree is holding one tone while another process holds a
+second, and measures both frequencies on both tracks. Measured on this project's
+development machine, each track's own tone reads 0.0565 and the other tree's
+reads 0.00003 — about 1,900 times apart, against a rejection threshold of eight.
+
+`cargo run -p clipped-audio --example process_loopback_probe` is the same claim
+by hand: it opens the pair and prints a peak level per side, so a game tone and a
+browser tone should raise one column each and never both at once.
 
 **Ending a capture drains it.** The audio engine holds up to 200 ms of captured
 audio; closing a capture throws that away, which is the last fraction of a
@@ -656,16 +768,19 @@ than asserting it. There is no look-ahead, deliberately: a true brickwall limite
 delays the signal by a few milliseconds, and a mix that is late against the
 picture to avoid an artefact nobody can hear is a bad trade.
 
-**What it will not do.** It does not resample, so a source captured at a rate the
-mix is not being written at is refused when it is *added* — before the recording
-starts, with a message saying so — rather than dropped from the mix during it.
-Reconciling capture clocks is
-[issue #30](https://github.com/wildware-uk/clipped/issues/30). Channel layouts
-are handled for the cases a recording actually produces: channel for channel, a
-mono source spread across every channel of the mix, and any source folded into a
-mono mix. A genuine downmix — 5.1 into stereo — needs a coefficient table, which
-is a decision about what the user hears, and is refused the same way for the same
-reason.
+**What it will not do.** It does not convert between sample rates, so a source
+captured at a rate the mix is not being written at is refused when it is
+*added* — before the recording starts, with a message saying so — rather than
+dropped from the mix during it. [Issue #30](https://github.com/wildware-uk/clipped/issues/30)
+keeps a single source's own clock from drifting against the reference clock
+over a long recording ([above](#loopback-delivers-nothing-while-the-endpoint-is-silent));
+it does not convert between two sources that were never at the same rate to
+begin with, which is a genuine resampling stage this mixer still does not
+have. Channel layouts are handled for the cases a recording actually produces:
+channel for channel, a mono source spread across every channel of the mix, and
+any source folded into a mono mix. A genuine downmix — 5.1 into stereo — needs
+a coefficient table, which is a decision about what the user hears, and is
+refused the same way for the same reason.
 
 **Where it runs.** A `Mixer` is owned by one thread and holds no lock; it is
 `Send` and not `Sync`. The alternative would be a lock every capture thread takes
@@ -842,7 +957,16 @@ cargo test -p clipped-audio
 - **The arithmetic**, in `src/timeline.rs`: silence of the exact length of the
   gap, jitter absorbed, ignored jitter not accumulating into drift,
   over-synthesised silence trimmed back out, buffers exactly contiguous across
-  all of it. These run anywhere, including on a machine with no sound card.
+  all of it, the drift-correction ratio staying at `1.0` until enough history
+  has accrued to trust it and clamped rather than following a bad measurement
+  once it is, and a real gap resetting the estimate rather than extending it.
+  These run anywhere, including on a machine with no sound card.
+- **The resampler**, in `src/resample.rs`: a ratio of `1.0` reproducing its
+  input exactly, including across a packet boundary; a ratio below or above
+  `1.0` producing correspondingly fewer or more frames; a long run at a steady
+  ratio converging on `frames * ratio` rather than drifting away from it; a
+  reset discarding carried state rather than blending it into the next
+  packet. Also machine-independent.
 - **The conversions**, in `src/format.rs` and `src/windows/endpoint.rs`: every
   endpoint sample format converting to the same amplitude, 24-bit sign
   extension, the mix format Windows actually reports here, a 44.1 kHz 5.1
@@ -1061,21 +1185,30 @@ Written during M2, alongside the code:
   the track off (SPEC.md section 13). What the mix does with what it is given is
   written above; the remaining half of
   [issue #29](https://github.com/wildware-uk/clipped/issues/29) is the wiring.
-- Clock drift and sample-rate handling between independent capture clients, and
-  how audio stays aligned with video over a multi-hour session
-  ([issue #30](https://github.com/wildware-uk/clipped/issues/30)) — including
-  what replaces the deadband correction described above.
+- A drift measurement taken from an actual multi-hour recording on real
+  hardware, the way the numbers elsewhere on this page were taken, rather than
+  from the synthetic packet sequences `crates/audio/src/timeline.rs` and
+  `crates/audio/src/resample.rs` are unit tested against
+  ([issue #30](https://github.com/wildware-uk/clipped/issues/30) — the
+  continuous correction itself, and what it replaced, are described
+  [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
+  Converting between two sources at genuinely different declared sample rates
+  — as opposed to correcting one source's own clock against the reference
+  clock, which is what is built — is a separate resampling stage neither this
+  crate nor the compatibility mix has.
 - Following an endpoint whose mix format differs from the one a recording
   started with, which today produces silence and a `Capture::FormatChanged`.
 - Per-source processing — gain, mute, noise suppression, gate, compressor,
   limiter — and where in the chain each sits
   ([issue #31](https://github.com/wildware-uk/clipped/issues/31)).
-- How to verify isolation across the whole track model at once
-  ([issue #34](https://github.com/wildware-uk/clipped/issues/34)): a recording
-  with a game track, a system track and a microphone track, each asserted by
-  frequency to hold its own tone and none of the others. Two trees against one
-  capture is asserted today, in
-  `test-apps/process-tree-audio/tests/process_loopback_isolation.rs`.
+- Verifying isolation across the whole track model at once, **including the
+  microphone** ([issue #34](https://github.com/wildware-uk/clipped/issues/34)).
+  A recording's game track, complement track and compatibility mix are asserted
+  by frequency today, against real endpoints and real processes, in
+  `tests/audio/track_isolation.rs`; two trees against one capture are asserted in
+  `test-apps/process-tree-audio/tests/process_loopback_isolation.rs`. The
+  microphone is not, and cannot be without a virtual capture device to render a
+  known tone into, so it stays in the manual procedure in `docs/testing.md`.
 - The Windows version requirements the subsystem depends on, measured rather
   than read off the documentation, and how it behaves on a machine that does not
   meet them. What is known today is above: the activation fails and

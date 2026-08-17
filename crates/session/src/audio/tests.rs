@@ -57,6 +57,8 @@ const BUFFER_FRAMES: usize = SAMPLE_RATE as usize / 100;
 /// Nothing here may assume the epoch is small.
 const EPOCH: u64 = 31_107_000 * 1_000_000_000;
 
+/// The game's own audio, in AGENTS.md section 26's vocabulary.
+const GAME_TONE: f64 = 440.0;
 const SYSTEM_TONE: f64 = 880.0;
 const MICROPHONE_TONE: f64 = 1320.0;
 
@@ -557,6 +559,203 @@ fn a_recording_with_both_sources_has_a_named_track_for_each_and_the_right_sound_
     }
 }
 
+/// The critical feature, measured rather than asserted: three sources, three
+/// tracks, and each track carrying its own sound and none of the others.
+///
+/// This is the automated half of
+/// [issue #34](https://github.com/wildware-uk/clipped/issues/34) and the proof
+/// that the routing issues [#26](https://github.com/wildware-uk/clipped/issues/26)
+/// and [#27](https://github.com/wildware-uk/clipped/issues/27) added does what
+/// SPEC.md section 11 asks. The tones are section 26's: 440 Hz for the game,
+/// 880 Hz for everything else the machine played, 1320 Hz for the microphone.
+///
+/// **What this does and does not prove.** The sources are scripted through
+/// [`AudioCapture`], so what is measured is the *routing* — that the session
+/// declares three tracks, puts each source on its own, and writes a file in
+/// which they are separable. It is not measured against Windows: whether
+/// `ProcessLoopbackCapture`'s include and exclude modes really partition the
+/// machine's audio is the system half of #34, and it is
+/// `tests/audio/track_isolation.rs` — a real recording of a real window, which
+/// needs a GPU, a display and an output endpoint and therefore cannot live
+/// here. The microphone leg of that is still the manual procedure in
+/// `docs/testing.md`, because a simulated microphone needs a virtual capture
+/// device rather than a program. A session that routed two
+/// sources to one track passes every structural assertion above the tone ones
+/// and fails here, which is the whole reason the tones exist.
+#[test]
+fn three_sources_produce_three_tracks_with_no_sound_shared_between_them() {
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("session-audio-isolation");
+    let path = directory.file("recording.mkv");
+
+    let reports = record(
+        video,
+        &path,
+        vec![
+            scripted(AudioSource::Game, 2, tone(GAME_TONE, 2, 2.0, 0)),
+            scripted(
+                AudioSource::OtherSystemAudio,
+                2,
+                tone(SYSTEM_TONE, 2, 2.0, 0),
+            ),
+            scripted(AudioSource::Microphone, 1, tone(MICROPHONE_TONE, 1, 2.0, 0)),
+        ],
+        2.0,
+    );
+
+    Media::open(&path)
+        .expect("a finished recording opens")
+        .validate()
+        .audio_stream_count(3)
+        // The order is the model's, not the order the sources were declared in:
+        // `AudioSource::ordering_rank` puts the game before everything else and
+        // the microphone last, so "track 2 is the microphone" keeps being true
+        // across recordings.
+        .audio(0, AudioStream::codec("pcm_s16le").title("Game"))
+        .audio(
+            1,
+            AudioStream::codec("pcm_s16le").title("Other System Audio"),
+        )
+        .audio(2, AudioStream::codec("pcm_s16le").title("Microphone"))
+        // The measurement. Each track's own tone must be at least eight times
+        // the strength of either tone belonging to another source, which is the
+        // documented rejection threshold #34 asks for
+        // (`Tone::DEFAULT_RATIO`).
+        .audio_tone(
+            0,
+            Tone::at(GAME_TONE)
+                .isolated_from(SYSTEM_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            1,
+            Tone::at(SYSTEM_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            2,
+            Tone::at(MICROPHONE_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(SYSTEM_TONE),
+        )
+        .monotonic_timestamps()
+        .synchronised_within(Duration::from_millis(40))
+        .assert_valid();
+
+    let names: Vec<&str> = reports.iter().map(AudioTrackReport::track_name).collect();
+    assert_eq!(
+        names,
+        vec!["Game", "Other System Audio", "Microphone"],
+        "all three sources should have reported, in the model's order"
+    );
+}
+
+/// #34's third assertion: the compatibility track carries **all three** sources.
+///
+/// The mix is what a player that takes one audio track arbitrarily takes
+/// (SPEC.md section 13), so a mix missing the game is a recording that sounds
+/// empty to everybody who does not go looking for track 1. Measured the way the
+/// two-source mix test measures its own: `Tone::at` asserts the *dominant*
+/// frequency and a mix of equal tones has none, so each is checked against the
+/// track's own peak instead.
+#[test]
+fn the_compatibility_mix_carries_the_game_the_rest_of_the_machine_and_the_microphone() {
+    let Some(video) = coded_video() else {
+        return;
+    };
+    // The same short script the two-source mix test uses, and for the same
+    // reason: inside the mixer's `MAX_SOURCE_LAG`, so no scripted source can run
+    // far enough ahead in media time to be left out of the mix.
+    const SCRIPT_SECONDS: f64 = 0.4;
+
+    let directory = TemporaryDirectory::new("session-mix-of-three");
+    let path = directory.file("recording.mkv");
+
+    record_with(
+        video,
+        &path,
+        vec![
+            scripted(AudioSource::Game, 2, tone(GAME_TONE, 2, SCRIPT_SECONDS, 0)),
+            scripted(
+                AudioSource::OtherSystemAudio,
+                2,
+                tone(SYSTEM_TONE, 2, SCRIPT_SECONDS, 0),
+            ),
+            scripted(
+                AudioSource::Microphone,
+                1,
+                tone(MICROPHONE_TONE, 1, SCRIPT_SECONDS, 0),
+            ),
+        ],
+        SCRIPT_SECONDS,
+        true,
+    );
+
+    let media = Media::open(&path).expect("a finished recording opens");
+    let mix = media
+        .audio_content(0)
+        .expect("the compatibility track can be decoded");
+    let quiet = mix.peak_amplitude() as f64 / 8.0;
+    let game = mix.magnitude_at(GAME_TONE);
+    let system = mix.magnitude_at(SYSTEM_TONE);
+    let microphone = mix.magnitude_at(MICROPHONE_TONE);
+
+    media
+        .validate()
+        .that(game > quiet, || {
+            format!(
+                "the mix should carry the game at {GAME_TONE} Hz, and it measures {game:.4}                  against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        .that(system > quiet, || {
+            format!(
+                "the mix should carry the rest of the machine at {SYSTEM_TONE} Hz, and it                  measures {system:.4} against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        .that(microphone > quiet, || {
+            format!(
+                "the mix should carry the microphone at {MICROPHONE_TONE} Hz, and it measures                  {microphone:.4} against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        // Four tracks: the mix, and the three it was made from.
+        .audio_stream_count(4)
+        .audio(
+            0,
+            AudioStream::codec("pcm_s16le")
+                .title("Compatibility Mix")
+                .default_track(true),
+        )
+        .audio(1, AudioStream::codec("pcm_s16le").title("Game"))
+        .audio(2, AudioStream::codec("pcm_s16le").title("Other System Audio"))
+        .audio(3, AudioStream::codec("pcm_s16le").title("Microphone"))
+        // And mixing changed none of the tracks it read.
+        .audio_tone(
+            1,
+            Tone::at(GAME_TONE)
+                .isolated_from(SYSTEM_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            2,
+            Tone::at(SYSTEM_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            3,
+            Tone::at(MICROPHONE_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(SYSTEM_TONE),
+        )
+        .assert_valid();
+}
+
 #[test]
 fn a_recording_with_no_audio_sources_is_a_video_only_file() {
     // `--microphone none --system-audio none`. No device is opened, no thread is
@@ -992,4 +1191,171 @@ fn the_compatibility_track_carries_every_source_and_the_isolated_tracks_stay_iso
         .monotonic_timestamps()
         .synchronised_within(Duration::from_millis(40))
         .assert_valid();
+}
+
+/// What [`plan_system_audio`] decides, which is the whole of issues #26 and #27
+/// that can be decided without a machine.
+///
+/// Opening a capture needs Windows, an endpoint and a running process. Deciding
+/// *which* captures to open needs none of those, and it is where the failure
+/// this pair of issues exists to prevent actually lives: a plan that scopes the
+/// game one way and everything-else another puts the game's audio on two tracks,
+/// and nobody finds that until they mute the game track in an editor and the
+/// game is still audible.
+mod planning {
+    use super::*;
+
+    /// The pid is arbitrary; what matters is that the same one reaches both.
+    const GAME: u32 = 4242;
+
+    #[test]
+    fn a_window_recording_scopes_the_game_and_everything_else_to_the_same_tree() {
+        let planned =
+            plan_system_audio(&AudioSourceSetting::SystemDefault, Some(GAME)).expect("a plan");
+
+        assert_eq!(
+            planned,
+            vec![
+                PlannedSource::GameTree(GAME),
+                PlannedSource::EverythingExceptGameTree(GAME),
+            ],
+            "a window recording gets both halves of the split, against one tree"
+        );
+    }
+
+    /// The invariant the pair exists for, stated as its own test because it is
+    /// the one a future change is most likely to break: no plan may contain a
+    /// whole-endpoint capture *and* a process-scoped one. The first records the
+    /// game along with everything else, so together they write the game's audio
+    /// to two tracks.
+    #[test]
+    fn no_plan_mixes_a_scoped_capture_with_the_whole_endpoint() {
+        for game_process in [None, Some(GAME)] {
+            for setting in [AudioSourceSetting::Off, AudioSourceSetting::SystemDefault] {
+                let planned = plan_system_audio(&setting, game_process).expect("a plan");
+
+                let whole = planned.contains(&PlannedSource::WholeEndpoint);
+                let scoped = planned
+                    .iter()
+                    .any(|source| !matches!(source, PlannedSource::WholeEndpoint));
+
+                assert!(
+                    !(whole && scoped),
+                    "{setting:?} with {game_process:?} planned {planned:?}, which records the \
+                     game twice"
+                );
+            }
+        }
+    }
+
+    /// A monitor recording, or a window whose process has already exited. One
+    /// unscoped system track is a worse recording than the split, and a better
+    /// one than none.
+    #[test]
+    fn a_recording_with_no_process_falls_back_to_the_whole_endpoint() {
+        let planned = plan_system_audio(&AudioSourceSetting::SystemDefault, None).expect("a plan");
+
+        assert_eq!(planned, vec![PlannedSource::WholeEndpoint]);
+    }
+
+    /// `--system-audio none` means none, and a resolvable game process is not a
+    /// reason to open two captures the user turned off.
+    #[test]
+    fn system_audio_off_opens_nothing_even_when_a_game_is_known() {
+        let planned = plan_system_audio(&AudioSourceSetting::Off, Some(GAME)).expect("a plan");
+
+        assert!(
+            planned.is_empty(),
+            "off planned {planned:?}, so a recording somebody asked to be silent is not"
+        );
+    }
+
+    /// Refused rather than silently recording the default endpoint (#316).
+    #[test]
+    fn a_named_system_audio_device_is_still_refused() {
+        let named = AudioSourceSetting::Named("Speakers".to_owned());
+
+        assert!(matches!(
+            plan_system_audio(&named, Some(GAME)),
+            Err(SessionError::AudioDeviceNotSelectable)
+        ));
+    }
+}
+
+/// Reducing a buffer to the one number a meter draws.
+///
+/// Opening a microphone needs Windows and an endpoint somebody has plugged in.
+/// Turning the samples it delivers into a level needs neither, and it is where
+/// the two failures worth having a test for live: a meter that reads zero while
+/// somebody is speaking, and a meter that sticks at the top and never comes
+/// down again (issue #109).
+mod level {
+    use super::*;
+
+    #[test]
+    fn the_peak_is_the_loudest_sample_however_it_is_signed() {
+        // The trough of a waveform is as loud as its crest. A meter that took
+        // the maximum rather than the maximum magnitude would read zero for
+        // every buffer whose loudest excursion happened to be downwards, which
+        // on a symmetric signal is half of them.
+        assert!((loudest(&[0.0, 0.25, -0.8, 0.3]) - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn silence_is_zero_and_not_something_a_meter_would_show() {
+        assert_eq!(loudest(&[0.0; 480]), 0.0);
+        assert_eq!(loudest(&[]), 0.0, "no samples is no signal, not a failure");
+    }
+
+    #[test]
+    fn a_sample_above_full_scale_is_the_top_of_the_meter_rather_than_past_it() {
+        // A float endpoint may deliver samples above 1.0, and the protocol
+        // promises 0.0 to 1.0. Without the clamp a meter drawn as a percentage
+        // of the width would run off the end of its own track.
+        assert_eq!(loudest(&[1.9, -0.2]), 1.0);
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_is_no_reading_rather_than_a_full_meter() {
+        // `f32::max` already prefers the number over a `NaN`, so dropping the
+        // filter would leave the two lines below passing. The infinity is the
+        // one that needs it: without the filter it becomes the peak, the clamp
+        // turns it into `1.0`, and the meter sits at the top for as long as the
+        // driver keeps producing them — a reading that says the microphone is
+        // clipping when what it means is that a sample was rubbish.
+        assert!((loudest(&[f32::NAN, 0.4]) - 0.4).abs() < f32::EPSILON);
+        assert!((loudest(&[0.4, f32::NAN]) - 0.4).abs() < f32::EPSILON);
+        assert_eq!(
+            loudest(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]),
+            0.0,
+            "a buffer of nothing but rubbish is no reading, not a full meter"
+        );
+    }
+
+    #[test]
+    fn recording_no_microphone_has_no_level_rather_than_a_level_of_zero() {
+        // `Off` is a setting somebody chose, not a device that could not be
+        // found, and the two must not arrive at a screen looking the same: one
+        // means "you asked for no microphone" and the other means "the one you
+        // asked for is not there" (AGENTS.md section 27). Resolution is the
+        // half of `microphone_level` that needs no endpoint, so it is the half
+        // this can check.
+        assert_eq!(
+            selected_microphone(&AudioSourceSetting::Off).expect("Off resolves"),
+            None,
+        );
+    }
+
+    #[test]
+    fn the_default_microphone_resolves_without_consulting_the_machine() {
+        // `default` follows whichever endpoint Windows considers default at the
+        // moment a capture opens, so resolving it must not enumerate: on a
+        // machine with no capture endpoints at all, enumerating would fail and
+        // a recording configured for `default` would be refused before the
+        // capture had a chance to say anything.
+        assert_eq!(
+            selected_microphone(&AudioSourceSetting::SystemDefault).expect("the default resolves"),
+            Some(clipped_audio::windows::MicrophoneSelection::SystemDefault),
+        );
+    }
 }

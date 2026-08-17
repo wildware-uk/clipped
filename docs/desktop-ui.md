@@ -189,11 +189,12 @@ something creating one (#91, #76), favourites on anything being favouritable
 [Issue #399](https://github.com/wildware-uk/clipped/issues/399). The Library
 listed what had been recorded and nothing could be done with it: the core loop of
 a recorder is record, find, watch, share, and two of the four were missing. Each
-recording in the Library now carries three controls, and the answer to "where
+recording in the Library now carries four controls, and the answer to "where
 does this actually happen" is different for each.
 
 | Control | Where it happens | What the window is allowed |
 | --- | --- | --- |
+| **Play** | Here, on the playback screen: it opens `/clip/:recordingId` with the row it was drawn for ([#304](https://github.com/wildware-uk/clipped/issues/304), and the playback screen below) | Nothing new. The media reaches the window over the `clip` scheme this process registers |
 | **Open** | `open_recording` in `src-tauri/src/main.rs`, through `tauri-plugin-opener`. Windows opens the file with whatever the user opens video with | Nothing new. It is a `#[tauri::command]` |
 | **Show in Explorer** | `reveal_recording`, the same way, with the file selected | Nothing new |
 | **Export MP4** | The **recorder**: `export_recording` over the control protocol, answered by `clipped_muxer::remux_to_mp4` ([ipc.md](ipc.md), [muxing.md](muxing.md)) | `dialog:allow-save`, so the interface can ask the operating system where the MP4 should go |
@@ -233,12 +234,11 @@ with the reason on each, rather than hidden: a control that would fail must not
 be offered as one that would work, and a row with nothing on it explains nothing
 (AGENTS.md sections 27 and 45).
 
-**Playing a recording inside this window is still not offered**, and Open is why
-that is acceptable rather than a gap: watching your own footage works today, in
-the player you already have. The window's own playback is
-[#304](https://github.com/wildware-uk/clipped/issues/304), blocked on four
-things including WebView2 being unable to decode the uncompressed sound the
-archival file carries ([#392](https://github.com/wildware-uk/clipped/issues/392)).
+**Open is still here now that Play exists**, and deliberately: the window plays
+one sound track at a time and offers the media element's own transport, and
+somebody who wants frame stepping, a second monitor or the player they have
+configured should have the file. Watching in Clipped and watching in VLC are
+different requests.
 
 ### What is being recorded right now, and the button that changes it
 
@@ -360,6 +360,50 @@ something: the query goes to the recorder, which parses it with the language in
 submission rather than on every keystroke — `game:` on the way to `game:cs2` is
 a parse error nobody asked about — and a query the recorder will not parse is
 reported with what was wrong with it rather than as an empty result set.
+
+### Scrolling a large library
+
+Issue #60's second acceptance criterion: "large libraries scroll smoothly
+(measured with a documented fixture size)". Every earlier round of this issue
+left it unmet, because the Library screen mounted one `<tbody>` per sitting —
+a header row and one row per recording — with nothing bounding how many of
+them existed at once. A page of 25 is nothing; the library
+[library.md](library.md) measures its own reconciliation cost against, ten
+thousand sessions, is not.
+
+`SessionList.tsx` and `virtualWindow.ts` fix the cause rather than the
+symptom. `useSessionWindow` measures `.clipped-shell__main` — the one element
+in the shell that scrolls (`AppShell.tsx`) — around the table, and trims which
+sessions are actually mounted to what that viewport needs, plus a small
+overscan either side; two `aria-hidden` spacer rows stand in for whatever was
+skipped, so the scrollbar keeps roughly the length a fully-mounted table would
+have had. Each sitting's height is *estimated* from its row count rather than
+measured, because measuring it would mean mounting it — the cost this exists
+to avoid — and the estimate only has to keep the window roughly right, not
+pixel-perfect.
+
+It is a no-op — every session renders, exactly as it always did — whenever
+there is nothing real to measure: `sessionWindow`'s `viewportHeight: 0` branch,
+which is what jsdom reports for every existing case in
+`LibraryScreen.test.tsx` and `HomeScreen.test.tsx`, having no layout engine of
+its own. It only starts trimming the table once there is a measured
+`.clipped-shell__main` with a real height, which in this build means a real
+window.
+
+**What is measured, and what is honestly not.** Nothing in this process can
+paint a frame, so no frame rate was observed and none is claimed — the same
+position [issue #309](https://github.com/wildware-uk/clipped/pull/309) took
+about drawing the screen at all. What `virtualWindow.test.ts` measures instead,
+against the same ten-thousand-session fixture `library.md` uses, is the
+property a frame rate actually depends on: at every scroll position across the
+whole library, the window stays a small, bounded slice of it — under fifty
+sessions, whatever the total — and the sessions it draws are the ones actually
+near the scroll position, not a fixed prefix of the list. `SessionList.test.tsx`
+proves the same property through the component itself, against a
+`.clipped-shell__main` built by hand with the dimensions a real one would have
+reported, because jsdom has none of its own to offer. Whether a real window
+scrolls smoothly on the strength of that has not been watched happen, and
+`docs/desktop-ui.md` says so rather than claiming it.
 
 ## The Games screen
 
@@ -538,16 +582,22 @@ mute and solo are resolved.
 
 ### No editing controls, and why
 
-There are none — not a Split, not a volume slider. The four operations that cut
-a clip up are **built and tested**, in `crates/edit` with undo and redo (#84),
-and a button here could not reach them any more than it could open a clip. The
-mix is #85, framing and speed #86, overlays #87 and combining recordings #88,
-and each owns its own control.
+There are almost none — not a Split, not a volume slider, not a mute button.
+The four operations that cut a clip up are **built and tested**, in
+`crates/edit` with undo and redo (#84), and a button here could not reach them
+any more than it could open a clip. Track volume, mute and fades are #85's
+still, framing and speed #86, overlays #87 and combining recordings #88, and
+each owns its own control — one that needs a path to `crates/edit`, which this
+window does not have until #306.
 
-The three zoom controls are the exception, because zoom is this component's own
+The three zoom controls are an exception, because zoom is this component's own
 state and they do exactly what they say. Each is disabled at the end of the
-scale where it would do nothing. **Export** is the fourth, for the same reason:
-opening a dialog is this component's own state.
+scale where it would do nothing. **Export** is another, for the same reason:
+opening a dialog is this component's own state. **Each track's Solo button** is
+the third: soloing is `Solo` (`crates/edit/src/audio.rs`), a
+value the editor listens with rather than a field of the document (#85), so it
+needs no operation and no path to the crate — pressing it changes only what
+this window's preview plays, never anything a save could carry.
 
 ### The export dialog
 
@@ -592,7 +642,7 @@ and names the rest instead of guessing:
 | The clip joins more than one recording | A cut that does not fall on a keyframe |
 | A segment is sped up, cropped or rotated | A codec the container writer cannot describe |
 | Text is drawn over the picture | Pictures stored out of the order they are shown |
-| A track is a mix: several inputs, a level, a mute or a solo elsewhere, a fade | A segment covering no pictures, and the recording's shape |
+| A track is a mix: several inputs, a level, a mute, a fade | A segment covering no pictures, and the recording's shape |
 
 That split is the crate's own structure rather than an approximation of it, and
 `exportPlan.test.ts` holds the port to the cases `crates/export`'s own tests
@@ -663,8 +713,10 @@ them is decided here rather than left to whichever branch merged last:
 2. **Zoom in**, and Zoom out and Fit when they are enabled — all three are
    disabled at the first zoom step, where only Zoom in is a tab stop;
 3. **the kind filters**, one per kind of event on the clip, when there are any;
-4. **the event marks**, in the order they occur on the edited timeline;
-5. **the playhead**.
+4. **each track's Solo button**, in the order its lane is drawn, when the clip
+   has any audio tracks;
+5. **the event marks**, in the order they occur on the edited timeline;
+6. **the playhead**.
 
 Two rules produce that list, and both are worth stating because the plausible
 alternative — content first, whole-document actions last — fails them:
@@ -693,67 +745,97 @@ SPEC.md sections 10, 12, 15, 27 and 34, and
 rail of sections and panes of controls: device pickers, a recording directory,
 quality presets, a container choice, hotkey bindings and a row of switches.
 
-**The rail is here and the controls are not, because this window can neither
-read nor write a setting.** That is a fact about what is built rather than about
-what was finished, and it has four parts:
+**The controls are here, because the settings are reachable.** The recorder owns
+`settings.json` — its three layers, its validation, its migrations, and each
+value reported with the layer it came from and whether this scope overrode it
+([configuration.md](configuration.md)) — and the window asks it: `get_settings`,
+`apply_settings` and `get_audio_devices` ([ipc.md](ipc.md)). It reads that file
+itself, and validates a value itself, exactly never: this window may link one
+crate of the repository's workspace, `clipped-ipc`, which
+`tests/integration/tests/workspace_layering.rs` enforces, and a second
+implementation of a settings file's versioning and validation would be one built
+against the file somebody's settings live in (AGENTS.md section 55).
 
-- the settings are `clipped_session::config` — three layers, validation, and
-  each value reported with the layer it came from and whether this scope
-  overrode it ([configuration.md](configuration.md)). It is exactly the shape a
-  settings screen needs, and nothing here can ask it anything;
-- the desktop application may link one crate of the repository's workspace,
-  `clipped-ipc`, and `tests/integration/tests/workspace_layering.rs` enforces
-  it. `clipped-session` sits above capture, audio, encoding and muxing, so
-  naming it here would put the recording engine in the window's process — the
-  separation [ADR 0002](adr/0002-separate-recorder-process.md) exists to make;
-- the control protocol has no command that reads configuration, and the one
-  that would write it, `apply_settings`, is refused as not implemented by every
-  build ([ipc.md](ipc.md));
-- reading `settings.json` from this process instead would be a second
-  implementation of its versioning, migration and validation, against the file
-  the user's own settings live in (AGENTS.md section 55).
+### What decides whether a control is drawn
 
-[Issue #252](https://github.com/wildware-uk/clipped/issues/252) is the fix, by
-either of its two routes, and it says it blocks this screen.
+The recorder does, per setting, and the window has no opinion of its own:
 
-### What each pane carries instead
+| The recorder says | The window draws |
+| --- | --- |
+| `applies: true` | A control: a list of options where `choices` is closed, a field where it is open, and this machine's microphones where the setting is one |
+| `applies: false` | The value, and the recorder's own sentence naming what would have to land — never a control that would change nothing (AGENTS.md section 27) |
+| `overridden: true` | A Reset beside it, which sends `null` rather than today's default: a setting reset follows a later change to the default, and one set to it does not |
+| `accepted` | The hint under the field, which is the same sentence a refused value comes back with, so the two cannot disagree |
+
+A refusal is the recorder's own words — it names the setting, the value and what
+would have been accepted — and what was typed stays on screen to be corrected
+(AGENTS.md section 45). What the screen redraws is the reply, never what it
+sent: a value the recorder refused, or one another window changed a moment
+earlier, must not be drawn as saved.
+
+The microphone list is the machine's, asked for when the screen opens and again
+whenever the window comes back to the front — because the answer goes stale in
+the one way that matters, which is somebody plugging in the headset they are
+about to choose. The recorder enumerates the endpoints on every request so that
+it can be asked twice; the previous list stays on screen while the new one
+arrives, rather than blanking a control somebody may be using. A device that is
+configured and not in the list is kept on offer as "not connected", because
+dropping it would silently change what is recorded; a list that could not be
+asked for is *said*, rather than drawn as a machine with no microphone.
+
+### The two things on this screen that are not settings
+
+The **hotkey list**, which is where every global hotkey stands and the only
+place a conflict is visible (#232); and the **start-at-login switch**, which is
+one `Run` value under this account that Windows reads at sign-in rather than a
+key in `settings.json` (#308). Neither goes through `apply_settings`.
+
+The switch is the recorder's, not this window's, and it has to be: the value is
+a command line naming the executable Windows runs, and that executable is the
+recorder — a window writing a path it worked out from its own location would
+leave a startup entry pointing at nothing, which fails silently, once, at a
+sign-in nobody is watching. So the window asks (`get_start_at_login`,
+`set_start_at_login`), and turning it on here does exactly what
+`clipped-recorder start-at-login enable` does, through the same code.
+
+It has three positions, not two. On, off, and **on but pointing at a Clipped
+that is no longer there** — a moved or reinstalled installation. That third one
+is drawn as on, because Windows will still try it, with the missing path named
+and the repair offered: turning it off and on again writes the copy in use now.
+Reading it never changes it, so opening this screen writes nothing
+([privacy.md](privacy.md)).
+
+### What each pane still only accounts for
 
 Three columns: the setting, **how it is set today**, and what has to land before
-this window can hold the control. The middle column is the one that makes this a
-screen rather than an apology — almost every setting *can* be changed today, and
-the screen says how:
+this window can hold the control. What is left there is what has nowhere to be
+saved, or nothing behind it:
 
-| Section | What can be changed today |
+| Section | Still an account rather than a control |
 | --- | --- |
-| Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
-| Audio | The same options. A recording carries its audio tracks (#180); what the settings file cannot yet do is choose the devices per game |
-| Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
-| Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
-| Notifications | **The one thing this window's own behaviour follows**: the four switches in `notifications.json`, named with their keys and their file |
-| Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
-
-Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
-read them, and that is worth the distinction the screen draws: the recording
-directory and the container are #307, and listing this machine's audio devices
-at all is #308. Both were raised while this screen was built, because a row that
-said "not yet" with no issue behind it is a promise nobody has made.
+| Recording | The quality presets and bitrate (#181, #62), and the container (#307) |
+| Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
+| Storage | The limits and the trash directory, which the file carries and the screen SPEC.md section 27 draws is #95; and per-game overrides, which the file carries and #63 draws |
+| Hotkeys | Binding a combination (#54). The section **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
+| Notifications | Nothing that has a key. The four switches are controls ([#252](https://github.com/wildware-uk/clipped/issues/252)); what is left is a toast for a replay that was saved, which needs an event from the recorder to be raised from (#110) |
+| Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |
 
 ### What is checked, and against what
 
 Everything above is a claim about code in another process, and a screen full of
-those goes quietly wrong: a renamed settings key, a subcommand that moved, an
-`apply_settings` that got implemented, and the screen still says what it said in
-August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions out
-of the sources that hold them:
+those goes quietly wrong: a renamed settings key the window then never draws, a
+subcommand that moved, a #252 that landed and a screen still saying what it said
+in August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions
+out of the sources that hold them:
 
 | The screen says | Read from |
 | --- | --- |
-| These are the settings, spelled this way | `SettingKey::name` in `crates/session/src/config/value.rs`, both directions — a setting the API gains and one the screen invented both fail |
-| These are the notification switches | `NotificationCategory::key` in `apps/desktop/src-tauri/src/notification_policy.rs` |
+| These are the settings it draws controls for | `SettingKey::name` in `crates/session/src/config/value.rs` and `RECORDING_DIRECTORY` in `apps/recorder/src/settings.rs`, both directions — a setting the API gains and one the screen invented both fail |
+| These are the notification switches | `NotificationCategory::key` in **both** `crates/session/src/config/notifications.rs`, which writes them into the settings file, and `apps/desktop/src-tauri/src/notification_policy.rs`, which matches on them when it decides about a toast. The two are in Cargo workspaces that may not link each other, so nothing but this holds them equal — and a rename on either side saves the switch, redraws it as saved and notifies anyway |
 | The settings file is at this path | `APPLICATION_DIRECTORY` in `clipped-logging` and `FILE_NAME` in `config::document` |
 | The notification file is at this path | The bundle identifier in `tauri.conf.json` and `SETTINGS_FILE` in `notifications.rs` |
-| `apply_settings` is refused | `UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` |
-| Nothing reads settings back | The command names `Command::from_request` parses |
+| The recorder reads and changes settings | The command names `Command::from_request` parses, and that `UNBUILT_COMMANDS` is gone from `crates/ipc/src/command.rs` |
+| A window can tell before it draws | The `settings` feature in `crates/ipc/src/message.rs` |
 | Run this command | The subcommands `apps/recorder/src/cli.rs` declares, and their options |
 
 `SettingKey`'s own documentation asks for the first of those: it exists so that
@@ -811,154 +893,141 @@ a report with no logs in it would be an export in name only
 ## The playback screen
 
 SPEC.md section 42 and [issue #52](https://github.com/wildware-uk/clipped/issues/52).
-The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx` and
-everything it decides is in `clipPlayback.ts`, which is pure and therefore the
-part with tests.
+The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx`,
+everything it decides is in `clipPlayback.ts`, and the round trip that gets it
+media is `playback.ts`.
 
 The ticket asks for playback with transport controls, keyboard shortcuts,
-frame-accurate seeking and an audio-track selector. **None of it is drawn,
-because this window cannot play a Clipped recording at all.** That is not a
-scheduling remark; it is four independent facts, and the design that follows from
-them is below.
+frame-accurate seeking and an audio-track selector. **A recording plays, with
+sound, and any of its tracks can be chosen**
+([#304](https://github.com/wildware-uk/clipped/issues/304)). What is not built is
+at the end of this section.
 
-### Why a `<video>` cannot be pointed at a recording
+### What was believed, and what was measured
 
-Each of these is enough on its own, so fixing any single one changes nothing.
-They are on the screen itself, with the evidence beside each, in the same
-contract the unbuilt screens keep.
+This screen used to carry a table of four facts explaining why a `<video>` could
+not be pointed at a recording. Two of them were wrong, and they were the two
+that had never been measured: that WebView2's Matroska support is the WebM
+subset, and that no browser decodes PCM. **It plays a Clipped recording as it
+stands** — Matroska, AV1 picture, uncompressed PCM sound — and decodes both.
+[ADR 0011](adr/0011-what-the-webview-plays.md) is the measurement, the method and
+what it means; it is worth reading before anything here is changed, because it
+also says how the reasoning failed. `canPlayType` and `MediaSource` do answer as
+the two facts predicted; the `src=` path does not, because it goes to Chromium's
+bundled FFmpeg demuxer rather than to a codec allow-list.
 
-| What stops it | Where it can be checked |
+The two facts that stood:
+
+| What is true | What follows |
 | --- | --- |
-| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, and none of the four reaches the file system — a Save As dialog returns a path a person typed, not a handle to anything; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
-| **A recording is Matroska, and WebView2 does not demux it.** | [ADR 0001](adr/0001-mkv-archival-container.md) writes recordings into MKV so a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video. |
-| **The audio is uncompressed PCM, and nothing in Clipped encodes audio.** | [muxing.md](muxing.md): every track is 16-bit PCM because no crate in the workspace encodes audio ([#28](https://github.com/wildware-uk/clipped/issues/28)). No browser decodes PCM in MP4. |
-| **A media element cannot choose an audio track.** | `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. |
+| **This window cannot load a file from the disk.** No asset protocol, no file-system permission, and a content-security policy that permits media from the bundle and from one origin | The media is served *to* the window, by this process, over a scheme that serves only what the recorder has opened |
+| **A media element cannot choose a sound track.** `HTMLMediaElement.audioTracks` is not implemented in Chromium, and the demuxer takes the *first* track — Matroska's default-track flag is ignored | Choosing a track means being handed a file that carries it, so the choice happens on the way out of the recorder |
 
-`apps/desktop/src/playbackReach.test.ts` reads the first of those out of the
-three files rather than asserting it in prose: the day somebody enables the asset
-protocol, grants a file-system permission or widens the policy, that test fails
-and brings them here. A claim in a comment is true on the day it is written; a
-claim a test resolves is true whenever it passes.
+`apps/desktop/src/playbackReach.test.ts` reads the first of those out of
+`tauri.conf.json`, `capabilities/default.json` and `src-tauri/src/playback.rs`
+rather than asserting it in prose, and it describes the boundary as it now is:
+the day somebody enables the asset protocol, grants a file-system permission or
+widens the policy beyond that one origin, it fails and brings them here.
 
-The fourth row is the one that decides the shape of the answer. **No arrangement
-that hands a whole multi-track file to a media element can satisfy #52's first
-acceptance criterion**, however the container question is settled, because the
-element has no way to switch tracks. Track selection has to happen on the way
-*out* of the recorder.
+### How a recording reaches the element
 
-### The decision, and what it costs
+Three hops, and each is where it is for a reason:
 
-**The recorder serves the media; the window plays a stream, one track at a time.**
-[Issue #304](https://github.com/wildware-uk/clipped/issues/304) builds it.
+1. **The screen asks the Tauri host** — `open_playback`, with the recording's
+   path and, when somebody has chosen one, a sound track.
+2. **The host asks the recorder**, over the control protocol
+   ([ipc.md](ipc.md)). It has to: `workspace_layering.rs` permits `src-tauri`
+   exactly one crate of this workspace, `clipped-ipc`, so the window's process
+   links no demuxer and cannot so much as list a recording's tracks.
+3. **The recorder answers with a file**, and the host serves it.
 
-Concretely: a protocol command opens a recording for playback and reports its
-duration, its dimensions and its track list; the recorder remuxes the source into
-fragmented MP4, copying the video without re-encoding it and encoding the chosen
-audio track to AAC; and it answers byte ranges, so a seek is a range request
-rather than a re-read. The Tauri host registers a URI scheme that relays those
-ranges and the screen points a `<video>` at it. The compatibility mix is the
-default, which is what the container already flags ([muxing.md](muxing.md)), and
-choosing another track is a new URL at the current time.
+What the recorder answers with is the decision this screen turns on:
 
-The recorder rather than the window, because
-`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
-permits `src-tauri` exactly one crate of the workspace, `clipped-ipc`. The window
-may not link `clipped-muxer`, so it cannot remux or encode anything in its own
-process, and it should not: that is the boundary
-[ADR 0002](adr/0002-separate-recorder-process.md) exists to keep.
+| The track asked for | What is served | What it costs |
+| --- | --- | --- |
+| the recording's first sound track — for a Clipped recording, the compatibility mix, which leads the file ([muxing.md](muxing.md)) | **the recording itself** | one `Mp4Plan::inspect`: opened, described, closed |
+| any other | a copy carrying the picture and that track alone, in `%LOCALAPPDATA%\Clipped\playback` | one pass over the file, and a copy of it on disk until it is swept |
 
-What it costs, stated rather than glossed:
+The copy is still a **stream copy** — `clipped_muxer::remux_to_mp4_carrying`,
+nothing decoded and nothing encoded, PCM carried into MP4 as `ipcm`. There is no
+audio encoder anywhere in this path, which is what
+[#392](https://github.com/wildware-uk/clipped/issues/392) was about.
 
-- **A live remux and an audio encode for every recording watched**, and again for
-  every track switched to. Video is copied, so the cost is the audio encode and
-  the container work, not a transcode — but it is not free, and it happens beside
-  a game.
-- **An audio encoder Clipped does not have.** Measured on this machine: the
-  pinned LGPL FFmpeg build carries FFmpeg's native `aac` encoder
-  (`third-party/ffmpeg/current/bin/ffmpeg -encoders`), so this is wiring rather
-  than a new dependency or a fresh licence question — but it is still a subsystem
-  that does not exist.
-- **Seek accuracy is the video's keyframe interval** unless the served stream
-  carries an index. "Frame-accurate seeking where practical" is the ticket's own
-  wording, and this is where the practical limit sits.
-- **Privilege.** The window gains a way to receive bytes it could not before.
-  #304's last criterion is that whatever it gains is the smallest thing that
-  works, and that `playbackReach.test.ts` is rewritten to describe the new
-  boundary rather than deleted.
+### What the window gains, and why it is the smallest thing that works
 
-The alternatives, and why not:
+A URI scheme, `clip`, registered by this process in `src-tauri/src/playback.rs`.
+It serves **nothing at all** until `open_playback` has answered for a recording;
+the window is handed `http://clip.localhost/3` and never a path; and a number
+nothing has registered is a 404. So the reach the interface gains is exactly
+"the recordings you have opened for playback in this session", and it is a
+consequence of the recorder's answer rather than something the window can ask
+for. `capabilities/default.json` gains **nothing**: a scheme this process
+registers is not a permission the interface holds.
 
-| Instead | Why not |
-| --- | --- |
-| Point a `<video>` at the MKV through Tauri's asset protocol | Rows two, three and four above. It is the cheapest thing to write and it plays nothing. |
-| Remux the whole file to MP4 first ([#92](https://github.com/wildware-uk/clipped/issues/92)) and play that | #92 copies streams without re-encoding, so the video arrives and **the sound does not** — PCM has nowhere to go in an MP4 a browser will decode. It also writes a second full-size copy of every recording somebody watches, and makes playback wait for a pass over the whole file. Even with the audio encoded it still cannot answer #52's track selector: one file, one track a media element can reach. |
-| Convert on the fly to WebM instead | The video would have to be re-encoded, because WebM cannot carry H.264 or HEVC. That is the one thing worth avoiding: a transcode of gameplay footage beside a running game. |
-| A native video surface behind the webview | No transport, no keyboard handling and no layout that the rest of the interface shares, and Tauri offers nothing for it. It is the answer if the stream above proves too expensive, and it is a much larger change. |
+The alternative was Tauri's asset protocol, and it was rejected on privilege
+rather than on playback — it serves any path inside a scope, and the only scope
+that covers a recordings directory that is a *setting* is every path on the
+machine. That is the same objection `open_recording` and `reveal_recording`
+exist for.
 
-### What it does show
+The scheme answers **byte ranges**, so a seek is a range request rather than a
+re-read, and each answer is bounded rather than being the rest of the file: a
+protocol handler answers with bytes in memory, and a recording is measured in
+gigabytes.
 
-The one thing that is real: **what the recorder link says about this recording.**
-The window follows a single recorder, so it learns of exactly two recordings —
-the one being written now, and the one a recorder died in the middle of, whose
-file [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md) says naming is the
-whole of recovery. `resolveClip` has one answer for each, and one for everything
-else.
+### The track selector
 
-That third answer is the careful one. It reads **"Not known to this window"** and
-explains that the library index is where a recording would be looked up and that
-this screen has not looked in it
-([#52](https://github.com/wildware-uk/clipped/issues/52)). Since #301 the index
-*can* be read — the Library screen does — but the identifier in the address bar
-is the recorder's `recording_id` for a live recording and the index keys
-recordings by its own integer, so reconciling the two is work of its own.
-It does **not** say the recording is missing. This window has not been to the
-disk and cannot; `missing_since` in the library index is the only thing that has
-looked ([#56](https://github.com/wildware-uk/clipped/issues/56)), and reporting a
-file as gone because *this* window could not find it is exactly the invented
-state AGENTS.md section 27 is about. `clipPlayback.test.ts` asserts the wording
-carries none of "missing", "gone" or "deleted", so the distinction cannot be lost
-to an edit that reads better.
+Buttons rather than a `<select>`, one per sound track, with `aria-pressed` on
+the one playing. Pressing one asks the recorder for that track and points the
+element at what comes back — and the position is carried across, because
+somebody four minutes into a match who wants to hear the microphone asked for
+the microphone, not to start again.
 
-Where a recording *is* known, the screen shows the four fields the protocol
-carries and no more: the file in full, the capture target, and how long the
-recorder had been recording when it last said so — labelled as a lower bound
-rather than a duration, because nothing has opened the file, and a recording a
-killed recorder left may have no Matroska trailer at all
-([#283](https://github.com/wildware-uk/clipped/issues/283)). **There is no
-duration, no thumbnail and no waveform**, because there is nothing to get them
-from.
+A track the recording did not name is shown by its position — "Audio 2" — rather
+than given a name here. What is on it is a fact about the file, and this window
+has not heard it.
 
-### Why it is reachable from the sidebar, and nowhere else
+### What is drawn only when it is true
 
-A screen nothing links to is a screen nobody finds. The one recording this window
-can name is the one a recorder died writing, and the sidebar notice that names
-the file it left now carries a link to that recording's screen.
+- **A recording still being written gets no player.** Its container has no
+  trailer yet, so there is nothing whose length a transport could describe, and
+  another process is appending to it. The screen says so.
+- **A recording whose file has gone gets the recorder's own sentence** — it
+  names the file and says what probably happened to it — with no transport above
+  it (AGENTS.md sections 27 and 45).
+- **The length, the position and the picture size are the element's own
+  measurements** of the file it was handed. Nothing in this window computes a
+  duration or counts a clock, which is the same rule the record control keeps.
 
-That link is a destination and not a control: it does not claim the recording
-will play, and the screen it leads to says so in its first paragraph. It is the
-same bargain the tray's Open Library keeps — "a thing that happens, rather than a
-control that does nothing". Everything else waits on this screen looking a
-recording up in the library index (#52); Home and Library (#60), which now list
-what the index holds, are what will open this screen properly.
+### Which recording it plays
+
+Three sources, in order: the row handed over by the screen somebody came from —
+the Library's Play — then the recording the link says is being written now, then
+the one a recorder died in the middle of
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
+
+The row is handed over rather than looked up because the Library has it in its
+hand when the button is pressed, and this screen would otherwise read the whole
+library back to find one file. A **reload** has no row, and the screen says it
+has not been told which file this recording is rather than inventing one:
+looking a recording up cold, by the identifier in the address bar, is
+[#52](https://github.com/wildware-uk/clipped/issues/52). It does **not** say the
+recording is missing — this window has not been to the disk, and reporting a file
+as gone because *this* screen could not find it is exactly the invented state
+AGENTS.md section 27 is about.
 
 ### What is not built
 
-Every row of the screen's second table, each naming the work that supplies it:
-playing anything at all and choosing a track (#304); opening a recording somebody
-picked, and saying a file has gone (#52 — the read that carries both landed with
-#301, and this screen does not yet use it); a poster frame, which is the thing
-[#57](https://github.com/wildware-uk/clipped/issues/57) has been waiting for —
-thumbnails are generated, cached and tested, and *nothing has ever drawn one*, so
-on a real machine none is produced; a waveform
-([#66](https://github.com/wildware-uk/clipped/issues/66)); and bookmarks and
-events on a timeline ([#64](https://github.com/wildware-uk/clipped/issues/64) and
-[#65](https://github.com/wildware-uk/clipped/issues/65)).
-
-The alternative to that table was a transport bar, a scrubber and a track
-selector drawn over a black rectangle. That is AGENTS.md section 27 broken twice
-in one screen — controls that do nothing, above a picture Clipped never made —
-and the scrubber is the worst of the three, because a scrubber implies a duration
-and nothing in this window has measured one.
+Frame-accurate seeking and keyboard shortcuts of Clipped's own: what is drawn is
+the media element's transport, which seeks to a keyframe (SPEC.md section 42,
+[#52](https://github.com/wildware-uk/clipped/issues/52)). A poster frame, which
+is the thing [#57](https://github.com/wildware-uk/clipped/issues/57) has been
+waiting for — thumbnails are generated, cached and tested, and *nothing has ever
+drawn one*. A waveform ([#66](https://github.com/wildware-uk/clipped/issues/66)),
+and bookmarks and events on a timeline
+([#64](https://github.com/wildware-uk/clipped/issues/64) and
+[#65](https://github.com/wildware-uk/clipped/issues/65)). Each is a row on the
+screen naming the work, which is the contract every unbuilt row keeps.
 
 ## The tray
 
@@ -970,7 +1039,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — this recording is not keeping a replay buffer   disabled
+  Save Replay
   Add Bookmark
   Stop Recording
   ─────────────────────────────
@@ -1071,8 +1140,8 @@ text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
 - **Save Replay** was a command the protocol defined and the recorder refused,
-  labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
-  day it was built the menu would stop claiming it had not. That day was
+  labelled from the refusal's own subsystem and tracking issue so that the day
+  it was built the menu would stop claiming it had not. That day was
   [#38](https://github.com/wildware-uk/clipped/issues/38). It is live exactly
   when the running recording is keeping a replay buffer, and disabled with the
   true reason otherwise: `— this recorder cannot save replays` when the recorder
@@ -1090,16 +1159,32 @@ explanation" is the failure AGENTS.md section 27 names.
   which is a fact about when the recording started and not about anything going
   wrong.
 
-  A recording started **from this window** still keeps no buffer, so in practice
-  the reason is usually the third. The window cannot ask for one at a length
-  somebody chose: the duration lives in `replay_window_seconds`, and this window
-  has no way to read a setting — `apply_settings` is unbuilt (#108) and
+  A recording started **from this window** keeps a buffer, so in practice the
+  item is live whenever this application is the thing recording
+  ([#427](https://github.com/wildware-uk/clipped/issues/427)). Both controls
+  that start one — the Record button and Start Recording below — send the same
+  request, and it carries `replay` without a length: how long a buffer keeps is
+  `replay_window_seconds`, and this window has no way to read a setting.
   `workspace_layering.rs` allows the Tauri host exactly one crate of the
   workspace, `clipped-ipc`, so reading `settings.json` here would be a second
-  implementation of the settings file. `clipped-recorder replay --duration`
-  starts a recording that does have one, and against that recording the item is
-  live and works ([#427](https://github.com/wildware-uk/clipped/issues/427) for
-  the rest).
+  implementation of the settings file — and it would be the wrong answer anyway,
+  because that setting inherits per game and the game is what the *recorder*
+  makes of the process identifier this request names. So the window asks, the
+  recorder resolves, and the length is one somebody chose rather than one
+  invented here.
+
+  The third reason is therefore now a fact about a recording somebody else
+  started: `clipped-recorder record`, another client of the protocol, or the
+  automatic recorder detection reaches the menu through
+  ([#421](https://github.com/wildware-uk/clipped/issues/421)) — none of which
+  asked for a buffer. `clipped-recorder replay --duration` starts one that has a
+  buffer, and against that recording the item is equally live.
+
+  `replay_window_seconds` is therefore a setting the Settings screen draws as a
+  control rather than as a sentence: the recorder reads it when a recording that
+  asked for a buffer without naming a length starts, so a length chosen there is
+  a length the next such recording keeps
+  ([#51](https://github.com/wildware-uk/clipped/issues/51)).
 - **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
@@ -1137,7 +1222,15 @@ because somebody may want to record one.
 
 The record button on the Home screen reads the same answer, through
 `record_target`, so both controls name the same application and neither can name
-something the other would not (issue #389).
+something the other would not (issue #389). They send the same *request*, too —
+`recording_request` in `main.rs` — which is a process identifier and `replay`,
+and nothing else. Every other parameter is the recorder's own setting, and so is
+the length the buffer keeps: a resolution or a replay window resolved in this
+window would be a second place those are decided (AGENTS.md sections 30 and 55).
+One function because two controls that build their own requests drift, and issue
+#427 is what drift here looks like — the tray's Save Replay item was correct,
+enabled exactly when the running recording had a buffer, and dark for ever,
+because neither control had ever asked for one.
 
 #### Clipped is more than one process
 
@@ -1444,68 +1537,87 @@ until somebody has clicked one.
 
 ### Switching categories off
 
-Per-category switches, in `notifications.json` in Clipped's configuration
-directory — `%APPDATA%\uk.wildware.clipped\notifications.json`:
+Four switches on the Settings screen, kept in the `notifications` section of
+`%LOCALAPPDATA%\Clipped\settings.json` — the one settings file, the recorder's
+([configuration.md](configuration.md)):
 
 ```json
 {
   "version": 1,
-  "recording_failed": true,
-  "recording_interrupted": true,
-  "recorder_unavailable": true
+  "notifications": {
+    "recording_failed": false
+  }
 }
 ```
 
-Every category defaults to on, because all three are failures. A missing field
-takes its default and an unknown field is ignored, so a file written by an older
-or a newer Clipped still works; a `version` from the future is refused rather
-than guessed at (AGENTS.md sections 30 and 43). There is no file until somebody
-writes one, and that is the ordinary case rather than a fault.
+Every category defaults to on, because all four are failures. A key the file does
+not mention is on, and a key holding something that is not a boolean is kept and
+ignored rather than refused — silencing a failure is the wrong way for a settings
+file to fail (AGENTS.md sections 30 and 43). There is no `notifications` section
+until somebody switches something off.
 
-A leading byte-order mark is dropped before the file is parsed. JSON has no such
-thing, but this file is edited by hand on Windows and both Notepad and
-`Out-File -Encoding utf8` under Windows PowerShell write one — which is exactly
-how the first end-to-end run of this feature was done, and the notification it
-was supposed to switch off arrived. A settings file that looks right and does not
-work is not a trap worth keeping.
+The window does not open that file. It asks the recorder — `get_settings` when
+the link attaches, `apply_settings` when somebody moves a switch — for the reason
+every other setting is asked for ([ipc.md](ipc.md), and "Why the window asks"
+below). A change reaches the very next notification rather than the next launch,
+because the answer replaces a value the thread that decides shares with the
+window's Save.
 
-**The Settings screen is issue #51**, and until it exists this file is where the
-switches are. That is why a file which exists and cannot be read is reported
-through the startup notice — naming the file, what is wrong with it, and the
-categories it may contain — rather than ignored: somebody has switched something
-off and it has not taken effect. Clipped notifies about everything in the
-meantime, so a broken settings file can never be the reason a user is not told
-that nothing is being recorded.
+Two things follow from the switches living in the recorder's file, and both are
+stated rather than hidden:
+
+- **Until the link has attached once, everything is on.** That is a second at
+  start-up, and the direction to fail in.
+- **A recorder that never attaches at all cannot be asked**, so its own
+  `recorder_unavailable` notification is shown even if it was switched off. The
+  only way to close that gap would be a copy of the switches in the window, which
+  is the second store this arrangement removed.
 
 The other place these can be switched off is Windows' own Settings →
 Notifications page, which is per-application and not per-category. It is Windows'
 switch rather than Clipped's, and Clipped does not try to reflect or override it.
 
-#### This file is a second configuration store, and why
+#### Why the window asks rather than reading
 
-Clipped has a configuration API — `crates/session/src/config`, issue #108 — with
-defaults, types, validation, layered resolution and migrations, and it writes
-`%LOCALAPPDATA%\Clipped\settings.json`. Notification switches are settings and
-belong in it. Two preference files in two directories is the duplication AGENTS.md
-section 55 forbids.
-
-They are not in it because **the desktop application may not link the crate it
-lives in**, and that is a rule with a test behind it:
+Clipped's configuration API — `crates/session/src/config`, issue #108 — owns
+`settings.json`: its defaults, types, validation, layered resolution and
+migrations. The desktop application may not link the crate it lives in, and that
+is a rule with a test behind it:
 `tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
 permits this crate exactly one member of the repository's workspace,
 `clipped-ipc`. `clipped-session` sits above capture, audio, encoding, muxing and
 replay, so naming it here would put the recording engine inside the window's
 process — the separation [ADR 0002](adr/0002-separate-recorder-process.md) exists
 to make, and the reason closing or crashing a window cannot interrupt a
-recording. Reading `settings.json` from here directly would instead be a second
-implementation of that file's versioning, migration and validation, against the
-file the user's recording settings live in, which is worse than a second file.
+recording.
 
-**Issue #252** is the fix: move the configuration API to a crate at the
-protocol's layer that both ends may link, or serve it over IPC. Either makes
-these three booleans ordinary settings, migrates this file into `settings.json`
-and deletes it. That migration is why this file carries a `version`, and why a
-category's key is documented as stable above.
+Until **issue #252** the way round that was a `notifications.json` of this
+window's own, in `%APPDATA%\uk.wildware.clipped`: a second store of user
+preferences, with a version field, a missing-key policy and a reader of its own,
+which is the duplication AGENTS.md section 55 forbids. The other way round would
+have been reading `settings.json` from here, which is a second implementation of
+that file's versioning, migration and validation against the file the user's
+recording settings live in — worse than a second file. Asking the process that
+owns it is the third, and it is what issue #51's settings commands already do for
+everything else.
+
+#### An old `notifications.json`
+
+Carried into the settings file and deleted, the first time the link attaches
+(`migrate_legacy_switches` in `src/notifications.rs`). A user who switched a
+category off must not silently have it switched back on (AGENTS.md sections 43
+and 56), and there is nowhere else those switches exist.
+
+The order is read, save, delete, and a failure at any step leaves the file
+exactly where it is for the next attachment to try again; applying the same
+values twice is harmless, because they are the values rather than a change to
+them. A file this build cannot read — one that is not JSON, or that claims a
+version above 1 — is left alone and reported through the startup notice, which is
+why that file carried a `version` at all. A leading byte-order mark is dropped
+first, because editing by hand was the only way to set these switches and both
+Notepad and `Out-File -Encoding utf8` under Windows PowerShell write one; a
+migration that refused those would lose the switches from precisely the files
+most likely to have any.
 
 ### Why neither notification crate
 
@@ -1594,6 +1706,14 @@ switched on until that file is corrected or deleted.` The failure was reported
 rather than swallowed, which is what that path is for — and the mark is now
 dropped, which is why the table above reads 0.
 
+**Those runs read `notifications.json`, and nothing reads it as settings any
+more** (issue #252). What they established still stands where it is about the
+policy — a category switched off silences that category and leaves the others
+alone, which is asserted in `notification_policy.rs` over the recorder's answer
+rather than over a file — but the _source_ of the switches has changed, and the
+equivalent runs against the `notifications` section of `settings.json` have not
+been made. They are in the list below rather than assumed from these.
+
 **Those three runs predate `src/toast.rs`**, and were made through
 `tauri-winrt-notification`. What carries them across the rewrite is that the
 document above is composed byte for byte by the current code:
@@ -1605,8 +1725,7 @@ category-switch behaviour those runs established still stand, and the button's
 
 ### Still to be verified on a real desktop
 
-One thing, and it needs a machine nobody else is using, because it puts a toast
-on screen:
+Both need a machine nobody else is using, because both put a toast on screen.
 
 - **Click the button on each of the three notifications and confirm the action
   runs**: File Explorer opens with the recording selected, "Try again" restarts
@@ -1614,9 +1733,24 @@ on screen:
   sentence. Then dismiss a toast to the Action Centre and click it there, which
   is the case the retention in `src/toast.rs` exists for.
 
-Until that is done, acceptance criterion 3 of issue #110 — "error notifications
-lead to an action, not just a message" — is **not** met. A button in the XML is
-not an action; it is a button in the XML.
+  Until that is done, acceptance criterion 3 of issue #110 — "error
+  notifications lead to an action, not just a message" — is **not** met. A button
+  in the XML is not an action; it is a button in the XML.
+
+- **Switch a category off on the Settings screen and confirm the toast stops**
+  (issue #252), against a real recorder rather than a stub: with the same
+  `CLIPPED_RECORDER_EXE` arrangement as the runs above, but with the switch moved
+  in the window instead of a file edited by hand. The three runs recorded above
+  measured a `notifications.json` that nothing reads any more, and the path from
+  a switch to a toast now crosses two processes — `apply_settings`, the settings
+  file, and the value the event thread shares with the window. Each of those
+  links is asserted by a test on its own side; what nobody has watched is all of
+  them at once.
+
+  The other half is the migration: a `notifications.json` left in
+  `%APPDATA%\uk.wildware.clipped` should be gone after the next launch, with its
+  switches showing on the Settings screen. Its steps are tested over a real file
+  in `notifications::tests`, but not through a real recorder.
 
 ## Decisions
 

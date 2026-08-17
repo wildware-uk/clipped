@@ -173,7 +173,13 @@ pub fn start(
 /// both carry the milestone and issue that would build it. A handler that
 /// swallowed the press to make the key look alive is what AGENTS.md section 54
 /// forbids.
-fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
+///
+/// `pub(crate)` for one caller and it is a test: `crate::watch` presses the
+/// bookmark key against a real recording detection started, which is issue
+/// #421's acceptance criterion and cannot be asserted from here — this module
+/// has no way to make a recording. Pressing through the handlers this registers,
+/// rather than calling [`perform`], is what makes it the real path.
+pub(crate) fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
     let mut handlers = Handlers::new();
     for action in [
         // `Ctrl`+`F10` is the reason this list exists at all (SPEC.md section
@@ -265,6 +271,17 @@ fn command_for(
                 ErrorCode::NotRecording,
                 "nothing is being recorded, and a hotkey does not say which window to record. \
                  Start the recording from the Clipped window or the tray",
+            )),
+            // Watching is not idle, and the idle refusal would be a lie here:
+            // it tells somebody to start a recording from the window, when a
+            // watching recorder is going to start one itself the moment a game
+            // appears. Whether this key should *also* start one early is issue
+            // #421's question, and answering it here would be answering it in
+            // the wrong place.
+            RecorderStatus::Watching(_) => Err(ProtocolError::new(
+                ErrorCode::NotRecording,
+                "nothing is being recorded yet. Clipped is watching for a game and will start \
+                 recording on its own when one appears",
             )),
         },
         // Not reachable: `handlers_for` registers the three above and nothing
@@ -382,6 +399,10 @@ mod tests {
                     // `save_replay` answers, not which command a press sends,
                     // and it is the command these tests are about.
                     replay_seconds: Some(300),
+                    // Which command a press sends does not depend on whether
+                    // the recording belongs to a sitting, and these tests are
+                    // about the command.
+                    session: None,
                 }),
             }
         }

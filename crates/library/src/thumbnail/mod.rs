@@ -52,6 +52,14 @@
 //! `docs/thumbnails.md` records the alternative that was considered — a crate of
 //! its own, beside `clipped-waveform` — and why it was not taken in this ticket.
 //!
+//! [`Continue`], [`Pace`], [`Unpaced`] and [`ThumbnailService`]'s queue, thread
+//! and suspension mechanism come from `clipped-background`
+//! ([issue #293](https://github.com/wildware-uk/clipped/issues/293)):
+//! `clipped-waveform` needed exactly the same background worker, and
+//! `crates/background/src/lib.rs` is where that is explained in full. What
+//! stays specific to a thumbnail is `src/thumbnail/render.rs` (the seek,
+//! decode, score and encode) and the JPEG-plus-JSON cache format below.
+//!
 //! # Where the pictures live
 //!
 //! A directory of JPEGs and JSON sidecars under Clipped's per-user directory,
@@ -102,25 +110,19 @@ mod choose;
 mod error;
 mod render;
 mod service;
-mod source;
-
-#[cfg(windows)]
-mod windows;
 
 pub use cache::{
     PruneReport, Thumbnail, ThumbnailCache, ThumbnailState, DEFAULT_BUDGET_BYTES, IMAGE_EXTENSION,
     SIDECAR_EXTENSION,
 };
+pub use clipped_background::{
+    Continue, Pace, RequestOutcome, SourceIdentity, Unpaced, WorkerPriority, UNKNOWN_MODIFIED,
+};
 pub use error::ThumbnailError;
 pub use render::{
-    render, render_paced, Continue, Pace, RenderedThumbnail, ThumbnailOptions, Unpaced,
-    DEFAULT_QUALITY, DEFAULT_WIDTH,
+    render, render_paced, RenderedThumbnail, ThumbnailOptions, DEFAULT_QUALITY, DEFAULT_WIDTH,
 };
-pub use service::{
-    Completion, RequestOutcome, ServiceOptions, ThumbnailService, WorkerPriority,
-    DEFAULT_QUEUE_CAPACITY,
-};
-pub use source::{SourceIdentity, UNKNOWN_MODIFIED};
+pub use service::{Completion, ServiceOptions, ThumbnailService, DEFAULT_QUEUE_CAPACITY};
 
 /// Every recording in the index worth reading a file for.
 ///

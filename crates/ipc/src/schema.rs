@@ -65,9 +65,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::command::{
-    Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand,
-};
+use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use crate::hotkeys::{HotkeyBinding, HotkeyState};
@@ -78,8 +76,12 @@ use crate::message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+use crate::playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
-use crate::status::{ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary};
+use crate::status::{
+    ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
+    SessionSummary, Watching,
+};
 
 /// The shape of the schema document itself.
 ///
@@ -465,6 +467,14 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_active_recording(), &[]),
         ),
         (
+            "session_summary".to_owned(),
+            structure_of(&exemplar_ended_session(), &[]),
+        ),
+        (
+            "session_recording".to_owned(),
+            structure_of(&exemplar_session_recording(), &[]),
+        ),
+        (
             "library_sessions".to_owned(),
             structure_of(&exemplar_library_sessions(), &[]),
         ),
@@ -495,6 +505,58 @@ fn structures() -> BTreeMap<String, Structure> {
         (
             "export_summary".to_owned(),
             structure_of(&exemplar_export(), &[]),
+        ),
+        (
+            "export_progress".to_owned(),
+            structure_of(&exemplar_export_progress(), &[]),
+        ),
+        (
+            "open_playback".to_owned(),
+            structure_of(&exemplar_open_playback(), &[]),
+        ),
+        (
+            "playback_stream".to_owned(),
+            structure_of(&exemplar_playback(), &[]),
+        ),
+        (
+            "playback_track".to_owned(),
+            structure_of(&exemplar_playback_track(), &[]),
+        ),
+        (
+            "apply_settings".to_owned(),
+            structure_of(&exemplar_apply_settings(), &[]),
+        ),
+        (
+            "settings_view".to_owned(),
+            structure_of(&exemplar_settings_view(), &[]),
+        ),
+        (
+            "setting_entry".to_owned(),
+            structure_of(&exemplar_setting_entry(), &[]),
+        ),
+        (
+            "audio_devices".to_owned(),
+            structure_of(&exemplar_audio_devices(), &[]),
+        ),
+        (
+            "audio_device".to_owned(),
+            structure_of(&exemplar_audio_device(), &[]),
+        ),
+        (
+            "microphone_level_request".to_owned(),
+            structure_of(&exemplar_microphone_level_request(), &[]),
+        ),
+        (
+            "microphone_level".to_owned(),
+            structure_of(&exemplar_microphone_level(), &[]),
+        ),
+        (
+            "set_start_at_login".to_owned(),
+            structure_of(&exemplar_set_start_at_login(), &[]),
+        ),
+        (
+            "start_at_login".to_owned(),
+            structure_of(&exemplar_start_at_login(), &[]),
         ),
     ]);
 
@@ -545,7 +607,7 @@ fn structures() -> BTreeMap<String, Structure> {
 
 /// The commands, in the order `docs/ipc.md` tables them.
 fn commands() -> Vec<CommandSchema> {
-    let mut commands: Vec<CommandSchema> = every_built_command()
+    let commands: Vec<CommandSchema> = every_built_command()
         .iter()
         .map(|command| CommandSchema {
             name: command.name().to_owned(),
@@ -560,14 +622,22 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
+                Command::SetFavourite(_) => Some("set_favourite".to_owned()),
+                Command::SetLock(_) => Some("set_lock".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
+                Command::OpenPlayback(_) => Some("open_playback".to_owned()),
+                Command::ApplySettings(_) => Some("apply_settings".to_owned()),
+                Command::GetMicrophoneLevel(_) => Some("microphone_level_request".to_owned()),
+                Command::SetStartAtLogin(_) => Some("set_start_at_login".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
                 | Command::Plugins
                 | Command::GetHotkeys
-                | Command::Unbuilt(_) => None,
+                | Command::GetSettings
+                | Command::GetAudioDevices
+                | Command::GetStartAtLogin => None,
             },
             reply: match command {
                 Command::Ping => Some("reply.pong".to_owned()),
@@ -583,27 +653,31 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("reply.library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
+                Command::SetFavourite(_) => Some("reply.favourited".to_owned()),
+                Command::SetLock(_) => Some("reply.locked".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
+                Command::OpenPlayback(_) => Some("reply.playback_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
+                // Both settings commands answer with the same reply: what a
+                // change produced is the settings as they now stand
+                // (`crate::settings`).
+                Command::GetSettings | Command::ApplySettings(_) => {
+                    Some("reply.settings".to_owned())
+                }
+                Command::GetAudioDevices => Some("reply.audio_devices".to_owned()),
+                Command::GetMicrophoneLevel(_) => Some("reply.microphone_level".to_owned()),
+                // And both start-at-login commands, for the same reason: what
+                // a change produced is the arrangement as it now stands
+                // (`crate::startup`).
+                Command::GetStartAtLogin | Command::SetStartAtLogin(_) => {
+                    Some("reply.start_at_login".to_owned())
+                }
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
-                Command::Unbuilt(_) => None,
             },
             available_in_this_build: true,
         })
         .collect();
-
-    commands.extend(crate::command::UNBUILT_COMMANDS.iter().map(|unbuilt| {
-        CommandSchema {
-            name: unbuilt.name().to_owned(),
-            // Deliberately no parameter schema: nobody knows yet what
-            // `save_replay` takes, and inventing a shape now would be a public
-            // API designed against a guess (AGENTS.md section 43).
-            params: None,
-            reply: None,
-            available_in_this_build: false,
-        }
-    }));
 
     commands
 }
@@ -675,6 +749,15 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "asking for a recording to be opened for playback, on one of its tracks",
+            ClientMessage::Request(Request {
+                id: 13,
+                command: "open_playback".to_owned(),
+                params: serde_json::to_value(exemplar_open_playback())
+                    .expect("the playback options serialise"),
+            }),
+        ),
+        (
             "asking the recorder to exit",
             ClientMessage::Request(Request {
                 id: 8,
@@ -711,10 +794,10 @@ fn samples() -> Vec<Sample> {
             ServerMessage::Refused(
                 ProtocolError::new(
                     ErrorCode::UnsupportedProtocolVersion,
-                    "this recorder speaks protocol version 1, and 2 was asked for",
+                    "this recorder speaks protocol version 2, and 3 was asked for",
                 )
                 .with_detail(ErrorDetail::UnsupportedProtocolVersion {
-                    requested: 2,
+                    requested: 3,
                     supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
                     recorder_version: "0.1.0".to_owned(),
                 }),
@@ -737,11 +820,41 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "the status of a recorder watching for a game to start",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: RecorderStatus::Watching(Watching::default()),
+                }),
+            }),
+        ),
+        (
+            "the status of a recorder watching for a game that just exited to come back",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: exemplar_watching(),
+                }),
+            }),
+        ),
+        (
             "the status of a recorder that is recording",
             ServerMessage::Response(Response {
                 id: 7,
                 outcome: Outcome::Ok(Reply::Status {
                     status: exemplar_recording(),
+                }),
+            }),
+        ),
+        (
+            "the status of a recording that belongs to no sitting",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: RecorderStatus::Recording(ActiveRecording {
+                        session: None,
+                        ..exemplar_active_recording()
+                    }),
                 }),
             }),
         ),
@@ -930,6 +1043,43 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a sitting marked a favourite, which is what cleanup then protects",
+            ServerMessage::Response(Response {
+                id: 17,
+                outcome: Outcome::Ok(Reply::Favourited {
+                    mark: crate::library::FavouriteMark {
+                        // The kind that is addressed by text rather than by an
+                        // integer, so a sample carries the awkward half of the
+                        // target rather than only the easy one.
+                        kind: "session".to_owned(),
+                        session_id: "counter-strike-2-20260814-201500".to_owned(),
+                        id: 0,
+                        favourite: true,
+                        changed: true,
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording locked against automatic cleanup, and nothing else",
+            ServerMessage::Response(Response {
+                id: 18,
+                outcome: Outcome::Ok(Reply::Locked {
+                    lock: crate::library::LockMark {
+                        kind: "recording".to_owned(),
+                        session_id: String::new(),
+                        id: 1,
+                        // Its own lock, so both are true. The pair exists for
+                        // the other case: a recording inside a locked sitting
+                        // is protected without having one.
+                        locked: true,
+                        protected: true,
+                        changed: true,
+                    },
+                }),
+            }),
+        ),
+        (
             "what is installed, and what each plugin asks for",
             ServerMessage::Response(Response {
                 id: 12,
@@ -1007,6 +1157,40 @@ fn samples() -> Vec<Sample> {
                 outcome: Outcome::Ok(Reply::RecordingExported {
                     export: exemplar_export(),
                 }),
+            }),
+        ),
+        (
+            "a recording opened for playback on the track a player would have taken anyway",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: PlaybackStream {
+                        path: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+                        audio_track: Some(1),
+                        prepared: false,
+                        ..exemplar_playback()
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording opened for playback on a track that needed a copy of its own",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: exemplar_playback(),
+                }),
+            }),
+        ),
+        (
+            "playback refused because the recording's file has gone",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::PlaybackFailed,
+                    "cs2-20260811-201400-1.mkv is not there any more. It may have been moved or \
+                     deleted, or the drive it is on may not be connected",
+                )),
             }),
         ),
         (
@@ -1127,10 +1311,79 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
-            "a command this build cannot perform",
+            "a subscription this build cannot serve",
+            ServerMessage::Refused(crate::server::metrics_refusal()),
+        ),
+        (
+            "the settings, one of which nothing reads yet",
             ServerMessage::Response(Response {
-                id: 3,
-                outcome: Outcome::Error(UnbuiltCommand::ApplySettings.refusal()),
+                id: 13,
+                outcome: Outcome::Ok(Reply::Settings {
+                    settings: exemplar_settings_view(),
+                }),
+            }),
+        ),
+        (
+            "the microphones this machine has, with the default one marked",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::AudioDevices {
+                    devices: exemplar_audio_devices(),
+                }),
+            }),
+        ),
+        (
+            "the recorder does not start at sign-in",
+            ServerMessage::Response(Response {
+                id: 16,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: crate::startup::StartAtLogin {
+                        enabled: false,
+                        location: exemplar_start_at_login().location,
+                        command: None,
+                        missing_executable: None,
+                    },
+                }),
+            }),
+        ),
+        (
+            "the recorder starts at sign-in, and the command it will run",
+            ServerMessage::Response(Response {
+                id: 17,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: crate::startup::StartAtLogin {
+                        missing_executable: None,
+                        ..exemplar_start_at_login()
+                    },
+                }),
+            }),
+        ),
+        (
+            "the recorder is set to start at sign-in from a Clipped that moved",
+            ServerMessage::Response(Response {
+                id: 18,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: exemplar_start_at_login(),
+                }),
+            }),
+        ),
+        (
+            "what a microphone is hearing, from a device that is plugged in",
+            ServerMessage::Response(Response {
+                id: 19,
+                outcome: Outcome::Ok(Reply::MicrophoneLevel {
+                    level: exemplar_microphone_level(),
+                }),
+            }),
+        ),
+        (
+            "a setting refused with what would have been accepted",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::InvalidParameters,
+                    "`framerate` cannot be 900: 1-480 frames per second",
+                )),
             }),
         ),
         (
@@ -1156,6 +1409,30 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a recorder settling back to watching after a game exited",
+            ServerMessage::Event(Event::StatusChanged {
+                status: exemplar_watching(),
+            }),
+        ),
+        (
+            "a sitting ending, with the files it produced",
+            ServerMessage::Event(Event::SessionEnded {
+                session: exemplar_ended_session(),
+            }),
+        ),
+        (
+            "a sitting of a game the catalogue would not attribute ending",
+            ServerMessage::Event(Event::SessionEnded {
+                session: SessionSummary {
+                    session_id: "unattributed-20260811-201400".to_owned(),
+                    game_id: None,
+                    game_name: None,
+                    end_reason: Some("recorder-stopping".to_owned()),
+                    ..exemplar_ended_session()
+                },
+            }),
+        ),
+        (
             "a recording that ended by itself",
             ServerMessage::Event(Event::RecordingFailed {
                 recording_id: "r-1".to_owned(),
@@ -1163,6 +1440,21 @@ fn samples() -> Vec<Sample> {
                     ErrorCode::RecordingFailed,
                     "the encoder stopped accepting frames",
                 ),
+            }),
+        ),
+        (
+            "an export part-way through a recording that said how long it was",
+            ServerMessage::Event(Event::ExportProgress {
+                export: exemplar_export_progress(),
+            }),
+        ),
+        (
+            "an export of a recording that never said how long it was",
+            ServerMessage::Event(Event::ExportProgress {
+                export: crate::status::ExportProgress {
+                    total_ms: None,
+                    ..exemplar_export_progress()
+                },
             }),
         ),
     ] {
@@ -1208,6 +1500,19 @@ fn samples() -> Vec<Sample> {
     samples.push(server_sample(
         "an event invented later",
         json!({"type": "event", "event": "disk_filling_up", "free_bytes": 1024}),
+    ));
+    samples.push(server_sample(
+        "a reason for a sitting to end invented later",
+        json!({"type": "event", "event": "session_ended",
+               "session": {"session_id": "cs2-20260811-201400", "game_id": "cs2",
+                           "game_name": "Counter-Strike 2",
+                           "started_at": "2026-08-11T20:14:00+01:00",
+                           "ended_at": "2026-08-11T22:03:00+01:00",
+                           "end_reason": "disk_full",
+                           "recordings": [{"session_index": 1,
+                                           "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                                           "outcome": "recorded",
+                                           "duration_ms": 1800000}]}}),
     ));
     samples.push(server_sample(
         "a feature invented later",
@@ -1351,9 +1656,23 @@ fn reply_discriminant(reply: &Reply) -> String {
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
+        Reply::Favourited { .. } => "favourited".to_owned(),
+        Reply::Locked { .. } => "locked".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
+        // Whether a copy had to be made is part of the path: it is the
+        // difference between an answer that cost nothing and one that read the
+        // whole recording, and a mirror that dropped `prepared` would otherwise
+        // reach the same discriminant for both.
+        Reply::PlaybackOpened { playback } => format!(
+            "playback_opened.{}",
+            if playback.prepared {
+                "prepared"
+            } else {
+                "as_recorded"
+            }
+        ),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1365,6 +1684,23 @@ fn reply_discriminant(reply: &Reply) -> String {
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
+        Reply::Settings { .. } => "settings".to_owned(),
+        Reply::AudioDevices { .. } => "audio_devices".to_owned(),
+        Reply::MicrophoneLevel { .. } => "microphone_level".to_owned(),
+        // Three paths rather than one, because they are the three things a
+        // window says differently and a mirror that dropped either field would
+        // reach the same discriminant for all of them. "Off" and "on" are the
+        // switch; "on and pointing at nothing" is a Clipped that moved, which
+        // is neither — it is on, it will not work, and the thing to offer is
+        // turning it on again from here (issue #308).
+        Reply::StartAtLogin { start_at_login } => match (
+            start_at_login.enabled,
+            start_at_login.missing_executable.is_some(),
+        ) {
+            (false, _) => "start_at_login.off".to_owned(),
+            (true, false) => "start_at_login.on".to_owned(),
+            (true, true) => "start_at_login.missing".to_owned(),
+        },
         // Whether the copy is complete is part of the path, because it is the
         // one thing a window has to say differently: a mirror that dropped
         // `lossless` would reach the same discriminant for an MP4 that holds
@@ -1387,7 +1723,28 @@ fn reply_discriminant(reply: &Reply) -> String {
 fn event_discriminant(event: &Event) -> String {
     match event {
         Event::StatusChanged { status } => format!("status_changed.{}", state_tag(status)),
+        // The reason a sitting ended is part of the path, because it is the one
+        // thing this event says that a window shows differently — and a mirror
+        // that dropped a reason it did not recognise would otherwise reach the
+        // same answer as one that kept it.
+        Event::SessionEnded { session } => format!(
+            "session_ended.{}",
+            session.end_reason.as_deref().unwrap_or("unstated")
+        ),
         Event::RecordingFailed { .. } => "recording_failed".to_owned(),
+        // Whether the recording said how long it was is part of the path,
+        // because it is the one thing a window draws differently: a total is a
+        // percentage and no total is an unbounded indication, and a mirror that
+        // read a missing `total_ms` as zero would otherwise reach the same
+        // answer as one that kept it absent.
+        Event::ExportProgress { export } => format!(
+            "export_progress.{}",
+            if export.total_ms.is_some() {
+                "measured"
+            } else {
+                "unmeasured"
+            }
+        ),
         // Deliberately not the tag it arrived with: this build cannot know
         // whether two events it has never heard of are the same kind of thing.
         Event::Other(_) => "unrecognised".to_owned(),
@@ -1475,7 +1832,10 @@ fn outcome_tag(outcome: &Outcome) -> String {
 /// The `event` of an event, or [`None`] for one this build did not recognise.
 fn event_tag(event: &Event) -> Option<String> {
     match event {
-        Event::StatusChanged { .. } | Event::RecordingFailed { .. } => Some(tag_of(event, "event")),
+        Event::StatusChanged { .. }
+        | Event::SessionEnded { .. }
+        | Event::RecordingFailed { .. }
+        | Event::ExportProgress { .. } => Some(tag_of(event, "event")),
         Event::Other(_) => None,
     }
 }
@@ -1543,11 +1903,130 @@ fn exemplar_response() -> Response {
 
 /// A refusal carrying a detail.
 ///
-/// Taken from [`UnbuiltCommand`] rather than typed out, so the example in the
-/// schema is a refusal the recorder really sends and cannot drift from one as
-/// the subsystems behind these commands are built.
+/// Taken from the refusal an `metrics` subscription really gets rather than
+/// typed out, so the example in the schema cannot drift from what the recorder
+/// sends. Every *command* this build defines is one it performs, so the
+/// remaining `not_implemented` in the protocol is a stream rather than a
+/// command (`crate::command`).
 fn exemplar_error() -> ProtocolError {
-    UnbuiltCommand::ApplySettings.refusal()
+    crate::server::metrics_refusal()
+}
+
+/// A settings change: one value set and one reset, which are the two things a
+/// settings screen sends.
+fn exemplar_apply_settings() -> crate::settings::ApplySettings {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("microphone".to_owned(), Some("name:Shure MV7".to_owned()));
+    values.insert("framerate".to_owned(), None);
+    crate::settings::ApplySettings { values }
+}
+
+/// One setting, with every field populated so the schema sees them all.
+fn exemplar_setting_entry() -> crate::settings::SettingEntry {
+    crate::settings::SettingEntry {
+        key: "capture_target".to_owned(),
+        label: "Capture target".to_owned(),
+        value: "game-window".to_owned(),
+        overridden: false,
+        choices: vec!["game-window".to_owned(), "display".to_owned()],
+        accepted: "\"game-window\" or \"display\"".to_owned(),
+        // The row this type exists for: a setting the file carries and no
+        // recording reads, carrying the sentence that says so.
+        applies: false,
+        unavailable: Some(
+            "a recording still captures the game's own window; reading this setting when a \
+             recording starts is issue #61"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The settings a window is sent: one that is in force, and one that is not.
+fn exemplar_settings_view() -> crate::settings::SettingsView {
+    crate::settings::SettingsView {
+        file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+        settings: vec![
+            crate::settings::SettingEntry {
+                key: "microphone".to_owned(),
+                label: "Microphone".to_owned(),
+                value: "name:Shure MV7".to_owned(),
+                overridden: true,
+                choices: Vec::new(),
+                accepted: "\"default\", \"none\" or a device name".to_owned(),
+                applies: true,
+                unavailable: None,
+            },
+            exemplar_setting_entry(),
+        ],
+    }
+}
+
+/// One microphone.
+fn exemplar_audio_device() -> crate::settings::AudioDevice {
+    crate::settings::AudioDevice {
+        name: "Shure MV7".to_owned(),
+        is_default: true,
+    }
+}
+
+/// The microphones a machine has, with one that is not the default alongside
+/// the one that is.
+fn exemplar_audio_devices() -> crate::settings::AudioDevices {
+    crate::settings::AudioDevices {
+        microphones: vec![
+            exemplar_audio_device(),
+            crate::settings::AudioDevice {
+                name: "Line In (Realtek High Definition Audio)".to_owned(),
+                is_default: false,
+            },
+        ],
+    }
+}
+
+/// The question a settings screen asks while somebody is choosing.
+fn exemplar_microphone_level_request() -> crate::settings::MicrophoneLevelRequest {
+    crate::settings::MicrophoneLevelRequest {
+        microphone: "name:Shure MV7".to_owned(),
+    }
+}
+
+/// A microphone that is present, unmuted and hearing something.
+///
+/// Every optional field populated, because a field that was skipped would not
+/// reach [`structure_of`] and the TypeScript mirror would never be held to it.
+fn exemplar_microphone_level() -> crate::settings::MicrophoneLevel {
+    crate::settings::MicrophoneLevel {
+        device: Some("Shure MV7".to_owned()),
+        // Exactly representable in `f32`, so the sample frame reads `0.5`
+        // rather than the nearest float to a decimal that is not — a number
+        // nobody typed, in a file people read to learn the shape.
+        peak: 0.5,
+        muted: Some(false),
+    }
+}
+
+/// Turning starting at login on.
+fn exemplar_set_start_at_login() -> crate::startup::SetStartAtLogin {
+    crate::startup::SetStartAtLogin { enabled: true }
+}
+
+/// A startup entry that is on and points at nothing.
+///
+/// The broken case rather than the working one, deliberately: both optional
+/// fields are present, and a schema derived from an exemplar that left them
+/// `None` would never describe them at all — a window written against it would
+/// have no way to know a moved installation can be reported (issue #308).
+fn exemplar_start_at_login() -> crate::startup::StartAtLogin {
+    crate::startup::StartAtLogin {
+        enabled: true,
+        location:
+            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\Clipped Recorder"
+                .to_owned(),
+        command: Some(
+            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve --watch-for-games"#.to_owned(),
+        ),
+        missing_executable: Some(r"C:\Program Files\Clipped\clipped-recorder.exe".to_owned()),
+    }
 }
 
 /// Every `start_recording` option at once.
@@ -1565,6 +2044,7 @@ fn exemplar_start_recording() -> StartRecording {
         microphone: Some("none".to_owned()),
         system_audio: Some("none".to_owned()),
         replay_seconds: Some(60),
+        replay: true,
     }
 }
 
@@ -1573,14 +2053,80 @@ fn exemplar_recording() -> RecorderStatus {
     RecorderStatus::Recording(exemplar_active_recording())
 }
 
+/// A recorder watching for a game, in a sitting waiting out its restart grace.
+///
+/// The sitting is present so that [`structure_of`] sees the field at all: an
+/// exemplar with nothing in it would describe a `watching` status as having no
+/// fields, and the TypeScript mirror would be checked against that.
+fn exemplar_watching() -> RecorderStatus {
+    RecorderStatus::Watching(Watching {
+        session: Some(Box::new(exemplar_session())),
+    })
+}
+
 /// The recording itself, without the state tag around it.
 fn exemplar_active_recording() -> ActiveRecording {
     ActiveRecording {
         recording_id: "r-1".to_owned(),
-        output: r"D:\clips\session.mkv".to_owned(),
+        output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
         target: "process `cs2.exe`".to_owned(),
         elapsed_ms: 4_200,
         replay_seconds: Some(60),
+        session: Some(Box::new(exemplar_session())),
+    }
+}
+
+/// A sitting that is still going, with one file finished and one being written.
+fn exemplar_session() -> SessionSummary {
+    SessionSummary {
+        session_id: "cs2-20260811-201400".to_owned(),
+        game_id: Some("cs2".to_owned()),
+        game_name: Some("Counter-Strike 2".to_owned()),
+        started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+        ended_at: None,
+        end_reason: None,
+        recordings: vec![
+            exemplar_session_recording(),
+            SessionRecording {
+                session_index: 2,
+                output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+                outcome: None,
+                duration_ms: None,
+            },
+        ],
+    }
+}
+
+/// The same sitting, after it ended.
+///
+/// This is the one the `session_summary` structure is derived from, because it
+/// is the one carrying every field: `ended_at` and `end_reason` are absent from
+/// a sitting that is still going, and a structure derived from that one would
+/// not mention them.
+fn exemplar_ended_session() -> SessionSummary {
+    SessionSummary {
+        ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+        end_reason: Some("game-exited".to_owned()),
+        recordings: vec![
+            exemplar_session_recording(),
+            SessionRecording {
+                session_index: 2,
+                output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+                outcome: Some("recorded".to_owned()),
+                duration_ms: Some(1_140_000),
+            },
+        ],
+        ..exemplar_session()
+    }
+}
+
+/// One finished file of a sitting, with everything one can carry.
+fn exemplar_session_recording() -> SessionRecording {
+    SessionRecording {
+        session_index: 1,
+        output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
+        outcome: Some("recorded".to_owned()),
+        duration_ms: Some(1_800_000),
     }
 }
 
@@ -1690,6 +2236,7 @@ fn exemplar_library_session() -> LibrarySession {
         ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
         end_reason: Some("game-exited".to_owned()),
         favourite: true,
+        locked: true,
         recordings: vec![exemplar_library_recording()],
         clips: vec![exemplar_library_clip()],
     }
@@ -1715,6 +2262,11 @@ fn exemplar_library_recording() -> LibraryRecording {
         size_bytes: Some(9_812_009_112),
         missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
         favourite: false,
+        // Not locked itself, and protected anyway: the exemplar carries the
+        // case that separates the two fields, because a pair that always
+        // agreed would not need to be a pair.
+        locked: false,
+        protected: true,
         tags: vec!["clutch".to_owned()],
     }
 }
@@ -1758,6 +2310,35 @@ fn exemplar_export_recording() -> ExportRecording {
     }
 }
 
+/// Every `open_playback` parameter at once.
+fn exemplar_open_playback() -> OpenPlayback {
+    OpenPlayback {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        audio_track: Some(3),
+    }
+}
+
+/// A recording opened for playback, with every optional field present so the
+/// schema sees them.
+fn exemplar_playback() -> PlaybackStream {
+    PlaybackStream {
+        path: r"C:\Users\sam\AppData\Local\Clipped\playback\cs2-20260811-201400-1-3.mp4".to_owned(),
+        audio_track: Some(3),
+        audio_tracks: vec![exemplar_playback_track()],
+        prepared: true,
+    }
+}
+
+/// One sound track a window can offer, with every optional field present.
+fn exemplar_playback_track() -> PlaybackTrack {
+    PlaybackTrack {
+        index: 3,
+        name: Some("Microphone".to_owned()),
+        language: Some("eng".to_owned()),
+        default: false,
+    }
+}
+
 /// A finished export, with every optional field present so the schema sees
 /// them.
 fn exemplar_export() -> ExportSummary {
@@ -1770,6 +2351,23 @@ fn exemplar_export() -> ExportSummary {
         elapsed_ms: 4_182,
         lossless: false,
         losses: vec!["4 chapter marks are not carried into MP4".to_owned()],
+    }
+}
+
+/// An export part-way through, with every optional field present so the schema
+/// sees them.
+///
+/// Deliberately part-way through and not at the end: an exemplar at 100 % would
+/// serialise the same shape but would stop anybody reading the schema from
+/// seeing that this arrives while the copy is still running.
+fn exemplar_export_progress() -> crate::status::ExportProgress {
+    crate::status::ExportProgress {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        destination: r"D:\clips\cs2-20260811-201400-1.mp4".to_owned(),
+        written_ms: 2_616_000,
+        total_ms: Some(6_540_000),
+        packets: 235_248,
+        bytes: 3_924_481_644,
     }
 }
 
@@ -1853,12 +2451,14 @@ fn every_event_stream() -> Vec<EventStream> {
         EventStream::Status,
         EventStream::Errors,
         EventStream::Metrics,
+        EventStream::Exports,
     ];
     for stream in &streams {
         match stream {
             EventStream::Status
             | EventStream::Errors
             | EventStream::Metrics
+            | EventStream::Exports
             | EventStream::Other(_) => {}
         }
     }
@@ -1902,9 +2502,28 @@ fn every_built_command() -> Vec<Command> {
             items: 1,
             bytes: 2_147_483_648,
         }),
+        Command::SetFavourite(crate::library::SetFavourite {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            favourite: true,
+        }),
+        Command::SetLock(crate::library::SetLock {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            locked: true,
+        }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
+        Command::OpenPlayback(exemplar_open_playback()),
         Command::GetHotkeys,
+        Command::GetSettings,
+        Command::ApplySettings(exemplar_apply_settings()),
+        Command::GetAudioDevices,
+        Command::GetMicrophoneLevel(exemplar_microphone_level_request()),
+        Command::GetStartAtLogin,
+        Command::SetStartAtLogin(exemplar_set_start_at_login()),
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1922,11 +2541,19 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibraryTrash(_)
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
+            | Command::SetFavourite(_)
+            | Command::SetLock(_)
             | Command::Plugins
             | Command::ExportRecording(_)
+            | Command::OpenPlayback(_)
             | Command::GetHotkeys
-            | Command::Shutdown(_)
-            | Command::Unbuilt(_) => {}
+            | Command::GetSettings
+            | Command::ApplySettings(_)
+            | Command::GetAudioDevices
+            | Command::GetMicrophoneLevel(_)
+            | Command::GetStartAtLogin
+            | Command::SetStartAtLogin(_)
+            | Command::Shutdown(_) => {}
         }
     }
     commands
@@ -1950,6 +2577,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::ShuttingDown,
         ErrorCode::DestinationExists,
         ErrorCode::ExportFailed,
+        ErrorCode::PlaybackFailed,
         ErrorCode::LibraryUnavailable,
         ErrorCode::Internal,
     ];
@@ -1970,6 +2598,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::ShuttingDown
             | ErrorCode::DestinationExists
             | ErrorCode::ExportFailed
+            | ErrorCode::PlaybackFailed
             | ErrorCode::LibraryUnavailable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
@@ -1986,10 +2615,9 @@ fn every_error_detail() -> Vec<ErrorDetail> {
             supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
             recorder_version: "0.1.0".to_owned(),
         },
-        ErrorDetail::NotImplemented {
-            subsystem: UnbuiltCommand::ApplySettings.subsystem().to_owned(),
-            milestone: UnbuiltCommand::ApplySettings.milestone().to_owned(),
-            tracking_issue: UnbuiltCommand::ApplySettings.tracking_issue(),
+        match crate::server::metrics_refusal().detail {
+            Some(detail) => detail,
+            None => unreachable!("a not_implemented refusal always carries its detail"),
         },
     ];
     for detail in &details {
@@ -2026,6 +2654,9 @@ fn every_event() -> Vec<Event> {
         Event::StatusChanged {
             status: RecorderStatus::Idle,
         },
+        Event::SessionEnded {
+            session: exemplar_ended_session(),
+        },
         Event::RecordingFailed {
             recording_id: "r-1".to_owned(),
             error: ProtocolError::new(
@@ -2033,10 +2664,17 @@ fn every_event() -> Vec<Event> {
                 "the encoder stopped accepting frames",
             ),
         },
+        Event::ExportProgress {
+            export: exemplar_export_progress(),
+        },
     ];
     for event in &events {
         match event {
-            Event::StatusChanged { .. } | Event::RecordingFailed { .. } | Event::Other(_) => {}
+            Event::StatusChanged { .. }
+            | Event::SessionEnded { .. }
+            | Event::RecordingFailed { .. }
+            | Event::ExportProgress { .. }
+            | Event::Other(_) => {}
         }
     }
     events
@@ -2088,6 +2726,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingExported {
             export: exemplar_export(),
         },
+        Reply::PlaybackOpened {
+            playback: exemplar_playback(),
+        },
         Reply::Hotkeys {
             hotkeys: every_hotkey_state()
                 .into_iter()
@@ -2096,6 +2737,21 @@ fn every_reply() -> Vec<Reply> {
                     ..exemplar_hotkey_binding()
                 })
                 .collect(),
+        },
+        Reply::Settings {
+            settings: exemplar_settings_view(),
+        },
+        Reply::AudioDevices {
+            devices: exemplar_audio_devices(),
+        },
+        Reply::MicrophoneLevel {
+            level: exemplar_microphone_level(),
+        },
+        Reply::StartAtLogin {
+            // The broken arrangement, because both optional fields are `Some`
+            // in it and a `None` is skipped: the schema would otherwise never
+            // describe the two fields a moved installation is reported with.
+            start_at_login: exemplar_start_at_login(),
         },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
@@ -2150,6 +2806,25 @@ fn every_reply() -> Vec<Reply> {
                 ],
             },
         },
+        Reply::Favourited {
+            mark: crate::library::FavouriteMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                favourite: true,
+                changed: true,
+            },
+        },
+        Reply::Locked {
+            lock: crate::library::LockMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                locked: true,
+                protected: true,
+                changed: true,
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2173,9 +2848,16 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibraryTrash { .. }
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }
+            | Reply::Favourited { .. }
+            | Reply::Locked { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
+            | Reply::Settings { .. }
+            | Reply::AudioDevices { .. }
+            | Reply::MicrophoneLevel { .. }
+            | Reply::StartAtLogin { .. }
             | Reply::RecordingExported { .. }
+            | Reply::PlaybackOpened { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }
@@ -2245,10 +2927,14 @@ fn hotkey_state_tag(state: &HotkeyState) -> String {
 
 /// Every state a recorder reports.
 fn every_recorder_status() -> Vec<RecorderStatus> {
-    let states = vec![RecorderStatus::Idle, exemplar_recording()];
+    let states = vec![
+        RecorderStatus::Idle,
+        exemplar_watching(),
+        exemplar_recording(),
+    ];
     for state in &states {
         match state {
-            RecorderStatus::Idle | RecorderStatus::Recording(_) => {}
+            RecorderStatus::Idle | RecorderStatus::Watching(_) | RecorderStatus::Recording(_) => {}
         }
     }
     states
@@ -2292,9 +2978,14 @@ mod tests {
             "reply.recording_stopped",
             "reply.shutting_down",
             "event.status_changed",
+            "event.session_ended",
             "event.recording_failed",
+            "event.export_progress",
             "recorder_status.idle",
+            "recorder_status.watching",
             "recorder_status.recording",
+            "session_summary",
+            "session_recording",
             "library_sessions",
             "library_session_page",
             "library_session",
@@ -2303,6 +2994,16 @@ mod tests {
             "library_game",
             "reply.library_sessions",
             "reply.library_games",
+            "reply.settings",
+            "reply.audio_devices",
+            "setting_entry",
+            "settings_view",
+            "apply_settings",
+            "audio_device",
+            "audio_devices",
+            "reply.start_at_login",
+            "start_at_login",
+            "set_start_at_login",
             "error_detail.unsupported_protocol_version",
             "error_detail.not_implemented",
             "outcome.ok",

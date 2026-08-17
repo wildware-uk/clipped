@@ -39,7 +39,7 @@
 //! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
 //! | [`start_at_login`] | The `start-at-login` subcommand: the opt-in registry value |
-//! | [`watch`] | The `watch` subcommand: recording games automatically |
+//! | [`watch`] | Recording games automatically: the `watch` subcommand, and the same loop inside `serve --watch-for-games` |
 //! | [`recover`] | The `recover` subcommand: the footage a killed recorder left |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
@@ -51,11 +51,13 @@ pub mod hotkeys;
 pub mod library;
 pub mod list_windows;
 pub mod options;
+pub mod playback;
 pub mod plugins;
 pub mod record;
 pub mod recover;
 pub mod replay;
 pub mod serve;
+pub mod settings;
 pub mod shutdown;
 pub mod start_at_login;
 pub mod storage;

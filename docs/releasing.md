@@ -17,6 +17,12 @@ Three questions this answers, in order of how easy they are to get wrong:
 `M9` complete does not mean `0.9.0`. No milestone number maps to a version
 number, and none ever will.
 
+[ADR 0014](adr/0014-a-milestone-is-not-a-version.md) is the decision, with the
+alternatives that were considered and rejected — milestone-numbered versions,
+`0.x` previews, calendar versioning — and what would make the `0.x` one win
+later. This page is the procedure that follows from it; that page is where to
+argue with it.
+
 Milestones `M0` to `M15` are groupings of scope, numbered in the order the work
 is planned (`SPEC.md` section 42). Version numbers are promises to whoever
 installed the previous one. The two are different kinds of thing, and treating
@@ -151,8 +157,7 @@ licence texts, the corresponding source and the relinking permission;
 [docs/licensing.md](licensing.md) sets out the whole list, and
 [#123](https://github.com/wildware-uk/clipped/issues/123) is the work.
 
-Today an installer built from this repository carries none of the paperwork,
-and `README.md` says so. A workflow able to publish that installer is a workflow
+A workflow able to publish an installer without that paperwork is a workflow
 able to break a licence by accident, against everybody who downloads it, without
 anybody noticing — so the gate asks what `bundle.resources` in
 `tauri.conf.json` would actually collect and requires six files to be among
@@ -177,9 +182,13 @@ It checks that the six texts are *present*, and nothing more: not their
 contents, not that `NOTICE.md` is FFmpeg's rather than somebody else's. Whoever
 publishes the draft is still the one who has read them.
 
-`collect-notices.ps1` already produces every one of them. What is missing is
-putting the payload into the bundle, which is #123's remaining work; when that
-lands, this gate starts passing on its own, with no change here.
+**This gate passes as of [#538](https://github.com/wildware-uk/clipped/pull/538)**,
+which put the payload into the bundle and was the remaining half of
+[#123](https://github.com/wildware-uk/clipped/issues/123). It started passing on
+its own, with no change here, which is what checking the artefact rather than
+the issue tracker buys. Confirmed on 2026-08-17 by listing the contents of an
+installer built from `edb36d8`: all six texts are in it, under `licences\` and
+`licences\ffmpeg\`.
 
 The gate checks the artefact rather than the issue tracker deliberately. #123
 being closed is somebody's opinion; a bundle without `GPL-3.0.txt` in it is a
@@ -260,20 +269,62 @@ that every branch in it can be tested against a fixture instead of against the
 live repository. [`scripts/test-check-release-gates.ps1`](../scripts/test-check-release-gates.ps1)
 is that test suite, and CI runs it on every pull request.
 
-## What has not been proven
+## What has been proven, and what has not
 
-Honesty about the mechanism, since the point of building it early is that
-nobody is relying on it yet:
+The point of building this early is that nobody is relying on it yet, so this
+section is worth more than the rest of the page. It distinguishes what has been
+*run* from what has only been *read*, and it is the section to update after the
+first real tag.
 
-- **No release has ever been created by this workflow**, because creating one
-  would mean tagging a version this project has not reached. Everything up to
-  and including building the installer, hashing it and rendering the notes can
-  be rehearsed and has been; `gh release create` itself has not run.
-- **The gates have been proven by refusing**, on fixtures in the test suite, on
-  this repository as it stands, and on a throwaway tag pushed and deleted. The
-  path where all five pass has been exercised against fixtures only, because
-  the real repository cannot currently satisfy them — which is the intended
-  state.
+**`.github/workflows/release.yml` has never executed.** Not once, on any event.
+`gh api repos/wildware-uk/clipped/actions/workflows/release.yml/runs` returned
+`total_count: 0` on 2026-08-17; the repository has no tags and no releases. An
+earlier version of this page claimed the gates had been proven "on a throwaway
+tag pushed and deleted", and that was not true — no tag has ever been pushed.
+Nothing below rests on the workflow having run.
+
+Verified by running, on 2026-08-17, against the tree at `edb36d8`:
+
+- **The gate script refuses this repository, for the right reasons.** Run with
+  the three `gh api` answers above and `-Tag v1.0.0`: Version, Continuous
+  integration and Milestones refuse and Branch passes, each naming what is
+  wrong. Its own suite (`scripts/test-check-release-gates.ps1`, 30 cases) and
+  `scripts/test-write-release-notes.ps1` both pass.
+- **The licence gate now passes**, which it did not when this page was written.
+  [#123](https://github.com/wildware-uk/clipped/issues/123) landed in
+  [#538](https://github.com/wildware-uk/clipped/pull/538), and an installer
+  built from this tree carries all six texts — confirmed by listing the
+  contents of the built `.exe`, not by reading the configuration.
+- **The build the workflow performs works, end to end.** `npm ci`,
+  `cargo build --release --locked -p clipped-recorder`,
+  `scripts/collect-notices.ps1` and `npm run build:app` produced exactly one
+  installer, at exactly the path the workflow's "Find the installer" step
+  expects. `scripts/write-release-notes.ps1` rendered notes from it, and the
+  SHA-256 it published matched `Get-FileHash` on the asset.
+- **The workflow is well-formed.** `actionlint` reports nothing on it. `zizmor`
+  reported six high-severity findings, of which the template injections and the
+  cache poisoning on the publishing path have been fixed; what remains is
+  argued in the comments at each site.
+
+Read and reasoned, but **not** run:
+
+- **`gh release create` has never executed here.** That the draft appears, with
+  both assets attached and `--verify-tag` accepting the tag, is inference from
+  the documented behaviour of `gh` and of the `contents: write` permission.
+- **No tag push has ever triggered the workflow**, so the `on.push.tags` match,
+  the `needs: gate` refusal actually preventing the build, and the branch gate
+  running against a real tag ref are all unobserved. They are also the cheapest
+  things to observe: the first rehearsal from the Actions tab exercises every
+  one of them except the last step.
+- **The gate job predicts what the installer will carry; it does not inspect
+  it.** It stages the payload on a different runner with a stand-in recorder,
+  and the release job then builds the real installer. The two check out the same
+  commit and run the same scripts, so they should not disagree — but "should
+  not" is the honest strength of that claim, and the end-to-end confirmation
+  above was done by hand rather than by the workflow.
 - **Nothing here signs anything.** The installer is unsigned, SmartScreen will
   warn about it, and the release notes say so rather than leaving somebody to
   guess. Code signing is not in scope of any milestone yet.
+
+The first rehearsal should be run from the Actions tab with **build** ticked,
+and this section updated with what it actually did.

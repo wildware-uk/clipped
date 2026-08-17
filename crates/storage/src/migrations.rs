@@ -85,6 +85,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "recording_spans",
         sql: include_str!("../migrations/0005_recording_spans.sql"),
     },
+    Migration {
+        version: 6,
+        name: "recovered_recording_outcomes",
+        sql: include_str!("../migrations/0006_recovered_recording_outcomes.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "locked_media",
+        sql: include_str!("../migrations/0007_locked_media.sql"),
+    },
 ];
 
 /// The checksum of every migration that has been released.
@@ -101,6 +111,8 @@ const CHECKSUMS: &[(u32, &str)] = &[
     (3, "d2cf76386a1d8bbe"),
     (4, "86f00947424c4989"),
     (5, "55ed6d143c4f7fe7"),
+    (6, "75c5a5483a721a71"),
+    (7, "fd00bcc13fc0387c"),
 ];
 
 /// The newest schema version this build understands.

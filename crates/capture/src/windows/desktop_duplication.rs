@@ -67,12 +67,10 @@ use windows::Win32::Foundation::{E_INVALIDARG, HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_IDENTITY,
-    DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_SAMPLE_DESC,
+    DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
@@ -88,6 +86,7 @@ use windows::Win32::System::Performance::QueryPerformanceFrequency;
 use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
 use super::client_size;
+use super::crop::{create_frame_texture, recordable_size, EvenCrop};
 use crate::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
     CaptureBackendFactory, CaptureConfig, CaptureError, CaptureMethod, CaptureTarget,
@@ -438,15 +437,26 @@ impl Running {
 
         let session = Session::open(&output, region)?;
         let format = FrameFormat::new(
-            match region {
-                Region::WholeOutput => session.size,
-                // A window's frames are its client area, which the caller has
-                // already measured; reading it again here keeps the format
-                // honest if the window was resized between enumeration and now.
-                Region::Window(window) => {
-                    client_size(window).ok_or(CaptureError::TargetLost { method: METHOD })?
-                }
-            },
+            // Rounded down to even, because 4:2:0 chroma has no representation
+            // for an odd dimension and an ordinary bordered window has one about
+            // half the time (issue #561). What makes that honest rather than a
+            // smaller number beside a larger texture is that the frame handed
+            // out is genuinely this size: a window's frames are cropped into a
+            // destination texture created at it, and a display's are too on the
+            // rare occasion a display mode is odd (`Session::open`).
+            recordable_size(
+                match region {
+                    Region::WholeOutput => session.size,
+                    // A window's frames are its client area, which the caller has
+                    // already measured; reading it again here keeps the format
+                    // honest if the window was resized between enumeration and now.
+                    Region::Window(window) => {
+                        client_size(window).ok_or(CaptureError::TargetLost { method: METHOD })?
+                    }
+                },
+                METHOD,
+                target.properties().kind(),
+            )?,
             PixelFormat::Bgra8Unorm,
         );
 
@@ -691,11 +701,19 @@ impl Running {
         let frames_missed = info.AccumulatedFrames.saturating_sub(1);
 
         let texture = match region {
-            Region::WholeOutput => {
+            Region::WholeOutput => match session.crop.as_ref() {
                 // Zero copy: the caller is handed DXGI's own desktop image, and
                 // the frame stays outstanding until the next acquisition.
-                desktop
-            }
+                None => desktop,
+                // Unless the display mode has an odd dimension, in which case
+                // the even crop of it is copied into a texture this backend
+                // owns, because the size a frame declares has to be the size of
+                // the picture in it (`super::crop`).
+                Some(crop) => {
+                    crop.fill_from(&desktop);
+                    crop.texture().clone()
+                }
+            },
             Region::Window(window) => {
                 let Some(client) = client_rect_in_desktop(window) else {
                     session.release_frame();
@@ -771,7 +789,14 @@ impl Running {
         let Some(size) = client_size(window) else {
             return Err(CaptureError::TargetLost { method: METHOD });
         };
-        if size != self.format.size() {
+        // Compared as the frames would be, not as the window is. A window taken
+        // from 986x593 to 987x593 is recorded at 986x592 either way — the crop
+        // this backend was already making simply takes a different column of the
+        // desktop image — so ending the file for it would cost a recording
+        // boundary (ADR 0012) and produce a second file of exactly the same
+        // shape. A change that does move the recorded size is reported exactly
+        // as before.
+        if size.rounded_down_to_even() != Some(self.format.size()) {
             return Ok(TargetState::Resized(size));
         }
 
@@ -855,9 +880,12 @@ impl Running {
         // the case `DXGI_ERROR_ACCESS_DENIED` describes and exactly the case a
         // game recorder must survive. The one failure that genuinely cannot be
         // retried away is a display that has been rotated mid-recording, which
-        // is refused every time until it is rotated back; that is
-        // [issue #138](https://github.com/wildware-uk/clipped/issues/138), and
-        // until then the warning below is what says so.
+        // is refused every time until it is rotated back — Desktop Duplication
+        // declines a rotated display outright rather than record it wrongly
+        // (see [`Session::open`] and
+        // [issue #138](https://github.com/wildware-uk/clipped/issues/138) for
+        // why) — and the warning below is what says so for as long as it stays
+        // rotated.
         let session = match Session::open(&output, self.region) {
             Ok(session) => session,
             Err(error) => {
@@ -890,7 +918,10 @@ impl Running {
         self.recovering_since = None;
         self.recovery_warned_at = None;
 
-        if size == self.format.size() {
+        // As the frames compare, not as the target does: a display or a window
+        // that came back one pixel wider is recorded at the same even size and
+        // needs no new file (see `check_target`).
+        if size.rounded_down_to_even() == Some(self.format.size()) {
             return Ok(None);
         }
         self.awaiting_resize = Some(size);
@@ -924,13 +955,26 @@ impl Running {
     }
 
     /// Accepts the size an acquisition reported, reconfiguring the crop.
+    ///
+    /// `size` is the *target's* new size, which may have an odd dimension; the
+    /// format returned is what will actually be recorded, and the destination
+    /// texture is created at that size so that the two cannot drift apart.
     fn adopt_size(&mut self, size: FrameSize) -> Result<FrameFormat, CaptureError> {
+        let recorded = recordable_size(
+            size,
+            METHOD,
+            match self.region {
+                Region::WholeOutput => TargetKind::Monitor,
+                Region::Window(_) => TargetKind::Window,
+            },
+        )?;
+
         self.release_held_frame();
-        self.format = FrameFormat::new(size, PixelFormat::Bgra8Unorm);
+        self.format = FrameFormat::new(recorded, PixelFormat::Bgra8Unorm);
         self.awaiting_resize = None;
 
         if let (Region::Window(_), Some(session)) = (self.region, self.session.as_mut()) {
-            session.destination = Some(Destination::create(&session.device, size)?);
+            session.destination = Some(Destination::create(&session.device, recorded)?);
         }
 
         Ok(self.format)
@@ -994,6 +1038,11 @@ struct Session {
     /// Where a cropped frame is copied to. [`None`] for a whole-output capture,
     /// which needs no copy at all.
     destination: Option<Destination>,
+    /// Where a whole-output frame is cropped to an even size, on the rare
+    /// display whose mode has an odd dimension. [`None`] for every other
+    /// whole-output capture — and for every window capture, whose
+    /// [`destination`](Self::destination) is already an even crop.
+    crop: Option<EvenCrop>,
     /// The failure `ReleaseFrame` reported, if it reported one.
     ///
     /// This is not bookkeeping, it is the difference between a recording that
@@ -1017,12 +1066,18 @@ impl Session {
     fn open(output: &Output, region: Region) -> Result<Self, CaptureError> {
         // A rotated output hands over its desktop image in the *unrotated*
         // orientation, so a portrait display duplicates as a landscape image
-        // that an application is expected to rotate itself. Recording that
-        // sideways would be a silently wrong recording, and cropping a window
-        // out of it would be worse: the window's coordinates are in the rotated
-        // desktop's space and would name the wrong pixels. Refusing is the
-        // honest answer until issue #138 adds the rotation
-        // (AGENTS.md section 54).
+        // that an application is expected to rotate itself. Correcting it would
+        // be the first GPU blit anywhere in this pipeline — there is no shader,
+        // no Direct2D interop, nothing that turns a texture — and getting the
+        // direction of a transpose wrong is exactly the kind of bug that is
+        // invisible without a physically rotated display to check it against,
+        // which neither this development machine nor CI has (issue #138's own
+        // notes say so). A wrongly-rotated recording would look like a fix and
+        // be one nobody could tell was broken; refusing it, naming why, is the
+        // honest answer for now (AGENTS.md section 54). Windows Graphics
+        // Capture, which composes the rotation for the caller before this
+        // process ever sees a frame, is unaffected and remains the way to
+        // record a rotated display.
         if !is_upright(output.rotation) {
             return Err(CaptureError::UnsupportedTarget {
                 method: METHOD,
@@ -1030,9 +1085,7 @@ impl Session {
                     Region::WholeOutput => TargetKind::Monitor,
                     Region::Window(_) => TargetKind::Window,
                 },
-                reason: "the display is rotated, and Desktop Duplication hands over a \
-                         rotated display's image unrotated, so the recording would be \
-                         sideways",
+                reason: rotated_display_refusal(region),
             });
         }
 
@@ -1093,8 +1146,30 @@ impl Session {
             Region::WholeOutput => None,
             Region::Window(window) => Some(Destination::create(
                 &device,
-                client_size(window).ok_or(CaptureError::TargetLost { method: METHOD })?,
+                // Even, like every frame this crate produces, and free here:
+                // this texture is the crop the window path was already copying
+                // into, one row or column smaller (issue #561).
+                recordable_size(
+                    client_size(window).ok_or(CaptureError::TargetLost { method: METHOD })?,
+                    METHOD,
+                    TargetKind::Window,
+                )?,
             )?),
+        };
+
+        // A whole-output capture hands over DXGI's own desktop image and copies
+        // nothing, so it needs a crop only when the display mode itself has an
+        // odd dimension. No physical monitor has one; a remote-desktop session
+        // sized to the window it is displayed in frequently does.
+        let crop = match region {
+            Region::WholeOutput => {
+                let recorded = recordable_size(size, METHOD, TargetKind::Monitor)?;
+                (recorded != size)
+                    .then(|| EvenCrop::create(device.device(), recorded))
+                    .transpose()
+                    .map_err(|error| backend_error("creating the cropped frame texture", error))?
+            }
+            Region::Window(_) => None,
         };
 
         Ok(Self {
@@ -1104,6 +1179,7 @@ impl Session {
             size,
             origin: (output.desktop_bounds.left, output.desktop_bounds.top),
             destination,
+            crop,
             release_failure: None,
         })
     }
@@ -1239,46 +1315,18 @@ struct Destination {
 
 impl Destination {
     /// Creates a `size` destination on `device`.
+    ///
+    /// `size` is always even ([`super::crop`]): it is the window's client area
+    /// rounded down, and the copy into it is clamped to this texture's own size
+    /// by [`place_window_in_output`], so the odd row or column of the window is
+    /// simply not part of the crop.
     fn create(device: &DuplicationDevice, size: FrameSize) -> Result<Self, CaptureError> {
-        let description = D3D11_TEXTURE2D_DESC {
-            Width: size.width(),
-            Height: size.height(),
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            // Render target so the uncovered part of a straddling window can be
-            // cleared; shader resource because that is what an encoder binds.
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-
-        let mut texture: Option<ID3D11Texture2D> = None;
-        // SAFETY: `description` is a live local describing a texture with no
-        // initial data, and the out parameter is the representation windows-rs
-        // uses for one of that type. On success it holds one reference, released
-        // when this `Destination` drops.
-        unsafe {
-            device
-                .device()
-                .CreateTexture2D(&raw const description, None, Some(&raw mut texture))
-        }
-        .map_err(|error| backend_error("creating the cropped frame texture", error))?;
-
-        let texture = texture.ok_or_else(|| {
-            backend_error(
-                "creating the cropped frame texture",
-                windows::core::Error::new(
-                    windows::Win32::Foundation::E_FAIL,
-                    "CreateTexture2D reported success without returning a texture",
-                ),
-            )
-        })?;
+        // Render target so the uncovered part of a straddling window can be
+        // cleared; shader resource because that is what an encoder binds. Both
+        // come from the shared description in `super::crop`, which is also what
+        // an odd-sized whole-output capture is copied into.
+        let texture = create_frame_texture(device.device(), size)
+            .map_err(|error| backend_error("creating the cropped frame texture", error))?;
 
         let mut view: Option<ID3D11RenderTargetView> = None;
         // SAFETY: `texture` was created immediately above with
@@ -1679,6 +1727,34 @@ fn is_upright(rotation: DXGI_MODE_ROTATION) -> bool {
     rotation == DXGI_MODE_ROTATION_IDENTITY || rotation == DXGI_MODE_ROTATION_UNSPECIFIED
 }
 
+/// Why Desktop Duplication refuses `region` on a rotated display.
+///
+/// The two regions fail differently, and a message that only ever says
+/// "sideways" undersells the window case. A whole-output capture really would
+/// just be sideways: DXGI hands over the unrotated desktop image and nothing
+/// else is wrong with it. A window capture is worse, not merely sideways —
+/// [`client_rect_in_desktop`] reads the window's position from
+/// `ClientToScreen`, which Windows reports in the *rotated* desktop's
+/// coordinate space, while the duplicated image this backend would crop it out
+/// of is in the *unrotated* one. The rectangle that math produces does not
+/// land on the window at all, so the recording would not merely be a sideways
+/// version of the right thing, it would be a crop of the wrong pixels
+/// entirely.
+fn rotated_display_refusal(region: Region) -> &'static str {
+    match region {
+        Region::WholeOutput => {
+            "the display is rotated, and Desktop Duplication hands over a rotated \
+             display's image unrotated, so the recording would be sideways"
+        }
+        Region::Window(_) => {
+            "the display is rotated, and Desktop Duplication hands over a rotated \
+             display's image unrotated while window positions are reported in the \
+             rotated desktop's coordinate space, so the crop would be taken from the \
+             wrong pixels entirely rather than merely being sideways"
+        }
+    }
+}
+
 /// Turns a `DuplicateOutput` failure into an error that says what it means.
 ///
 /// The codes it has for "no" mean quite different things to a user, and
@@ -1832,8 +1908,10 @@ mod tests {
     use windows::core::{w, Interface as _, PCWSTR};
     use windows::Win32::Foundation::{COLORREF, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_STAGING,
     };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
     use windows::Win32::Graphics::Gdi::{
         ChangeDisplaySettingsExW, CreateSolidBrush, EnumDisplaySettingsW, FillRect, GetDC,
         ReleaseDC, CDS_FULLSCREEN, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL,
@@ -2195,13 +2273,46 @@ mod tests {
     #[test]
     fn a_display_that_is_not_the_right_way_up_is_refused_rather_than_recorded_sideways() {
         use windows::Win32::Graphics::Dxgi::Common::{
-            DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE90,
+            DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90,
         };
 
         assert!(is_upright(DXGI_MODE_ROTATION_IDENTITY));
         assert!(is_upright(DXGI_MODE_ROTATION_UNSPECIFIED));
         assert!(!is_upright(DXGI_MODE_ROTATION_ROTATE90));
         assert!(!is_upright(DXGI_MODE_ROTATION_ROTATE180));
+        assert!(
+            !is_upright(DXGI_MODE_ROTATION_ROTATE270),
+            "270 degrees is portrait, the same as 90, and must be refused the same way"
+        );
+    }
+
+    #[test]
+    fn the_rotated_display_refusal_names_the_worse_problem_for_a_window() {
+        // A monitor target really is just sideways: DXGI's image is the whole
+        // truth, only unrotated.
+        let monitor_reason = rotated_display_refusal(Region::WholeOutput);
+        assert!(
+            monitor_reason.contains("sideways"),
+            "a whole-output capture of a rotated display has exactly one thing wrong \
+             with it: {monitor_reason}"
+        );
+
+        // A window target is worse than sideways: the crop coordinates and the
+        // duplicated image disagree about which orientation they are in, so the
+        // crop lands on the wrong pixels, not a rotated version of the right
+        // ones. That distinction has to survive in the message a diagnostics
+        // screen shows, not just in a code comment nobody using the app reads.
+        let window_reason = rotated_display_refusal(Region::Window(HWND(core::ptr::null_mut())));
+        assert!(
+            window_reason.contains("wrong pixels"),
+            "a window capture of a rotated display is cropped from the wrong place \
+             entirely, which is a stronger claim than \"sideways\" and the message must \
+             say so: {window_reason}"
+        );
+        assert_ne!(
+            monitor_reason, window_reason,
+            "the two regions fail for different reasons and must not share one message"
+        );
     }
 
     #[test]
@@ -2440,6 +2551,16 @@ mod tests {
         }
 
         fn at(x: i32, y: i32) -> Option<Self> {
+            Self::sized(x, y, WINDOW_WIDTH, WINDOW_HEIGHT)
+        }
+
+        /// The same, for a test that needs a particular client area.
+        ///
+        /// The window is a `WS_POPUP`, so it has no border and no caption and
+        /// the size given *is* the client area — which is what lets a test ask
+        /// for the odd one an ordinary bordered window arrives at by accident
+        /// (issue #561).
+        fn sized(x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
             let class = w!("clipped_duplication_marker");
 
             // SAFETY: `GetModuleHandleW(None)` returns this executable's own
@@ -2472,8 +2593,8 @@ mod tests {
                     WS_POPUP | WS_VISIBLE,
                     x,
                     y,
-                    WINDOW_WIDTH,
-                    WINDOW_HEIGHT,
+                    width,
+                    height,
                     None,
                     None,
                     Some(instance.into()),
@@ -3037,6 +3158,151 @@ mod tests {
             "the crop must follow the window; a fixed crop would now be showing the desktop \
              the window used to be over"
         );
+    }
+
+    /// # Why this is `#[ignore]`d
+    ///
+    /// It needs a window whose pixels are actually painted on a desktop. On the
+    /// CI runner duplication yields frames — 117 of them — but none whose
+    /// corners are the window's own colour, because there is no compositing
+    /// session drawing it. The assertion is right; the environment cannot
+    /// satisfy it.
+    ///
+    /// It passes on a machine with a desktop — run it with
+    /// `cargo test -p clipped-capture -- --ignored`. `docs/testing.md` lists it
+    /// with the other suites that need real hardware.
+    #[test]
+    #[ignore = "needs a real desktop session; a CI runner paints no window to find"]
+    fn a_window_with_an_odd_client_area_is_cropped_to_an_even_one_and_not_reported_as_resizing() {
+        let _one_at_a_time = one_duplication_at_a_time();
+        // Issue #561 through this backend. An ordinary bordered window sized to
+        // 1000x600 has a 986x593 client area, which no encoder can be configured
+        // for, so the recording used to fail before its first frame. Cropping is
+        // nearly free here — this backend was already copying the window out of
+        // the desktop image — but two things about it are easy to get wrong and
+        // both are silent:
+        //
+        // - the destination texture has to be the size the frame declares, or
+        //   the track declares a shape the pictures do not have;
+        // - `check_target` compares the window against the *frame*, so comparing
+        //   an odd client area against an even frame reports a resize on every
+        //   acquisition, for ever — which under ADR 0012 is a new file every few
+        //   milliseconds for a window nobody touched.
+        let _ = clipped_windows::enable_per_monitor_dpi_awareness();
+
+        let Ok(monitors) = enumerate_monitors() else {
+            skipped("this machine would not enumerate its displays");
+            return;
+        };
+        let Some(display) = test_display(&monitors) else {
+            skipped("this machine reports no displays");
+            return;
+        };
+        if !the_display_is_awake(display) {
+            return;
+        }
+        let bounds = display.bounds();
+        let Some(window) = MarkerWindow::sized(
+            bounds.left() + WINDOW_INSET,
+            bounds.top() + WINDOW_INSET,
+            987,
+            593,
+        ) else {
+            skipped("this machine would not create a window");
+            return;
+        };
+
+        let measured = window.client_size();
+        assert_eq!(
+            (measured.width(), measured.height()),
+            (987, 593),
+            "a borderless window's client area is the size it was created at, and this test \
+             is about an odd one"
+        );
+        let recorded = measured
+            .rounded_down_to_even()
+            .expect("987x593 has an even picture inside it");
+
+        let mut backend = match capture_of(window.handle().0 as u64, TargetKind::Window, measured) {
+            Ok(backend) => backend,
+            Err(error) => {
+                skipped(&format!(
+                    "this machine would not duplicate a window: {error}"
+                ));
+                return;
+            }
+        };
+
+        let mut frames = 0_u32;
+        let mut on_the_window = 0_u32;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline && on_the_window < 3 {
+            window.paint();
+            match backend.acquire(Duration::from_millis(250)) {
+                Ok(Acquisition::Frame(frame)) => {
+                    frames += 1;
+                    assert_eq!(
+                        frame.format().size(),
+                        recorded,
+                        "986x592 is the largest picture inside a 987x593 window that 4:2:0 \
+                         chroma can represent, and it is what the encoder is configured for"
+                    );
+                    assert_eq!(
+                        texture_size(&frame),
+                        Some((recorded.width(), recorded.height())),
+                        "the frame declares {recorded} and hands over a texture of another \
+                         size, which is the mismatch the software encoder refuses outright"
+                    );
+                    // The crop is still the window rather than the desktop
+                    // beside it: a rounding applied to the copy's origin instead
+                    // of its extent would put the desktop in the frame.
+                    let corners = [
+                        read_pixel(&frame, 2, 2),
+                        read_pixel(&frame, recorded.width() - 3, 2),
+                        read_pixel(&frame, 2, recorded.height() - 3),
+                        read_pixel(&frame, recorded.width() - 3, recorded.height() - 3),
+                    ];
+                    if corners.iter().all(|pixel| *pixel == Some(MARKER_PIXEL)) {
+                        on_the_window += 1;
+                    }
+                }
+                Ok(Acquisition::Timeout) => {}
+                Ok(Acquisition::TargetMinimised) => {
+                    panic!("the test window is not minimised")
+                }
+                Ok(Acquisition::SizeChanged(size)) => panic!(
+                    "nothing resized this window: comparing its odd client area against the \
+                     even frame reports {size} on every acquisition, and a session follows \
+                     every one of them with a new file (ADR 0012)"
+                ),
+                Err(error) => panic!("capture stopped: {error}"),
+            }
+        }
+
+        note(&format!(
+            "odd client area: {frames} frames, {on_the_window} with every corner on the window"
+        ));
+        assert!(
+            on_the_window >= 3,
+            "a 987x593 window produced {frames} frames and {on_the_window} whose corners were \
+             all the window's own colour; before issue #561 it produced no recording at all"
+        );
+    }
+
+    /// The dimensions of a frame's own texture, which is the half of
+    /// [`FrameFormat`] nothing outside this crate can check.
+    fn texture_size(frame: &CapturedFrame<'_>) -> Option<(u32, u32)> {
+        let raw = frame.texture().as_raw();
+        // SAFETY: the pointer came from a live `CapturedFrame`, whose texture the
+        // backend guarantees is a valid `ID3D11Texture2D` for as long as the
+        // frame exists. `from_raw_borrowed` takes no reference of its own.
+        let texture = unsafe { ID3D11Texture2D::from_raw_borrowed(&raw) }?;
+
+        let mut description = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `texture` is live and `description` is a live local the call
+        // writes into; `GetDesc` reads what the runtime already holds.
+        unsafe { texture.GetDesc(&raw mut description) };
+        Some((description.Width, description.Height))
     }
 
     #[test]

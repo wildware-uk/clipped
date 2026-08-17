@@ -182,6 +182,33 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
             "Not recording".to_owned(),
             "Clipped — not recording".to_owned(),
         ),
+        // Nothing is being recorded, so the mark is the idle one: a badge of
+        // its own would be a tray design decision, and this issue's scope is
+        // the protocol having a word for the state rather than the tray
+        // gaining a fourth mark for it.
+        //
+        // The sentence is not the idle one, though. A sitting still open in
+        // its restart grace has a game name, and dropping it for those seconds
+        // is exactly the flicker `Watching::session` exists to prevent.
+        RecorderLinkState::Attached {
+            status: RecorderStatus::Watching(watching),
+            ..
+        } => match watching
+            .session
+            .as_deref()
+            .and_then(|s| s.game_name.as_deref())
+        {
+            Some(game) => (
+                TrayMark::Idle,
+                format!("Watching — {game}"),
+                format!("Clipped — watching for {game}"),
+            ),
+            None => (
+                TrayMark::Idle,
+                "Watching for a game".to_owned(),
+                "Clipped — watching for a game".to_owned(),
+            ),
+        },
         RecorderLinkState::Attached {
             status: RecorderStatus::Recording(active),
             ..
@@ -262,13 +289,14 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
 /// it now saves a clip — `tray::save_replay` — which it did not until
 /// [issue #427](https://github.com/wildware-uk/clipped/issues/427).
 ///
-/// A recording started **from this window** still keeps no buffer, because
-/// nothing here asks `start_recording` for one and the length to ask for lives
-/// in a setting this window has no way to read (#427 again). So this reason is
-/// the usual one, and it is a fact about *this recording* rather than a stale
-/// claim about the build — which is the whole difference. A recording started
-/// by `clipped-recorder replay --duration` has a buffer, and against that one
-/// the item is live.
+/// A recording started **from this window** keeps a buffer since #427:
+/// `crate::recording_request` asks for one without naming a length, and the
+/// recorder answers with `replay_window_seconds` resolved for the game it is
+/// recording — a duration somebody chose, which this process could not have
+/// read for itself. So against a recording either control here started, this
+/// item is live. The middle refusal is now a fact about a recording somebody
+/// else started — `clipped-recorder record`, or a client of its own — rather
+/// than a stale claim about the build, which is the whole difference.
 ///
 /// The capability is asked first, and is a different question again: a recorder
 /// that never advertised `replay` has no `save_replay` command, so no recording
@@ -433,6 +461,7 @@ mod tests {
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 4_200,
             replay_seconds,
+            session: None,
         }
     }
 
@@ -562,9 +591,9 @@ mod tests {
             "Save Replay — nothing is being recorded"
         );
 
-        // A recording with no buffer is the case a user will actually meet, and
-        // it is a different sentence: something *is* being recorded, and there
-        // is still nothing to save (#427).
+        // A recording with no buffer — `clipped-recorder record`, or a client
+        // of its own — is a different sentence again: something *is* being
+        // recorded, and there is still nothing to save (#427).
         let plain = tray_model(&recording(), Some(&game()));
         assert_eq!(
             plain.save_replay.label,

@@ -67,6 +67,18 @@
 //! section 58). The COM apartment is the one exception, and `apartment.rs` says
 //! why.
 //!
+//! # Drift correction
+//!
+//! `crate::timeline` decides how far this stream's clock has drifted from the
+//! reference clock and hands back a resampling ratio;
+//! [`EndpointCapture::accept_packet`] is what applies it, through a
+//! [`LinearResampler`] held beside the timeline, before the packet's frame
+//! count ever reaches [`Timeline::plan`]. Both the ratio and the resampler's
+//! carried state are reset together, on the same events: a stream reopened on
+//! a possibly different device, and any packet the timeline itself decided was
+//! not simply the next one in sequence. See `crate::resample` for why the two
+//! always reset together.
+//!
 //! # What is not here
 //!
 //! The complement of a process tree — everything the machine plays *except* one
@@ -95,6 +107,7 @@ use clipped_logging::AudioSource;
 use crate::buffer::{CapturedAudio, SampleOrigin};
 use crate::error::{AudioError, Capture};
 use crate::format::{append_as_f32, AudioFormat};
+use crate::resample::LinearResampler;
 use crate::time::AudioTimestamp;
 use crate::timeline::{Continuity, Timeline};
 use crate::windows::apartment::ensure_multi_threaded_apartment;
@@ -312,12 +325,13 @@ pub(super) struct Stream {
 
 /// What one look at the endpoint produced.
 enum Polled {
-    /// A packet, already converted into the capture's buffer.
+    /// A packet, already converted into the capture's buffer. Its frame count
+    /// is not carried here: `accept_packet` reads it back from the buffer
+    /// itself, because by the time drift correction has resampled it the
+    /// count WASAPI reported is no longer the count that matters.
     Packet {
         /// The position WASAPI attached to it.
         arrived: AudioTimestamp,
-        /// Frames in it.
-        frames: u64,
         /// Whether the audio engine reported that data was lost before it.
         discontinuity: bool,
     },
@@ -479,7 +493,9 @@ impl Stream {
                 // reason a microphone track is silent and the stream itself
                 // cannot tell.
                 SourceKind::Microphone => EndpointMute::of(&device),
-                SourceKind::SystemAudio | SourceKind::GameAudio => None,
+                SourceKind::SystemAudio | SourceKind::GameAudio | SourceKind::OtherSystemAudio => {
+                    None
+                }
             },
             // An endpoint reports the position of every packet it delivers, and
             // `tests/system_audio.rs` asserts that it does.
@@ -560,7 +576,6 @@ impl Stream {
 
         Polled::Packet {
             arrived,
-            frames: u64::from(frames),
             discontinuity,
         }
     }
@@ -763,7 +778,10 @@ impl CaptureSource {
     fn kind(&self) -> SourceKind {
         match self {
             Self::Endpoint(endpoint) => endpoint.kind,
-            Self::ProcessTree(_) => SourceKind::GameAudio,
+            // Which side of the tree, not merely "a tree": both sides run at
+            // once in a recording and every line the engine writes has to say
+            // which of them it is about (issue #27).
+            Self::ProcessTree(process) => process.kind(),
         }
     }
 
@@ -854,9 +872,18 @@ pub(super) struct EndpointCapture {
     /// The shape of the track, fixed when the capture was opened.
     format: AudioFormat,
     timeline: Timeline,
+    /// Nudges a real packet's frame count by [`Timeline::correction_ratio`]
+    /// before the timeline ever sees it, so a source's clock stays aligned
+    /// with the reference clock continuously rather than in occasional
+    /// deadband-sized steps; see "Drift correction" above.
+    drift: LinearResampler,
     counter_frequency: NonZeroU64,
     /// The converted samples of the packet not yet handed over.
     packet: Vec<f32>,
+    /// Where `accept_packet` writes a packet after `drift` has resampled it,
+    /// before it becomes `packet`. Kept as a field, not a local, so its
+    /// allocation is reused every packet rather than made and dropped again.
+    resampled: Vec<f32>,
     /// Samples at the front of `packet` that the timeline said to discard.
     packet_offset: usize,
     /// Whether `packet` holds something to hand over.
@@ -963,8 +990,10 @@ impl EndpointCapture {
             stream: Some(stream),
             format,
             timeline: Timeline::new(format, opened),
+            drift: LinearResampler::new(format.channels()),
             counter_frequency,
             packet: Vec::new(),
+            resampled: Vec::new(),
             packet_offset: 0,
             packet_pending: false,
             packet_device: opened,
@@ -1180,9 +1209,9 @@ impl EndpointCapture {
             match self.poll_stream() {
                 Polled::Packet {
                     arrived,
-                    frames,
                     discontinuity,
-                } => self.accept_packet(arrived, frames, discontinuity),
+                    ..
+                } => self.accept_packet(arrived, discontinuity),
                 Polled::Lost(change) => {
                     self.watch.request_reopen(change);
                     // The same deadline the empty case observes, and for a
@@ -1275,9 +1304,9 @@ impl EndpointCapture {
             match self.poll_stream() {
                 Polled::Packet {
                     arrived,
-                    frames,
                     discontinuity,
-                } => self.accept_packet(arrived, frames, discontinuity),
+                    ..
+                } => self.accept_packet(arrived, discontinuity),
                 // A stream that has failed has nothing left to give, and one
                 // whose queue is empty has given everything: a stopped client
                 // produces no more.
@@ -1286,11 +1315,24 @@ impl EndpointCapture {
         }
     }
 
-    /// Places a freshly converted packet on the timeline.
-    fn accept_packet(&mut self, arrived: AudioTimestamp, frames: u64, discontinuity: bool) {
+    /// Places a freshly converted packet on the timeline, first nudging its
+    /// frame count by whatever drift correction `crate::timeline` has
+    /// measured so far. `self.packet` already holds the endpoint's own
+    /// samples; `self.resampled` is where the corrected count is built before
+    /// it becomes `self.packet` in turn.
+    fn accept_packet(&mut self, arrived: AudioTimestamp, discontinuity: bool) {
         if discontinuity {
             self.stats.discontinuities += 1;
+            // The audio engine has already said this packet is not adjacent,
+            // in time, to the last one it delivered, so interpolating between
+            // them would blend two moments that were never next to each
+            // other into a false transition (`crate::resample`).
+            self.drift.reset();
         }
+
+        let ratio = self.timeline.correction_ratio(arrived);
+        let frames = self.drift.process(&self.packet, ratio, &mut self.resampled);
+        core::mem::swap(&mut self.packet, &mut self.resampled);
 
         match self.timeline.plan(arrived, frames) {
             Continuity::Continue => {
@@ -1308,6 +1350,11 @@ impl EndpointCapture {
                 self.packet_offset = 0;
                 self.packet_pending = true;
                 self.packet_device = arrived;
+                // Real elapsed time with nothing delivered is exactly the
+                // case `LinearResampler::reset` exists for: whatever this
+                // resampler carried belongs to audio that stopped being
+                // adjacent to this packet the moment the gap opened.
+                self.drift.reset();
             }
             Continuity::Trim(overlap) => {
                 tracing::debug!(
@@ -1326,12 +1373,19 @@ impl EndpointCapture {
                         .as_nanos()
                         .saturating_add(self.format.frames_to_nanos(overlap)),
                 );
+                // A packet trimmed this way almost always follows a stall this
+                // crate over-estimated the length of (`LAG`), which is the
+                // same "nothing was adjacent to what came before" situation
+                // as `SilenceFirst`, even though the outcome for the timeline
+                // is the opposite correction.
+                self.drift.reset();
             }
             Continuity::Drop => {
                 tracing::debug!(
                     frames,
                     "discarding audio that lies entirely inside a period already reported"
                 );
+                self.drift.reset();
             }
         }
     }
@@ -1434,12 +1488,23 @@ impl EndpointCapture {
                 );
                 self.stream = Some(stream);
                 self.retry_at = None;
+                // A rate estimate built from the old stream says nothing
+                // about this one's clock — it may be different hardware
+                // entirely — so the next real packet has to establish a fresh
+                // baseline rather than being judged against history that may
+                // belong to a different device (issue #30).
+                self.timeline.reset_drift_correction();
+                self.drift.reset();
             }
             Ok(Some(stream)) => {
-                // The recording cannot follow this endpoint without resampling
-                // or remixing, and neither exists yet (issue #30). Ending the
-                // recording over a headset would be the worse answer, so the
-                // track becomes silence, the caller is told once, and the
+                // The recording cannot follow this endpoint without
+                // converting between two different sample rates or channel
+                // counts, or remixing, and neither exists yet: issue #30 keeps
+                // a source's own clock aligned with the reference clock, which
+                // is a different problem from converting between two
+                // endpoints that disagree about the shape of a frame. Ending
+                // the recording over a headset would be the worse answer, so
+                // the track becomes silence, the caller is told once, and the
                 // capture waits in case the user goes back to a device it can
                 // use.
                 tracing::warn!(

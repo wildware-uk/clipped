@@ -36,6 +36,19 @@ import { parseClientMessage, parseServerMessage } from './parse';
 import type {
   ActiveRecording,
   AddBookmarkParams,
+  ApplySettingsParams,
+  AudioDevice,
+  AudioDevices,
+  AudioDevicesReply,
+  MicrophoneLevel,
+  MicrophoneLevelParams,
+  MicrophoneLevelReply,
+  SetStartAtLoginParams,
+  StartAtLogin,
+  StartAtLoginReply,
+  SettingEntry,
+  SettingsReply,
+  SettingsView,
   BookmarkAddedReply,
   ScreenshotSummary,
   ScreenshotTakenReply,
@@ -49,6 +62,12 @@ import type {
   ErrorOutcome,
   EventStream,
   ExportRecordingParams,
+  OpenPlaybackParams,
+  PlaybackOpenedReply,
+  PlaybackStream,
+  PlaybackTrack,
+  ExportProgress,
+  ExportProgressEvent,
   ExportSummary,
   ConflictingHotkey,
   Feature,
@@ -66,6 +85,8 @@ import type {
   LibraryTrashReply,
   RestoredReply,
   TrashEmptiedReply,
+  FavouritedReply,
+  LockedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -96,6 +117,9 @@ import type {
   ReplaySummary,
   SaveReplayParams,
   ServerMessage,
+  SessionEndedEvent,
+  SessionRecording,
+  SessionSummary,
   StartRecordingParams,
   StatusChangedEvent,
   ShutdownParams,
@@ -104,6 +128,7 @@ import type {
   StopRecordingParams,
   UnboundHotkey,
   UnsupportedProtocolVersionDetail,
+  WatchingStatus,
   Welcome,
 } from './protocol';
 import {
@@ -277,6 +302,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     microphone: 'optional',
     system_audio: 'optional',
     replay_seconds: 'optional',
+    replay: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
   add_bookmark: fields<AddBookmarkParams>({
@@ -300,6 +326,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
+  }),
+  session_summary: fields<SessionSummary>({
+    session_id: 'required',
+    game_id: 'optional',
+    game_name: 'optional',
+    started_at: 'required',
+    ended_at: 'optional',
+    end_reason: 'optional',
+    recordings: 'required',
+  }),
+  session_recording: fields<SessionRecording>({
+    session_index: 'required',
+    output: 'required',
+    outcome: 'optional',
+    duration_ms: 'optional',
   }),
   recording_summary: fields<RecordingSummary>({
     output: 'required',
@@ -368,6 +410,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     ended_at: 'optional',
     end_reason: 'optional',
     favourite: 'required',
+    locked: 'optional',
     recordings: 'required',
     clips: 'required',
   }),
@@ -385,6 +428,8 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     size_bytes: 'optional',
     missing_since: 'optional',
     favourite: 'required',
+    locked: 'optional',
+    protected: 'optional',
     tags: 'required',
   }),
   library_clip: fields<LibraryClip>({
@@ -410,6 +455,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     bytes: 'required',
     missing: 'required',
   }),
+  open_playback: fields<OpenPlaybackParams>({
+    source: 'required',
+    audio_track: 'optional',
+  }),
+  playback_stream: fields<PlaybackStream>({
+    path: 'required',
+    audio_track: 'optional',
+    audio_tracks: 'optional',
+    prepared: 'optional',
+  }),
+  playback_track: fields<PlaybackTrack>({
+    index: 'required',
+    name: 'optional',
+    language: 'optional',
+    default: 'optional',
+  }),
   export_recording: fields<ExportRecordingParams>({
     source: 'required',
     destination: 'required',
@@ -423,6 +484,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     elapsed_ms: 'required',
     lossless: 'required',
     losses: 'optional',
+  }),
+  export_progress: fields<ExportProgress>({
+    source: 'required',
+    destination: 'required',
+    written_ms: 'required',
+    total_ms: 'optional',
+    packets: 'required',
+    bytes: 'required',
   }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
@@ -473,6 +542,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     emptied: 'required',
   }),
+  'reply.favourited': fields<FavouritedReply>({
+    reply: 'required',
+    mark: 'required',
+  }),
+  'reply.locked': fields<LockedReply>({
+    reply: 'required',
+    lock: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -481,6 +558,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
     export: 'required',
+  }),
+  'reply.playback_opened': fields<PlaybackOpenedReply>({
+    reply: 'required',
+    playback: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -501,7 +582,42 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reason: 'required',
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
+  setting_entry: fields<SettingEntry>({
+    key: 'required',
+    label: 'required',
+    value: 'required',
+    overridden: 'required',
+    choices: 'optional',
+    accepted: 'required',
+    applies: 'required',
+    unavailable: 'optional',
+  }),
+  settings_view: fields<SettingsView>({ file: 'required', settings: 'required' }),
+  'reply.settings': fields<SettingsReply>({ reply: 'required', settings: 'required' }),
+  audio_device: fields<AudioDevice>({ name: 'required', is_default: 'required' }),
+  audio_devices: fields<AudioDevices>({ microphones: 'required' }),
+  'reply.audio_devices': fields<AudioDevicesReply>({ reply: 'required', devices: 'required' }),
+  microphone_level_request: fields<MicrophoneLevelParams>({ microphone: 'required' }),
+  microphone_level: fields<MicrophoneLevel>({
+    peak: 'required',
+    device: 'optional',
+    muted: 'optional',
+  }),
+  'reply.microphone_level': fields<MicrophoneLevelReply>({ reply: 'required', level: 'required' }),
+  start_at_login: fields<StartAtLogin>({
+    enabled: 'required',
+    location: 'required',
+    command: 'optional',
+    missing_executable: 'optional',
+  }),
+  set_start_at_login: fields<SetStartAtLoginParams>({ enabled: 'required' }),
+  'reply.start_at_login': fields<StartAtLoginReply>({
+    reply: 'required',
+    start_at_login: 'required',
+  }),
+  apply_settings: fields<ApplySettingsParams>({ values: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
+  'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
     recording_id: 'required',
@@ -509,8 +625,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
   }),
   'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
+  'event.session_ended': fields<SessionEndedEvent>({ event: 'required', session: 'required' }),
+  'event.export_progress': fields<ExportProgressEvent>({
+    event: 'required',
+    export: 'required',
+  }),
   'event.recording_failed': fields<RecordingFailedEvent>({
     event: 'required',
     recording_id: 'required',
@@ -616,6 +738,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'set_favourite',
+    params: 'set_favourite',
+    reply: 'reply.favourited',
+    available_in_this_build: true,
+  },
+  {
+    name: 'set_lock',
+    params: 'set_lock',
+    reply: 'reply.locked',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -628,9 +762,54 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'open_playback',
+    params: 'open_playback',
+    reply: 'reply.playback_opened',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_hotkeys',
     params: null,
     reply: 'reply.hotkeys',
+    available_in_this_build: true,
+  },
+  {
+    name: 'get_settings',
+    params: null,
+    reply: 'reply.settings',
+    available_in_this_build: true,
+  },
+  {
+    // The command that used to be the one nobody performed. Both settings
+    // commands answer with the same reply, because what a change produced is
+    // the settings as they now stand (issue #51).
+    name: 'apply_settings',
+    params: 'apply_settings',
+    reply: 'reply.settings',
+    available_in_this_build: true,
+  },
+  {
+    name: 'get_audio_devices',
+    params: null,
+    reply: 'reply.audio_devices',
+    available_in_this_build: true,
+  },
+  {
+    name: 'get_microphone_level',
+    params: 'microphone_level_request',
+    reply: 'reply.microphone_level',
+    available_in_this_build: true,
+  },
+  {
+    name: 'get_start_at_login',
+    params: null,
+    reply: 'reply.start_at_login',
+    available_in_this_build: true,
+  },
+  {
+    name: 'set_start_at_login',
+    params: 'set_start_at_login',
+    reply: 'reply.start_at_login',
     available_in_this_build: true,
   },
   {
@@ -639,7 +818,6 @@ const TYPESCRIPT_COMMANDS: readonly {
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
-  { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
 ];
 
 /** Which structure each envelope's payload takes, as the types here compose it. */
@@ -693,18 +871,58 @@ function replyDiscriminant(reply: Reply): string {
       // One discriminant: a refusal list that is empty is the same shape
       // carrying nothing, and it is always present.
       return 'trash_emptied';
+    case 'locked':
+      // One discriminant: whether the lock changed, and whether the sweep will
+      // leave the thing alone, are both fields rather than shapes.
+      return 'locked';
+    case 'favourited':
+      // One discriminant: whether the mark changed is a field, not a shape, and
+      // a session and a recording differ only in which half of the target is
+      // filled in.
+      return 'favourited';
     case 'library_trash':
       // One discriminant, for the same reason: an empty trash is the same
       // shape carrying nothing, and there is no paging to lose.
       return 'library_trash';
     case 'hotkeys':
       return 'hotkeys';
+    case 'settings':
+      // One discriminant: a settings view with nothing in it is the same shape
+      // carrying nothing, and `settings` is always present.
+      return 'settings';
+    case 'audio_devices':
+      // The same. A machine with no microphone is an empty list rather than a
+      // different reply.
+      return 'audio_devices';
+    case 'microphone_level':
+      // One discriminant: a device that is not there and one that is silent are
+      // the same shape with a field left out, and which is which is
+      // `MicrophoneLevel.device` rather than a different reply.
+      return 'microphone_level';
+    case 'start_at_login':
+      // Three paths, because they are the three things the window says
+      // differently: off, on, and on but pointing at an executable that is no
+      // longer there. A mirror that dropped either field would reach the same
+      // discriminant for a working startup arrangement and a broken one
+      // (issue #308).
+      if (!reply.start_at_login.enabled) {
+        return 'start_at_login.off';
+      }
+      return reply.start_at_login.missing_executable === undefined
+        ? 'start_at_login.on'
+        : 'start_at_login.missing';
     case 'recording_exported':
       // Whether the copy is complete is part of the path, because it is the one
       // thing the window has to say differently: a mirror that dropped
       // `lossless` would reach the same discriminant for an MP4 that holds the
       // whole recording and one that quietly does not.
       return reply.export.lossless ? 'recording_exported' : 'recording_exported.lossy';
+    case 'playback_opened':
+      // Whether a copy had to be made is part of the path: it is the difference
+      // between an answer that cost nothing and one that read the whole
+      // recording, and a mirror that dropped `prepared` would reach the same
+      // discriminant for both.
+      return `playback_opened.${reply.playback.prepared === true ? 'prepared' : 'as_recorded'}`;
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise
@@ -717,8 +935,20 @@ function eventDiscriminant(event: RecorderEvent): string {
   switch (event.event) {
     case 'status_changed':
       return `status_changed.${event.status.state}`;
+    case 'session_ended':
+      // The reason is part of the path, because it is the one thing this event
+      // says that a window shows differently — and dropping a reason invented
+      // later would otherwise reach the same answer as keeping it.
+      return `session_ended.${event.session.end_reason ?? 'unstated'}`;
     case 'recording_failed':
       return 'recording_failed';
+    case 'export_progress':
+      // Whether the recording said how long it was is part of the path, because
+      // it is the one thing a window draws differently: a total is a percentage
+      // and no total is an unbounded indication. A mirror that read a missing
+      // `total_ms` as zero would otherwise reach the same answer as one that
+      // kept it absent.
+      return `export_progress.${event.export.total_ms === undefined ? 'unmeasured' : 'measured'}`;
     case undefined:
       return 'unrecognised';
   }

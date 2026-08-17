@@ -1,51 +1,49 @@
+import type { AudioDevices, SettingEntry, SettingsView, StartAtLogin } from '@clipped/shared';
+import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
+import { useCallback, useEffect, useState } from 'react';
+
+import { asProblem, type LibraryProblem, type LibraryRead } from './library';
+
 /**
- * What the Settings screen says, as data (issue #51).
+ * The Settings screen: what it can change, and what it can only account for
+ * (issue #51).
  *
- * # Why this screen is an account of settings rather than a form
+ * # Where a setting lives, and how this window reaches it
  *
- * SPEC.md sections 10, 12, 15 and 27 draw a settings screen with devices,
- * directories, presets and switches, and the application deck draws the same
- * one. **This window can neither read nor write a single setting**, so none of
- * those controls is drawn (AGENTS.md section 27). The reasoning is short and it
- * is worth having in one place:
+ * In `%LOCALAPPDATA%\Clipped\settings.json`, which `clipped_session::config`
+ * owns — its defaults, its types, its validation, its per-game layering and its
+ * migrations (`docs/configuration.md`). This window may link one crate of the
+ * repository's workspace, `clipped-ipc`, and
+ * `tests/integration/tests/workspace_layering.rs` enforces it, so it neither
+ * reads that file nor validates a value itself: **it asks the recorder**
+ * (`get_settings`, `apply_settings`, `get_audio_devices`). A window that read
+ * the file would be a second implementation of its versioning and validation,
+ * against the file somebody's settings live in (AGENTS.md section 55).
  *
- * - the settings themselves are `clipped_session::config`, which resolves the
- *   global and per-game layers, validates every value and owns
- *   `%LOCALAPPDATA%\Clipped\settings.json` (`docs/configuration.md`). It reports
- *   each setting's value, which layer supplied it and whether this scope
- *   overrode it, which is exactly what a settings screen needs — and the window
- *   has no way to ask;
- * - the desktop application may link one crate of the repository's workspace,
- *   `clipped-ipc`, and `tests/integration/tests/workspace_layering.rs` enforces
- *   it. `clipped-session` sits above capture, audio, encoding and muxing, so
- *   naming it here would put the recording engine in the window's process — the
- *   separation ADR 0002 exists to make;
- * - the control protocol has no command that reads configuration, and its one
- *   command that would write it, `apply_settings`, is refused by every build as
- *   not implemented (`crates/ipc/src/command.rs`);
- * - reading the file from the window instead would be a second implementation
- *   of its versioning, migration and validation, against the file the user's
- *   settings live in (AGENTS.md section 55).
+ * Everything a control needs comes back with the setting: its label, what it
+ * resolves to, whether it was configured, the values it accepts, and — the one
+ * that decides whether a control is drawn at all — whether anything reads it
+ * when a recording starts. A setting the file can carry and no recording acts
+ * on is drawn as its value and the sentence saying what it is waiting for,
+ * never as a working control (AGENTS.md section 27).
  *
- * [Issue #252](https://github.com/wildware-uk/clipped/issues/252) is the one
- * that fixes this, by either route, and it says it blocks this screen.
+ * # What is still an account rather than a control
  *
- * # What is drawn instead
- *
- * For every setting: how it is set **today**, and what has to land before this
- * window can hold it. A user leaves this screen able to change the thing they
- * came for — from a command line or, for the notification switches, from a file
- * — which is the useful action AGENTS.md section 45 asks for and which an empty
- * form with a disabled Save button would not have given them.
- *
- * Two claims are the load-bearing ones, and `settingsConformance.test.ts`
- * checks both against the Rust that owns them rather than against this file: the
- * settings named here are exactly the ones the configuration API models, and the
- * commands named here are subcommands the recorder actually has.
+ * The rows in {@link SETTINGS_SECTIONS}. Each one is a setting SPEC.md asks a
+ * settings screen for that has nowhere to be saved, or nothing behind it, and
+ * each names the issue that would build it. They are held against the Rust that
+ * owns them by `settingsConformance.test.ts`.
  */
 
-/** Where Clipped keeps a value, when anything keeps it. */
-export type SettingsFile = 'settings.json' | 'notifications.json';
+/**
+ * Where Clipped keeps a value, when anything keeps it.
+ *
+ * One file. There were two until issue #252 — the notification switches lived
+ * in a `notifications.json` of this window's own, with a version field and a
+ * reader of their own — and a union of one is what says that is over.
+ */
+export type SettingsFile = 'settings.json';
 
 /** The key a setting has in the file that carries it. */
 export interface SettingLocation {
@@ -55,7 +53,7 @@ export interface SettingLocation {
   readonly file: SettingsFile;
 }
 
-/** One setting, and where it stands. */
+/** One setting this window cannot offer, and where it stands. */
 export interface SettingRow {
   /** The setting's name in the words a person reads. */
   readonly label: string;
@@ -82,53 +80,413 @@ export interface SettingsSection {
   readonly id: string;
   /** The rail's label for it. */
   readonly label: string;
-  /** What the section is about, and which file carries it. */
+  /** What the section is about. */
   readonly lead: string;
-  /** The settings in it. */
+  /**
+   * The settings the recorder sends that this section draws controls for, by
+   * the key each has in the settings file, in the order they are drawn.
+   *
+   * A key the recorder does not send is not drawn — an older recorder is
+   * missing settings rather than showing empty controls — and a key the
+   * recorder sends that no section lists would be a setting this screen never
+   * offered, which `settingsConformance.test.ts` fails on.
+   */
+  readonly keys: readonly string[];
+  /** The settings this window cannot offer, and what each is waiting for. */
   readonly rows: readonly SettingRow[];
 }
 
 /** Clipped's settings file, as a user would find it. */
 export const SETTINGS_FILE = String.raw`%LOCALAPPDATA%\Clipped\settings.json`;
 
-/** The notification switches, which are a second store until issue #252. */
-export const NOTIFICATIONS_FILE = String.raw`%APPDATA%\uk.wildware.clipped\notifications.json`;
-
 /**
- * The one section with something live in it.
+ * The one section with something live in it beyond the settings themselves.
  *
  * Named here rather than spelled in the screen, so that renaming the section
- * cannot silently stop the hotkey list being drawn — the list would simply
- * vanish, and a section that quietly lost its only real content is exactly the
- * kind of regression nobody notices.
+ * cannot silently stop the hotkey list being drawn.
  */
 export const HOTKEYS_SECTION = 'hotkeys';
 
 /**
- * Why no control on this screen changes anything, in the words the screen says
- * it in.
+ * The section with the other thing that is live and is not a setting.
  *
- * One statement rather than a disabled control beside each setting: a screen
- * whose every row is greyed out says the same thing forty times and none of the
- * times says why.
+ * Named here for the reason {@link HOTKEYS_SECTION} is: renaming the section
+ * must not silently stop the start-at-login switch being drawn.
  */
-export const NOTHING_IS_EDITABLE = {
-  heading: 'No setting can be changed from this window',
-  /* The mechanism, because "coming soon" is not a reason and cannot be acted
-     on. */
-  why:
-    `The recorder owns ${SETTINGS_FILE}. The control protocol has no command that reads it, and ` +
-    'the one that would write it, apply_settings, is refused as not implemented by every build. ' +
-    'Issue #252 makes the configuration API reachable from this window.',
-  /* And what the screen does instead, so that the sections below are read as
-     what they are. */
-  instead:
-    'Each section names how a setting is set today, and the work that has to land before this ' +
-    'window can hold the control. Nothing here is drawn as a control that would do nothing.',
-} as const;
+export const STARTUP_SECTION = 'startup';
 
 /**
- * Every section of the screen, and every setting in it.
+ * The section holding the notification switches.
+ *
+ * Named here for the reason {@link HOTKEYS_SECTION} is, and for one more: these
+ * four are the settings this window itself acts on, so a test about whether a
+ * switch reaches anything has to be able to find them.
+ */
+export const NOTIFICATIONS_SECTION = 'notifications';
+
+/**
+ * The keys the notification switches have in the settings file.
+ *
+ * The same words `clipped_session::config::notifications` writes and the same
+ * words the desktop host matches on when it decides whether to show a toast, so
+ * a rename here would draw a control over a switch nothing reads.
+ * `settingsConformance.test.ts` holds all three lists equal.
+ */
+export const NOTIFICATION_KEYS = [
+  'recording_failed',
+  'recording_interrupted',
+  'recorder_unavailable',
+  'hotkey_unavailable',
+] as const;
+
+/** The key the recording directory has in the settings file. */
+export const RECORDING_DIRECTORY = 'recording_directory';
+
+/**
+ * Whether a setting is a switch rather than a field or a list.
+ *
+ * True exactly when the only values the recorder will accept are `true` and
+ * `false`, which is what a boolean setting is. Asked of the answer rather than
+ * from a list of keys kept here, so that a switch a newer recorder adds is drawn
+ * as one without this window being taught its name (AGENTS.md section 55).
+ */
+export function isSwitch(entry: SettingEntry): boolean {
+  const choices = entry.choices ?? [];
+  return choices.length === 2 && choices.includes('true') && choices.includes('false');
+}
+
+/** The key the microphone has, which is the one control with a device list. */
+export const MICROPHONE = 'microphone';
+
+/** The two values an audio setting takes that are not a device name. */
+export const DEFAULT_DEVICE = 'default';
+
+/** Record nothing from this source. */
+export const NO_DEVICE = 'none';
+
+/**
+ * What a device name is prefixed with in the settings file.
+ *
+ * The escape that lets somebody whose headset is genuinely called "Default"
+ * name it (`clipped_session::config::document`). The window writes it so that a
+ * device is never read back as one of the two words above.
+ */
+export const DEVICE_PREFIX = 'name:';
+
+/** Asks the recorder for every setting, as it now stands. */
+export async function readSettings(): Promise<SettingsView> {
+  return invoke<SettingsView>('recorder_settings');
+}
+
+/**
+ * Changes settings, and answers with the settings as the recorder now holds
+ * them.
+ *
+ * `null` clears one, which is Reset: it returns the setting to the value
+ * Clipped ships with and keeps following it, which writing today's default in
+ * as a value would not.
+ */
+export async function saveSettings(
+  values: Readonly<Record<string, string | null>>,
+): Promise<SettingsView> {
+  return invoke<SettingsView>('apply_recorder_settings', { values });
+}
+
+/** Asks the recorder which microphones this machine has. */
+export async function readAudioDevices(): Promise<AudioDevices> {
+  return invoke<AudioDevices>('audio_devices');
+}
+
+/** Asks the recorder whether it starts when this user signs in. */
+export async function readStartAtLogin(): Promise<StartAtLogin> {
+  return invoke<StartAtLogin>('start_at_login');
+}
+
+/**
+ * Turns starting at login on or off, and answers with where it now stands.
+ *
+ * The recorder writes the value, because the value names the recorder's own
+ * executable and this window would have to guess at it (issue #308).
+ */
+export async function saveStartAtLogin(enabled: boolean): Promise<StartAtLogin> {
+  return invoke<StartAtLogin>('set_start_at_login', { enabled });
+}
+
+/**
+ * Asks the operating system for a folder to record into.
+ *
+ * `null` when the dialog was dismissed, which is not a failure and must not be
+ * reported as one.
+ */
+export async function chooseRecordingDirectory(current: string): Promise<string | null> {
+  const chosen = await open({
+    directory: true,
+    multiple: false,
+    title: 'Where should Clipped keep recordings?',
+    ...(current === '' ? {} : { defaultPath: current }),
+  });
+  return typeof chosen === 'string' ? chosen : null;
+}
+
+/**
+ * What the window says about settings it could not read or save.
+ *
+ * `unknown_command` is the one worth its own sentence: a recorder built before
+ * issue #51 has no `get_settings` at all and refuses `apply_settings` as not
+ * implemented, so "your settings could not be read" would send somebody looking
+ * at their disk rather than restarting Clipped (AGENTS.md section 45).
+ */
+export function describeSettingsProblem(problem: LibraryProblem): string {
+  switch (problem.code) {
+    case 'no_recorder_configured':
+    case 'recorder_unreachable':
+      return `Clipped could not ask the recorder for your settings, so nothing here can be changed. ${problem.message}`;
+    case 'unknown_command':
+    case 'not_implemented':
+      return 'The recorder that is running is older than this window and cannot read or change settings. Restarting Clipped starts the recorder that came with it.';
+    default:
+      return problem.message;
+  }
+}
+
+/** One thing a microphone control offers. */
+export interface MicrophoneOption {
+  /** The value the settings file would carry, which is what a control sends. */
+  readonly value: string;
+  /** What it is called in the list. */
+  readonly label: string;
+}
+
+/**
+ * What a microphone setting offers: the two words, then this machine's devices.
+ *
+ * Here rather than in a screen because two screens draw the chooser — the
+ * Settings screen and the first run (issue #109) — and a second copy of this
+ * list would be a second answer to "what can I record from", differing in
+ * whichever of them somebody forgot to change (AGENTS.md section 55).
+ */
+export function microphoneOptions(
+  entry: SettingEntry,
+  devices: LibraryRead<AudioDevices>,
+): readonly MicrophoneOption[] {
+  const listed = devices.state === 'read' ? devices.value.microphones : [];
+  const options = [
+    { value: DEFAULT_DEVICE, label: 'Whichever Windows is using' },
+    { value: NO_DEVICE, label: 'Do not record a microphone' },
+    ...listed.map((device) => ({
+      value: `${DEVICE_PREFIX}${device.name}`,
+      label: device.is_default ? `${device.name} (default)` : device.name,
+    })),
+  ];
+
+  // A configured device that is not in the list is one that is unplugged, and
+  // it stays on offer: dropping it would silently change what is recorded to
+  // whatever the list happened to start with (AGENTS.md section 27).
+  const named = deviceNamed(entry.value);
+  if (named !== undefined && !options.some((option) => option.value === entry.value)) {
+    options.push({ value: entry.value, label: `${named} (not connected)` });
+  }
+  return options;
+}
+
+/** The device a microphone setting names, without the prefix that made it literal. */
+export function deviceNamed(value: string): string | undefined {
+  if (value === DEFAULT_DEVICE || value === NO_DEVICE) {
+    return undefined;
+  }
+  return value.startsWith(DEVICE_PREFIX) ? value.slice(DEVICE_PREFIX.length) : value;
+}
+
+/** What a save is doing, or what it did. */
+export type SaveState =
+  | { readonly state: 'idle' }
+  | { readonly state: 'saving' }
+  | { readonly state: 'saved' }
+  | { readonly state: 'refused'; readonly problem: LibraryProblem };
+
+/** The settings, and the one way this screen changes them. */
+export interface SettingsControl {
+  /** The settings as the recorder last reported them. */
+  readonly read: LibraryRead<SettingsView>;
+  /** What the last save did. */
+  readonly save: SaveState;
+  /**
+   * Sends changes, and redraws from what came back.
+   *
+   * Answers whether the recorder took them, which is what a screen clears its
+   * edits on: a refused value has to stay on screen to be corrected.
+   */
+  readonly apply: (values: Readonly<Record<string, string | null>>) => Promise<boolean>;
+}
+
+/**
+ * The settings, read once when the screen is opened and re-read from every
+ * change the recorder accepts.
+ *
+ * Nothing is drawn from what was sent: the answer to `apply_settings` is the
+ * settings as the recorder now holds them, so a value it refused, or one
+ * another window changed a moment earlier, cannot be drawn as saved
+ * (`crates/ipc/src/settings.rs`).
+ */
+export function useSettings(): SettingsControl {
+  const [read, setRead] = useState<LibraryRead<SettingsView>>({ state: 'reading' });
+  const [save, setSave] = useState<SaveState>({ state: 'idle' });
+
+  useEffect(() => {
+    let current = true;
+    readSettings()
+      .then((settings) => {
+        if (current) {
+          setRead({ state: 'read', value: settings });
+        }
+      })
+      .catch((thrown: unknown) => {
+        if (current) {
+          setRead({ state: 'unread', problem: asProblem(thrown) });
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  const apply = useCallback(async (values: Readonly<Record<string, string | null>>) => {
+    setSave({ state: 'saving' });
+    try {
+      const settings = await saveSettings(values);
+      setRead({ state: 'read', value: settings });
+      setSave({ state: 'saved' });
+      return true;
+    } catch (thrown: unknown) {
+      // The edits stay on screen: a refused value is one somebody has to be
+      // able to correct, and a form that cleared itself would take the rest of
+      // their work with it (AGENTS.md section 45).
+      setSave({ state: 'refused', problem: asProblem(thrown) });
+      return false;
+    }
+  }, []);
+
+  return { read, save, apply };
+}
+
+/**
+ * The microphones this machine has, asked for when the screen opens and again
+ * whenever the window comes back to the front.
+ *
+ * Asked again rather than kept, because the answer goes stale in the one way
+ * that matters: somebody plugs in the headset they are about to choose. The
+ * recorder enumerates the endpoints on every request precisely so that it can
+ * be asked twice (`apps/recorder/src/serve.rs`), and a window that asked once
+ * would offer a list of the devices that happened to be there when the screen
+ * opened (issue #308).
+ *
+ * Coming back to the front is the trigger because it is when it is worth
+ * asking and no more often: plugging a device in means going to the machine and
+ * returning to the window. Polling would ask hundreds of times for one answer
+ * that changes twice a day.
+ *
+ * The previous list stays on screen while the new one is fetched. Dropping back
+ * to `reading` would blank a control somebody may be in the middle of using,
+ * for an answer that is almost always identical.
+ */
+export function useAudioDevices(): LibraryRead<AudioDevices> {
+  const [read, setRead] = useState<LibraryRead<AudioDevices>>({ state: 'reading' });
+
+  useEffect(() => {
+    let current = true;
+    const ask = () => {
+      readAudioDevices()
+        .then((devices) => {
+          if (current) {
+            setRead({ state: 'read', value: devices });
+          }
+        })
+        .catch((thrown: unknown) => {
+          if (current) {
+            setRead({ state: 'unread', problem: asProblem(thrown) });
+          }
+        });
+    };
+
+    ask();
+    window.addEventListener('focus', ask);
+    return () => {
+      current = false;
+      window.removeEventListener('focus', ask);
+    };
+  }, []);
+
+  return read;
+}
+
+/** Whether the recorder starts at sign-in, and the one way this screen changes it. */
+export interface StartAtLoginControl {
+  /** The arrangement as the recorder last reported it. */
+  readonly read: LibraryRead<StartAtLogin>;
+  /** What the last change did. */
+  readonly save: SaveState;
+  /**
+   * Moves the switch, and redraws from what came back.
+   *
+   * Answers whether the recorder took it, so that a refused change leaves the
+   * switch where the registry actually is rather than where it was pushed.
+   */
+  readonly set: (enabled: boolean) => Promise<boolean>;
+}
+
+/**
+ * Whether the recorder starts at sign-in, read when the screen opens.
+ *
+ * Not part of {@link useSettings}: it is not in `settings.json` and
+ * `apply_settings` does not reach it. It is a `Run` value under this account
+ * that Windows reads once, at sign-in, and that Windows also lists in
+ * Settings > Apps > Startup with a switch of its own — so it is read back from
+ * the registry after every change rather than assumed (issue #308).
+ */
+export function useStartAtLogin(): StartAtLoginControl {
+  const [read, setRead] = useState<LibraryRead<StartAtLogin>>({ state: 'reading' });
+  const [save, setSave] = useState<SaveState>({ state: 'idle' });
+
+  useEffect(() => {
+    let current = true;
+    readStartAtLogin()
+      .then((state) => {
+        if (current) {
+          setRead({ state: 'read', value: state });
+        }
+      })
+      .catch((thrown: unknown) => {
+        if (current) {
+          setRead({ state: 'unread', problem: asProblem(thrown) });
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  const set = useCallback(async (enabled: boolean) => {
+    setSave({ state: 'saving' });
+    try {
+      setRead({ state: 'read', value: await saveStartAtLogin(enabled) });
+      setSave({ state: 'saved' });
+      return true;
+    } catch (thrown: unknown) {
+      // The switch is left reading whatever the last successful answer said,
+      // which is where the registry is. A switch that moved on a refused write
+      // would be telling somebody their machine is arranged in a way it is not
+      // (AGENTS.md section 27).
+      setSave({ state: 'refused', problem: asProblem(thrown) });
+      return false;
+    }
+  }, []);
+
+  return { read, save, set };
+}
+
+/**
+ * Every section of the screen: the settings it draws, and what it can only
+ * account for.
  *
  * The order is the deck's: what a recording is made at, then its audio, then
  * where the files go, then the keys, then what interrupts you, then what
@@ -139,64 +497,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: 'recording',
     label: 'Recording',
     lead:
-      `What a recording is made at. The settings shown with a key are the ones ${SETTINGS_FILE} ` +
-      'carries, and nothing reads them when a recording starts: what a recording is actually ' +
-      'made with comes from the command line that started the recorder (issue #61).',
+      'What a recording is made at. A change here reaches the next recording; nothing re-reads ' +
+      'these while one is running.',
+    keys: [
+      'capture_target',
+      'resolution',
+      'framerate',
+      'codec',
+      'encoder',
+      'replay_window_seconds',
+    ],
     rows: [
-      {
-        label: 'Capture target',
-        key: { name: 'capture_target', file: 'settings.json' },
-        today:
-          'The game’s own window. There is deliberately no capture-mode option on the command ' +
-          'line: Full Session is the only mode this build runs.',
-        run: 'clipped-recorder watch',
-        needs:
-          'Issue #61 to read the setting when a recording starts, and issue #252 to reach it ' +
-          'from here.',
-      },
-      {
-        label: 'Resolution',
-        key: { name: 'resolution', file: 'settings.json' },
-        today:
-          'Whatever the source produces. There is no scaler between capture and the encoder, so ' +
-          'a fixed size that is not the source’s is refused when the recording starts rather ' +
-          'than quietly ignored.',
-        run: 'clipped-recorder watch --resolution source',
-        needs: 'Issues #61 and #252, as above.',
-      },
-      {
-        label: 'Frame rate',
-        key: { name: 'framerate', file: 'settings.json' },
-        today: 'A ceiling rather than a pace, from 1 to 480, applied to every recording that run.',
-        run: 'clipped-recorder watch --framerate 60',
-        needs: 'Issues #61 and #252, as above.',
-      },
-      {
-        label: 'Codec',
-        key: { name: 'codec', file: 'settings.json' },
-        today:
-          'auto, h264, hevc or av1. auto picks from what this machine can open, which ' +
-          'clipped-recorder capabilities reports.',
-        run: 'clipped-recorder watch --codec auto',
-        needs: 'Issues #61 and #252, as above.',
-      },
-      {
-        label: 'Encoder',
-        key: { name: 'encoder', file: 'settings.json' },
-        today: 'auto, nvenc, amf, quicksync or software, chosen the same way as the codec.',
-        run: 'clipped-recorder watch --encoder auto',
-        needs: 'Issues #61 and #252, as above.',
-      },
-      {
-        label: 'Replay window',
-        key: { name: 'replay_window_seconds', file: 'settings.json' },
-        today:
-          'Nothing. The replay buffer is written and no build starts a recording that runs one, ' +
-          'so there is no buffer for a length to apply to.',
-        needs:
-          'Issue #38 to run a recording with a replay buffer, then issues #61 and #252 to ' +
-          'configure its length from here.',
-      },
       {
         label: 'Quality preset and bitrate',
         today:
@@ -210,7 +521,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: 'Recording format',
         today:
           'Matroska. Copying a finished recording into MP4 without re-encoding is built and ' +
-          'nothing calls it, so there is no format to choose between yet.',
+          'nothing calls it automatically, so there is no format to choose between yet.',
         needs:
           'Issue #307: a container setting, and the session work that acts on it (SPEC.md ' +
           'section 15).',
@@ -221,69 +532,59 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: 'audio',
     label: 'Audio',
     lead:
-      'A recording has no audio track at all yet (issue #180). These are the settings for ' +
-      'something that is not yet recorded, which is why the recorder warns when it is given one.',
+      'Which endpoints a recording captures. Each source becomes a track of its own in the file, ' +
+      'so they can be edited apart (SPEC.md section 12).',
+    keys: [MICROPHONE, 'system_audio'],
     rows: [
-      {
-        label: 'Microphone',
-        key: { name: 'microphone', file: 'settings.json' },
-        today:
-          'default, none, or part of a device name, matched against the endpoints present when ' +
-          'a recording starts. A recording carries no audio, so it changes nothing today.',
-        run: 'clipped-recorder watch --microphone default',
-        needs:
-          'Issue #180 to record an audio track, issue #308 for a way to list this machine’s ' +
-          'devices to choose from, and issue #252 to save the choice.',
-      },
-      {
-        label: 'System audio',
-        key: { name: 'system_audio', file: 'settings.json' },
-        today: 'The same, for the endpoint the machine plays through.',
-        run: 'clipped-recorder watch --system-audio default',
-        needs: 'Issues #180, #308 and #252, as above.',
-      },
       {
         label: 'Audio tracks, enable and level',
         today:
-          'Nothing. The muxer writes separate game, microphone and system tracks, and nothing ' +
-          'produces the tracks for it to write.',
+          'Nothing. A recording carries the tracks its sources produced and nothing mixes, ' +
+          'mutes or levels them here.',
         needs:
-          'Issue #180 first, then issue #81 for the track list SPEC.md section 12 draws and ' +
-          'issue #33 for routing an application to a track.',
+          'Issue #81 for the track list SPEC.md section 12 draws, and issue #33 for routing an ' +
+          'application to a track.',
+      },
+      {
+        label: 'A named playback device',
+        today:
+          'Not offered. System audio is recorded from the endpoint Windows is playing through, ' +
+          'and this build cannot record a different one — so the choice above is between that ' +
+          'and nothing.',
+        needs: 'Issue #316, which is what would let an endpoint be named.',
       },
     ],
   },
   {
     id: 'storage',
     label: 'Storage',
-    lead: `Where recordings go, and what happens when the disk fills. ${SETTINGS_FILE} carries none of this.`,
+    lead:
+      'Where recordings go, and what happens when the disk fills. A directory chosen here is ' +
+      'where the recorder writes from the next recording onwards.',
+    keys: [RECORDING_DIRECTORY],
     rows: [
       {
-        label: 'Recording directory',
-        today:
-          'Named per run on the command line. Without one, recordings and session records go ' +
-          'to the Clipped folder of your videos directory, which is created when the recorder ' +
-          'starts rather than when a game launches.',
-        run: String.raw`clipped-recorder watch --output-directory D:\clips`,
-        needs:
-          'Issue #307: the settings file has no key for the recording directory, so there is ' +
-          'nowhere for this window to save one.',
-      },
-      {
         label: 'Maximum usage, minimum free space, maximum age',
+        key: { name: 'maximum_usage_bytes', file: 'settings.json' },
         today:
-          'Nothing sets them. Clipped measures what the library occupies and whether limits are ' +
-          'met, and deletes nothing at all.',
-        needs:
-          'Issue #307 for the keys, issue #111 to act on a breached limit, and issue #95 for ' +
-          'the screen SPEC.md section 27 draws.',
+          `Set by hand in the storage section of ${SETTINGS_FILE}. Clipped measures what the ` +
+          'library occupies against them and reports what a sweep would delete.',
+        needs: 'Issue #95 for the screen SPEC.md section 27 draws them on.',
       },
       {
-        label: 'Trash and recovery',
+        label: 'Where deleted recordings wait',
+        key: { name: 'trash_directory', file: 'settings.json' },
         today:
-          'Nothing. Clipped deletes no recording of its own, and there is no trash to recover ' +
-          'from if something else does.',
-        needs: 'Issue #94.',
+          'Beside the recordings — `D:\\Clips` becomes `D:\\Clips.trash` — unless that key says ' +
+          'otherwise. What is in it, and putting something back, is on the Library screen.',
+        needs: 'Issue #95, with the limits above.',
+      },
+      {
+        label: 'Per-game settings',
+        today:
+          'Not offered here. The settings file carries a section per game, which every game ' +
+          'inherits the values above through, and it is edited by hand.',
+        needs: 'Issue #63 for the per-game screen SPEC.md section 31 draws.',
       },
     ],
   },
@@ -293,7 +594,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     lead:
       'Hotkeys are global and never per game: Windows registers a combination once for a ' +
       'process, so a per-game binding is one that could not be honoured. The recorder is that ' +
-      'process, and the table above is what it registered when it started.',
+      'process, and the table below is what it registered when it started.',
+    keys: [],
     rows: [
       {
         label: 'Which combination an action has',
@@ -308,7 +610,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       {
         label: 'A combination another application owns',
         today:
-          'Shown above, in the recorder’s own words: Discord, Steam and NVIDIA’s overlay all ' +
+          'Shown below, in the recorder’s own words: Discord, Steam and NVIDIA’s overlay all ' +
           'claim function keys, and a combination Windows would not give Clipped is a key that ' +
           'does nothing. Choosing another one means editing the file above.',
         needs: 'Issue #417 to interrupt you with it rather than waiting for you to look here.',
@@ -316,18 +618,9 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       {
         label: 'An action nothing performs yet',
         today:
-          'Also shown above, with the milestone and issue that would build it. The key is still ' +
-          'registered and the press still reports itself, so it is never a key that silently ' +
-          'does nothing: saving a replay waits on issue #38, and the overlay on issue #53.',
-        needs:
-          'Issue #38 for the replay buffer, issue #53 for the overlay, issue #234 for the microphone.',
-      },
-      {
-        label: 'Starting a recording from a key',
-        today:
-          'Not possible. Bound, the start-or-stop key stops the recording that is running; with ' +
-          'nothing recording it refuses, because a key press does not say which window to record.',
-        needs: 'Issue #416.',
+          'Also shown below, with the issue that would build it. The key is still registered and ' +
+          'the press still reports itself, so it is never a key that silently does nothing.',
+        needs: 'Issue #53 for the overlay, and issue #234 for the microphone.',
       },
       {
         label: 'A hotkey for one game only',
@@ -340,77 +633,59 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
-    id: 'notifications',
+    id: NOTIFICATIONS_SECTION,
     label: 'Notifications',
     lead:
-      `The only settings Clipped keeps between runs today, and they are changed by hand: each ` +
-      `switch is a key in ${NOTIFICATIONS_FILE}, alongside "version": 1. Every category is on ` +
-      'until that file says otherwise, because all three are failures. A file Clipped cannot ' +
-      'read is reported when the window opens rather than ignored.',
+      'What Clipped interrupts you for, as a Windows notification. All four are failures — ' +
+      'nothing is being recorded, or a recording ended, or a key does nothing — so every one is ' +
+      'on until you switch it off. They are kept in the settings file with everything else, and ' +
+      'a change here reaches the next notification rather than the next launch.',
+    keys: [...NOTIFICATION_KEYS],
     rows: [
       {
-        label: 'A recording failed',
-        key: { name: 'recording_failed', file: 'notifications.json' },
-        today: 'A recording ended because something went wrong and the recorder is still running.',
-        run: '"recording_failed": false',
+        label: 'Replay saved, bookmark added, screenshot taken',
+        today:
+          'Nothing. Only failures interrupt you, because they are the only things the recorder ' +
+          'tells this window about — a toast for a replay that was saved would be a toast for ' +
+          'an event nothing reports.',
         needs:
-          'Issue #252, which moves these three into the settings file and puts their switches ' +
-          'on this screen.',
+          'Issue #110, which asks for them, and an event from the recorder for each one to be ' +
+          'raised from.',
       },
       {
-        label: 'A recording was interrupted',
-        key: { name: 'recording_interrupted', file: 'notifications.json' },
+        label: 'Quieter notifications while you are playing',
         today:
-          'A recorder stopped mid-recording without being asked. The notification names the ' +
-          'file it left, which nothing else will.',
-        run: '"recording_interrupted": false',
-        needs: 'Issue #252, as above.',
-      },
-      {
-        label: 'The recorder cannot be reached',
-        key: { name: 'recorder_unavailable', file: 'notifications.json' },
-        today:
-          'The link gave up: nothing is being recorded, and nothing further will be tried on ' +
-          'its own.',
-        run: '"recorder_unavailable": false',
-        needs: 'Issue #252, as above.',
-      },
-      {
-        label: 'A hotkey is unavailable',
-        key: { name: 'hotkey_unavailable', file: 'notifications.json' },
-        today:
-          'Windows refused one of Clipped’s combinations, so pressing it does nothing. Said ' +
-          'once when it is first seen, not again every time the recorder reconnects.',
-        run: '"hotkey_unavailable": false',
-        needs: 'Issue #252, as above.',
+          'Not offered, and there is nothing to quieten: every category above is a failure, and ' +
+          'the moment somebody most needs to know that nothing is being recorded is while they ' +
+          'are in a game.',
+        needs:
+          'Nothing. Issue #110 asked for non-critical notifications to be held back during ' +
+          'gameplay, and the set of those is empty.',
       },
     ],
   },
   {
-    id: 'startup',
+    id: STARTUP_SECTION,
     label: 'Startup',
     lead:
-      'Closing this window minimises it to the notification area and leaves the recorder ' +
-      'recording; the tray’s Exit is the only thing that stops one. That is fixed behaviour ' +
-      'rather than a setting.',
+      'The switch below is not a setting in the settings file: it is one Run value under this ' +
+      'account that Windows reads at sign-in, and it is the same value ' +
+      '`clipped-recorder start-at-login enable` writes from a terminal. Windows lists it in ' +
+      'Settings > Apps > Startup too, with a switch of its own. Closing this window minimises ' +
+      'it to the notification area and leaves the recorder recording; the tray’s Exit is the ' +
+      'only thing that stops one. That is fixed behaviour rather than a setting.',
+    keys: [],
     rows: [
       {
-        label: 'Start the recorder when I sign in',
+        label: 'Start Clipped’s window when I sign in',
         today:
-          'Opt-in and reversible from the command line. It writes one Run value under this ' +
-          'account, which Windows also lists in Settings > Apps > Startup; disable removes it ' +
-          'and status reports it without changing anything.',
-        run: 'clipped-recorder start-at-login enable',
+          'Nothing. What has to be running at sign-in is the recorder, and the switch above ' +
+          'starts it without a window: it records, watches for games and sits in the ' +
+          'notification area, and this window is a client that opens when somebody opens it.',
         needs:
-          'Issue #308: no protocol command reads or sets it, so this window cannot offer the ' +
-          'switch.',
-      },
-      {
-        label: 'Start Clipped when I sign in',
-        today:
-          'Nothing. Starting at sign-in is the recorder’s, because the recorder is what records ' +
-          'and this window is a client of it.',
-        needs: 'Issue #308, with the setting above.',
+          'Nothing is waiting on it. A second Run value naming this application would start a ' +
+          'window nobody asked for, and issue #308 deliberately built the recorder’s entry ' +
+          'and not one for the window.',
       },
     ],
   },

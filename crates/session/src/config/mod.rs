@@ -76,12 +76,22 @@
 //! `clipped_replay::ReplayConfig` where a recording opens a replay buffer.
 //! `docs/configuration.md` has the whole of it.
 //!
-//! What still does not read this module is `apps/recorder`'s `watch`: it hands
-//! the session manager no configuration and does not apply what it is given, so
-//! a settings file changes nothing about a shipped build's recordings yet. That
-//! is stated here rather than left to be discovered, because a configuration
-//! API that looked as though it were in force would be worse than one that
-//! admits it is not (AGENTS.md section 54).
+//! `apps/recorder` reads it in both of the ways a recording can start: `watch`
+//! resolves each game's settings through the session manager and lays them over
+//! its command line, and `serve` does the same for a recording the window asked
+//! for — and re-reads the file whenever the window changes it, so a setting
+//! saved from the Settings screen reaches the *next* recording without a
+//! restart ([issue #51](https://github.com/wildware-uk/clipped/issues/51)).
+//!
+//! One setting is still carried and read by nothing when a recording starts,
+//! and the recorder says so rather than leaving it to be discovered
+//! (`apps/recorder/src/settings.rs`, AGENTS.md section 54):
+//! [`SettingKey::CaptureTarget`], which decides which handle the caller
+//! resolves before a recording exists.
+//! [`SettingKey::ReplayWindow`] joined the others when
+//! [issue #427](https://github.com/wildware-uk/clipped/issues/427) gave a
+//! recording the window started a buffer: the request carries `replay` with no
+//! length, and the recorder resolves the length from here.
 //!
 //! Per-game defaults from the game catalogue are a fourth layer that does not
 //! exist yet either: `clipped_game_detection::catalogue::Entry::default_settings`
@@ -93,6 +103,7 @@ mod document;
 mod error;
 mod game;
 mod hotkeys;
+mod notifications;
 mod plugins;
 mod preferences;
 mod storage;
@@ -106,13 +117,14 @@ pub use document::{Loaded, FILE_NAME, SCHEMA_VERSION};
 pub use error::{ConfigurationError, Section, SettingError};
 pub use game::{GameKey, InvalidGameKey};
 pub use hotkeys::{HotkeyOverride, HotkeyOverrides, ResolvedHotkeys};
+pub use notifications::{NotTrueOrFalse, NotificationCategory, NotificationSettings};
 pub use plugins::{NotStarted, PluginConsent, PluginConsents};
 pub use preferences::{
     AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, DEFAULT_REPLAY_WINDOW,
     MAXIMUM_DEVICE_NAME, MAXIMUM_DIMENSION, MAXIMUM_FRAMERATE, MINIMUM_DIMENSION,
     MINIMUM_FRAMERATE,
 };
-pub use storage::{trash_beside, StorageProblem, StorageSettings, TrashPathError};
+pub use storage::{trash_beside, DirectoryPathError, StorageProblem, StorageSettings};
 pub use store::ConfigurationStore;
 pub use value::{Resolved, Scope, SettingKey, SettingSource};
 
@@ -141,6 +153,11 @@ pub struct Configuration {
     /// What the library is allowed to occupy. Global only, and a section of its
     /// own for the reason `storage` gives.
     storage: StorageSettings,
+    /// Which failures interrupt the user. Global only, and a section of its own
+    /// for the reason `notifications` gives; the recorder keeps them and the
+    /// desktop application is what reads them, over the protocol
+    /// ([issue #252](https://github.com/wildware-uk/clipped/issues/252)).
+    notifications: NotificationSettings,
     /// Top-level keys from a newer build, kept and written back (AGENTS.md
     /// section 56).
     unknown: BTreeMap<String, serde_json::Value>,
@@ -263,6 +280,7 @@ impl Configuration {
         hotkeys: HotkeyOverrides,
         plugins: PluginConsents,
         storage: StorageSettings,
+        notifications: NotificationSettings,
         unknown: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self {
@@ -271,6 +289,7 @@ impl Configuration {
             hotkeys,
             plugins,
             storage,
+            notifications,
             unknown,
         }
     }
@@ -287,6 +306,22 @@ impl Configuration {
     /// Replaces what the library is allowed to occupy.
     pub fn set_storage(&mut self, storage: StorageSettings) {
         self.storage = storage;
+    }
+
+    /// Which failures interrupt the user.
+    ///
+    /// Global, and deliberately not resolvable per game: the thing being
+    /// interrupted is a person rather than a recording, so "should
+    /// Counter-Strike's failures interrupt me" is the same question as "should
+    /// failures interrupt me" (`super::notifications`).
+    #[must_use]
+    pub const fn notifications(&self) -> &NotificationSettings {
+        &self.notifications
+    }
+
+    /// Replaces which failures interrupt the user.
+    pub fn set_notifications(&mut self, notifications: NotificationSettings) {
+        self.notifications = notifications;
     }
 
     /// The limits automatic cleanup enforces, which is unlimited unless the

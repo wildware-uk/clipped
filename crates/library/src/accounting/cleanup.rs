@@ -24,23 +24,41 @@
 //!
 //! # What protects a recording
 //!
-//! Two rules, and both are in the data model:
+//! Three rules, and all three are in the data model:
 //!
-//! - **A favourite is never deleted automatically.** `favourited_at` is the
-//!   user saying this one matters — and a recording whose *session* is
-//!   favourited is protected too, which is what favouriting a sitting means
+//! - **A locked recording is never deleted automatically.** `locked_at` is the
+//!   user saying *do not take this*, and it is the only one of the three that
+//!   exists for no other purpose ([`crate::locks`]). A recording whose session
+//!   is locked is protected by that, which is what locking a sitting means.
+//! - **Nor is a favourite.** `favourited_at` is the user saying this one
+//!   matters — and a recording whose *session* is favourited is protected too
 //!   ([`crate::favourites`] documents the rule and why the mark is not written
 //!   down through the children).
-//! - **Neither is a recording some clip was cut from.** The clip survives its
+//! - **Nor is a recording some clip was cut from.** The clip survives its
 //!   source going (`ON DELETE SET NULL`), but it stops being possible to go back
 //!   to the moment it came from, which is not a thing to do to somebody without
 //!   asking.
 //!
-//! The issue's scope names two more — locked recordings, and recordings being
-//! edited — and **neither exists to be read**: there is no `locked` column in
-//! the schema and nothing records that an edit document is open. They are not
-//! silently ignored here; [`Protection`] is the whole vocabulary, and adding one
-//! is adding a variant and the rule that produces it.
+//! The issue's scope named a fourth — a recording that is **being edited** — and
+//! it is still absent, because nothing records that an edit document is open.
+//!
+//! The mechanism for it is settled: a lock file held for the lifetime of the
+//! edit, released by the operating system whether the editor exits or dies
+//! ([issue #472](https://github.com/wildware-uk/clipped/issues/472)). A flag in
+//! this database would survive a crash and protect a recording for ever, which
+//! fails silently in the direction of a full disk.
+//!
+//! What it waits on is a document being **open**, which is
+//! [issue #306](https://github.com/wildware-uk/clipped/issues/306) rather than
+//! anything here. The Editor screen exists and is routed
+//! (`apps/desktop/src/editor/EditorScreen.tsx`), and there is no command that
+//! serves a clip's edit document to it, so nothing has ever opened one. Until
+//! something does there is no interval for a lock file to span, and a mechanism
+//! guarding a state that cannot occur is worse than an absent one — it reads as
+//! a protection that is working.
+//!
+//! It is not silently ignored: [`Protection`] is the whole vocabulary, and a
+//! recording with no [`Protection`] against it is one this may take.
 //!
 //! # What is deleted, and in what order
 //!
@@ -71,6 +89,16 @@ use crate::trash::{Trash, TrashError, TrashItem};
 /// express, and they are absent rather than assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protection {
+    /// The user locked it.
+    Locked,
+    /// The session it belongs to is locked.
+    ///
+    /// Distinct from [`Self::Locked`] for the reason
+    /// [`Self::FavouriteSession`] is distinct, and more sharply: a recording
+    /// protected by its sitting's lock has no lock of its own to release, so
+    /// somebody told only "it is locked" would go looking for a control that is
+    /// not on this row.
+    LockedSession,
     /// The user marked it a favourite.
     Favourite,
     /// The session it belongs to is a favourite.
@@ -94,6 +122,8 @@ pub enum Protection {
 impl core::fmt::Display for Protection {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Locked => formatter.write_str("it is locked"),
+            Self::LockedSession => formatter.write_str("the sitting it belongs to is locked"),
             Self::Favourite => formatter.write_str("it is a favourite"),
             Self::FavouriteSession => {
                 formatter.write_str("the sitting it belongs to is a favourite")
@@ -209,7 +239,9 @@ pub fn candidates(database: &Database) -> Result<Vec<Candidate>, clipped_storage
                 r.favourited_at IS NOT NULL, r.deleted_at IS NOT NULL, \
                 r.missing_since IS NOT NULL, \
                 (SELECT COUNT(*) FROM clips c WHERE c.source_recording_id = r.recording_id), \
-                COALESCE(s.favourited_at IS NOT NULL, 0) \
+                COALESCE(s.favourited_at IS NOT NULL, 0), \
+                r.locked_at IS NOT NULL, \
+                COALESCE(s.locked_at IS NOT NULL, 0) \
          FROM recordings r LEFT JOIN sessions s ON s.session_id = r.session_id",
     )?;
 
@@ -223,11 +255,20 @@ pub fn candidates(database: &Database) -> Result<Vec<Candidate>, clipped_storage
         let missing: bool = row.get(6)?;
         let clips: i64 = row.get(7)?;
         let session_favourite: bool = row.get(8)?;
+        let locked: bool = row.get(9)?;
+        let session_locked: bool = row.get(10)?;
 
-        // In the order somebody would want to be told. "It is a favourite"
-        // explains a decision; "its file is not on disk" explains a
-        // measurement, and the first is the more useful of the two.
-        let protection = if favourite {
+        // In the order somebody would want to be told. A lock comes first
+        // because it is the most deliberate thing on the list: it is the only
+        // mark whose entire purpose is to stop this, so it is the truest answer
+        // to "why is this still here". "It is a favourite" explains a decision;
+        // "its file is not on disk" explains a measurement, and each is more
+        // useful than the one after it.
+        let protection = if locked {
+            Some(Protection::Locked)
+        } else if session_locked {
+            Some(Protection::LockedSession)
+        } else if favourite {
             Some(Protection::Favourite)
         } else if session_favourite {
             Some(Protection::FavouriteSession)

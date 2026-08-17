@@ -12,15 +12,28 @@
 //! enabling, no "on by default", and no code path from starting a recording or
 //! opening a window to writing a registry value. `docs/privacy.md`'s position is
 //! nothing surprising and nothing hidden, and a program that quietly arranges to
-//! start itself for ever is the definition of both. The only way this key is
-//! written is somebody running `clipped-recorder start-at-login enable`, and the
-//! only way it stays written is nobody running `disable`.
+//! start itself for ever is the definition of both. The only ways this key is
+//! written are somebody running `clipped-recorder start-at-login enable` and
+//! somebody turning the switch on in the Settings screen, and the only way it
+//! stays written is nobody turning it off.
+//!
+//! # Who asks, and what answers
+//!
+//! Two callers, one implementation ([`arrangement`], [`enable`], [`disable`]):
+//! the `start-at-login` subcommand below, and the `get_start_at_login` and
+//! `set_start_at_login` protocol commands, which [`current`] and [`set`] answer
+//! for `serve` ([issue #308](https://github.com/wildware-uk/clipped/issues/308)).
+//! The window has to ask rather than write the value itself, because the value
+//! holds the full path of the executable to run and the executable to run is
+//! **this** one: a window guessing at the recorder's location would leave a
+//! startup entry pointing at nothing, which fails at the next sign-in and
+//! nowhere else.
 //!
 //! # Where it writes, and why there
 //!
 //! ```text
 //! HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-//!     "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve
+//!     "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve --watch-for-games
 //! ```
 //!
 //! `HKEY_CURRENT_USER` rather than `HKEY_LOCAL_MACHINE`: this is one person's
@@ -50,6 +63,9 @@
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+use clipped_ipc::startup::{SetStartAtLogin, StartAtLogin};
+use clipped_ipc::{ErrorCode, ProtocolError};
 
 use crate::cli::{StartAtLoginAction, StartAtLoginArgs};
 
@@ -149,9 +165,17 @@ impl LoginEntry {
 ///
 /// Quoted because an installation path contains spaces far more often than not,
 /// and Windows parses this value as a command line.
+///
+/// `--watch-for-games` is what makes a recorder started at login do the thing
+/// the product is for: record games as they launch (SPEC.md sections 2 and 7).
+/// It is a flag rather than the default because a `serve` started by hand or by
+/// a test must not begin recording whatever is running on the machine, and this
+/// is one of the two places a shipped build asks for it — the other is
+/// `clipped_ipc::supervisor`, which starts a recorder when the window opens and
+/// none is listening ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
 #[must_use]
 pub fn login_command(executable: &Path) -> String {
-    format!("\"{}\" serve", executable.display())
+    format!("\"{}\" serve --watch-for-games", executable.display())
 }
 
 /// Runs `clipped-recorder start-at-login`.
@@ -165,53 +189,147 @@ pub fn run(args: &StartAtLoginArgs) -> Result<(), StartAtLoginError> {
 
     match args.action {
         StartAtLoginAction::Enable => {
-            let executable = this_executable()?;
-            let command = login_command(&executable);
-            platform::write(&entry, &command)?;
+            let command = enable(&entry)?;
             println!("Clipped will start at login for this account.");
             println!("  {} = {command}", entry.location());
             println!("Run `clipped-recorder start-at-login disable` to undo it, or turn it off in");
             println!("Settings > Apps > Startup.");
         }
         StartAtLoginAction::Disable => {
-            if platform::remove(&entry)? {
+            if disable(&entry)? {
                 println!("Clipped will no longer start at login for this account.");
                 println!("  removed {}", entry.location());
             } else {
                 println!("Clipped was not set to start at login for this account.");
             }
         }
-        StartAtLoginAction::Status => report(&entry)?,
+        StartAtLoginAction::Status => report(&arrangement(&entry)?),
     }
 
     Ok(())
 }
 
-/// Prints what is configured, and whether it still points at anything.
-fn report(entry: &LoginEntry) -> Result<(), StartAtLoginError> {
-    let Some(command) = platform::read(entry)? else {
-        println!("Clipped is not set to start at login for this account.");
-        println!("  {} is not set", entry.location());
-        return Ok(());
-    };
-
-    println!("Clipped is set to start at login for this account.");
-    println!("  {} = {command}", entry.location());
+/// What Windows is arranged to do at this account's next sign-in.
+///
+/// The one place that decides what "set to start at login" means, so that the
+/// subcommand and the protocol command cannot come to different conclusions
+/// about the same registry value (AGENTS.md section 55). It is the
+/// [`StartAtLogin`] the window is sent and the thing [`report`] prints.
+///
+/// # Errors
+///
+/// [`StartAtLoginError`] if the registry refused, or if there is no registry
+/// because this is not a Windows build.
+pub fn arrangement(entry: &LoginEntry) -> Result<StartAtLogin, StartAtLoginError> {
+    let command = platform::read(entry)?;
 
     // Reported rather than repaired. An installation that moved leaves a value
     // pointing at nothing, and silently rewriting somebody's startup entry
-    // because a status command was run is exactly the surprising behaviour this
-    // subcommand exists to avoid.
-    match executable_in(&command) {
-        Some(path) if !path.is_file() => {
-            println!();
-            println!("That path does not exist, so nothing will start. Run");
-            println!("`clipped-recorder start-at-login enable` from the installation you want.");
-        }
-        Some(_) | None => {}
+    // because a status command was run — or because a settings screen was
+    // opened — is exactly the surprising behaviour this module exists to avoid.
+    let missing_executable = command
+        .as_deref()
+        .and_then(executable_in)
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string());
+
+    Ok(StartAtLogin {
+        enabled: command.is_some(),
+        location: entry.location(),
+        command,
+        missing_executable,
+    })
+}
+
+/// Writes the entry, naming **this** executable, and answers with the command
+/// that was written.
+///
+/// Run again over an entry that is already there, it rewrites it with this
+/// installation's path — which is the repair for the moved installation
+/// [`arrangement`] reports and does not fix.
+///
+/// # Errors
+///
+/// [`StartAtLoginError`] if the registry refused, or if this executable's own
+/// path could not be read.
+pub fn enable(entry: &LoginEntry) -> Result<String, StartAtLoginError> {
+    let command = login_command(&this_executable()?);
+    platform::write(entry, &command)?;
+    Ok(command)
+}
+
+/// Removes the entry, reporting whether there was one to remove.
+///
+/// # Errors
+///
+/// [`StartAtLoginError`] if the registry refused. A value that was never there
+/// is not a refusal: it is the state being asked for.
+pub fn disable(entry: &LoginEntry) -> Result<bool, StartAtLoginError> {
+    platform::remove(entry)
+}
+
+/// Prints what is configured, and whether it still points at anything.
+fn report(arrangement: &StartAtLogin) {
+    let Some(command) = arrangement.command.as_deref() else {
+        println!("Clipped is not set to start at login for this account.");
+        println!("  {} is not set", arrangement.location);
+        return;
+    };
+
+    println!("Clipped is set to start at login for this account.");
+    println!("  {} = {command}", arrangement.location);
+
+    if let Some(missing) = arrangement.missing_executable.as_deref() {
+        println!();
+        println!("{missing} does not exist, so nothing will start. Run");
+        println!("`clipped-recorder start-at-login enable` from the installation you want.");
+    }
+}
+
+/// Whether the recorder starts at sign-in, as the protocol asks it.
+///
+/// # Errors
+///
+/// [`ErrorCode::Internal`] carrying the reason, so that a window says why it
+/// cannot draw the switch rather than drawing one in the off position as though
+/// it had looked (AGENTS.md section 27).
+pub fn current() -> Result<StartAtLogin, ProtocolError> {
+    arrangement(&LoginEntry::for_the_recorder()).map_err(refusal)
+}
+
+/// Turns starting at sign-in on or off, and answers with where it now stands.
+///
+/// Answered from the registry after the change rather than from what was asked
+/// for: a window that drew the switch where the user put it would show "on" for
+/// a write the registry refused.
+///
+/// # Errors
+///
+/// [`ErrorCode::Internal`] carrying the reason the registry refused, or the
+/// reason this executable's own path could not be read — which is the one thing
+/// that stops the entry being written even when the registry is willing.
+pub fn set(request: &SetStartAtLogin) -> Result<StartAtLogin, ProtocolError> {
+    let entry = LoginEntry::for_the_recorder();
+
+    if request.enabled {
+        enable(&entry).map_err(refusal)?;
+    } else {
+        disable(&entry).map_err(refusal)?;
     }
 
-    Ok(())
+    arrangement(&entry).map_err(refusal)
+}
+
+/// A failure here, as a refusal a window can render.
+///
+/// [`ErrorCode::Internal`] rather than
+/// [`NotImplemented`](ErrorCode::NotImplemented) for the same reason
+/// `crate::settings::audio_devices` uses it: the command is built, and what
+/// went wrong is this machine or this build rather than an unfinished
+/// milestone. The sentence is the error's own, which already names what was
+/// being done.
+fn refusal(error: StartAtLoginError) -> ProtocolError {
+    ProtocolError::new(ErrorCode::Internal, error.to_string())
 }
 
 /// The executable a login command names, if it is quoted the way
@@ -484,10 +602,30 @@ mod tests {
     #[cfg(windows)]
     impl Scratch {
         fn new(label: &str) -> Self {
-            Self(LoginEntry::at(
+            // The process identifier keeps two suites running at once out of
+            // each other's way — a `cargo test` in another checkout on this
+            // machine is a second process against the same registry hive — and
+            // the label keeps this suite's own cases apart, since they run on
+            // several threads.
+            let entry = LoginEntry::at(
                 &format!(r"Software\Clipped\tests\{}-{label}", std::process::id()),
                 "start-at-login",
-            ))
+            );
+
+            // Structural rather than conventional. Every case below makes real
+            // registry calls, and the one key they must never reach is the one
+            // that decides what starts on the machine running them: pointing
+            // this helper at it — by editing `at` to `for_the_recorder`, or by
+            // changing `RUN_KEY` — would otherwise be a silent change to
+            // somebody's startup arrangement rather than a failing test
+            // (AGENTS.md section 25).
+            assert_ne!(
+                entry.location(),
+                LoginEntry::for_the_recorder().location(),
+                "a test may not write the entry Windows reads at sign-in",
+            );
+
+            Self(entry)
         }
 
         fn entry(&self) -> &LoginEntry {
@@ -521,10 +659,15 @@ mod tests {
         // than not, and Windows parses this value as a command line: without the
         // quotes, `C:\Program Files\Clipped\clipped-recorder.exe` starts
         // `C:\Program.exe`.
+        //
+        // And `--watch-for-games`, because a recorder started at login that
+        // did not watch for games would be a Clipped that records nothing
+        // until somebody opens its window and presses a button — which is the
+        // opposite of what it is for (issue #421).
         let command = login_command(Path::new(r"C:\Program Files\Clipped\clipped-recorder.exe"));
         assert_eq!(
             command,
-            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve"#
+            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve --watch-for-games"#
         );
         assert_eq!(
             executable_in(&command),
@@ -597,6 +740,96 @@ mod tests {
         // `disable` run twice, or run by somebody who never enabled it. It is
         // the state they asked for either way, and an error would be wrong.
         let scratch = Scratch::new("never-there");
-        assert!(!platform::remove(scratch.entry()).expect("the registry can be reached"));
+        assert!(!disable(scratch.entry()).expect("the registry can be reached"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nothing_configured_is_reported_as_off_rather_than_as_a_failure() {
+        // What the switch is drawn from on a machine where nobody has turned it
+        // on — which is every machine until somebody does. A refusal here would
+        // make the settings screen say the recorder could not be asked, on the
+        // one state that is both normal and correct.
+        let scratch = Scratch::new("arrangement-absent");
+        let state = arrangement(scratch.entry()).expect("the registry can be read");
+
+        assert!(!state.enabled);
+        assert_eq!(state.command, None);
+        assert_eq!(state.missing_executable, None);
+        assert_eq!(
+            state.location,
+            scratch.entry().location(),
+            "the window is told where the entry is rather than keeping its own copy of the path",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn turning_it_on_writes_this_executable_and_is_read_back_as_on() {
+        // The whole of what the switch does. `enable` names `current_exe`,
+        // which under `cargo test` is the test binary — a real path that really
+        // exists, which is the point: the arrangement it produces is a working
+        // one, so `missing_executable` must be absent.
+        let scratch = Scratch::new("arrangement-on");
+        let entry = scratch.entry();
+
+        let written = enable(entry).expect("the value can be written");
+        let state = arrangement(entry).expect("the registry can be read");
+
+        assert!(state.enabled);
+        assert_eq!(state.command.as_deref(), Some(written.as_str()));
+        assert_eq!(
+            state.missing_executable, None,
+            "the executable this was written from is the one running the test, so it is there",
+        );
+        assert!(
+            written.contains("serve"),
+            "what starts at login has to be a recorder that serves: {written}",
+        );
+
+        // And off again, which is the other half of a switch.
+        assert!(disable(entry).expect("the value can be removed"));
+        assert!(
+            !arrangement(entry)
+                .expect("the registry can be read")
+                .enabled,
+            "reversible means reversible: the switch has to read as off afterwards",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_entry_naming_an_executable_that_is_gone_is_reported_and_not_repaired() {
+        // A Clipped that was moved or reinstalled. This is the case `status`
+        // exists for and the case the settings screen has something to offer
+        // about, and getting it wrong in either direction is bad: reported as
+        // off, and the user turns on something already on; reported as working,
+        // and nothing starts at sign-in and nothing ever says why.
+        let scratch = Scratch::new("arrangement-moved");
+        let entry = scratch.entry();
+        let gone = Path::new(r"C:\Clipped-that-was-moved-away\clipped-recorder.exe");
+        assert!(
+            !gone.is_file(),
+            "this test needs a path that does not exist"
+        );
+
+        let command = login_command(gone);
+        platform::write(entry, &command).expect("the value can be written");
+
+        let state = arrangement(entry).expect("the registry can be read");
+        assert!(state.enabled, "Windows will still try it, so it is on");
+        assert_eq!(
+            state.missing_executable.as_deref(),
+            Some(gone.to_string_lossy().as_ref()),
+            "the path that is missing is named, so a window can say what it looked for",
+        );
+
+        // Reported rather than repaired: reading it must leave the registry
+        // exactly as it was. Silently rewriting somebody's startup entry
+        // because a screen was opened is what this module refuses to do.
+        assert_eq!(
+            platform::read(entry).expect("the registry can be read"),
+            Some(command),
+        );
     }
 }

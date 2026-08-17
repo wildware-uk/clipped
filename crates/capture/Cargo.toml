@@ -39,6 +39,10 @@ windows = { workspace = true, features = [
     # LastPresentTime into a CaptureTimestamp. Windows Graphics Capture needs no
     # equivalent because a WinRT TimeSpan always ticks at 10 MHz.
     "Win32_System_Performance",
+    # SetThreadExecutionState, which holds the display on for the length of a
+    # capture. A display Windows has powered down delivers no Desktop
+    # Duplication frames at all (ADR 0015, issue #461).
+    "Win32_System_Power",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",

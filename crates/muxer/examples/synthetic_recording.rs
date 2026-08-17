@@ -1,13 +1,15 @@
 //! Writes a synthetic multi-track recording, for testing the muxer.
 //!
 //! The muxer's job is to take encoded packets and produce a file. Proving it
-//! does needs packets, and the encoders that will produce them in the real
-//! pipeline are separate pieces of work
-//! ([issue #15](https://github.com/wildware-uk/clipped/issues/15) onwards). So
-//! this example makes its own: a moving test pattern encoded to H.264 with the
-//! pinned FFmpeg build's own software encoder, and a tone per audio source as
-//! interleaved `f32` samples, written through the public API of `clipped_muxer`
-//! exactly as a session would write them.
+//! does needs packets, and this example makes them the way a recording session
+//! does: a moving test pattern uploaded to a Direct3D 11 texture and encoded to
+//! H.264 with `clipped_encoder::SoftwareEncoder`
+//! ([issue #18](https://github.com/wildware-uk/clipped/issues/18)), and a tone
+//! per audio source as interleaved `f32` samples, written through the public
+//! API of `clipped_muxer` exactly as a session would write them. Before issue
+//! #159 this drove `libopenh264` itself, from before the workspace had any
+//! encoder of its own to exercise instead
+//! ([issue #15](https://github.com/wildware-uk/clipped/issues/15) onwards).
 //!
 //! The audio tracks are the product's own — the compatibility mix, game, other
 //! system audio, microphone (`clipped_muxer::AudioSource`) — each carrying a
@@ -34,38 +36,33 @@
 //! ```
 
 use std::error::Error;
-use std::ffi::c_int;
+use std::ffi::c_void;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::ptr;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use clipped_encoder::{
+    BitRate, Codec, DeviceKind, EncoderConfig, FrameRate as EncoderFrameRate, GraphicsDevice,
+    KeyframeInterval, RateControl, Resolution, SoftwareEncoder, SourceFrame, SourceTexture,
+    SurfaceFormat, SurfaceKind, VideoEncoder,
+};
 use clipped_muxer::{
     AudioSource, AudioTrack, AudioTrackWriter, EncodedPacket, FrameRate, Language, MkvWriter,
     PacketTimestamp, RecordingLayout, TrackId, VideoCodec, VideoTrack,
 };
-use rusty_ffmpeg::ffi;
-
-/// FFmpeg's `AVERROR_EOF`, which is `FFERRTAG('E','O','F',' ')`.
-///
-/// The binding does not carry it: it is a macro over another macro, and
-/// `bindgen` expands neither.
-const AVERROR_EOF: c_int = -(0x20_46_4F_45);
-
-/// FFmpeg's `AVERROR(EAGAIN)`: the encoder has taken the frame and has no
-/// packet ready yet.
-const AVERROR_EAGAIN: c_int = -(ffi::EAGAIN as c_int);
-
-/// FFmpeg's `AV_NOPTS_VALUE`, the timestamp that means "there is none".
-const AV_NOPTS_VALUE: i64 = i64::MIN;
-
-/// The software H.264 encoder in the pinned LGPL build.
-///
-/// Not libx264, which is GPL and is not in the build Clipped links against
-/// (`docs/adr/0004-ffmpeg-dependency-strategy.md`).
-const SOFTWARE_ENCODER: &std::ffi::CStr = c"libopenh264";
+use windows::core::Interface as _;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
+};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
 /// How much audio goes into one packet.
 ///
@@ -74,13 +71,19 @@ const SOFTWARE_ENCODER: &std::ffi::CStr = c"libopenh264";
 /// recording rather than in one big lump per second.
 const AUDIO_PACKET: Duration = Duration::from_millis(20);
 
+/// The bit rate the software encoder is configured for.
+///
+/// A round number well inside what a 640x360 test pattern needs, chosen for
+/// consistency with the picture this example draws rather than for realism —
+/// nothing here is trying to say what a real recording is configured for.
+const BIT_RATE_MEGABITS_PER_SECOND: u32 = 2;
+
 #[derive(Debug, Parser)]
 #[command(
     about = "Writes a synthetic multi-track MKV recording",
-    long_about = "Encodes a moving test pattern to H.264 with the pinned FFmpeg build's \
-                  software encoder, generates tones as PCM, and writes both through \
-                  clipped-muxer. Used by the muxer's own tests, including the one that \
-                  kills this process mid-recording."
+    long_about = "Encodes a moving test pattern to H.264 with clipped_encoder::SoftwareEncoder, \
+                  generates tones as PCM, and writes both through clipped-muxer. Used by the \
+                  muxer's own tests, including the one that kills this process mid-recording."
 )]
 struct Arguments {
     /// Where to write the recording. Must not already exist.
@@ -182,12 +185,11 @@ fn main() -> ExitCode {
 fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     let frame_rate = FrameRate::per_second(arguments.frame_rate)
         .ok_or("a recording needs a frame rate of at least one frame per second")?;
-    let keyframe_interval = (arguments.keyframe_seconds * f64::from(arguments.frame_rate)) as u32;
     let mut encoder = SoftwareVideoEncoder::open(
         arguments.width,
         arguments.height,
         arguments.frame_rate,
-        keyframe_interval.max(1),
+        arguments.keyframe_seconds,
     )?;
 
     let video = VideoTrack::new(VideoCodec::H264, arguments.width, arguments.height)
@@ -421,167 +423,154 @@ fn sine(seconds: f64, frequency: f64) -> f32 {
     (seconds * frequency * std::f64::consts::TAU).sin() as f32 * AMPLITUDE
 }
 
-/// The pinned build's software H.264 encoder, wrapped just enough to produce
-/// packets.
+/// Draws the test pattern into a Direct3D 11 texture and encodes it with
+/// `clipped_encoder::SoftwareEncoder`.
 ///
 /// This is not the encoder Clipped will record with — that is hardware, and it
-/// is `clipped-encoder`'s work — and nothing here should be mistaken for the
-/// beginnings of one. It exists so the muxer has real bitstream to write.
+/// is `clipped-encoder`'s work — but it is the same software fallback a machine
+/// with no usable encoding hardware records with (issue #18), driven the way a
+/// recording session drives it: frames arrive as Direct3D textures, not as
+/// pixels this crate hands FFmpeg directly.
 ///
 /// # Ownership
 ///
-/// The three pointers are null until they are allocated and are never anything
-/// but null or live, which is what makes `Drop` correct on every path out of
-/// [`open`](Self::open): FFmpeg's three free functions all accept a pointer to
-/// a null pointer and do nothing. Once `open` has returned a value, all three
-/// are live.
+/// Owns the immediate context, one texture reused for every frame, and the
+/// encoding session. `encoder` releases its own session on `Drop`; the
+/// Direct3D types release their COM references the same way, so nothing here
+/// needs a `Drop` implementation of its own.
 struct SoftwareVideoEncoder {
-    context: *mut ffi::AVCodecContext,
-    frame: *mut ffi::AVFrame,
-    packet: *mut ffi::AVPacket,
+    context: ID3D11DeviceContext,
+    texture: ID3D11Texture2D,
+    encoder: SoftwareEncoder,
     width: u32,
     height: u32,
+    /// The picture being built for the frame about to be submitted, as BGRA8
+    /// bytes: reused between frames so that drawing one is not an allocation.
+    pixels: Vec<u8>,
 }
 
 impl SoftwareVideoEncoder {
-    /// Opens the encoder for pictures of `width` by `height` at `frame_rate`,
-    /// with a keyframe every `keyframe_interval` frames.
+    /// Opens a Direct3D 11 device and a software encoding session against it,
+    /// for pictures of `width` by `height` at `frame_rate`, with a keyframe
+    /// every `keyframe_seconds`.
     fn open(
         width: u32,
         height: u32,
         frame_rate: u32,
-        keyframe_interval: u32,
+        keyframe_seconds: f64,
     ) -> Result<Self, Box<dyn Error>> {
-        // SAFETY: `avcodec_find_encoder_by_name` reads the NUL-terminated name
-        // and returns either null or a pointer to a static descriptor inside
-        // libavcodec.
-        let codec = unsafe { ffi::avcodec_find_encoder_by_name(SOFTWARE_ENCODER.as_ptr()) };
-        if codec.is_null() {
-            return Err(format!(
-                "the linked FFmpeg has no {} encoder, so this example cannot produce video; \
-                 see docs/ffmpeg.md",
-                SOFTWARE_ENCODER.to_string_lossy()
-            )
-            .into());
-        }
+        let device = open_device()?;
+        // SAFETY: `device` is a live Direct3D 11 device. `GetImmediateContext`
+        // hands back a reference the returned context owns, which is why
+        // nothing here needs to keep `device` itself alive afterwards: the
+        // context and the texture below each hold their own reference to the
+        // device internally, as every Direct3D 11 child object does, and
+        // `SoftwareEncoder::open` takes a reference of its own too.
+        let context = unsafe { device.GetImmediateContext() }?;
 
-        // SAFETY: `codec` is a live descriptor, and this returns either null or
-        // a context this value then owns and frees in `Drop`. Everything
-        // allocated from here on is held by `encoder`, so every early return
-        // below releases it.
-        let context = unsafe { ffi::avcodec_alloc_context3(codec) };
-        let mut encoder = Self {
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            #[allow(clippy::cast_sign_loss)]
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: the description is a live local; no initial data is given,
+        // because the first call to `draw` fills the pixel buffer this uploads
+        // before anything reads the texture; `texture` is a live out-parameter
+        // that receives the one reference `CreateTexture2D` returns.
+        unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }?;
+        let texture = texture.ok_or("CreateTexture2D reported success without a texture")?;
+
+        let frame_rate = EncoderFrameRate::whole(frame_rate);
+        let config = EncoderConfig::new(
+            Codec::H264,
+            Resolution::new(width, height),
+            frame_rate,
+            RateControl::constant(BitRate::megabits_per_second(BIT_RATE_MEGABITS_PER_SECOND)),
+        )
+        .with_keyframe_interval(KeyframeInterval::every(
+            Duration::from_secs_f64(keyframe_seconds),
+            frame_rate,
+        ));
+
+        // SAFETY: `device` is a live Direct3D 11 device, owned by this
+        // function and kept alive by the local above for the whole of this
+        // call, which is all `open` needs of it: it takes its own reference
+        // before returning.
+        let graphics_device = unsafe { GraphicsDevice::new(DeviceKind::D3d11, device.as_raw()) };
+        let encoder = SoftwareEncoder::open(&graphics_device, config)?;
+
+        Ok(Self {
             context,
-            frame: ptr::null_mut(),
-            packet: ptr::null_mut(),
+            texture,
+            encoder,
             width,
             height,
-        };
-        if encoder.context.is_null() {
-            return Err("there was not enough memory for an encoder context".into());
-        }
-
-        // SAFETY: `encoder.context` is live and exclusively owned, and every
-        // field assigned is one the caller is expected to fill in before
-        // `avcodec_open2`.
-        unsafe {
-            let context = encoder.context;
-            (*context).width = c_int::try_from(width)?;
-            (*context).height = c_int::try_from(height)?;
-            (*context).pix_fmt = ffi::AV_PIX_FMT_YUV420P;
-            (*context).time_base = ffi::AVRational {
-                num: 1,
-                den: c_int::try_from(frame_rate)?,
-            };
-            (*context).framerate = ffi::AVRational {
-                num: c_int::try_from(frame_rate)?,
-                den: 1,
-            };
-            (*context).bit_rate = 2_000_000;
-            (*context).gop_size = c_int::try_from(keyframe_interval)?;
-            // Puts the sequence header in `extradata` instead of in front of
-            // every keyframe, which is where the container wants it.
-            (*context).flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER as c_int;
-        }
-
-        // SAFETY: the context was allocated for this codec and has not been
-        // opened. Passing a null options dictionary uses the encoder's
-        // defaults.
-        let code = unsafe { ffi::avcodec_open2(encoder.context, codec, ptr::null_mut()) };
-        if code < 0 {
-            return Err(
-                format!("the software encoder would not open (FFmpeg error {code})").into(),
-            );
-        }
-
-        // SAFETY: takes no arguments and returns null on failure; ownership of
-        // what it returns passes to `encoder`, which frees it.
-        encoder.frame = unsafe { ffi::av_frame_alloc() };
-        // SAFETY: as above.
-        encoder.packet = unsafe { ffi::av_packet_alloc() };
-        if encoder.frame.is_null() || encoder.packet.is_null() {
-            return Err("there was not enough memory for a frame and a packet".into());
-        }
-
-        // SAFETY: the frame is live and empty. Its buffers are allocated for
-        // the size and format set here and are freed with the frame.
-        unsafe {
-            let frame = encoder.frame;
-            (*frame).width = c_int::try_from(width)?;
-            (*frame).height = c_int::try_from(height)?;
-            (*frame).format = ffi::AV_PIX_FMT_YUV420P;
-            let code = ffi::av_frame_get_buffer(frame, 0);
-            if code < 0 {
-                return Err(format!("a picture buffer could not be allocated ({code})").into());
-            }
-        }
-
-        Ok(encoder)
+            pixels: vec![0_u8; width as usize * height as usize * 4],
+        })
     }
 
-    /// The sequence header the encoder produced, for the container to store.
+    /// The sequence and picture parameter sets the encoder produced, for the
+    /// container to store.
     fn codec_private(&self) -> Vec<u8> {
-        // SAFETY: the context is live and open. `extradata` is either null or
-        // points at `extradata_size` bytes the context owns; the slice is
-        // copied here and not kept.
-        unsafe {
-            let context = self.context;
-            let size = usize::try_from((*context).extradata_size).unwrap_or(0);
-            if (*context).extradata.is_null() || size == 0 {
-                return Vec::new();
-            }
-            std::slice::from_raw_parts((*context).extradata, size).to_vec()
-        }
+        self.encoder.parameter_sets().to_vec()
     }
 
-    /// Draws frame `index` of the test pattern, encodes it and writes whatever
-    /// comes out.
+    /// Draws frame `index` of the test pattern, uploads it and encodes it,
+    /// writing whatever packets come out.
     fn encode_frame(
         &mut self,
         index: u64,
         frame_interval: Duration,
         writer: &mut MkvWriter,
     ) -> Result<(), Box<dyn Error>> {
-        // SAFETY: the frame is live and its buffers were allocated in `open`.
-        // `av_frame_make_writable` replaces them if anything else still holds a
-        // reference, which the encoder does while a frame is queued.
-        let code = unsafe { ffi::av_frame_make_writable(self.frame) };
-        if code < 0 {
-            return Err(format!("a picture buffer could not be made writable ({code})").into());
-        }
         self.draw(index);
 
-        // SAFETY: the frame is live, writable, and describes a picture the
-        // encoder was opened for.
+        // SAFETY: `self.texture` was created above for exactly this width,
+        // height and format, so subresource 0 is the whole of it; the box is
+        // null, meaning the whole resource; and `self.pixels` holds
+        // `width * height * 4` bytes, which is what the row pitch below
+        // declares.
         unsafe {
-            (*self.frame).pts = i64::try_from(index)?;
+            self.context.UpdateSubresource(
+                &self.texture,
+                0,
+                None,
+                self.pixels.as_ptr().cast::<c_void>(),
+                self.width * 4,
+                0,
+            );
+            // Reaches the GPU now rather than whenever the driver next
+            // flushes, so that the copy `submit` makes below reads this frame
+            // and not the one before it.
+            self.context.Flush();
         }
 
-        // SAFETY: both pointers are live and the context is open for encoding.
-        let code = unsafe { ffi::avcodec_send_frame(self.context, self.frame) };
-        if code < 0 {
-            return Err(format!("the encoder refused a frame ({code})").into());
-        }
+        let presentation_time = frame_interval * u32::try_from(index)?;
+        // SAFETY: the texture is live for the whole of this call and was
+        // created on the device the encoder was opened against; the frame's
+        // lifetime ties the borrow to it, and nothing derived from it is kept
+        // once `submit` returns.
+        let surface =
+            unsafe { SourceTexture::new(SurfaceKind::D3d11Texture2D, self.texture.as_raw()) };
+        let frame = SourceFrame::new(
+            surface,
+            SurfaceFormat::Bgra8Unorm,
+            Resolution::new(self.width, self.height),
+            presentation_time,
+        );
+        self.encoder.submit(&frame)?;
 
         self.drain(frame_interval, writer)
     }
@@ -592,123 +581,112 @@ impl SoftwareVideoEncoder {
         frame_interval: Duration,
         writer: &mut MkvWriter,
     ) -> Result<(), Box<dyn Error>> {
-        // SAFETY: a null frame is the documented way to tell an encoder that no
-        // more input is coming.
-        let code = unsafe { ffi::avcodec_send_frame(self.context, ptr::null()) };
-        if code < 0 {
-            return Err(format!("the encoder refused the end of the stream ({code})").into());
-        }
+        self.encoder.finish()?;
         self.drain(frame_interval, writer)
     }
 
-    /// Writes every packet the encoder has ready.
+    /// Writes every packet the encoder has ready, giving each the same
+    /// duration since the software encoder does not report one of its own.
     fn drain(
         &mut self,
         frame_interval: Duration,
         writer: &mut MkvWriter,
     ) -> Result<(), Box<dyn Error>> {
-        loop {
-            // SAFETY: both pointers are live; the packet is unreferenced at the
-            // end of each iteration, so it is empty on entry.
-            let code = unsafe { ffi::avcodec_receive_packet(self.context, self.packet) };
-            if code == AVERROR_EAGAIN || code == AVERROR_EOF {
-                return Ok(());
-            }
-            if code < 0 {
-                return Err(format!("the encoder failed to produce a packet ({code})").into());
-            }
-
-            // SAFETY: a packet returned by `avcodec_receive_packet` holds
-            // `size` bytes at `data`, owned by the packet, which is not touched
-            // again until the borrow ends at `av_packet_unref` below.
-            let (data, presentation, decode, keyframe) = unsafe {
-                let packet = self.packet;
-                let size = usize::try_from((*packet).size)?;
-                (
-                    std::slice::from_raw_parts((*packet).data, size),
-                    (*packet).pts,
-                    (*packet).dts,
-                    ((*packet).flags & ffi::AV_PKT_FLAG_KEY as c_int) != 0,
-                )
-            };
-
-            // The encoder counts in frames, because that is the time base it
-            // was opened with. The muxer counts in nanoseconds on the
-            // recording's clock, which here is a clock that starts at zero.
-            let interval_nanos = i64::try_from(frame_interval.as_nanos())?;
-            let nanos = |ticks: i64| PacketTimestamp::from_nanos(ticks * interval_nanos);
-            // libopenh264 does not reorder, so this is always the presentation
-            // timestamp; taken from the packet anyway, because an encoder that
-            // did reorder would be silently mistimed otherwise.
-            let decode = if decode == AV_NOPTS_VALUE {
-                presentation
-            } else {
-                decode
+        while let Some(packet) = self.encoder.next_packet()? {
+            let nanos = |duration: Duration| -> Result<PacketTimestamp, Box<dyn Error>> {
+                Ok(PacketTimestamp::from_nanos(i64::try_from(
+                    duration.as_nanos(),
+                )?))
             };
 
             writer.write_packet(
-                &EncodedPacket::new(TrackId::Video, nanos(presentation), data)
-                    .with_decode_timestamp(nanos(decode))
-                    .with_duration(frame_interval)
-                    .with_keyframe(keyframe),
+                &EncodedPacket::new(
+                    TrackId::Video,
+                    nanos(packet.presentation_time())?,
+                    packet.data(),
+                )
+                .with_decode_timestamp(nanos(packet.decode_time())?)
+                .with_duration(frame_interval)
+                .with_keyframe(packet.is_keyframe()),
             )?;
-
-            // SAFETY: the packet is live and the borrow of its payload ended
-            // with the call above.
-            unsafe { ffi::av_packet_unref(self.packet) };
         }
+
+        Ok(())
     }
 
-    /// Draws frame `index`: a bright block travelling left to right over a
-    /// background that changes shade, so that a decoded frame can be told from
-    /// its neighbours by eye.
+    /// Draws frame `index` into [`pixels`](Self::pixels): a bright block
+    /// travelling left to right over a background that changes shade, so that
+    /// a decoded frame can be told from its neighbours by eye.
     fn draw(&mut self, index: u64) {
         let (width, height) = (self.width as usize, self.height as usize);
         let block = (index as usize * 8) % width.max(1);
 
-        // SAFETY: the frame's buffers were allocated by `av_frame_get_buffer`
-        // for exactly this width, height and pixel format, and each plane has
-        // at least `linesize` bytes per row. Every index below is bounded by
-        // the plane's own dimensions.
-        unsafe {
-            let frame = self.frame;
-            let luma = (*frame).data[0];
-            let luma_stride = usize::try_from((*frame).linesize[0]).unwrap_or(0);
-            for row in 0..height {
-                for column in 0..width {
-                    let bright = column.abs_diff(block) < 24;
-                    let value = if bright {
-                        235
-                    } else {
-                        16 + ((row + index as usize) % 64) as u8
-                    };
-                    *luma.add(row * luma_stride + column) = value;
-                }
-            }
-
-            for plane in 1..3 {
-                let chroma = (*frame).data[plane];
-                let stride = usize::try_from((*frame).linesize[plane]).unwrap_or(0);
-                for row in 0..height / 2 {
-                    for column in 0..width / 2 {
-                        *chroma.add(row * stride + column) = 128;
-                    }
-                }
+        for row in 0..height {
+            for column in 0..width {
+                let bright = column.abs_diff(block) < 24;
+                let value = if bright {
+                    235
+                } else {
+                    16 + ((row + index as usize) % 64) as u8
+                };
+                let at = (row * width + column) * 4;
+                // BGRA, which is what `DXGI_FORMAT_B8G8R8A8_UNORM` stores and
+                // what the encoder was configured to read
+                // (`SurfaceFormat::Bgra8Unorm`). Grey rather than coloured, so
+                // that the luma value written here is the value that lands in
+                // the YUV picture the encoder codes.
+                self.pixels[at] = value;
+                self.pixels[at + 1] = value;
+                self.pixels[at + 2] = value;
+                self.pixels[at + 3] = 255;
             }
         }
     }
 }
 
-impl Drop for SoftwareVideoEncoder {
-    fn drop(&mut self) {
-        // SAFETY: this value owns all three, and each free takes a pointer to
-        // the pointer and does nothing when it is null — which is the state
-        // `open` leaves behind when it fails part-way through, so this is
-        // correct on every path out of it.
-        unsafe {
-            ffi::av_packet_free(&mut self.packet);
-            ffi::av_frame_free(&mut self.frame);
-            ffi::avcodec_free_context(&mut self.context);
+/// Opens a Direct3D 11 device: real graphics hardware if there is one, the WARP
+/// software rasteriser otherwise.
+///
+/// WARP ships with Windows, so unlike opening a hardware *encoder* there is
+/// nothing here worth doing without: if neither driver type produces a device,
+/// Direct3D itself is broken on this machine, and every muxer test that runs
+/// this example would be asserting on a recording that was never made. Tries
+/// the same two driver types in the same order as
+/// `crates/encoder/src/software/tests.rs`'s `TestGpu`, which is what lets that
+/// crate's own encoding tests run on a hosted CI runner with no GPU.
+fn open_device() -> Result<ID3D11Device, Box<dyn Error>> {
+    for kind in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        if let Some(device) = try_open_device(kind) {
+            return Ok(device);
         }
     }
+
+    Err("no Direct3D 11 device could be created, on hardware or on WARP".into())
+}
+
+/// Tries to create a device of one driver type, answering [`None`] rather than
+/// an error: the caller tries another type next, and only the failure of every
+/// type is worth reporting.
+fn try_open_device(kind: D3D_DRIVER_TYPE) -> Option<ID3D11Device> {
+    let mut device: Option<ID3D11Device> = None;
+    // SAFETY: no adapter is named, which is what these driver types require;
+    // the module handle is unused for them; the feature level list and the
+    // out-parameter are live locals; `D3D11_SDK_VERSION` is the constant the
+    // header requires. On success `device` holds one reference, released when
+    // it is dropped.
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            kind,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    }
+    .ok()?;
+    device
 }

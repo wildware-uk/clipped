@@ -41,9 +41,12 @@
 
 import type {
   ActiveRecording,
+  AudioDevice,
+  AudioDevices,
   BookmarkSummary,
   ClientMessage,
   ErrorDetail,
+  ExportProgress,
   ExportSummary,
   Hello,
   HotkeyBinding,
@@ -54,10 +57,18 @@ import type {
   LibraryEventLane,
   RestoredItem,
   TrashEmptied,
+  FavouriteMark,
+  LockMark,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
+  MicrophoneLevel,
+  PlaybackStream,
+  PlaybackTrack,
   PluginDeclaration,
+  SettingEntry,
+  SettingsView,
+  StartAtLogin,
   PluginState,
   RefusedPlugin,
   LibraryGame,
@@ -74,6 +85,8 @@ import type {
   ReplaySummary,
   ScreenshotSummary,
   ServerMessage,
+  SessionRecording,
+  SessionSummary,
   Welcome,
 } from './protocol';
 
@@ -162,6 +175,27 @@ function optionalNumberField(source: JsonObject, name: string, what: string): nu
 function booleanField(source: JsonObject, name: string, what: string): boolean {
   const value = source[name];
   return typeof value === 'boolean' ? value : unreadable(`${what} has no \`${name}\` boolean`);
+}
+
+/**
+ * A boolean a build older than the field simply does not send.
+ *
+ * Absent is not the same as `false` to a reader, but it is the same to a
+ * caller: a recorder with no lock column has nothing locked. Spread into the
+ * object so the field stays absent rather than becoming an explicit
+ * `undefined`, which `exactOptionalPropertyTypes` refuses.
+ */
+function optionalBoolean(source: JsonObject, name: string): { [key: string]: boolean } {
+  const value = source[name];
+  return typeof value === 'boolean' ? { [name]: value } : {};
+}
+
+function optionalBooleanField(source: JsonObject, name: string, what: string): boolean | undefined {
+  const value = source[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return typeof value === 'boolean' ? value : unreadable(`${what}'s \`${name}\` is not a boolean`);
 }
 
 function optionalStringField(source: JsonObject, name: string, what: string): string | undefined {
@@ -366,6 +400,10 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'restored', restored: readRestoredItem(reply['restored']) };
     case 'trash_emptied':
       return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
+    case 'favourited':
+      return { reply: 'favourited', mark: readFavouriteMark(reply['mark']) };
+    case 'locked':
+      return { reply: 'locked', lock: readLockMark(reply['lock']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -374,11 +412,21 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
+    case 'playback_opened':
+      return { reply: 'playback_opened', playback: readPlayback(reply['playback']) };
     case 'hotkeys':
       return {
         reply: 'hotkeys',
         hotkeys: arrayField(reply['hotkeys'], 'a hotkey list', readHotkeyBinding),
       };
+    case 'settings':
+      return { reply: 'settings', settings: readSettingsView(reply['settings']) };
+    case 'audio_devices':
+      return { reply: 'audio_devices', devices: readAudioDevices(reply['devices']) };
+    case 'microphone_level':
+      return { reply: 'microphone_level', level: readMicrophoneLevel(reply['level']) };
+    case 'start_at_login':
+      return { reply: 'start_at_login', start_at_login: readStartAtLogin(reply['start_at_login']) };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -400,6 +448,7 @@ function readReply(value: JsonValue | undefined): Reply {
 function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
   const recording = object(value, 'a recording');
   const replay = optionalNumberField(recording, 'replay_seconds', 'a recording');
+  const session = recording['session'];
   return {
     recording_id: stringField(recording, 'recording_id', 'a recording'),
     output: stringField(recording, 'output', 'a recording'),
@@ -409,6 +458,138 @@ function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
     // rather than a gap: the recorder skips the field entirely for one that
     // was started without one.
     ...(replay === undefined ? {} : { replay_seconds: replay }),
+    // Absent is "this recording belongs to no sitting", which is also an
+    // answer: it is what a recorder driving `record` on its own reports.
+    ...(session === undefined || session === null ? {} : { session: readSession(session) }),
+  };
+}
+
+/**
+ * One sitting, open or ended.
+ *
+ * The same reader for both, because they are the same object: `ended_at` and
+ * `end_reason` are what an ended one has and an open one has not.
+ */
+function readSession(value: JsonValue | undefined): SessionSummary {
+  const session = object(value, 'a sitting');
+  const what = 'a sitting';
+  const gameId = optionalStringField(session, 'game_id', what);
+  const gameName = optionalStringField(session, 'game_name', what);
+  const endedAt = optionalStringField(session, 'ended_at', what);
+  const endReason = optionalStringField(session, 'end_reason', what);
+  return {
+    session_id: stringField(session, 'session_id', what),
+    // Absent is a sitting the catalogue would not attribute, which is a sitting
+    // with no game rather than a sitting whose game is unknown.
+    ...(gameId === undefined ? {} : { game_id: gameId }),
+    ...(gameName === undefined ? {} : { game_name: gameName }),
+    started_at: stringField(session, 'started_at', what),
+    ...(endedAt === undefined ? {} : { ended_at: endedAt }),
+    // Kept as it arrived, including a reason invented after this build: there
+    // is nothing here that branches on it, and losing it would lose the only
+    // explanation the interface has to show.
+    ...(endReason === undefined ? {} : { end_reason: endReason }),
+    recordings: arrayField(session['recordings'], what, readSessionRecording),
+  };
+}
+
+function readSessionRecording(value: JsonValue | undefined): SessionRecording {
+  const recording = object(value, 'a recording of a sitting');
+  const what = 'a recording of a sitting';
+  const outcome = optionalStringField(recording, 'outcome', what);
+  const duration = optionalNumberField(recording, 'duration_ms', what);
+  return {
+    session_index: numberField(recording, 'session_index', what),
+    output: stringField(recording, 'output', what),
+    // Absent is "still running", which is what the last entry of an open
+    // sitting reports.
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(duration === undefined ? {} : { duration_ms: duration }),
+  };
+}
+
+function readSettingsView(value: JsonValue | undefined): SettingsView {
+  const view = object(value, 'the settings');
+  return {
+    file: stringField(view, 'file', 'the settings'),
+    settings: arrayField(view['settings'], 'a settings list', readSettingEntry),
+  };
+}
+
+function readSettingEntry(value: JsonValue | undefined): SettingEntry {
+  const entry = object(value, 'a setting');
+  const what = 'a setting';
+  const choices = optionalStringArrayField(entry, 'choices', what);
+  const unavailable = optionalStringField(entry, 'unavailable', what);
+  return {
+    key: stringField(entry, 'key', what),
+    label: stringField(entry, 'label', what),
+    value: stringField(entry, 'value', what),
+    overridden: booleanField(entry, 'overridden', what),
+    // Absent means the value set is open — a frame rate, a device name — which
+    // is a fact about the setting rather than a gap in the frame.
+    ...(choices === undefined ? {} : { choices }),
+    accepted: stringField(entry, 'accepted', what),
+    applies: booleanField(entry, 'applies', what),
+    // Present exactly when nothing reads the setting, and it is the sentence
+    // the screen shows in place of a working control.
+    ...(unavailable === undefined ? {} : { unavailable }),
+  };
+}
+
+function readAudioDevices(value: JsonValue | undefined): AudioDevices {
+  const devices = object(value, 'the audio devices');
+  return {
+    microphones: arrayField(devices['microphones'], 'a microphone list', readAudioDevice),
+  };
+}
+
+function readAudioDevice(value: JsonValue | undefined): AudioDevice {
+  const device = object(value, 'an audio device');
+  return {
+    name: stringField(device, 'name', 'an audio device'),
+    is_default: booleanField(device, 'is_default', 'an audio device'),
+  };
+}
+
+/**
+ * What a microphone is hearing.
+ *
+ * The peak is required and the other two are not, and the difference is the
+ * point: a reading always has a level, and an absent device is a microphone
+ * that is not plugged in — the one thing a flat meter cannot say for itself.
+ */
+function readMicrophoneLevel(value: JsonValue | undefined): MicrophoneLevel {
+  const level = object(value, 'a microphone level');
+  const what = 'a microphone level';
+  const device = optionalStringField(level, 'device', what);
+  const muted = optionalBooleanField(level, 'muted', what);
+  return {
+    peak: numberField(level, 'peak', what),
+    // Absent means the device is not there, which is a different answer from
+    // silence and must not be flattened into an empty name.
+    ...(device === undefined ? {} : { device }),
+    // Absent means Windows will not report the switch for this device, which
+    // is not the same as "not muted".
+    ...(muted === undefined ? {} : { muted }),
+  };
+}
+
+function readStartAtLogin(value: JsonValue | undefined): StartAtLogin {
+  const state = object(value, 'the start-at-login arrangement');
+  const what = 'the start-at-login arrangement';
+  const command = optionalStringField(state, 'command', what);
+  const missing = optionalStringField(state, 'missing_executable', what);
+  return {
+    enabled: booleanField(state, 'enabled', what),
+    location: stringField(state, 'location', what),
+    // Absent means there is no entry at all, which is the switch being off
+    // rather than a gap in the frame.
+    ...(command === undefined ? {} : { command }),
+    // Present exactly when the entry names an executable that is no longer
+    // there — a Clipped that moved. Dropping it here would draw a startup
+    // arrangement that will never run as a working one (AGENTS.md section 27).
+    ...(missing === undefined ? {} : { missing_executable: missing }),
   };
 }
 
@@ -454,6 +635,15 @@ function readStatus(value: JsonValue | undefined): RecorderStatus {
   switch (state) {
     case 'idle':
       return { state: 'idle' };
+    case 'watching': {
+      const session = status['session'];
+      return {
+        state: 'watching',
+        // Absent is "watching for anything at all" rather than for the return of
+        // a game that just exited, and the two are different things to show.
+        ...(session === undefined || session === null ? {} : { session: readSession(session) }),
+      };
+    }
     case 'recording':
       return { state: 'recording', ...readActiveRecording(status) };
     default:
@@ -559,6 +749,60 @@ function readExport(value: JsonValue | undefined): ExportSummary {
   };
 }
 
+/** How far a running export has got. */
+function readExportProgress(value: JsonValue | undefined): ExportProgress {
+  const progress = object(value, 'an export in progress');
+  const what = 'an export in progress';
+  const total = optionalNumberField(progress, 'total_ms', what);
+  return {
+    source: stringField(progress, 'source', what),
+    destination: stringField(progress, 'destination', what),
+    written_ms: numberField(progress, 'written_ms', what),
+    packets: numberField(progress, 'packets', what),
+    bytes: numberField(progress, 'bytes', what),
+    // Absent is "this recording never said how long it was", which is an
+    // answer rather than a gap: it is the difference between an unbounded
+    // indication and a percentage, and reading it as zero would draw the
+    // second over the first.
+    ...(total === undefined ? {} : { total_ms: total }),
+  };
+}
+
+function readPlayback(value: JsonValue | undefined): PlaybackStream {
+  const playback = object(value, 'a playback stream');
+  const what = 'a playback stream';
+  const track = optionalNumberField(playback, 'audio_track', what);
+  const tracks = playback['audio_tracks'];
+  const prepared = optionalBooleanField(playback, 'prepared', what);
+  return {
+    path: stringField(playback, 'path', what),
+    // Absent is "this recording has no sound", which is an answer rather than a
+    // gap - and one a window says out loud, because a silent player somebody
+    // was not warned about reads as a broken one.
+    ...(track === undefined ? {} : { audio_track: track }),
+    ...(tracks === undefined || tracks === null
+      ? {}
+      : { audio_tracks: arrayField(tracks, 'a playback track list', readPlaybackTrack) }),
+    ...(prepared === undefined ? {} : { prepared }),
+  };
+}
+
+function readPlaybackTrack(value: JsonValue | undefined): PlaybackTrack {
+  const track = object(value, 'a playback track');
+  const what = 'a playback track';
+  const name = optionalStringField(track, 'name', what);
+  const language = optionalStringField(track, 'language', what);
+  const chosen = optionalBooleanField(track, 'default', what);
+  return {
+    index: numberField(track, 'index', what),
+    // A track a recording did not name is shown by its position rather than
+    // given one here (`clipPlayback.ts`).
+    ...(name === undefined ? {} : { name }),
+    ...(language === undefined ? {} : { language }),
+    ...(chosen === undefined ? {} : { default: chosen }),
+  };
+}
+
 function readSessionPage(value: JsonValue | undefined): LibrarySessionPage {
   const page = object(value, 'a library page');
   const cursor = optionalStringField(page, 'next_cursor', 'a library page');
@@ -584,6 +828,7 @@ function readLibrarySession(value: JsonValue | undefined): LibrarySession {
     ...(endedAt === undefined ? {} : { ended_at: endedAt }),
     ...(endReason === undefined ? {} : { end_reason: endReason }),
     favourite: booleanField(session, 'favourite', what),
+    ...optionalBoolean(session, 'locked'),
     recordings: arrayField(session['recordings'], what, readLibraryRecording),
     clips: arrayField(session['clips'], what, readLibraryClip),
   };
@@ -616,6 +861,8 @@ function readLibraryRecording(value: JsonValue | undefined): LibraryRecording {
     // present means the screen has to say it has gone.
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(recording, 'favourite', what),
+    ...optionalBoolean(recording, 'locked'),
+    ...optionalBoolean(recording, 'protected'),
     tags: stringArrayField(recording, 'tags', what),
   };
 }
@@ -748,6 +995,33 @@ function readTrashEmptied(value: JsonValue | undefined): TrashEmptied {
   };
 }
 
+/** What a favourite mark is now. */
+function readFavouriteMark(value: JsonValue | undefined): FavouriteMark {
+  const mark = object(value, 'a favourite mark');
+  const what = 'a favourite mark';
+  return {
+    kind: stringField(mark, 'kind', what),
+    session_id: stringField(mark, 'session_id', what),
+    id: numberField(mark, 'id', what),
+    favourite: booleanField(mark, 'favourite', what),
+    changed: booleanField(mark, 'changed', what),
+  };
+}
+
+/** What a lock is now, and whether cleanup will leave the thing alone. */
+function readLockMark(value: JsonValue | undefined): LockMark {
+  const lock = object(value, 'a lock');
+  const what = 'a lock';
+  return {
+    kind: stringField(lock, 'kind', what),
+    session_id: stringField(lock, 'session_id', what),
+    id: numberField(lock, 'id', what),
+    locked: booleanField(lock, 'locked', what),
+    protected: booleanField(lock, 'protected', what),
+    changed: booleanField(lock, 'changed', what),
+  };
+}
+
 /** What is in the trash, and what emptying it would take. */
 function readTrashListing(value: JsonValue | undefined): TrashListing {
   const listing = object(value, 'a trash listing');
@@ -871,12 +1145,16 @@ function readEvent(frame: JsonObject): RecorderEvent {
     switch (frame['event']) {
       case 'status_changed':
         return { event: 'status_changed', status: readStatus(frame['status']) };
+      case 'session_ended':
+        return { event: 'session_ended', session: readSession(frame['session']) };
       case 'recording_failed':
         return {
           event: 'recording_failed',
           recording_id: stringField(frame, 'recording_id', 'a failed recording'),
           error: readProtocolError(frame['error'], 'a failed recording'),
         };
+      case 'export_progress':
+        return { event: 'export_progress', export: readExportProgress(frame['export']) };
       default:
         break;
     }

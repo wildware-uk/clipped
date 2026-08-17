@@ -28,9 +28,10 @@ automatically when a game in the catalogue launches, and stops when it exits.
 ([docs/encoder-capabilities.md](docs/encoder-capabilities.md)), and
 `clipped-recorder list-windows` shows what can be captured.
 
-**The desktop window runs**, from `npm run dev`. It starts and stops a recording
-and lists what has been recorded. It cannot yet play a recording
-([#304](https://github.com/wildware-uk/clipped/issues/304)) or export one
+**The desktop window runs**, from `npm run dev`. It starts and stops a recording,
+lists what has been recorded, and **plays one** — with sound, and with any of its
+audio tracks ([#304](https://github.com/wildware-uk/clipped/issues/304),
+[ADR 0011](docs/adr/0011-what-the-webview-plays.md)). It cannot yet export one
 ([#322](https://github.com/wildware-uk/clipped/issues/322)), and the library
 draws no thumbnails yet. Recordings land in `%USERPROFILE%\Videos\Clipped\` and
 any player that handles Matroska will open them.
@@ -38,9 +39,12 @@ any player that handles Matroska will open them.
 **`npm run build:app` builds an installer that records.** It carries the
 recorder and the FFmpeg libraries beside the window, so an installed Clipped
 finds and starts its recorder with nothing set by hand
-([docs/packaging.md](docs/packaging.md)). It is not a shippable build: it is
-unsigned, and it does not yet carry the licence texts and third-party notices a
-distributed copy owes ([#123](https://github.com/wildware-uk/clipped/issues/123)).
+([docs/packaging.md](docs/packaging.md)). It carries the licence texts and
+third-party notices a distributed copy owes
+([#123](https://github.com/wildware-uk/clipped/issues/123),
+[docs/licensing.md](docs/licensing.md)). It is still not a shippable build: it
+is unsigned, so SmartScreen will warn about it, and nothing has been released —
+[docs/releasing.md](docs/releasing.md) says when anything will be.
 
 Screenshots are pending.
 
@@ -160,7 +164,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime`, `clipped-background` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
 | 2 | `clipped-muxer`, `clipped-league-plugin`, `clipped-cs2-plugin`, `clipped-dota2-plugin` (plugins, see below) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
@@ -260,6 +264,19 @@ kind of reason. It copies the pinned FFmpeg DLLs beside the binaries a build
 produces, so that nothing has to be on `PATH`, and it is named only by the
 `[build-dependencies]` of the crates that link FFmpeg — `clipped-muxer` and
 `clipped-encoder`. No binary links it, and it depends on nothing at all.
+
+`clipped-background` (`crates/background`) holds the one background worker
+`clipped-waveform` and the thumbnail module of `clipped-library` both need — a
+low-priority thread reading from a bounded queue, suspendable for the
+duration of a recording — which each implemented for itself until
+[issue #293](https://github.com/wildware-uk/clipped/issues/293) (AGENTS.md
+section 55). It sits at layer 0 rather than depending on `clipped-logging`
+for the digest its cache keys need: two layer-0 crates may not depend on each
+other, since neither would then be the workspace's lowest layer, so it
+computes the same digest algorithm a second time instead
+(`crates/background/src/lib.rs` explains the trade-off). It knows nothing
+about waveforms, thumbnails, FFmpeg or a cache format; what to do with a path
+taken off its queue is a closure its two callers each supply.
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the

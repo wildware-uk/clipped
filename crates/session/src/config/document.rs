@@ -67,7 +67,8 @@ use crate::config::error::{ConfigurationError, Section, SettingError};
 use crate::config::game::GameKey;
 use crate::config::hotkeys::{HotkeyOverride, HotkeyOverrides};
 use crate::config::preferences::{
-    AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings,
+    AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, MAXIMUM_FRAMERATE,
+    MINIMUM_FRAMERATE,
 };
 use crate::config::value::SettingKey;
 use crate::config::Configuration;
@@ -195,13 +196,32 @@ pub(crate) fn parse(
         source,
     })?;
 
+    // Kept rather than refused, like `plugins` above and unlike `storage`: a
+    // switch this build cannot read leaves that category interrupting, which is
+    // a nuisance, and refusing would mean a typo in a notification switch
+    // stopped the recording settings in the same file from loading
+    // (`super::notifications`).
+    let notifications = super::notifications::read(take_object(
+        path,
+        &mut document,
+        "notifications",
+        Section::Document,
+    )?);
+
     // Whatever is left is a key from a newer build, or the version, which is
     // rewritten rather than kept.
     document.remove("version");
     let unknown = document.into_iter().collect();
 
-    let configuration =
-        Configuration::from_parts(global, games, hotkeys, plugins, storage, unknown);
+    let configuration = Configuration::from_parts(
+        global,
+        games,
+        hotkeys,
+        plugins,
+        storage,
+        notifications,
+        unknown,
+    );
     let loaded = if version == SCHEMA_VERSION {
         Loaded::AsWritten
     } else {
@@ -241,6 +261,13 @@ pub(crate) fn render(configuration: &Configuration) -> String {
     let storage = super::storage::write(configuration.storage());
     if !storage.is_empty() {
         document.insert("storage".to_owned(), Value::Object(storage));
+    }
+    // Written only when something is set, for the same reason: a user who has
+    // never switched a notification off should not find a section explaining
+    // that everything is on.
+    let notifications = super::notifications::write(configuration.notifications());
+    if !notifications.is_empty() {
+        document.insert("notifications".to_owned(), Value::Object(notifications));
     }
 
     for (key, value) in configuration.unrecognised() {
@@ -443,6 +470,109 @@ fn read_setting(
 const CODECS: &str = "\"auto\", \"h264\", \"hevc\" or \"av1\"";
 const ENCODERS: &str = "\"auto\", \"nvenc\", \"amf\", \"quicksync\" or \"software\"";
 const DEVICES: &str = "\"default\", \"none\" or a device name";
+
+/// The token every value a setting can be spelled as, where the set is closed.
+///
+/// Empty for the settings whose values are open — a frame rate, a size, a
+/// device name — which a caller tells apart by the list being empty rather than
+/// by knowing which settings those are. This is what lets a settings screen
+/// draw a list of choices for one setting and a field for another without
+/// keeping its own copy of either (issue #51).
+///
+/// Built from the same sources the parsers read, so a codec added to
+/// [`Codec::EFFICIENCY_ORDER`] appears here without anybody remembering to add
+/// it (AGENTS.md section 55).
+pub(crate) fn choices_for(key: SettingKey) -> Vec<String> {
+    match key {
+        SettingKey::CaptureTarget => CaptureTargetSetting::ALL
+            .iter()
+            .map(|target| target.token().to_owned())
+            .collect(),
+        SettingKey::Codec => core::iter::once("auto".to_owned())
+            .chain(
+                Codec::EFFICIENCY_ORDER
+                    .into_iter()
+                    .map(|codec| codec.log_value().to_owned()),
+            )
+            .collect(),
+        SettingKey::Encoder => core::iter::once("auto".to_owned())
+            .chain(
+                EncoderKind::ALL
+                    .into_iter()
+                    .map(|encoder| encoder_token(encoder).to_owned()),
+            )
+            .collect(),
+        SettingKey::Resolution
+        | SettingKey::Framerate
+        | SettingKey::Microphone
+        | SettingKey::SystemAudio
+        | SettingKey::ReplayWindow => Vec::new(),
+    }
+}
+
+/// What a setting would have accepted, in the words its refusal uses.
+///
+/// The same sentences [`SettingError`] carries, so that the hint beside a field
+/// and the refusal that follows a bad value cannot disagree.
+pub(crate) fn accepted_for(key: SettingKey) -> String {
+    match key {
+        SettingKey::CaptureTarget => "\"game-window\" or \"display\"".to_owned(),
+        SettingKey::Resolution => "\"source\" or a size such as \"1920x1080\"".to_owned(),
+        SettingKey::Framerate => {
+            format!("{MINIMUM_FRAMERATE}-{MAXIMUM_FRAMERATE} frames per second")
+        }
+        SettingKey::Codec => CODECS.to_owned(),
+        SettingKey::Encoder => ENCODERS.to_owned(),
+        SettingKey::Microphone | SettingKey::SystemAudio => DEVICES.to_owned(),
+        SettingKey::ReplayWindow => format!(
+            "{}-{} seconds",
+            clipped_replay::MINIMUM_WINDOW.as_secs(),
+            clipped_replay::MAXIMUM_WINDOW.as_secs()
+        ),
+    }
+}
+
+/// Sets one setting from the text the file spells it with.
+///
+/// The inverse of [`written_setting`], and deliberately the *same* parsers the
+/// file reader uses: a value the settings screen sends over the control
+/// protocol is refused exactly when the same value written into
+/// [`FILE_NAME`] by hand would be refused, with the same message
+/// (AGENTS.md section 55). A screen that validated for itself would be a second
+/// opinion about what a frame rate is.
+///
+/// # Errors
+///
+/// [`SettingError`] naming the setting, the value and what would have been
+/// accepted.
+pub(crate) fn set_written_setting(
+    preferences: &mut Preferences,
+    key: SettingKey,
+    token: &str,
+) -> Result<(), SettingError> {
+    let whole_number = |accepted: &'static str| {
+        token
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| SettingError::Unrecognised {
+                key,
+                value: format!("{token:?}"),
+                accepted,
+            })
+    };
+
+    match key {
+        SettingKey::Framerate => {
+            preferences.set_framerate(Some(whole_number("a whole number of frames per second")?))
+        }
+        SettingKey::ReplayWindow => preferences.set_replay_window(Some(Duration::from_secs(
+            u64::from(whole_number("a whole number of seconds")?),
+        ))),
+        // Everything else is a string in the file, and `read_setting` is the
+        // one reader of those strings.
+        _ => read_setting(preferences, key, &Value::String(token.to_owned())),
+    }
+}
 
 /// One *resolved* setting, spelled the way the settings file spells it.
 ///

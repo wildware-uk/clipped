@@ -11,8 +11,10 @@ range becomes a playable file.
 **Something asks for one now.** `clipped-recorder replay` records with a buffer
 and binds `Ctrl`+`F10` to a save
 ([issue #38](https://github.com/wildware-uk/clipped/issues/38),
-`docs/recorder-cli.md`); `start_recording` takes a `replay_seconds` and
-`save_replay` saves from it over the protocol (`docs/ipc.md`).
+`docs/recorder-cli.md`); `start_recording` takes a `replay` and a
+`replay_seconds` and `save_replay` saves from it over the protocol
+(`docs/ipc.md`), which is what the desktop window sends for every recording it
+starts ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
 `clipped_session::replay::ReplayRecording` is the join between the two — it is
 what knows the video in the buffer well enough to write a container header for
 it — and `docs/sessions.md` is where a saved clip is written down.
@@ -523,7 +525,7 @@ The same two words the rest of this page uses, and no third way of saying it:
 | A named range (`lease`, not `lease_last`) | Unaffected. A caller that named two instants asked for those instants, and a silence since then does not move them. |
 
 Refusing the third is the one real decision here, and [ADR
-0010](adr/0010-a-replay-save-does-not-reach-across-a-gap.md) is where the
+0010](adr/0017-a-replay-save-does-not-reach-across-a-gap.md) is where the
 alternatives are weighed. The short version: a clip containing nothing at all
 from the period asked for is not a short clip, it is a different clip wearing
 that clip's name — and **nothing is lost by refusing**, because a replay buffer
@@ -861,5 +863,5 @@ and a wrong number in a report is a smaller failure than a recording that stops
 
 Related decisions: [ADR 0001](adr/0001-mkv-archival-container.md), because
 segments are standard containers rather than an application-specific format; and
-[ADR 0010](adr/0010-a-replay-save-does-not-reach-across-a-gap.md), for what a
+[ADR 0017](adr/0017-a-replay-save-does-not-reach-across-a-gap.md), for what a
 save does when the source stopped producing pictures.

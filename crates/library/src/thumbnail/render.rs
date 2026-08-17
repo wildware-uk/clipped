@@ -49,11 +49,11 @@ use core::time::Duration;
 use std::ffi::CString;
 use std::path::Path;
 
+use clipped_background::{Continue, Pace, SourceIdentity, Unpaced};
 use rusty_ffmpeg::ffi;
 use tracing::debug;
 
 use super::choose::{candidate_offsets, score, BLANK, FRAMES_PER_CANDIDATE, GOOD_ENOUGH};
-use super::source::SourceIdentity;
 use super::ThumbnailError;
 
 /// FFmpeg's `AVERROR_EOF`, which is `FFERRTAG('E','O','F',' ')`.
@@ -95,39 +95,6 @@ const PACKETS_PER_CHECKPOINT: u32 = 32;
 /// normally decodes to a picture. The bound is what stops a container whose
 /// index is wrong from turning one candidate into a full read of the file.
 const PACKETS_PER_CANDIDATE: u32 = 512;
-
-/// Whether generation should carry on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Continue {
-    /// Carry on.
-    Yes,
-    /// Stop, and report [`ThumbnailError::Cancelled`].
-    Stop,
-}
-
-/// What the renderer asks, periodically, before reading more of the file.
-///
-/// This is the hook that keeps thumbnail generation out of a game's way. An
-/// implementation may block — that is the point:
-/// [`ThumbnailService`](super::ThumbnailService)'s blocks for as long as a
-/// recording is running, so a library scan that started before a game launched
-/// stops within a few packets and resumes when the recording ends, rather than
-/// being abandoned or running through it.
-pub trait Pace: Send + Sync {
-    /// Called every so often while reading. May block; may ask for a stop.
-    fn checkpoint(&self) -> Continue;
-}
-
-/// The pace of a caller with nothing better to do, which never waits and never
-/// stops.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Unpaced;
-
-impl Pace for Unpaced {
-    fn checkpoint(&self) -> Continue {
-        Continue::Yes
-    }
-}
 
 /// How wide a thumbnail is, in pixels, unless the caller says otherwise.
 ///

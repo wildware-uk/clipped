@@ -81,6 +81,7 @@ pub mod accounting;
 pub mod events;
 pub mod favourites;
 pub mod index;
+pub mod locks;
 pub mod search;
 pub mod thumbnail;
 pub mod trash;
