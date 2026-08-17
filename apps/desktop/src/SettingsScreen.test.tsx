@@ -234,6 +234,36 @@ describe('the Settings screen', () => {
   });
 
   /*
+   * Save says "save changes" in front of the section it is in, so that is what
+   * it saves. An edit left in another pane is somebody's to come back to, and a
+   * button that quietly sent it as well would be doing something it did not say
+   * — with a value they had stopped part way through typing.
+   */
+  it('saves the section it is in, and leaves an edit in another pane alone', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      applySettings: () => settingsWith('microphone', { value: 'none', overridden: true }),
+    });
+
+    await openSection(user, 'Recording');
+    const framerate = await screen.findByLabelText('Frame rate');
+    await user.clear(framerate);
+    await user.type(framerate, '90');
+
+    await openSection(user, 'Audio');
+    await user.selectOptions(await screen.findByLabelText('Microphone'), 'none');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(saved(runtime)).toEqual([{ microphone: 'none' }]);
+    });
+
+    // And the frame rate is still where it was left, rather than saved or lost.
+    await openSection(user, 'Recording');
+    expect(screen.getByLabelText('Frame rate')).toHaveValue('90');
+  });
+
+  /*
    * The recorder says which settings nothing reads when a recording starts, and
    * a control for one of those is a control that silently does nothing — the
    * defect this screen has been rewritten around twice (AGENTS.md section 27).

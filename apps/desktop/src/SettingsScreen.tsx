@@ -257,7 +257,7 @@ function Pane({
   readonly devices: LibraryRead<AudioDevices>;
   readonly edits: Readonly<Record<string, string>>;
   readonly onEdit: (key: string, value: string) => void;
-  readonly onSave: () => void;
+  readonly onSave: (keys: readonly string[]) => void;
   readonly onDiscard: () => void;
   readonly onReset: (key: string) => void;
   readonly saving: boolean;
@@ -310,7 +310,7 @@ function Pane({
           aria-label={`${section.label} settings`}
           onSubmit={(event) => {
             event.preventDefault();
-            onSave();
+            onSave(entries.map((entry) => entry.key));
           }}
         >
           {entries.map((entry) =>
@@ -399,18 +399,35 @@ export function SettingsScreen(): ReactNode {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const open = SETTINGS_SECTIONS.find((section) => section.id === openId) ?? SETTINGS_SECTIONS[0];
 
-  const save = (): void => {
-    // What was edited, as it will be saved. Nothing is translated on the way
-    // out: a control's value is already the words the settings file spells that
-    // setting in — a microphone is `name:Shure MV7` because that is the option's
-    // value — so a translation here would be a second vocabulary to keep in step
-    // (`crates/ipc/src/settings.rs`).
-    const values: Record<string, string | null> = { ...edits };
+  /**
+   * Saves what was edited in one section.
+   *
+   * Only that section's settings, because that is what the button in front of
+   * somebody says it does: an edit left behind in another pane is theirs to
+   * come back to, not something a Save over here should send on their behalf.
+   *
+   * Nothing is translated on the way out. A control's value is already the
+   * words the settings file spells that setting in — a microphone is
+   * `name:Shure MV7` because that is the option's value — so a translation here
+   * would be a second vocabulary to keep in step (`crates/ipc/src/settings.rs`).
+   */
+  const save = (keys: readonly string[]): void => {
+    const values: Record<string, string | null> = {};
+    for (const key of keys) {
+      const edited = edits[key];
+      if (edited !== undefined) {
+        values[key] = edited;
+      }
+    }
+
     void settings.apply(values).then((saved) => {
-      // Cleared only for what the recorder took: on a refusal the edits stay so
-      // that a bad value can be corrected rather than retyped.
+      // Cleared only for what the recorder took, and only what was sent: on a
+      // refusal the edits stay so that a bad value can be corrected rather than
+      // retyped.
       if (saved) {
-        setEdits({});
+        setEdits((current) =>
+          Object.fromEntries(Object.entries(current).filter(([key]) => !keys.includes(key))),
+        );
       }
     });
   };
