@@ -171,6 +171,22 @@ export interface CommandAnswers {
    * screen drew a player over a recorder nobody asked (issue #304).
    */
   readonly openPlayback?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `recording_preview` answers, given the recording and the kind it was
+   * asked for.
+   *
+   * The default is a rejection, like the other recorder commands. A stub that
+   * quietly answered with a `pending` preview would let a screen test pass while
+   * every row drew "no thumbnail yet" over a recorder nobody asked — which is
+   * the exact state issue #448's second criterion is about telling apart, so it
+   * is the last one that may be arrived at by default (AGENTS.md section 27).
+   *
+   * A promise that has not settled is a legitimate answer here, and the only way
+   * to see how many round trips this window will have in flight at once: a
+   * thumbnail is one call per row, and the recorder serves eight connections
+   * between everything the window does (`preview.ts`, `CONCURRENT_PREVIEWS`).
+   */
+  readonly preview?: (args: Record<string, unknown>) => unknown;
   /** What `reveal_recording` answers, given the path it was sent. */
   readonly revealRecording?: (args: Record<string, unknown>) => unknown;
   /**
@@ -369,6 +385,11 @@ export function stubRecorderLinkRuntime(
       if (command === 'open_playback') {
         return answered(
           commands.openPlayback === undefined ? undefined : () => commands.openPlayback?.(args),
+        );
+      }
+      if (command === 'recording_preview') {
+        return answered(
+          commands.preview === undefined ? undefined : () => commands.preview?.(args),
         );
       }
       if (command === 'reveal_recording') {

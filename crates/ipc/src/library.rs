@@ -22,13 +22,15 @@
 //!   ([issue #58](https://github.com/wildware-uk/clipped/issues/58),
 //!   [issue #94](https://github.com/wildware-uk/clipped/issues/94)). This is the
 //!   read.
-//! - **Thumbnails and waveforms.** A picture is bytes rather than a row, the
-//!   window has no file-system permission to load one from the path beside a
-//!   recording, and how it should reach the window — as bytes on this protocol,
-//!   or through a Tauri asset scope — is a decision worth taking on its own
-//!   rather than on the way past
-//!   ([issue #57](https://github.com/wildware-uk/clipped/issues/57),
-//!   [issue #66](https://github.com/wildware-uk/clipped/issues/66)).
+//! - **Thumbnails and waveforms.** A picture is bytes rather than a row, and a
+//!   page of rows is not where it belongs: a library page carries twenty-five
+//!   sittings and a picture is 20 kB, so putting one on each row would be a
+//!   page that no longer fits in a frame. They are [`crate::preview`] instead —
+//!   their own command, asked one recording at a time as a row is drawn
+//!   ([issue #448](https://github.com/wildware-uk/clipped/issues/448) took that
+//!   decision; [#57](https://github.com/wildware-uk/clipped/issues/57) and
+//!   [#66](https://github.com/wildware-uk/clipped/issues/66) are what draw
+//!   them).
 //!
 //! # `missing_since` is the field this exists for
 //!

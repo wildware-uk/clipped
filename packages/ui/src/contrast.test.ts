@@ -431,6 +431,25 @@ describe('the editor', () => {
   });
 });
 
+/*
+ * The library's thumbnails (issue #448). The tile that stands in for a
+ * recording with no picture holds one word, and that word is the whole of how
+ * "not made yet" is told from "there will not be one" — #448's second
+ * acceptance criterion — so it is held to body text's ratio rather than to the
+ * 3:1 something decorative would get. Its ground is the tile's own, which the
+ * base class fills, not the window's.
+ */
+describe('the library list', () => {
+  it('draws the word in an empty thumbnail at 4.5:1 or better', () => {
+    const ratio = ratioBetween(
+      ['styles', '\\.clipped-thumb--absent', 'color'],
+      ['styles', '\\.clipped-thumb', 'background'],
+    );
+
+    expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+});
+
 /* The two rules of the segmented control that the focus ring is measured on. */
 const SEGMENT_RING: string = '\\.clipped-segment__option:has\\(input:focus-visible\\)';
 const SEGMENT_SELECTED: string = '\\.clipped-segment__option:has\\(input:checked\\)';

@@ -126,9 +126,15 @@ sessions, recently clipped and favourites, and Library as a Sessions / Clips /
 Highlights tab strip over a grid of thumbnails, with a filter row and a search
 field above it.
 
-**The sessions and the per-game figures are drawn. The clips, the highlights,
-the favourites and the thumbnails are not**, and the reason has changed: it is
-no longer that nothing can be read.
+**The sessions, the per-game figures and the thumbnails are drawn. The clips,
+the highlights and filtering to favourites are not**, and the reason has
+changed: it is no longer that nothing can be read.
+
+The thumbnails arrived with
+[#448](https://github.com/wildware-uk/clipped/issues/448), which is the first
+time any build has drawn one. Not as the deck's grid of tiles — that is a view
+of a game's footage and is still #57 — but as a picture in each recording's row,
+which is what a row has space for.
 
 ### How the window sees the library
 
@@ -181,8 +187,37 @@ of the database and, until #385, false of the disk.
 
 What each screen still owes is a row in `WaitingOn.tsx`, the table both share
 with Games, naming the work that lands it: clips and highlights wait on
-something creating one (#91, #76), favourites on anything being favouritable
-(#58), and thumbnails and waveforms on a transport for bytes rather than rows.
+something creating one (#91, #76), filtering to favourites on a control that
+types the query (#60), and a waveform under each of a recording's tracks on a
+surface to draw it on — the peaks reach the window over the same command a
+thumbnail does, and where they belong is under a track on the playback screen
+(#66) rather than in a row of a table.
+
+### Where a thumbnail comes from
+
+Not off the disk. The window still has no file-system permission and no asset
+scope; the picture is base64 in the recorder's own `preview_opened` reply and is
+drawn from a `data:` URI, which the content security policy already permitted
+([ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
+[thumbnails.md](thumbnails.md)). `capabilities/default.json` and the policy are
+both unchanged by it, which `playbackReach.test.ts` is what holds.
+
+Three things follow, and each is visible on the screen:
+
+- **A row asks only when the recorder says it can answer.** `previews` is in the
+  `welcome`, and a recorder built before #448 would refuse one round trip per
+  row — so `SessionList` draws no column at all rather than a column of
+  refusals.
+- **A tile says which of three things it is.** A picture; "Not made yet", which
+  resolves itself; or "No picture" with the reason, which does not. Collapsing
+  the last two would report a disconnected drive as a library nobody has
+  indexed, which is #448's second acceptance criterion and AGENTS.md section 27.
+- **Asking is bounded.** `RecorderLink::call` opens a connection per call and the
+  recorder serves eight, so `preview.ts` keeps at most `CONCURRENT_PREVIEWS` in
+  flight and starts the newest first — a page mounting a dozen rows at once is
+  the first thing this window has ever done that could exhaust that cap, and
+  exhausting it would take the answer out of whatever else was being asked at
+  the same moment.
 
 ### Watching it, finding it, sharing it
 
@@ -975,6 +1010,19 @@ re-read, and each answer is bounded rather than being the rest of the file: a
 protocol handler answers with bytes in memory, and a recording is measured in
 gigabytes.
 
+**A picture does not come this way, and that is deliberate.** The poster frame
+below is a thumbnail, and a thumbnail arrives as base64 in a `preview_opened`
+reply rather than as a file this scheme serves
+([ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
+[#448](https://github.com/wildware-uk/clipped/issues/448)). The short reason is
+the *waveform*: peaks are a `.cwf`, a binary sidecar neither this process nor
+the window links a reader for, so serving them as files would mean a second
+implementation of the format in TypeScript — and a scheme that carried the
+picture and not the peaks would be two mechanisms for one problem. Bytes in a
+reply cost the window nothing: `img-src 'self' data:` was already in the policy,
+so `capabilities/default.json` and the policy are both untouched, which
+`playbackReach.test.ts` is what holds.
+
 ### The track selector
 
 Buttons rather than a `<select>`, one per sound track, with `aria-pressed` on
@@ -1016,17 +1064,39 @@ recording is missing — this window has not been to the disk, and reporting a f
 as gone because *this* screen could not find it is exactly the invented state
 AGENTS.md section 27 is about.
 
+### The poster frame and the waveform
+
+Both arrived with [#448](https://github.com/wildware-uk/clipped/issues/448) and
+both are the first time anything has drawn either.
+
+The poster is the *same* picture the Library's rows draw, over the same
+`open_preview` command — `crates/library`'s thumbnail, handed to the element's
+`poster` attribute so that something of the recording is on screen before a
+frame has been decoded. A recording with no picture yet, or one that will never
+have one, keeps the element's own first frame: a player has no room for a
+sentence explaining an absent poster, and no need of one.
+
+The waveform is `crates/waveform`'s peaks, one row per sound track of the
+recording, drawn as one filled `<svg>` path per track under the transport. Peaks
+are asked for at the width they will be drawn at, which is what the pyramid in
+[waveforms.md](waveforms.md) is for; **a track with no peaks is drawn as nothing
+and a sentence, never as a flat line**, because a flat line is
+indistinguishable from silence.
+
+It is not a timeline. There is no playhead, nothing to scrub, and no bookmarks
+or events on it — those are
+[#64](https://github.com/wildware-uk/clipped/issues/64) and
+[#65](https://github.com/wildware-uk/clipped/issues/65), and a control drawn
+here that did nothing would be AGENTS.md section 27.
+
 ### What is not built
 
 Frame-accurate seeking and keyboard shortcuts of Clipped's own: what is drawn is
 the media element's transport, which seeks to a keyframe (SPEC.md section 42,
-[#52](https://github.com/wildware-uk/clipped/issues/52)). A poster frame, which
-is the thing [#57](https://github.com/wildware-uk/clipped/issues/57) has been
-waiting for — thumbnails are generated, cached and tested, and *nothing has ever
-drawn one*. A waveform ([#66](https://github.com/wildware-uk/clipped/issues/66)),
-and bookmarks and events on a timeline
-([#64](https://github.com/wildware-uk/clipped/issues/64) and
-[#65](https://github.com/wildware-uk/clipped/issues/65)). Each is a row on the
+[#52](https://github.com/wildware-uk/clipped/issues/52)). A playhead across the
+waveform and marks on it (#64, #65), and a waveform that follows the track being
+played rather than showing every one of them
+([#66](https://github.com/wildware-uk/clipped/issues/66)). Each is a row on the
 screen naming the work, which is the contract every unbuilt row keeps.
 
 ## The tray
@@ -1934,6 +2004,8 @@ They are not from the reference pages, which have no screen in them:
 | `.clipped-path` | A file path, printed in full: monospaced, and broken anywhere, because a Windows path has no spaces to break at. It sets no size, so it takes whatever block it sits in, and no colour, so it is the window's own ink |
 | `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
 | `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below. `.clipped-editor__header` carries the clip's name and Export, and `.clipped-editor__reasons` is the export dialog's list of what decides an export; both are the Editor's, and neither sets a colour |
+| `.clipped-thumb` + `--absent` | A recording's thumbnail in the Library's list, and the tile that stands in for one there is no picture for ([#448](https://github.com/wildware-uk/clipped/issues/448)). One shape for all four states, on the dark ground the player and the editor's frame already use, so an empty tile reads as a frame with nothing in it rather than as a hole in the layout. What tells "not made yet" from "there will not be one" is the **word** in the tile, never its shade; `contrast.test.ts` measures that word on that ground. `--thumb-width` is its one metric, and it is deliberately not the deck's 320-pixel grid tile: this is a row in a dense table |
+| `.clipped-waveform` + `__lane`, `__name`, `__lane-picture` | A recording's sound under the player, one row per track ([#448](https://github.com/wildware-uk/clipped/issues/448)). Laid out like the Editor's timeline and on purpose — a name column of `--editor-lane-label-width` beside a picture that takes what is left, so a waveform here and a waveform there are the same size. The path is **filled** rather than stroked, because the outline is a shape and a stroke of a fixed width would thicken as the picture is stretched; `--color-accent-600` on `--color-surface` is a mark rather than words, which is what `--color-accent-text` exists to distinguish |
 
 **Every screen written so far consumes the component layer** — Home, Library,
 Games, Editor, Settings, Playback and Diagnostics, between them `.clipped-table`,

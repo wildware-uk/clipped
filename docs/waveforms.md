@@ -285,8 +285,11 @@ On **one** thread that `WaveformService` creates and owns.
 
 The intended host is the recorder process, which is the process that already
 knows when a recording is running and can therefore suspend generation
-truthfully. **Nothing hosts it yet**: the consumers are the timeline (issue #65)
-and the clip editor (issue #83), and neither exists.
+truthfully, and **it does host it**: `LibraryIndexer::for_this_user` starts the
+service beside the index and asks for a waveform per recording after each
+reconciliation (issue #293). What it does not yet do is *suspend* it — nothing
+in `apps/recorder` calls `suspend_for_recording` or `resume` — so the half of
+the promise that is kept today is the thread and I/O priority below.
 
 ### What bounds it
 
@@ -394,12 +397,51 @@ why the honest summary is that this is a disk job with a decoder attached.
 That needs a game, a GPU and a machine to itself, so it is a manual measurement
 rather than a test — see the verification notes on issue #66.
 
+## How they reach the window
+
+The window cannot open a `.cwf` and never will. It has no file-system
+permission, and `tests/integration/tests/workspace_layering.rs` permits the
+Tauri host exactly one crate of this workspace, `clipped-ipc` — so neither the
+host nor the webview links a reader for this format, and giving the webview the
+file would mean a second implementation of the layout above in TypeScript, of
+the one surface where the two halves disagreeing is a waveform that is quietly
+wrong.
+
+So the peaks cross as **numbers**, on the same `open_preview` command that
+carries a thumbnail ([ipc.md](ipc.md),
+[ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
+[#448](https://github.com/wildware-uk/clipped/issues/448)). One command, one
+reply and one set of three states for both, because a picture of a recording and
+a picture of its sound are the same problem — derived, cached outside the index,
+and unreachable from the window — and two mechanisms would have been two things
+to keep in step.
+
+A request names **how many buckets the caller can draw**, which in practice is
+the pixel width of the row. That is what the pyramid is for and it is not an
+approximation: merging is exact, so answering on the caller's own grid is the
+same answer rather than a resampling of somebody else's. It is also what keeps
+the reply small — the base resolution of an hour is 360,000 buckets, which no
+frame holds — and the request is clamped to 4,096, past the width of any display
+this runs on.
+
+The wire shape is two numbers per bucket, minimum then maximum, interleaved in
+one array: the two halves of a bucket cannot then arrive at different lengths,
+and it is a quarter of the bytes a list of objects would cost. Zero tracks is a
+successful answer and not a failure, which is what every recording Clipped
+writes today produces.
+
 ## What is not built
 
-- Nothing draws these numbers yet. The timeline is issue #65 and the clip editor
-  is issue #83.
-- Nothing hosts the service yet, so no process suspends it when a recording
-  starts. The mechanism is here and tested; the wiring belongs with the process
-  that owns recording state.
+- **Nothing draws these numbers on a timeline yet.** The transport is here and
+  the peaks reach the window; the timeline is issue #65 and the clip editor is
+  issue #83, and the Editor screen still cannot open a clip at all (issue #306),
+  so its lanes still say "No waveform". The playback screen draws the peaks of
+  the recording it is playing, which is the first time any of these numbers has
+  been on a screen.
+- Nothing **suspends** the service when a recording starts. The recorder hosts
+  it — `LibraryIndexer::for_this_user` starts it beside the indexer — but
+  nothing calls `suspend_for_recording` or `resume`, so what protects a
+  recording today is entirely the worker's thread and I/O priority. The
+  mechanism is here and tested; the caller is not.
 - The effect on an active game is stated as a design property and measured only
   as far as thread and I/O priority; the frame-time measurement is deferred.

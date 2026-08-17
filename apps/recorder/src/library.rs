@@ -56,7 +56,7 @@ use std::time::SystemTime;
 use clipped_ipc::{
     ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
     LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LockMark,
-    ProtocolError, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
+    Preview, ProtocolError, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
     TrashListing, TrashedItem, MAX_FRAME_BYTES,
 };
 use clipped_library::favourites::Favourite;
@@ -1014,6 +1014,50 @@ impl LibraryIndexer {
             shared.storage = storage;
         }
         self
+    }
+
+    /// The same indexer, keeping its pictures and its peaks in named
+    /// directories.
+    ///
+    /// For tests, which must not read or write the thumbnail and waveform
+    /// caches of whoever is running them (AGENTS.md section 25) — the reason
+    /// [`Self::at`] leaves both services unstarted and only
+    /// [`Self::for_this_user`] installs them.
+    #[must_use]
+    pub fn with_preview_caches(mut self, thumbnails: PathBuf, waveforms: PathBuf) -> Self {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.thumbnails = Some(ThumbnailService::start(
+                ThumbnailCache::at(thumbnails),
+                ServiceOptions::new(),
+            ));
+            shared.waveforms = Some(WaveformService::start(
+                WaveformCache::at(waveforms),
+                WaveformOptions::new(),
+            ));
+        }
+        self
+    }
+
+    /// One recording's thumbnail, or the peaks of its sound.
+    ///
+    /// Answered here rather than in `crate::serve` because this is what holds
+    /// the two services: they are started beside the indexer, because indexing
+    /// is what asks for a picture per recording after a reconciliation
+    /// (`Indexer::picture_what_was_indexed`). A window asking for one goes to
+    /// the same place, which is what makes "the window asked for it" and "the
+    /// sweep asked for it" the same queue rather than two
+    /// ([issue #448](https://github.com/wildware-uk/clipped/issues/448)).
+    ///
+    /// # Errors
+    ///
+    /// What `crate::preview::open` refuses: a request naming no recording, and
+    /// a machine with nowhere to keep either cache.
+    pub fn preview(&self, request: &clipped_ipc::OpenPreview) -> Result<Preview, ProtocolError> {
+        crate::preview::open(
+            request,
+            self.shared.thumbnails.as_ref(),
+            self.shared.waveforms.as_ref(),
+        )
     }
 
     /// Starts the thread, and asks it for the run that catches up on everything

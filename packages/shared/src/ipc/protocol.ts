@@ -136,6 +136,7 @@ export const FEATURES = [
   'microphone_level',
   'startup',
   'automatic',
+  'previews',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -171,6 +172,7 @@ export const COMMANDS = [
   'plugins',
   'export_recording',
   'open_playback',
+  'open_preview',
   'get_hotkeys',
   'get_settings',
   'apply_settings',
@@ -265,6 +267,7 @@ export const REPLIES = [
   'plugins',
   'recording_exported',
   'playback_opened',
+  'preview_opened',
   'hotkeys',
   'settings',
   'audio_devices',
@@ -771,6 +774,204 @@ export interface PlaybackTrack {
    * flag, which is why `open_playback` decides what is served.
    */
   readonly default?: boolean;
+}
+
+/**
+ * The two derived pictures a recording has.
+ *
+ * Closed, like {@link RecorderState} and {@link HotkeyStateName}: the two are
+ * drawn by entirely different code — a `data:` URI in an `<img>`, or peaks on a
+ * canvas — so a window that met a third and guessed would draw peaks as a
+ * picture, or a picture as peaks. `crates/ipc/src/preview.rs` refuses one it
+ * does not know for the same reason, and the schema records both sides as
+ * intolerant (issue #448).
+ */
+export const PREVIEW_KINDS = ['thumbnail', 'waveform'] as const;
+
+/** Which picture a request asks for. There is no unrecognised kind. */
+export type PreviewKind = (typeof PREVIEW_KINDS)[number];
+
+/**
+ * Where a preview stands.
+ *
+ * Closed for the reason above, and this one carries issue #448's second
+ * criterion: `pending` is the ordinary state of a recording that has just been
+ * written, `unavailable` means there will never be a picture, and a screen that
+ * collapsed the two would put a broken tile over every new recording — or an
+ * empty one over a file it can never draw. A state this build cannot name would
+ * be drawn as one it can, which is the fabricated state AGENTS.md section 27
+ * forbids.
+ */
+export const PREVIEW_STATES = ['pending', 'ready', 'unavailable'] as const;
+
+/** How far a preview has got. There is no unrecognised state. */
+export type PreviewState = (typeof PREVIEW_STATES)[number];
+
+/**
+ * Which recording to draw, and which of its two pictures.
+ *
+ * Asking is also what causes one to be made: the recorder answers `pending`
+ * *and* queues the work, so a row being drawn is what puts that recording at
+ * the front of the queue (`crates/ipc/src/preview.rs`).
+ *
+ * A type alias rather than an interface so that it is assignable to
+ * {@link JsonValue}, which is what {@link RecorderRequest.params} takes.
+ */
+export type OpenPreviewParams = {
+  /** The recording to draw, as {@link LibraryRecording.path} reported it. */
+  readonly source: string;
+  /**
+   * Which picture is wanted.
+   *
+   * Required, with no default: the two answers are shaped differently, and
+   * guessing would answer a screen asking for peaks with a picture it cannot
+   * draw.
+   */
+  readonly kind: PreviewKind;
+  /**
+   * How many buckets of peaks the caller can draw, for a `waveform`.
+   *
+   * The width in pixels of the space the waveform goes in, in the ordinary
+   * case. Asking at the width that will be drawn is not an approximation:
+   * `crates/waveform` stores a pyramid of resolutions and merging buckets is
+   * exact, so the answer arrives on the caller's own grid.
+   *
+   * Absent means an overview, the coarsest resolution the recorder keeps.
+   * Clamped by the recorder rather than refused, and ignored for a thumbnail,
+   * which has one stored size.
+   */
+  readonly buckets?: number;
+};
+
+/**
+ * One recording's thumbnail or waveform, as far as it exists.
+ *
+ * Which of {@link Preview.picture} and {@link Preview.tracks} is filled in
+ * follows from {@link Preview.kind}, and whether either is follows from
+ * {@link Preview.state}. A window branches on those two rather than on which
+ * fields happen to be present: the recorder leaves out what does not belong, so
+ * a missing picture is never the difference between "not yet" and "never".
+ */
+export interface Preview {
+  /**
+   * Which picture this answers about.
+   *
+   * Echoed rather than assumed: a window draws several recordings at once and
+   * an answer has to be matched to what it answers.
+   */
+  readonly kind: PreviewKind;
+  /** Where it stands. */
+  readonly state: PreviewState;
+  /** The picture, for a `thumbnail` that is `ready`. */
+  readonly picture?: PreviewPicture;
+  /**
+   * One entry per sound track, for a `waveform` that is `ready`.
+   *
+   * Empty for every other state, and legitimately empty for a recording with no
+   * sound at all — which is what Clipped writes today, until multi-track audio
+   * (issue #180). A window drawing a row per track therefore needs no branch.
+   */
+  readonly tracks?: readonly PreviewTrack[];
+  /**
+   * Why there will not be one, for a state of `unavailable`.
+   *
+   * A sentence naming what happened, shown as it arrives. It never carries a
+   * directory: the generators format their errors through
+   * `clipped_logging::RedactedPath`, so what crosses the boundary is a file
+   * name rather than the folders somebody chose (AGENTS.md section 14).
+   */
+  readonly reason?: string;
+}
+
+/** A thumbnail, ready to be drawn. */
+export interface PreviewPicture {
+  /**
+   * What {@link PreviewPicture.bytes} is, as a media type — `image/jpeg` for
+   * what this build stores.
+   *
+   * Carried rather than assumed so that the window builds its `data:` URI
+   * without knowing which format the generator chose; `docs/thumbnails.md`
+   * argues JPEG against WebP and the argument is not settled.
+   */
+  readonly media_type: string;
+  /**
+   * The picture itself, base64 (RFC 4648, with padding).
+   *
+   * Straight into `src="data:{media_type};base64,{bytes}"`, which
+   * `tauri.conf.json`'s `img-src` already permits — no asset scope, no new
+   * origin, and the peaks travel by the same route (issue #448).
+   */
+  readonly bytes: string;
+  /** How wide the picture is, in pixels. */
+  readonly width: number;
+  /** How tall it is. */
+  readonly height: number;
+  /**
+   * How far into the recording the frame came from, in seconds.
+   *
+   * Not the first frame, and deliberately: `docs/thumbnails.md` explains which
+   * frame is chosen and why.
+   */
+  readonly at_seconds: number;
+  /**
+   * Whether every candidate frame was a flat colour, so this one is too.
+   *
+   * True is honest rather than a failure — that is what the recording looks
+   * like — and a screen may draw it or fall back to its no-picture tile.
+   */
+  readonly blank?: boolean;
+}
+
+/** One sound track of a recording, reduced to peaks. */
+export interface PreviewTrack {
+  /**
+   * The stream index the container declares the track at.
+   *
+   * The same numbering {@link PlaybackTrack.index} uses, so a screen showing a
+   * waveform beside a track selector can put the two together.
+   */
+  readonly index: number;
+  /**
+   * What the track is called — `Microphone`, `Game` — where the recording named
+   * it.
+   *
+   * Absent for a file that named none. A window shows the position rather than
+   * inventing a name.
+   */
+  readonly name?: string;
+  /** The track's sample rate, in hertz. */
+  readonly sample_rate: number;
+  /**
+   * How many channels it carries.
+   *
+   * The channels are merged into these peaks rather than averaged, so a sound
+   * panned hard to one side is as visible as one in the middle. This is what
+   * the track holds, not how many rows of peaks there are — there is always
+   * one.
+   */
+  readonly channels: number;
+  /**
+   * How long the track is, in seconds.
+   *
+   * What {@link PreviewTrack.peaks} spans: the first bucket starts at zero and
+   * the last one ends here.
+   */
+  readonly duration_seconds: number;
+  /**
+   * The peaks, two numbers per bucket: the lowest sample and then the highest,
+   * each scaled to ±127.
+   *
+   * Interleaved rather than two arrays, so the two halves of a bucket cannot
+   * arrive at different lengths, and rather than a list of objects, which costs
+   * four times the bytes for the same numbers. The length is therefore always
+   * even, there are `peaks.length / 2` buckets, and each covers
+   * `duration_seconds / (peaks.length / 2)`.
+   *
+   * Minimum *and* maximum rather than one magnitude, because asymmetric audio
+   * is a real thing and drawing it as a mirror image is a lie about the
+   * recording.
+   */
+  readonly peaks?: readonly number[];
 }
 
 /** One media file a sitting produced. */
@@ -1389,6 +1590,21 @@ export interface PlaybackOpenedReply {
 }
 
 /**
+ * A recording's thumbnail or waveform, or the reason there is not one yet.
+ *
+ * The picture itself, rather than a path to it: what the recorder holds is a
+ * cache entry the window has no permission to read, and the peaks are a binary
+ * sidecar only `crates/waveform` knows how to read. Both therefore travel as
+ * this reply (issue #448).
+ */
+export interface PreviewOpenedReply {
+  /** The tag. */
+  readonly reply: 'preview_opened';
+  /** What there is of the picture, and which of the three states it is in. */
+  readonly preview: Preview;
+}
+
+/**
  * The states one hotkey binding can be in.
  *
  * Closed, like {@link RecorderState} and for the same reason: a state this
@@ -1669,6 +1885,7 @@ export type Reply =
   | PluginsReply
   | RecordingExportedReply
   | PlaybackOpenedReply
+  | PreviewOpenedReply
   | HotkeysReply
   | SettingsReply
   | AudioDevicesReply

@@ -268,10 +268,10 @@ export interface Missing {
 /**
  * What issue #52 asks of this screen and it does not yet do.
  *
- * Shorter than it was, because playing a recording and choosing its sound track
- * are on the screen now (issue #304). What is left is what would otherwise be
- * drawn over nothing: a poster frame Clipped has never produced on a real
- * machine, and a waveform that is a file this window has no route to.
+ * Shorter than it was again. Playing a recording and choosing its sound track
+ * arrived with issue #304; the poster frame and the waveform arrived with
+ * issue #448, which is what gave a picture and a set of peaks a route to this
+ * window at all. What is left is what would otherwise be drawn over nothing.
  */
 export const MISSING: readonly Missing[] = [
   {
@@ -285,13 +285,13 @@ export const MISSING: readonly Missing[] = [
       'What is drawn is the media element’s own transport, which seeks to a keyframe. SPEC.md section 42 asks for more, and it is issue #52',
   },
   {
-    shows: 'A poster frame before playback starts',
+    shows: 'Bookmarks and events on the waveform, and a playhead across it',
     needs:
-      'Thumbnails are generated, cached and tested (issue #57) and nothing has ever drawn one: the cache is a file beside the recording, and the scheme this screen plays through serves recordings the recorder opened rather than pictures beside them',
+      'The peaks are drawn (issue #448) and what is under them is not a timeline: there is no playhead, nothing to scrub and no marks on it. Bookmarks are written beside the recording already (issue #64) and issue #65 is the timeline that carries them',
   },
   {
-    shows: 'A waveform under the transport, and bookmarks and events on it',
+    shows: 'A waveform that follows the track being played',
     needs:
-      'Waveforms are issue #66 and are files too, so they need the same route a thumbnail does; bookmarks are written beside the recording already (issue #64) and issue #65 draws a timeline.',
+      'What is drawn is every sound track of the recording, which is what the recorder computed. Highlighting the one the element is playing, and zooming into it, is issue #66',
   },
 ];

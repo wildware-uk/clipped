@@ -309,6 +309,22 @@ pub mod features {
         /// on: converging `serve` and `watch` is a recorder that advertises this
         /// where today's does not, and needs nothing here to change.
         AUTOMATIC = "automatic";
+        /// The recorder can answer with a recording's thumbnail or the peaks of
+        /// its sound: `open_preview`.
+        ///
+        /// A UI asks for this before drawing a tile that would hold a picture,
+        /// for the reason the others give: a recorder built before
+        /// [issue #448](https://github.com/wildware-uk/clipped/issues/448) has
+        /// no `open_preview` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) — for
+        /// every recording on the screen, which is the one place a per-row
+        /// refusal is expensive rather than merely wrong.
+        ///
+        /// It says the recorder *can be asked*, not that any picture exists: a
+        /// recorder that has generated none answers
+        /// [`PreviewState::Pending`](crate::PreviewState) for every recording,
+        /// which is a different fact and one a screen draws differently.
+        PREVIEWS = "previews";
     }
 }
 

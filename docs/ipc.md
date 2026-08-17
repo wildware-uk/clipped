@@ -256,10 +256,23 @@ ends for a saving nobody here can measure; Protocol Buffers, which brings a
 schema compiler and a build step into a project that currently needs neither, to
 solve a versioning problem the handshake already solves.
 
-**High-bandwidth data is not in scope for this protocol at all.** Live preview
-frames, waveforms and thumbnails do not belong in JSON on a control channel, and
-they get their own transport decision when something needs them
-([ADR 0002](adr/0002-separate-recorder-process.md) says the same).
+**High-bandwidth data is not in scope for this protocol.** A live preview of
+what is being captured — a picture a second, or thirty — does not belong in JSON
+on a control channel, and still gets its own transport decision when something
+needs one ([ADR 0002](adr/0002-separate-recorder-process.md) says the same).
+
+This page used to name thumbnails and waveforms in that sentence as well, and
+[#448](https://github.com/wildware-uk/clipped/issues/448) is where that was
+argued out and decided the other way. They are not a stream: a thumbnail is one
+20 kB picture, asked for once per recording as a row is drawn, and a waveform is
+a few kilobytes of peaks at the width they will be drawn at. That is inside "a
+few messages a second, a few hundred bytes each" by an order of magnitude and
+nowhere near [`MAX_FRAME_BYTES`](#framing). The transport they were being kept
+off this channel *for* — a Tauri asset scope over the cache directory — turned
+out to be unable to carry the peaks at all, and to cost the window a
+file-system permission it has never had. [`open_preview`](#open_preview) is what
+came of that; the rule the sentence was protecting is intact, and the two things
+it was protecting against turned out not to be examples of it.
 
 ## Connections and roles
 
@@ -331,7 +344,7 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`,
+`shutdown`, `library`, `export`, `playback`, `previews`, `hotkeys`, `replay`,
 `export_progress`, `settings`, `microphone_level`, `startup`, `automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
@@ -362,6 +375,13 @@ going to be written.
 [`open_playback`](#open_playback) has no way to open a recording for playback and
 refuses the command by name, and a window that had already drawn a transport
 would be showing a control that cannot work.
+
+`previews` is the check in front of a tile that would hold a picture. A
+recorder built before [`open_preview`](#open_preview) refuses the command by
+name, once for every recording on the screen, and a window that did not check
+would draw a grid of empty squares that looks exactly like a library whose
+pictures have not been generated yet. Those are opposite answers: one is worth
+waiting for and the other never resolves.
 
 `hotkeys` is the one where the two answers are *opposites*. A recorder built
 before [`get_hotkeys`](#get_hotkeys) registers no global hotkey at all, so every
@@ -616,6 +636,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `open_playback` | `source`, `audio_track` (optional) | `playback_opened` | yes |
+| `open_preview` | `source`, `kind`, `buckets` (optional) | `preview_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `get_settings` | none | `settings` | yes |
 | `apply_settings` | `values`, below | `settings` | yes |
@@ -1270,6 +1291,121 @@ Two refusals, both `playback_failed` and both saying which:
   sound, and look exactly as though it had worked.
 
 The recording is opened for reading and is never modified, on either path.
+
+### `open_preview`
+
+A recording's thumbnail, or the peaks of its sound
+([#448](https://github.com/wildware-uk/clipped/issues/448)).
+
+```json
+{"type":"request","id":14,"command":"open_preview",
+ "params":{"source":"D:\clips\cs2-20260811-201400-1.mkv","kind":"thumbnail"}}
+```
+
+`source` is required and has no default, for the reason
+[`open_playback`](#open_playback)'s has none. `kind` is `thumbnail` or
+`waveform` and is also required: the two answers are shaped differently, and a
+default would be a guess at which screen is asking. `buckets` is how many
+buckets of peaks the caller can draw — in practice the pixel width of the row —
+and is ignored for a thumbnail.
+
+```json
+{"type":"response","id":14,"outcome":{"ok":{
+  "reply":"preview_opened",
+  "preview":{"kind":"thumbnail","state":"ready","tracks":[],
+             "picture":{"media_type":"image/jpeg","bytes":"/9j/4A…",
+                        "width":640,"height":360,"at_seconds":184.5,
+                        "blank":false}}}}}
+```
+
+**The picture itself, not a path to one.** That is the decision #448 exists to
+take, and it is recorded in
+[ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md). In short: the
+alternative was a Tauri asset scope over the cache directory, which cannot carry
+the *peaks* — a waveform entry is a `.cwf`, a binary sidecar the Tauri host may
+not link a reader for and the window would have to reimplement — so a scope
+would have served the thumbnail and left the waveform needing a second
+mechanism. Base64 in a reply goes into a `data:` URI, which the window's content
+security policy already permits, so this costs no permission and no policy
+change.
+
+The objection to bytes on a protocol is a page of them at once, and this is
+never a page: one recording is asked about at a time, as its row is drawn, so
+what crosses is one 20 kB picture in a frame that holds a mebibyte. A page of
+twenty-five is twenty-five frames of about 27 kB each, measured by
+`a_page_of_thumbnails_is_a_page_of_frames_and_each_one_fits` in
+`apps/recorder/src/preview/tests.rs` and quoted in
+[thumbnails.md](thumbnails.md).
+
+### Three states, and none of them is a refusal
+
+```json
+{"reply":"preview_opened","preview":{"kind":"thumbnail","state":"pending","tracks":[]}}
+```
+
+```json
+{"reply":"preview_opened",
+ "preview":{"kind":"thumbnail","state":"unavailable","tracks":[],
+            "reason":"cs2-20260811-201400-1.mkv holds no video stream, so there is no frame to show"}}
+```
+
+`pending` is the ordinary state of a recording that has just been written, and
+of one that was trimmed or replaced since its picture was made; a screen draws
+the tile with no picture in it. `unavailable` means there will not be one, and
+`reason` says why. **Keeping those two apart is the point.** An empty tile and a
+broken one are different facts about a library, and a window that collapsed them
+would report a disconnected drive as a library nobody has indexed yet — the
+fabricated state AGENTS.md section 27 forbids.
+
+Asking is also what causes one to be made: a miss queues the work and answers
+`pending` immediately, so a screen that draws a recording is what puts it at the
+front of the queue. Nothing here waits for generation to finish, because a
+response that took the tens of milliseconds a thumbnail costs — let alone the
+seconds a waveform does — multiplied by every row on a screen, is a screen that
+does not draw.
+
+`reason` carries no directory. Both generators format their errors through
+`clipped_logging::RedactedPath`, so what crosses is a file name and a digest
+rather than the account name in `%LOCALAPPDATA%` (AGENTS.md section 14).
+
+### The waveform answer
+
+```json
+{"type":"response","id":15,"outcome":{"ok":{
+  "reply":"preview_opened",
+  "preview":{"kind":"waveform","state":"ready",
+             "tracks":[{"index":1,"name":"Game","sample_rate":48000,"channels":2,
+                        "duration_seconds":6540.5,
+                        "peaks":[-118,120,-12,9,0,0,-127,127]}]}}}}
+```
+
+`peaks` is **two numbers per bucket** — the lowest sample and then the highest,
+each scaled to ±127 — interleaved rather than sent as two arrays, so the two
+halves of a bucket cannot arrive at different lengths, and rather than a list of
+objects, which is four times the bytes for the same numbers. There are
+`peaks.length / 2` buckets and each covers `duration_seconds` divided by that.
+
+Minimum *and* maximum rather than one magnitude, because asymmetric audio is a
+real thing and drawing it as a mirror image is a lie about the recording
+([waveforms.md](waveforms.md)).
+
+Answering at the caller's own width is not an approximation. `crates/waveform`
+stores a pyramid, and merging buckets is exact — the maximum of two maxima *is*
+the maximum of the union — so a row 1,280 pixels wide asking for 1,280 buckets
+gets the same answer on its own grid rather than a resampling of somebody
+else's. It is what keeps the reply small: the base resolution of an hour-long
+recording is 360,000 buckets, which is not something a frame can hold. `buckets`
+is clamped to 4,096, which is past the width of any display this runs on.
+
+Zero tracks is a successful answer, not a failure: it is what a recording with
+no sound produces, which is every recording Clipped writes until multi-track
+audio ([#180](https://github.com/wildware-uk/clipped/issues/180)).
+
+Two refusals, and both are about the question rather than the recording:
+`invalid_parameters` for a request naming no `source`, and `library_unavailable`
+for a machine that describes no per-user directory, so there is nowhere for
+either cache to be. Everything else — a recording that has gone, one that cannot
+be decoded, one nobody has generated anything for — is a `preview` with a state.
 
 ### `get_hotkeys`
 
@@ -2071,6 +2207,7 @@ cargo run -p clipped-ipc --bin protocol-schema
 | `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C — and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 | `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
+| `apps/recorder/src/preview/tests.rs` | `open_preview` against thumbnail and waveform caches built for the test: that the picture is the picture of *that* recording, that "not made yet" and "there will not be one" stay apart, that a recording changed since its picture was made is not shown the old one, that peaks come back at the width the caller asked for, and what a page of twenty-five costs |
 | `packages/shared/src/ipc/conformance.test.ts` | The TypeScript mirror against that schema: every enumeration both ways, every field of every object, and every sample frame parsed to the same verdict the recorder reached |
 
 The rejection tests each end by asserting that the *next* client is still
