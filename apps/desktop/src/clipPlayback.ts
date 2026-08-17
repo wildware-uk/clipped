@@ -16,7 +16,7 @@ import type { InterruptedRecording, RecorderLinkView } from './useRecorderLink';
  * There was none until issue #304, and the reasons filled a table on this
  * screen. Three of the four turned out to be wrong: a WebView2 plays a Clipped
  * recording — Matroska, AV1 picture, uncompressed PCM sound — as it is, which
- * `docs/adr/0010-what-the-webview-plays.md` records with the measurement behind
+ * `docs/adr/0011-what-the-webview-plays.md` records with the measurement behind
  * it. What was true, and still is, is that this window cannot reach a file on
  * its own and that a media element cannot choose an audio track. So the
  * recorder opens the recording and says what to play (`playback.ts`), and the

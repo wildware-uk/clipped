@@ -8,7 +8,7 @@
 //! **It plays the recording.** Measured rather than assumed: a Clipped
 //! recording — AV1 picture, uncompressed PCM sound, in Matroska — loads,
 //! decodes and plays in the engine the window is drawn by
-//! (`docs/adr/0010-what-the-webview-plays.md`). So the ordinary case costs
+//! (`docs/adr/0011-what-the-webview-plays.md`). So the ordinary case costs
 //! nothing at all: the answer to "what should I play" is the recording itself.
 //!
 //! **It cannot choose an audio track.** `HTMLMediaElement.audioTracks` is not
@@ -222,7 +222,7 @@ fn choose(
 ///
 /// **The first sound track, not the flagged one.** Chromium ignores Matroska's
 /// default-track flag and takes the first audio stream it finds — measured, and
-/// recorded in `docs/adr/0010-what-the-webview-plays.md` — so this asks the
+/// recorded in `docs/adr/0011-what-the-webview-plays.md` — so this asks the
 /// question the media element will actually answer. For a Clipped recording the
 /// two agree, because the compatibility mix both leads the file and carries the
 /// flag; for anything else they need not, and a copy is what makes the answer

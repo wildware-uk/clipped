@@ -70,6 +70,7 @@ import type {
   LibraryTrashReply,
   RestoredReply,
   TrashEmptiedReply,
+  FavouritedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -100,6 +101,9 @@ import type {
   ReplaySummary,
   SaveReplayParams,
   ServerMessage,
+  SessionEndedEvent,
+  SessionRecording,
+  SessionSummary,
   StartRecordingParams,
   StatusChangedEvent,
   ShutdownParams,
@@ -108,6 +112,7 @@ import type {
   StopRecordingParams,
   UnboundHotkey,
   UnsupportedProtocolVersionDetail,
+  WatchingStatus,
   Welcome,
 } from './protocol';
 import {
@@ -304,6 +309,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
+  }),
+  session_summary: fields<SessionSummary>({
+    session_id: 'required',
+    game_id: 'optional',
+    game_name: 'optional',
+    started_at: 'required',
+    ended_at: 'optional',
+    end_reason: 'optional',
+    recordings: 'required',
+  }),
+  session_recording: fields<SessionRecording>({
+    session_index: 'required',
+    output: 'required',
+    outcome: 'optional',
+    duration_ms: 'optional',
   }),
   recording_summary: fields<RecordingSummary>({
     output: 'required',
@@ -493,6 +514,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     emptied: 'required',
   }),
+  'reply.favourited': fields<FavouritedReply>({
+    reply: 'required',
+    mark: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -526,6 +551,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
+  'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
     recording_id: 'required',
@@ -533,8 +559,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
   }),
   'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
+  'event.session_ended': fields<SessionEndedEvent>({ event: 'required', session: 'required' }),
   'event.recording_failed': fields<RecordingFailedEvent>({
     event: 'required',
     recording_id: 'required',
@@ -640,6 +668,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'set_favourite',
+    params: 'set_favourite',
+    reply: 'reply.favourited',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -723,6 +757,11 @@ function replyDiscriminant(reply: Reply): string {
       // One discriminant: a refusal list that is empty is the same shape
       // carrying nothing, and it is always present.
       return 'trash_emptied';
+    case 'favourited':
+      // One discriminant: whether the mark changed is a field, not a shape, and
+      // a session and a recording differ only in which half of the target is
+      // filled in.
+      return 'favourited';
     case 'library_trash':
       // One discriminant, for the same reason: an empty trash is the same
       // shape carrying nothing, and there is no paging to lose.
@@ -753,6 +792,11 @@ function eventDiscriminant(event: RecorderEvent): string {
   switch (event.event) {
     case 'status_changed':
       return `status_changed.${event.status.state}`;
+    case 'session_ended':
+      // The reason is part of the path, because it is the one thing this event
+      // says that a window shows differently — and dropping a reason invented
+      // later would otherwise reach the same answer as keeping it.
+      return `session_ended.${event.session.end_reason ?? 'unstated'}`;
     case 'recording_failed':
       return 'recording_failed';
     case undefined:

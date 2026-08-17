@@ -31,7 +31,7 @@ automatically when a game in the catalogue launches, and stops when it exits.
 **The desktop window runs**, from `npm run dev`. It starts and stops a recording,
 lists what has been recorded, and **plays one** — with sound, and with any of its
 audio tracks ([#304](https://github.com/wildware-uk/clipped/issues/304),
-[ADR 0010](docs/adr/0010-what-the-webview-plays.md)). It cannot yet export one
+[ADR 0011](docs/adr/0011-what-the-webview-plays.md)). It cannot yet export one
 ([#322](https://github.com/wildware-uk/clipped/issues/322)), and the library
 draws no thumbnails yet. Recordings land in `%USERPROFILE%\Videos\Clipped\` and
 any player that handles Matroska will open them.

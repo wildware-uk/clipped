@@ -335,7 +335,7 @@ describe('the Library screen', () => {
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
-    ['favourites', /^favourites, and filtering/i, [58]],
+    ['filtering by favourite', /^filtering the list down to favourites/i, [60]],
     ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
     // Playing a *recording* is no longer on this list: Play is a control on
     // every row since issue #304, and a row promising what the screen already
@@ -923,5 +923,183 @@ describe('the Library screen', () => {
       await screen.findByRole('heading', { name: 'The trash could not be read' }),
     ).toBeInTheDocument();
     expect(screen.queryByText('Nothing has been deleted.')).not.toBeInTheDocument();
+  });
+
+  /*
+   * Favouriting (issue #58, SPEC.md section 29).
+   *
+   * The read has always carried `favourite` and automatic cleanup has always
+   * protected what is marked. What did not exist was any way to *set* one, so
+   * these are the tests that the star reaches the recorder rather than filling
+   * itself in: the runtime rejects `set_favourite` unless a test stubs it, so a
+   * screen that drew a star and asked nobody fails here rather than passing.
+   */
+  it('marks a sitting as one to keep, and says so as a pressed control', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: args['favourite'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    expect(star).toHaveAttribute('aria-pressed', 'false');
+    await user.click(star);
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'set_favourite'),
+      ).toEqual([
+        {
+          command: 'set_favourite',
+          args: {
+            kind: 'session',
+            sessionId: 'cs2-20260811-201400',
+            id: 0,
+            favourite: true,
+          },
+        },
+      ]);
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: /^Stop keeping the Counter-Strike 2 sitting from /,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('addresses a recording by its identifier and a sitting by its name', async () => {
+    // The one thing about this command that a careless wiring gets wrong: the
+    // two kinds are addressed by different fields, because the schema keys them
+    // differently. A recording sent as a `session_id` names nothing.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: true,
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Keep cs2-20260811-201400-1.mkv, Counter-Strike 2',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'set_favourite'),
+      ).toEqual([
+        {
+          command: 'set_favourite',
+          args: { kind: 'recording', sessionId: '', id: 12, favourite: true },
+        },
+      ]);
+    });
+  });
+
+  it('clears a mark that is already on, rather than setting it again', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session({ favourite: true })])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: args['favourite'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: /^Stop keeping the Counter-Strike 2 sitting from /,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations
+          .filter((invocation) => invocation.command === 'set_favourite')
+          .map((invocation) => invocation.args['favourite']),
+      ).toEqual([false]);
+    });
+  });
+
+  it('draws the mark the library holds rather than the one that was asked for', async () => {
+    // A row that has gone is written to by nothing. The recorder reads the mark
+    // back after the write and answers with what is true, and a star that
+    // filled in anyway would be the window disagreeing with its own next read
+    // (AGENTS.md section 27).
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          favourite: false,
+          changed: false,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    await user.click(star);
+
+    await waitFor(() => {
+      expect(star).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  it('says a mark that would not go on did not, rather than drawing it anyway', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setFavourite: () =>
+        Promise.reject(
+          Object.assign(new Error('the library could not be written'), {
+            code: 'library_unavailable',
+            message: 'the recording library could not be opened: the drive is not there',
+          }),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const star = await screen.findByRole('button', {
+      name: /^Keep the Counter-Strike 2 sitting from /,
+    });
+    await user.click(star);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'That could not be kept. the recording library could not be opened: the drive is not there Nothing was changed.',
+    );
+    expect(star).toHaveAttribute('aria-pressed', 'false');
   });
 });

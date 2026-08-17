@@ -1,4 +1,4 @@
-# 0010. The window plays the archival recording itself, and the recorder chooses which sound track it carries
+# 0011. The window plays the archival recording itself, and the recorder chooses which sound track it carries
 
 - Status: Accepted
 - Date: 2026-08-16

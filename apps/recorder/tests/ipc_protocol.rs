@@ -88,11 +88,17 @@ impl ServedRecorder {
     /// recordings of whoever is running it and write to their library
     /// (AGENTS.md section 25).
     fn start_under(label: &str, home: Option<&Path>) -> Self {
+        Self::started_with(label, home, &[])
+    }
+
+    /// The same, with further arguments after `--endpoint`.
+    fn started_with(label: &str, home: Option<&Path>, extra: &[&str]) -> Self {
         ensure_console();
 
         let name = unique_endpoint_name(label);
         let mut command = Command::new(recorder_binary());
         command.args(["serve", "--endpoint", &name]);
+        command.args(extra);
         if let Some(home) = home {
             command
                 .env("USERPROFILE", home)
@@ -1716,6 +1722,85 @@ fn a_recorder_whose_games_file_cannot_be_read_still_serves_and_says_so() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[test]
+fn a_recorder_watching_for_games_serves_the_protocol_and_stops_cleanly() {
+    // Issue #421 joined the two halves of the recorder: the process that serves
+    // the protocol and owns the hotkeys is now also the one that records games
+    // as they launch. Everything about that is in one process, so the things
+    // most likely to go wrong with it are the ones only a real process shows —
+    // a watcher thread that stops `serve` from ever announcing its endpoint,
+    // and a shutdown that waits for a thread nobody asked to stop.
+    //
+    // The home is redirected because this recorder really does create its
+    // recordings folder and really does watch this machine for launches
+    // (AGENTS.md section 25).
+    let home = scratch_home("watching");
+
+    let recorder = ServedRecorder::started_with("watching", Some(&home), &["--watch-for-games"]);
+    let mut client = recorder.client();
+
+    assert_eq!(
+        client.call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong,
+        "a recorder that watches for games still serves the protocol",
+    );
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        // Nothing has launched, so nothing is being recorded. A recorder that
+        // reported otherwise would be claiming a recording it is not making.
+        Reply::Status { status } => assert_eq!(status, RecorderStatus::Idle),
+        other => panic!("expected a status, got {other:?}"),
+    }
+
+    drop(client);
+    // `stop` asserts the exit was clean rather than a kill, which is the half
+    // that catches a shutdown waiting on the watcher for ever.
+    let diagnostics = recorder.stop();
+    assert!(
+        diagnostics.contains("Watching for games"),
+        "a recorder asked to watch has to say so, or nobody can tell it from one that was \
+         not:\n{diagnostics}"
+    );
+    assert!(
+        home.join("Videos").join("Clipped").is_dir(),
+        "recordings go where the settings say and to the videos folder when they say nothing, \
+         and the folder is made at start-up rather than when a game launches",
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_recorder_that_was_not_asked_to_watch_for_games_does_not() {
+    // The other direction, and what makes the test above mean anything: a build
+    // that watched regardless would pass it just as well, and every `serve`
+    // somebody started at a terminal would begin recording whatever game they
+    // had open.
+    let home = scratch_home("not-watching");
+
+    let recorder = ServedRecorder::start_under("not-watching", Some(&home));
+    let mut client = recorder.client();
+    assert_eq!(
+        client.call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong
+    );
+
+    drop(client);
+    let diagnostics = recorder.stop();
+    assert!(
+        !diagnostics.contains("Watching for games"),
+        "nothing asked this recorder to watch for games:\n{diagnostics}"
+    );
+    assert!(
+        !home.join("Videos").join("Clipped").exists(),
+        "and it must not have made a recordings folder for a user who did not ask it to record",
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// A home directory of this test's own, for a recorder that must not touch the
 /// library or the recordings of whoever is running the tests.
 fn scratch_home(label: &str) -> std::path::PathBuf {
@@ -1813,7 +1898,7 @@ fn open_playback(
 fn a_recording_opened_for_playback_is_served_whole_and_costs_nothing_to_open() {
     // Issue #304's first criterion, from the recorder's side: what the window
     // is told to play is the recording itself, because a WebView2 plays it
-    // (`docs/adr/0010-what-the-webview-plays.md`). A regression that started
+    // (`docs/adr/0011-what-the-webview-plays.md`). A regression that started
     // remuxing every recording somebody watched would leave the player working
     // and cost a pass over the file every time, so `prepared` is asserted as
     // hard as the path is.

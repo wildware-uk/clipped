@@ -18,6 +18,7 @@ import {
   headlineActionProblem,
   useRecordingActions,
 } from './recordingActions';
+import { describeFavouriteProblem, useFavourites } from './favourites';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -62,7 +63,8 @@ const PAGE = 25;
  *
  * A promise to the reader rather than a derived list. The rows that named issue
  * #301 for the session list, the search and a missing file are gone, because
- * those three are on the screen now.
+ * those three are on the screen now, and so is the one for favouriting: every
+ * sitting and every recording has a Keep control, which is issue #58.
  */
 const WAITING: readonly Waiting[] = [
   {
@@ -71,9 +73,9 @@ const WAITING: readonly Waiting[] = [
       'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
   },
   {
-    shows: 'Favourites, and filtering the list down to them (SPEC.md section 29)',
+    shows: 'Filtering the list down to favourites with one control',
     needs:
-      'Favouriting anything at all. Issue #58. The read already carries which things are favourited',
+      'A control on this screen (#60). Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`)',
   },
   {
     shows: 'A thumbnail against each recording, and a waveform under each track',
@@ -302,6 +304,7 @@ export function LibraryScreen(): ReactNode {
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
   const actions = useRecordingActions();
+  const favourites = useFavourites();
   const navigate = useNavigate();
 
   /**
@@ -395,7 +398,14 @@ export function LibraryScreen(): ReactNode {
 
       {read.state === 'read' && read.value.length > 0 && (
         <section aria-label="Sessions">
-          <SessionList sessions={read.value} label="Sessions" actions={actions} onPlay={play} />
+          <SessionList
+            sessions={read.value}
+            label="Sessions"
+            actions={actions}
+            favourites={favourites}
+            onPlay={play}
+          />
+
           {/*
            * One region for the outcome of the last thing somebody asked for,
            * announced rather than only drawn: opening a recording and showing
@@ -404,10 +414,16 @@ export function LibraryScreen(): ReactNode {
            * did anything at all (AGENTS.md sections 45 and 46).
            */}
           <p role="status" className="clipped-panel__body">
-            {actions.outcome.state === 'working' &&
+            {favourites.outcome.state === 'failed' &&
+              `That could not be kept. ${describeFavouriteProblem(favourites.outcome.problem)}`}
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'working' &&
               `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}
-            {actions.outcome.state === 'done' && actions.outcome.message}
-            {actions.outcome.state === 'failed' &&
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'done' &&
+              actions.outcome.message}
+            {favourites.outcome.state === 'idle' &&
+              actions.outcome.state === 'failed' &&
               `${headlineActionProblem(actions.outcome.problem)}. ${describeActionProblem(
                 actions.outcome.problem,
               )}`}

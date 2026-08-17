@@ -24,8 +24,9 @@
 //!   writes it back — re-indexing it, moving it, exporting it — would otherwise
 //!   delete every field it had not learned. [`ReadEvent::to_json`] is the write
 //!   path that does not (AGENTS.md section 56).
-//! - **An unknown `kind` is kept**, as [`EventKind::Unrecognised`] or
-//!   [`EventKind::Custom`] depending on whether it is namespaced. Adding a kind
+//! - **An unknown `kind` is kept**, as [`EventKind::Unrecognised`],
+//!   [`EventKind::Custom`] or [`EventKind::UserLabelled`] depending on whether
+//!   it is namespaced, prefixed as a user label, or neither. Adding a kind
 //!   costs no version bump either — and this is the part that has to be
 //!   implemented rather than inherited, because a tagged union whose tag a
 //!   build does not recognise fails the whole document it is part of. An event
@@ -536,7 +537,7 @@ mod tests {
 
     use super::*;
     use crate::event::{Confidence, EventPayload, EventSource};
-    use crate::kind::{CustomName, EventKind};
+    use crate::kind::{CustomName, EventKind, UserLabel};
     use crate::time::{EventTime, EventTiming};
 
     fn kill() -> GameEvent {
@@ -707,6 +708,41 @@ mod tests {
             read.event.kind(),
             &EventKind::Custom(CustomName::new("acme-cs2.flag_captured").expect("valid"))
         );
+    }
+
+    #[test]
+    fn a_user_labelled_event_round_trips_through_storage_with_its_label_intact() {
+        // Issue #345's acceptance criterion, exercised at the layer that
+        // actually matters: the shape these end up in, in a library's
+        // database and a recording's sidecar.
+        let event = GameEvent::new(
+            EventKind::UserLabelled(
+                UserLabel::new("My Ultimate! (é)").expect("a well-formed label"),
+            ),
+            EventTiming::new(EventTime::from_media_nanos(1), Duration::ZERO),
+            EventSource::application_component("input").expect("a valid component"),
+            Confidence::CERTAIN,
+        );
+
+        let json = StoredEvent::new(event.clone())
+            .to_json()
+            .expect("it serialises");
+        assert!(
+            json.contains(r#""kind":"user:My Ultimate! (é)""#),
+            "the label is the wire form of the kind, unprefixed nowhere: {json}"
+        );
+        assert!(
+            json.contains(r#""source":"clipped.input""#),
+            "the host component is its own source, distinct from `clipped`: {json}"
+        );
+
+        let read = read(&json).expect("a user-labelled event is readable");
+        assert_eq!(read.event, event);
+        let EventKind::UserLabelled(label) = read.event.kind() else {
+            panic!("expected a user-labelled kind, got {:?}", read.event.kind());
+        };
+        assert_eq!(label.label(), "My Ultimate! (é)");
+        assert!(read.event.source().is_application());
     }
 
     #[test]

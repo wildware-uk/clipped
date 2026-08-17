@@ -247,7 +247,14 @@ pub fn sweep(
 }
 
 /// Where this configuration says deleted media goes.
-fn trash_directory(configuration: &Configuration, recordings: &Path) -> PathBuf {
+///
+/// Public because it answers the same question for a second caller:
+/// `clipped-recorder recover --discard` (issue #451) sends a recovered
+/// fragment to this same trash, and computing "the configured directory, or
+/// beside the recordings if nothing was configured" a second time in
+/// `apps/recorder` would be the two answers to one question AGENTS.md
+/// section 55 warns about.
+pub fn trash_directory(configuration: &Configuration, recordings: &Path) -> PathBuf {
     configuration
         .storage()
         .trash_directory()
