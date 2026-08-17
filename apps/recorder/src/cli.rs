@@ -197,9 +197,15 @@ pub struct RecoverArgs {
     #[arg(long)]
     pub adopt: bool,
 
-    /// Delete one recording's file and record that you did. [default: off]
+    /// Move one recording's file to the trash and record that you did.
+    /// [default: off]
     ///
-    /// Requires `--session`, because this is footage that cannot be made again.
+    /// The recording is indexed first, so it goes into the trash the same
+    /// way a deletion from the library does: listed there, restorable, and
+    /// under the same retention as everything else deleted — not merely
+    /// moved with nothing left pointing at it. Requires `--session`: even a
+    /// recoverable action on footage is refused in bulk, so it always names
+    /// the one recording it moves (AGENTS.md section 56).
     #[arg(long, requires = "session")]
     pub discard: bool,
 }
