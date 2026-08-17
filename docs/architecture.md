@@ -250,8 +250,9 @@ large:
   Tauri 2 window hosting a React interface, with its layout, navigation, design
   tokens and accessibility baseline, drawn from `packages/ui` and typed by
   `packages/shared`. It runs — `npm run dev` opens the window — and it shows no
-  data it does not have: each of the seven screens says it is not built and
-  names the issue that builds it, and the recorder status block shows what its
+  data it does not have: six of the seven screens are written and the last,
+  Trash, is the placeholder that names the issue building it
+  (`apps/desktop/src/Shell.tsx`), and the recorder status block shows what its
   link with the recorder reports, which is one wording per link state and no
   guessing ([#106](https://github.com/wildware-uk/clipped/issues/106),
   [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
