@@ -959,6 +959,30 @@ struct Running {
     /// under [`RecordingState::current`], lets that lock go, and only then
     /// writes anything — exactly as `add_bookmark` does with the bookmark log.
     session: Option<Arc<Mutex<ManualSession>>>,
+    /// That same sitting as the protocol describes one, taken when it was
+    /// opened.
+    ///
+    /// **Where the game a recording is of comes from on a status.**
+    /// [`Running::target`] is a capture selector — `process 4242` — and a
+    /// window cannot turn one into "Counter-Strike 2" without the catalogue;
+    /// the session asked the catalogue when it opened, so this is that answer
+    /// (`clipped_ipc::ActiveRecording::session`, issue #241).
+    ///
+    /// A copy rather than a view of [`Self::session`], and it cannot go stale:
+    /// everything on it is fixed for the life of the recording — the
+    /// identifier, the game, when the sitting started and the one file being
+    /// written — and the fields that do change are the ones only a *finished*
+    /// recording has, by which time the status is no longer `recording`. It is
+    /// also what keeps `get_status` off that mutex, which the recording thread
+    /// holds while it writes the session's record to disk (AGENTS.md section
+    /// 20).
+    ///
+    /// [`None`] for a recording the automatic recorder handed over. That one
+    /// belongs to a sitting its session manager owns, which may already hold
+    /// earlier files of the same sitting and is the one on
+    /// [`RecordingState::watching`]; [`status_of`] is where the two answers
+    /// meet.
+    sitting: Option<Box<SessionSummary>>,
     /// The rolling window of the last few minutes, when this recording was
     /// asked for one.
     ///
@@ -1147,6 +1171,12 @@ impl RecordingState {
             now,
         );
 
+        // Taken here, from the session that has just asked the catalogue what
+        // this window is, so that the status can name the game without asking
+        // anything twice and without reaching into the session while a
+        // recording thread is writing to it.
+        let sitting = Box::new(crate::watch::sitting_of(session.session()));
+
         Running {
             id,
             bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
@@ -1158,6 +1188,7 @@ impl RecordingState {
             progress: RecordingProgress::new(),
             screenshots: ScreenshotRequests::new(),
             session: Some(Arc::new(Mutex::new(session))),
+            sitting: Some(sitting),
             // Attached afterwards by [`Running::with_replay`], because it is the
             // one thing about a recording that is optional.
             replay: None,
@@ -1231,6 +1262,12 @@ impl RecordingState {
             progress: progress.clone(),
             screenshots: screenshots.clone(),
             session: None,
+            // And no copy of one either: the sitting this recording belongs to
+            // is the driver's, reported on to `watching` once a pass, and it is
+            // the one `status_of` puts on the status. Taking a copy here would
+            // be a second answer that stopped changing the moment the recording
+            // started — which is the moment the sitting gains this file.
+            sitting: None,
             // No buffer, so `save_replay` refuses an automatic recording in the
             // recorder's own words.
             // [Issue #427](https://github.com/wildware-uk/clipped/issues/427)
@@ -1327,6 +1364,38 @@ impl RecordingState {
         }
     }
 
+    /// Says a sitting is over, with the files it produced.
+    ///
+    /// **This is the producer of
+    /// [`Event::SessionEnded`](clipped_ipc::Event::SessionEnded)**, and the
+    /// second acceptance criterion of
+    /// [issue #241](https://github.com/wildware-uk/clipped/issues/241). The
+    /// event was defined, carried by the schema and parsed by the desktop's
+    /// TypeScript, and nothing ever sent one.
+    ///
+    /// It carries the sitting rather than an identifier because the files are
+    /// the point: a window is told a sitting is over at the moment it can offer
+    /// to open it, and the library has not necessarily indexed any of it yet
+    /// (`docs/library.md`). Both kinds of sitting end through here — the one a
+    /// `start_recording` was the whole of, closed by [`Self::finish`], and the
+    /// one a driver's session manager owns, closed by that manager
+    /// (`crate::watch`) — so there is one thing a client subscribes to rather
+    /// than one per way of starting a recording (AGENTS.md section 55).
+    ///
+    /// The status is left to the caller. A driver's sitting is on
+    /// [`Self::watching`] and comes off it through [`Self::sitting_is`]; a
+    /// `start_recording`'s sitting is part of the recording and goes when the
+    /// recording does, which [`Self::finish`] already publishes.
+    pub(crate) fn sitting_ended(&self, session: SessionSummary) {
+        tracing::info!(
+            session = session.session_id,
+            recordings = session.recordings.len(),
+            "telling every subscriber that a sitting ended"
+        );
+        self.events
+            .publish(&clipped_ipc::Event::SessionEnded { session });
+    }
+
     /// Stores what the watcher is doing and tells every subscriber, if it moved.
     fn watching_is(&self, watching: Option<Watching>) {
         let changed = {
@@ -1346,19 +1415,22 @@ impl RecordingState {
     /// Called with no lock of this state held, because [`Self::status`] takes
     /// both of them.
     ///
-    /// **Silent while a recording is running**, deliberately: a status event
-    /// carries the whole state, and the whole state of a recording recorder is
-    /// the recording. Publishing every change the watcher makes underneath one
-    /// would be a stream of identical `recording` events, and the sitting that
-    /// changed becomes visible the moment the recording ends — which is the
-    /// moment it matters, and the publication [`Self::finish`] already makes.
+    /// **Published while a recording is running as well.** Issue #584 kept
+    /// quiet then, and was right to: the sitting was invisible under a
+    /// `recording` status, so every one of these would have been an identical
+    /// event. It is not invisible any more — a recording carries the sitting it
+    /// belongs to (issue #241) — so the sitting gaining this recording's own
+    /// file is a real change to what a window is drawing, and a subscriber told
+    /// nothing would show "the first file of this sitting" for as long as the
+    /// second one took to record.
+    ///
+    /// It is still not a stream. Both callers compare before they publish, so
+    /// this is reached only when the stored value actually moved, and a driver
+    /// reporting the same sitting once a second reaches it once.
     fn publish_what_the_watcher_changed(&self) {
-        let status = self.status();
-        if status.is_recording() {
-            return;
-        }
-        self.events
-            .publish(&clipped_ipc::Event::StatusChanged { status });
+        self.events.publish(&clipped_ipc::Event::StatusChanged {
+            status: self.status(),
+        });
     }
 
     /// What the watcher is doing, as [`status_of`] needs it.
@@ -1924,16 +1996,24 @@ impl RecordingState {
             // `save_replay` that is still writing a clip holds this lock, and
             // waiting for it is what stops the session's last write racing the
             // clip's entry in it (`ManualSession::finish_in_place`).
-            let ended = {
+            let sitting = {
                 let mut session = session
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                session
-                    .finish_in_place(&for_the_session, SystemTime::now())
-                    .id()
-                    .as_str()
-                    .to_owned()
+                crate::watch::sitting_of(
+                    session.finish_in_place(&for_the_session, SystemTime::now()),
+                )
             };
+            let ended = sitting.session_id.clone();
+
+            // Said before the index run is asked for, because the event carries
+            // the sitting's files precisely so that a window need not wait for
+            // one: the recording is on disk and playable now, and the row that
+            // will describe it is minutes of walking away on a full folder
+            // (`clipped_ipc::Event::SessionEnded`, issue #241). A sitting a
+            // `start_recording` was the whole of ends here; an automatic one
+            // ends in its manager, and says so from there (`crate::watch`).
+            self.sitting_ended(sitting);
 
             // Off this thread and on to the indexer's: this is the recording
             // thread, and walking the recordings folder here would hold up the
@@ -2130,6 +2210,10 @@ fn session_outcome(outcome: &Result<RecordingReport, String>) -> RecordingOutcom
 /// It is only ever the answer when nothing is being recorded: a recorder that is
 /// both watching and recording is **recording**, because that is the thing a
 /// window has to be able to see and stop.
+///
+/// Its *sitting* is read either way, though, and that is the one place the two
+/// arms meet: a recording the watcher started has no sitting of its own and
+/// belongs to the one the watcher is holding.
 fn status_of(running: Option<&Running>, watching: Option<Watching>) -> RecorderStatus {
     match running {
         Some(running) if running.outcome.is_none() => RecorderStatus::Recording(ActiveRecording {
@@ -2144,20 +2228,29 @@ fn status_of(running: Option<&Running>, watching: Option<Watching>) -> RecorderS
                 .replay
                 .as_ref()
                 .map(|replay| u32::try_from(replay.window().as_secs()).unwrap_or(u32::MAX)),
-            // A recording `serve` was asked for directly is not part of a
-            // sitting the recorder is driving, so there is no game name to
-            // give and `target` is the whole of what is known about it.
+            // **The game this recording is of**, which is the first acceptance
+            // criterion of
+            // [issue #241](https://github.com/wildware-uk/clipped/issues/241):
+            // `target` is a capture selector and a window cannot turn `process
+            // 4242` into "Counter-Strike 2" without the catalogue, which lives
+            // here. Both kinds of recording carry it, from the sitting each one
+            // actually belongs to:
             //
-            // **Nothing fills this in, including for a recording the watcher
-            // started**, and that is a gap rather than a decision: issue #421
-            // handed the recording over without its sitting, and it is the
-            // first acceptance criterion of
-            // [issue #241](https://github.com/wildware-uk/clipped/issues/241) —
-            // still open — that a window be able to name the game a recording
-            // is of. Issue #584 built the other half of that criterion: the
-            // sitting a *watching* recorder is in, which this state now holds
-            // and could hand to an adopted recording here.
-            session: None,
+            // - one `start_recording` asked for is the whole of its own
+            //   sitting, copied when [`RecordingState::begin`] opened it;
+            // - one the watcher handed over belongs to the sitting its driver
+            //   is in, which is the one on `watching` — and which may already
+            //   hold the earlier files of the same sitting, so that the second
+            //   file of a sitting stops looking like an unrelated recording.
+            //
+            // In that order, and the order is the point: a `start_recording`
+            // arriving while this recorder is watching must not claim the game
+            // the watcher was in the middle of, which would be a window naming
+            // a game nobody asked to record.
+            session: running
+                .sitting
+                .clone()
+                .or_else(|| watching.and_then(|watching| watching.session)),
         }),
         // Nothing is being recorded, so what this recorder is depends on
         // whether it will record the next game to launch by itself. Those are
@@ -2916,6 +3009,284 @@ mod tests {
 
         assert_eq!(state.status(), RecorderStatus::Idle);
 
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Issue #241's first acceptance criterion, for a recording nobody asked
+    /// for.
+    ///
+    /// The sitting is the only thing that knows the game — `target` is a
+    /// capture selector, and turning `process 4242` into "Counter-Strike 2"
+    /// needs the catalogue — and `status_of` set this field to `None` for every
+    /// recording, so a window could name the game a recorder was *waiting* for
+    /// and not the one it was recording.
+    #[test]
+    fn a_recording_the_watcher_started_carries_the_sitting_it_is_part_of() {
+        let directory = scratch("adopted-sitting");
+        let output = directory.join("test-game-20260811-201400-02.mkv");
+        let state = idle_state(&directory);
+        let _watching = state.watch_for_games();
+
+        let (_adopted, _progress, _stop, _asked) = adopted_recording(&state, &output, None);
+        match state.status() {
+            RecorderStatus::Recording(active) => assert_eq!(
+                active.session, None,
+                "a watcher with no sitting invents none: an empty sitting on a recording would \
+                 be a game name with nothing behind it",
+            ),
+            other => panic!("the recorder should be recording, not {other:?}"),
+        }
+
+        // What the driver reports once a pass, including while this recording
+        // runs, so the sitting is on the status the moment a window asks.
+        state.sitting_is(Some(Box::new(SessionSummary {
+            session_id: "test-game-20260811-201400".to_owned(),
+            game_id: Some("test-game".to_owned()),
+            game_name: Some("Test Game".to_owned()),
+            started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+            recordings: vec![
+                clipped_ipc::SessionRecording {
+                    session_index: 1,
+                    output: directory
+                        .join("test-game-20260811-201400-01.mkv")
+                        .to_string_lossy()
+                        .into_owned(),
+                    outcome: Some("recorded".to_owned()),
+                    duration_ms: Some(600_000),
+                },
+                clipped_ipc::SessionRecording {
+                    session_index: 2,
+                    output: output.to_string_lossy().into_owned(),
+                    ..clipped_ipc::SessionRecording::default()
+                },
+            ],
+            ..SessionSummary::default()
+        })));
+
+        let session = match state.status() {
+            RecorderStatus::Recording(active) => *active
+                .session
+                .expect("a recording the watcher started belongs to the sitting it is holding"),
+            other => panic!("the recorder should be recording, not {other:?}"),
+        };
+        assert_eq!(
+            session.game_name.as_deref(),
+            Some("Test Game"),
+            "this is the whole of the criterion: a recording that can say which game it is of",
+        );
+        assert_eq!(
+            session.recordings.len(),
+            2,
+            "and which file of the sitting it is, so the second one stops looking like an \
+             unrelated recording: {:?}",
+            session.recordings,
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The other kind of recording, and the reason the two are told apart.
+    ///
+    /// A `start_recording` is the whole of its own sitting, which the catalogue
+    /// attributed when it opened. Reading the *watcher's* sitting for it would
+    /// put the game somebody was playing an hour ago on a recording of
+    /// something else — a window naming a game nobody asked to record.
+    #[test]
+    fn a_recording_the_window_asked_for_carries_its_own_sitting_and_not_the_watchers() {
+        let directory = scratch("asked-for-sitting");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        let state = state_over(&directory, catalogue_claiming_this_process());
+        let _watching = state.watch_for_games();
+        state.sitting_is(Some(Box::new(SessionSummary {
+            session_id: "some-other-game-20260811-201400".to_owned(),
+            game_name: Some("Some Other Game".to_owned()),
+            ..SessionSummary::default()
+        })));
+
+        let running = state.begin(
+            "r-1".to_owned(),
+            output.clone(),
+            format!("process {}", this_executable_name()),
+            &window_of(std::process::id(), &this_executable_name()),
+            &Configuration::defaults(),
+            moment(),
+        );
+        *state.current.lock().expect("a fresh lock") = Some(running);
+
+        let session = match state.status() {
+            RecorderStatus::Recording(active) => *active
+                .session
+                .expect("every recording this recorder makes opens a sitting"),
+            other => panic!("the recorder should be recording, not {other:?}"),
+        };
+        assert_eq!(
+            session.game_name.as_deref(),
+            Some("A Test Game"),
+            "the game is the one the catalogue gave *this* recording's sitting",
+        );
+        assert!(
+            session.session_id.starts_with("a-test-game-"),
+            "and its sitting is the one the recording opened: {}",
+            session.session_id,
+        );
+        assert_eq!(
+            session.recordings.len(),
+            1,
+            "which holds the file being written and nothing else: {:?}",
+            session.recordings,
+        );
+        assert_eq!(session.recordings[0].output, output.to_string_lossy());
+        assert_eq!(
+            session.ended_at, None,
+            "a sitting on a status is one the recorder is still in",
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The sitting reaching a window **while the recording is still running**.
+    ///
+    /// Issue #584 kept quiet about the watcher's changes under a recording, and
+    /// was right to while the sitting was invisible then. It is on the recording
+    /// now, and the change that matters most happens exactly there: the sitting
+    /// gains this recording's own file a moment after it starts. A subscriber
+    /// told nothing would draw "the first file of this sitting" for as long as
+    /// the second one took to record, and `get_status` would disagree with the
+    /// event stream about the same recorder.
+    #[test]
+    fn a_sitting_that_changes_under_a_running_recording_is_published_rather_than_held_back() {
+        let directory = scratch("sitting-under-recording");
+        let output = directory.join("test-game-20260811-201400-01.mkv");
+
+        let events = EventPublisher::new();
+        let service = Arc::new(RecorderService::with_library(
+            events.clone(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+        ));
+        let subscribed = crate::test_events::Subscribed::to(&events, &service, "sitting-recording");
+
+        let state = Arc::clone(service.recordings());
+        let _watching = state.watch_for_games();
+        let (adopted, _progress, _stop, _asked) = adopted_recording(&state, &output, None);
+
+        state.sitting_is(Some(Box::new(SessionSummary {
+            session_id: "test-game-20260811-201400".to_owned(),
+            game_name: Some("Test Game".to_owned()),
+            recordings: vec![clipped_ipc::SessionRecording {
+                session_index: 1,
+                output: output.to_string_lossy().into_owned(),
+                ..clipped_ipc::SessionRecording::default()
+            }],
+            ..SessionSummary::default()
+        })));
+
+        let event = subscribed.wait_for("the recording's sitting", |event| {
+            matches!(
+                event,
+                clipped_ipc::Event::StatusChanged {
+                    status: RecorderStatus::Recording(active),
+                } if active.session.is_some()
+            )
+        });
+        let clipped_ipc::Event::StatusChanged { status } = event else {
+            unreachable!("`wait_for` matched a status change")
+        };
+        let RecorderStatus::Recording(active) = status else {
+            unreachable!("`wait_for` matched a recording")
+        };
+        assert_eq!(
+            active
+                .session
+                .expect("`wait_for` matched a recording with a sitting")
+                .game_name
+                .as_deref(),
+            Some("Test Game"),
+        );
+
+        drop(subscribed);
+        // Handed back before the recorder is shut down, because a shutdown
+        // stops whatever is running and waits for its file: this recording is a
+        // stand-in with no thread behind it, and nothing else would ever store
+        // an outcome for it.
+        drop(adopted);
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Issue #241's second acceptance criterion, for the sitting a
+    /// `start_recording` was the whole of.
+    ///
+    /// `Event::SessionEnded` was defined, mirrored in the desktop's TypeScript
+    /// and carried by the schema, and **nothing ever sent one**. This subscribes
+    /// the way the desktop application does — a real server over a real pipe —
+    /// because a test that called the publisher itself is exactly the test that
+    /// would have passed all along.
+    #[test]
+    fn a_sitting_a_recording_was_the_whole_of_is_announced_with_the_file_it_produced() {
+        let directory = scratch("session-ended");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+
+        let events = EventPublisher::new();
+        let service = Arc::new(RecorderService::with_library(
+            events.clone(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            catalogue_claiming_this_process(),
+        ));
+        let subscribed = crate::test_events::Subscribed::to(&events, &service, "session-ended");
+
+        let running = service.recordings.begin(
+            "r-1".to_owned(),
+            output.clone(),
+            format!("process {}", this_executable_name()),
+            &window_of(std::process::id(), &this_executable_name()),
+            &Configuration::defaults(),
+            moment(),
+        );
+        *service.recordings.current.lock().expect("a fresh lock") = Some(running);
+        service
+            .recordings
+            .finish("r-1", Err("the encoder went".to_owned()));
+
+        let event = subscribed.wait_for("a sitting ending", |event| {
+            matches!(event, clipped_ipc::Event::SessionEnded { .. })
+        });
+        let clipped_ipc::Event::SessionEnded { session } = event else {
+            unreachable!("`wait_for` matched a sitting ending")
+        };
+
+        assert_eq!(
+            session.game_name.as_deref(),
+            Some("A Test Game"),
+            "the sitting is the one the catalogue attributed when the recording opened it",
+        );
+        assert!(
+            session.ended_at.is_some(),
+            "what makes a sitting over is `ended_at`, and this one is: {session:?}",
+        );
+        assert_eq!(
+            session.end_reason.as_deref(),
+            Some("recording-ended"),
+            "a sitting somebody's recording was the whole of ends when that recording does",
+        );
+        assert_eq!(
+            session.recordings.len(),
+            1,
+            "and it carries the files it produced, which is why the event exists: {:?}",
+            session.recordings,
+        );
+        assert_eq!(session.recordings[0].output, output.to_string_lossy());
+        assert_eq!(
+            session.recordings[0].outcome.as_deref(),
+            Some("failed"),
+            "a recording that produced nothing is listed all the same, saying so",
+        );
+
+        drop(subscribed);
+        service.shut_down();
         let _ = std::fs::remove_dir_all(&directory);
     }
 

@@ -1761,6 +1761,345 @@ fn status_of(client: &mut Client) -> RecorderStatus {
     }
 }
 
+/// The overlay entry that makes a recorder treat the pattern application as a
+/// game.
+///
+/// A user's own file, exactly as somebody registering an unknown executable
+/// would write it (`docs/game-detection.md`). The shipped catalogue must never
+/// name it: that file is compiled into every build, and a test application in it
+/// would have Clipped recording a test application on somebody's machine
+/// (`tests/automatic_sessions.rs`).
+const PATTERN_OVERLAY: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "clipped-video-pattern"
+name = "Clipped Video Pattern"
+[[game.executables]]
+name = "video-pattern.exe"
+"#;
+
+/// Writes that overlay into a scratch home, where the recorder reads one.
+fn overlay_naming_the_pattern(home: &Path) {
+    let application_directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+    std::fs::write(application_directory.join("games.toml"), PATTERN_OVERLAY)
+        .expect("the games file can be written");
+}
+
+/// Collects every event a subscription delivers until the recorder stops.
+///
+/// Reading on a thread rather than in the test, for the reason
+/// `a_client_that_does_not_ask_for_export_progress_is_not_sent_any` does it:
+/// the assertion is about what did and did not arrive over a whole run, and
+/// `recorder.stop()` is what ends the loop.
+fn collecting_events(recorder: &ServedRecorder) -> std::thread::JoinHandle<Vec<Event>> {
+    let events = EventClient::subscribe(
+        recorder.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Status],
+        PATIENCE,
+    )
+    .expect("the status stream is delivered");
+
+    std::thread::spawn(move || {
+        let mut events = events;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.next_event() {
+            seen.push(event);
+        }
+        seen
+    })
+}
+
+/// The sitting a `session_ended` event carried, or a failure naming what did
+/// arrive.
+fn the_sitting_that_ended(seen: &[Event], diagnostics: &str) -> clipped_ipc::SessionSummary {
+    seen.iter()
+        .find_map(|event| match event {
+            Event::SessionEnded { session } => Some(session.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no `session_ended` event was sent for a sitting that ended: {seen:#?}\n\
+                 {diagnostics}"
+            )
+        })
+}
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see tests/record_end_to_end.rs"]
+fn a_recording_names_the_game_it_is_of_and_its_sitting_is_announced_when_it_ends() {
+    // Both of issue #241's remaining acceptance criteria, over a real pipe and
+    // against a real recording — which is the only place they can be checked,
+    // because both are producers. `ActiveRecording::session` was `None` for
+    // every recording this recorder made and `Event::SessionEnded` was sent by
+    // nothing, and a unit test of either producer is exactly the test that
+    // would have passed while they were missing.
+    //
+    // The overlay is what makes the game name real: without it the pattern is a
+    // window the catalogue claims nothing about, the sitting is unattributed,
+    // and "a recording that can name its game" is not something this test could
+    // tell from a recorder that always says nothing.
+    let Some(_tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let home = scratch_home("recording-sitting");
+    overlay_naming_the_pattern(&home);
+    let output = home.join("over-ipc.mkv");
+    let pattern = support::PatternApp::start(SOURCE_FPS, 120);
+
+    let recorder = ServedRecorder::start_under("recording-sitting", Some(&home));
+    let reader = collecting_events(&recorder);
+    let mut client = recorder.client();
+
+    let started = client
+        .call(&IpcCommand::StartRecording(StartRecording {
+            pid: Some(pattern.process_id()),
+            output: Some(output.to_string_lossy().into_owned()),
+            overwrite: true,
+            microphone: Some("none".to_owned()),
+            system_audio: Some("none".to_owned()),
+            ..StartRecording::default()
+        }))
+        .expect("the recording starts");
+    let recording_id = match started {
+        Reply::RecordingStarted { recording_id, .. } => recording_id,
+        other => panic!("expected a started recording, got {other:?}"),
+    };
+
+    std::thread::sleep(RECORD_FOR);
+
+    let session = match status_of(&mut client) {
+        RecorderStatus::Recording(active) => {
+            assert_eq!(active.recording_id, recording_id);
+            assert!(
+                active.target.contains(&pattern.process_id().to_string()),
+                "`target` is the selector the user gave, which is what makes the game name \
+                 necessary: {}",
+                active.target,
+            );
+            *active
+                .session
+                .expect("every recording this recorder makes belongs to a sitting")
+        }
+        other => panic!("the recorder should be recording, not {other:?}"),
+    };
+    assert_eq!(
+        session.game_name.as_deref(),
+        Some("Clipped Video Pattern"),
+        "a window cannot turn a capture selector into a game name without the catalogue, which \
+         is why the sitting is on the status",
+    );
+    assert_eq!(
+        session.game_id.as_deref(),
+        Some("clipped-video-pattern"),
+        "and the identifier the library will file it under, so a window can find it again",
+    );
+    assert_eq!(session.recordings.len(), 1, "{:?}", session.recordings);
+    assert_eq!(session.recordings[0].output, output.to_string_lossy());
+    assert_eq!(
+        session.recordings[0].outcome, None,
+        "the file is still being written, which is what an absent outcome means",
+    );
+
+    // And as it actually goes down the pipe. `ActiveRecording::session` is
+    // `skip_serializing_if`, so an absent sitting and an empty one are the same
+    // thing to a parsed reply and different bytes on the wire — and the wire is
+    // what a window reads.
+    let frame = status_on_the_wire(&recorder);
+    assert!(
+        frame.contains(r#""session":{"session_id":"clipped-video-pattern-"#),
+        "the recording on the wire carries no sitting: {frame}",
+    );
+    assert!(
+        frame.contains(r#""game_name":"Clipped Video Pattern""#),
+        "the sitting on the wire cannot name the game: {frame}",
+    );
+
+    let summary = match client
+        .call(&IpcCommand::StopRecording(StopRecording {
+            recording_id: Some(recording_id),
+        }))
+        .expect("the recording stops")
+    {
+        Reply::RecordingStopped { summary } => summary,
+        other => panic!("expected a summary, got {other:?}"),
+    };
+    assert!(
+        summary.frames_encoded > 0,
+        "a recording of no frames is not a recording: {summary:?}"
+    );
+
+    drop(client);
+    drop(pattern);
+    let diagnostics = recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+    let ended = the_sitting_that_ended(&seen, &diagnostics);
+
+    assert_eq!(
+        ended.session_id, session.session_id,
+        "the sitting that ended is the one the status was carrying",
+    );
+    assert!(
+        ended.ended_at.is_some(),
+        "what makes a sitting over is `ended_at`: {ended:?}",
+    );
+    assert_eq!(
+        ended.end_reason.as_deref(),
+        Some("recording-ended"),
+        "a sitting somebody's recording was the whole of ends when that recording does",
+    );
+    assert_eq!(
+        ended.recordings.len(),
+        1,
+        "the event carries the files rather than an identifier to look up, because the library \
+         may not have indexed one of them yet: {:?}",
+        ended.recordings,
+    );
+    assert_eq!(ended.recordings[0].output, output.to_string_lossy());
+    assert_eq!(ended.recordings[0].outcome.as_deref(), Some("recorded"));
+    assert!(
+        ended.recordings[0]
+            .duration_ms
+            .is_some_and(|duration| duration > 0),
+        "and how long it runs for: {:?}",
+        ended.recordings[0],
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+#[ignore = "needs a GPU, an encoder, a desktop session and process detection; see the module docs"]
+fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
+    // The same criterion for the recording issue #241 is actually about: one
+    // nobody asked for. It is the harder half, because the sitting is not the
+    // recording's own — it belongs to the session manager on the watcher's
+    // thread, and reaching a window with it crosses the seam issue #421 built.
+    //
+    // Nothing here starts a recording: the recorder is told to watch, the
+    // pattern application launches, and everything after that is the product
+    // doing what it does. What is asserted is what a window would draw.
+    let Some(_tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let home = scratch_home("watcher-sitting");
+    overlay_naming_the_pattern(&home);
+
+    let recorder =
+        ServedRecorder::started_with("watcher-sitting", Some(&home), &["--watch-for-games"]);
+    let mut client = recorder.client();
+    assert_eq!(
+        status_of(&mut client),
+        RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+        "nothing has launched yet, so this recorder is watching and in no sitting",
+    );
+
+    // A process that starts between the watcher's baseline snapshot and its
+    // subscription is invisible to it for its lifetime, and that window is a
+    // few tens of milliseconds (`tests/automatic_sessions.rs` says the same).
+    std::thread::sleep(Duration::from_secs(1));
+    let pattern = support::PatternApp::start(SOURCE_FPS, 120);
+
+    let session = the_sitting_being_recorded(&mut client, DETECTION_PATIENCE);
+    assert_eq!(
+        session.game_name.as_deref(),
+        Some("Clipped Video Pattern"),
+        "this is the sentence the issue asks for: not \"recording, process 4242\" but a \
+         recording that names the game it is of",
+    );
+    assert!(
+        session.session_id.starts_with("clipped-video-pattern-"),
+        "and the sitting it belongs to, which is what makes the second file of one sitting \
+         recognisable as such: {}",
+        session.session_id,
+    );
+    assert_eq!(
+        session.recordings.len(),
+        1,
+        "the file being written is part of the sitting while it is being written: {:?}",
+        session.recordings,
+    );
+
+    let frame = status_on_the_wire(&recorder);
+    assert!(
+        frame.contains(r#""game_name":"Clipped Video Pattern""#),
+        "the recording on the wire cannot name the game: {frame}",
+    );
+
+    match client
+        .call(&IpcCommand::StopRecording(StopRecording {
+            recording_id: None,
+        }))
+        .expect("the recording stops")
+    {
+        Reply::RecordingStopped { summary } => assert!(
+            summary.frames_encoded > 0,
+            "a recording of no frames is not a recording: {summary:?}"
+        ),
+        other => panic!("expected a summary, got {other:?}"),
+    }
+
+    // And the sitting outlives the recording, which is the flicker
+    // `Watching::session` exists to prevent: the game is still running and its
+    // sitting is still open.
+    match status_of(&mut client) {
+        RecorderStatus::Watching(watching) => assert_eq!(
+            watching
+                .session
+                .expect("the sitting is still open, and the recorder is still in it")
+                .session_id,
+            session.session_id,
+        ),
+        other => panic!("the recorder should be watching again, not {other:?}"),
+    }
+
+    drop(client);
+    drop(pattern);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// How long the watcher is given to notice a launch and reach a window.
+///
+/// Generous on purpose: detection is deliberately unhurried — up to four and a
+/// half seconds between a process starting and the launch being reported — and
+/// a bound tight enough to trip on a busy machine is a failure nobody can tell
+/// from a real one (AGENTS.md section 25).
+const DETECTION_PATIENCE: Duration = Duration::from_secs(60);
+
+/// The sitting of the recording this recorder is making, once it is making one.
+///
+/// Polled through `get_status` rather than waited for on the event stream, so
+/// that a build which never records anything fails on this deadline instead of
+/// blocking on a pipe that will never carry another frame.
+fn the_sitting_being_recorded(
+    client: &mut Client,
+    within: Duration,
+) -> clipped_ipc::SessionSummary {
+    let deadline = std::time::Instant::now() + within;
+    let mut last = None;
+    while std::time::Instant::now() < deadline {
+        match status_of(client) {
+            RecorderStatus::Recording(active) => {
+                if let Some(session) = active.session {
+                    return *session;
+                }
+                last = Some(RecorderStatus::Recording(active));
+            }
+            other => last = Some(other),
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    panic!("no recording carrying a sitting within {within:?}; the last status was {last:?}")
+}
+
 #[test]
 fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it() {
     // Issue #402's second half, against the real process rather than against a

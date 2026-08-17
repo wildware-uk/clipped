@@ -64,6 +64,11 @@ pub mod start_at_login;
 pub mod storage;
 pub mod watch;
 
+/// A real subscriber on a real pipe, for the tests that assert an event was
+/// published. Never built into the recorder.
+#[cfg(test)]
+pub(crate) mod test_events;
+
 use std::error::Error;
 use std::fmt;
 
