@@ -51,7 +51,7 @@ fn observed_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_545_000)
 }
 
-/// See `tests/support/mod.rs`. Bind the answer to a variable that outlives the
+/// See `crates/library/tests/support/mod.rs`. Bind the answer to a variable that outlives the
 /// test body: the directory goes when it does.
 fn scratch_directory(name: &str) -> support::Scratch {
     support::Scratch::new(&format!("sidecars-{name}"))

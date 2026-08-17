@@ -36,7 +36,7 @@ fn observed_later() -> SystemTime {
 struct Library {
     /// Held only so that it is dropped when this is, which is what removes the
     /// directory. Underscored because nothing reads it; see
-    /// `tests/support/mod.rs`.
+    /// `crates/library/tests/support/mod.rs`.
     _directory: support::Scratch,
     root: PathBuf,
     database: PathBuf,
