@@ -878,3 +878,93 @@ code {
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
 }
+
+/*
+ * A recording's thumbnail in a list, and the tile that stands in for one that
+ * has no picture (issue #448).
+ *
+ * One shape for all four states, because they occupy one slot: a row whose tile
+ * was simply absent would read as a layout fault rather than as a fact about
+ * that recording. The ground is `--color-neutral-900`, the same ink the player
+ * and the editor's frame sit on, so an empty tile reads as a frame with nothing
+ * in it rather than as a broken picture.
+ *
+ * The ratio is stated rather than taken from the picture, so that a column of
+ * them lines up whatever each recording was shot at; `object-fit: cover` crops
+ * the rare one that does not match instead of squashing it, because a stretched
+ * thumbnail misreports what is in the file (AGENTS.md section 22).
+ */
+.clipped-thumb {
+  width: var(--thumb-width);
+  aspect-ratio: 16 / 9;
+  background: var(--color-neutral-900);
+  object-fit: cover;
+}
+
+/*
+ * The tile with no picture in it. What tells the states apart is the word it
+ * holds - "Not made yet", "No picture", "Not read" - never its shade, and never
+ * whether it is there at all (AGENTS.md section 46). `--color-neutral-200` on
+ * that ground is the pair the editor's frame note already draws at, and
+ * `contrast.test.ts` measures this one too.
+ */
+.clipped-thumb--absent {
+  display: grid;
+  place-items: center;
+  padding: var(--space-1);
+  color: var(--color-neutral-200);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  text-align: center;
+}
+
+/*
+ * A recording's sound under the player, one row per track (issue #448).
+ *
+ * Laid out like the editor's timeline above and deliberately: a name column of
+ * a fixed width beside a picture that takes what is left, so the names line up
+ * down the column whatever they are called. It is not that timeline — there is
+ * no ruler, no playhead and nothing to scroll, because a waveform is all that
+ * has reached this window (#65 is the timeline).
+ */
+.clipped-waveform {
+  margin: var(--space-3) 0 0;
+}
+
+.clipped-waveform__lane {
+  display: grid;
+  grid-template-columns: var(--editor-lane-label-width) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  border-bottom: var(--hairline) solid var(--color-divider);
+}
+
+.clipped-waveform__name {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: var(--text-sm);
+}
+
+/*
+ * The picture itself. Its height is the editor's lane height, so a waveform
+ * here and a waveform there are the same size, and `preserveAspectRatio="none"`
+ * in the element is what lets one `viewBox` unit per bucket stretch to whatever
+ * width the panel has.
+ */
+.clipped-waveform__lane-picture {
+  width: 100%;
+  height: var(--editor-lane-height);
+  background: var(--color-surface);
+}
+
+/*
+ * Filled rather than stroked. A stroke of a fixed width would thicken as the
+ * picture is stretched horizontally, and a shape is what the outline is: the
+ * maxima along the top and the minima along the bottom of one closed path.
+ * `--color-accent-600` on `--color-surface` is a mark rather than words, which
+ * is the distinction `--color-accent-text` exists for.
+ */
+.clipped-waveform__lane-picture path {
+  fill: var(--color-accent-600);
+}

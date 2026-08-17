@@ -53,6 +53,7 @@ pub mod list_windows;
 pub mod options;
 pub mod playback;
 pub mod plugins;
+pub mod preview;
 pub mod record;
 pub mod recover;
 pub mod replay;

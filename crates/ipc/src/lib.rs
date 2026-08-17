@@ -121,6 +121,7 @@ pub mod library;
 pub mod message;
 pub mod playback;
 mod plugins;
+pub mod preview;
 pub mod schema;
 pub mod server;
 pub mod settings;
@@ -149,6 +150,10 @@ pub use message::{
 };
 pub use playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 pub use plugins::{PluginDeclaration, PluginState, RefusedPlugin};
+pub use preview::{
+    base64, OpenPreview, Preview, PreviewKind, PreviewPicture, PreviewState, PreviewTrack,
+    MAX_PREVIEW_BUCKETS,
+};
 pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,

@@ -63,9 +63,16 @@ import type {
   EventStream,
   ExportRecordingParams,
   OpenPlaybackParams,
+  OpenPreviewParams,
   PlaybackOpenedReply,
   PlaybackStream,
   PlaybackTrack,
+  Preview,
+  PreviewKind,
+  PreviewOpenedReply,
+  PreviewPicture,
+  PreviewState,
+  PreviewTrack,
   ExportSummary,
   ConflictingHotkey,
   Feature,
@@ -143,6 +150,8 @@ import {
   HOTKEY_STATES,
   MAX_CONCURRENT_CONNECTIONS,
   OUTCOMES,
+  PREVIEW_KINDS,
+  PREVIEW_STATES,
   PROTOCOL_VERSION,
   RECORDER_STATES,
   REPLIES,
@@ -262,6 +271,8 @@ const TYPESCRIPT_ENUMERATIONS: Readonly<Record<string, EnumerationMirror>> = {
   outcome: enumeration<'ok' | 'error'>(OUTCOMES, false),
   reply: enumeration<ReplyName>(REPLIES, false),
   recorder_state: enumeration<RecorderState>(RECORDER_STATES, false),
+  preview_kind: enumeration<PreviewKind>(PREVIEW_KINDS, false),
+  preview_state: enumeration<PreviewState>(PREVIEW_STATES, false),
   hotkey_state: enumeration<HotkeyStateName>(HOTKEY_STATES, false),
 };
 
@@ -469,6 +480,34 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     language: 'optional',
     default: 'optional',
   }),
+  open_preview: fields<OpenPreviewParams>({
+    source: 'required',
+    kind: 'required',
+    buckets: 'optional',
+  }),
+  preview: fields<Preview>({
+    kind: 'required',
+    state: 'required',
+    picture: 'optional',
+    tracks: 'optional',
+    reason: 'optional',
+  }),
+  preview_picture: fields<PreviewPicture>({
+    media_type: 'required',
+    bytes: 'required',
+    width: 'required',
+    height: 'required',
+    at_seconds: 'required',
+    blank: 'optional',
+  }),
+  preview_track: fields<PreviewTrack>({
+    index: 'required',
+    name: 'optional',
+    sample_rate: 'required',
+    channels: 'required',
+    duration_seconds: 'required',
+    peaks: 'optional',
+  }),
   export_recording: fields<ExportRecordingParams>({
     source: 'required',
     destination: 'required',
@@ -552,6 +591,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.playback_opened': fields<PlaybackOpenedReply>({
     reply: 'required',
     playback: 'required',
+  }),
+  'reply.preview_opened': fields<PreviewOpenedReply>({
+    reply: 'required',
+    preview: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -754,6 +797,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'open_preview',
+    params: 'open_preview',
+    reply: 'reply.preview_opened',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_hotkeys',
     params: null,
     reply: 'reply.hotkeys',
@@ -909,6 +958,13 @@ function replyDiscriminant(reply: Reply): string {
       // recording, and a mirror that dropped `prepared` would reach the same
       // discriminant for both.
       return `playback_opened.${reply.playback.prepared === true ? 'prepared' : 'as_recorded'}`;
+    case 'preview_opened':
+      // Both the kind and the state are part of the path, which is issue #448's
+      // second criterion expressed as a discriminant: a mirror that carried the
+      // picture and dropped the state would reach the same answer for a
+      // thumbnail that is here and one there will never be, and a mirror that
+      // dropped the kind would reach it for peaks and a picture alike.
+      return `preview_opened.${reply.preview.kind}.${reply.preview.state}`;
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise

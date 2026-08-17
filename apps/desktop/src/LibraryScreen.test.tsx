@@ -66,11 +66,16 @@ function renderApp(): void {
  * The router is not decoration: the Play control on every row navigates to that
  * recording's playback screen (issue #304), so a screen rendered without one is
  * a screen whose rows cannot be drawn at all.
+ *
+ * `link` is `null`, which is what a screen rendered outside the window has:
+ * there is no recorder, so no capability, so no thumbnail is asked for. The
+ * cases below are about the trash and about refusals, and a column of round
+ * trips they never stubbed would only be noise (issue #448).
  */
 function renderScreen(): void {
   render(
     <MemoryRouter>
-      <LibraryScreen />
+      <LibraryScreen link={null} />
     </MemoryRouter>,
   );
 }
@@ -332,11 +337,17 @@ describe('the Library screen', () => {
    * Three rows have gone since issue #301: the session list, the search and a
    * recording whose file has gone are all on the screen, and each has a case of
    * its own above. Shrinking this list without honouring it fails here.
+   *
+   * The row that named thumbnails and waveforms together has become a row about
+   * waveforms alone. Issue #448 built the transport and a thumbnail is drawn
+   * against every recording, so naming one here would be the screen promising
+   * something it already does — and #301, which that row named as the open
+   * question about how bytes reach this window, is answered.
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
     ['filtering by favourite', /^filtering the list down to favourites/i, [60]],
-    ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
+    ['waveforms', /^a waveform under each/i, [66, 448]],
     // Playing a *recording* is no longer on this list: Play is a control on
     // every row since issue #304, and a row promising what the screen already
     // does is worse than no row. Playing a **clip** is still waiting, and on

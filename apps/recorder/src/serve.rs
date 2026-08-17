@@ -160,6 +160,13 @@ fn features_of_this_build() -> Vec<String> {
         // before issue #304 — which has no `open_playback` and would refuse the
         // request — is told apart from a recording that will not play.
         features::PLAYBACK.to_owned(),
+        // And for this before it draws a tile that would hold a picture, so
+        // that a recorder built before issue #448 — which has no
+        // `open_preview` and would refuse the request once a row — is told
+        // apart from a library whose pictures have simply not been made yet.
+        // Those are the two answers a blank grid can mean, and only one of
+        // them is worth waiting for.
+        features::PREVIEWS.to_owned(),
         features::HOTKEYS.to_owned(),
         // And for this before it offers "Save Replay": a recorder built before
         // issue #38 parses `save_replay` and always refuses it, so the feature
@@ -736,6 +743,11 @@ impl CommandHandler for RecorderService {
             // pass over the file (issue #304).
             Command::OpenPlayback(request) => Ok(Reply::PlaybackOpened {
                 playback: crate::playback::open(&request)?,
+            }),
+            // Answered by the indexer, because the indexer is what holds the
+            // two services that make these (`crate::preview`, issue #448).
+            Command::OpenPreview(request) => Ok(Reply::PreviewOpened {
+                preview: self.indexer.preview(&request)?,
             }),
             // Answered from what registration produced when this process
             // started, which is a clone of a small `Vec` and touches nothing a
@@ -3261,6 +3273,97 @@ mod tests {
             "a kind this build has never met has to arrive and be drawn"
         );
         assert_eq!(lane.marks[0].source, "acme-cs2");
+    }
+
+    #[test]
+    fn the_preview_command_is_answered_with_the_picture_of_the_recording_it_named() {
+        // The middle hop, which nothing else covers: `preview::open`'s own tests
+        // start at the service and the window's tests stop at `invoke`, so a
+        // dispatch that answered `open_preview` with the wrong command, or with
+        // the wrong recording's picture, would pass both. That is the failure
+        // `library_sessions` had once and `start_recording` had once, and this
+        // is where it would land now (issue #448).
+        let directory = scratch("open-preview");
+        let recording = directory.join("cs2-20260811-201400-1.mkv");
+        std::fs::write(&recording, b"a stand-in for a recording").expect("it can be written");
+        let thumbnails = directory.join("thumbnails");
+        std::fs::create_dir_all(&thumbnails).expect("the cache directory can be made");
+        store_a_thumbnail(&thumbnails, &recording, b"the picture of that recording");
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory).with_preview_caches(thumbnails, directory.join("waveforms")),
+            Catalogue::default(),
+        );
+
+        let Reply::PreviewOpened { preview } = service
+            .call(Command::OpenPreview(clipped_ipc::OpenPreview {
+                source: recording.to_string_lossy().into_owned(),
+                kind: clipped_ipc::PreviewKind::Thumbnail,
+                buckets: None,
+            }))
+            .expect("a thumbnail that is there is not a refusal")
+        else {
+            panic!("`open_preview` was answered with something else");
+        };
+
+        assert_eq!(preview.state, clipped_ipc::PreviewState::Ready);
+        assert_eq!(
+            preview
+                .picture
+                .expect("a ready thumbnail carries a picture")
+                .bytes,
+            clipped_ipc::base64(b"the picture of that recording"),
+            "the window would have been handed somebody else's frame"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn this_build_says_it_can_be_asked_for_a_preview() {
+        // A window checks this before it draws a tile that would hold a picture,
+        // so a recorder that answers `open_preview` and does not advertise it
+        // would have a library screen with no pictures in it and nothing
+        // anywhere reporting a problem (`clipped_ipc::features`, issue #448).
+        assert!(
+            features_of_this_build().contains(&clipped_ipc::features::PREVIEWS.to_owned()),
+            "this build answers `open_preview` and must say so: {:?}",
+            features_of_this_build()
+        );
+    }
+
+    /// Writes a thumbnail cache entry, as `docs/thumbnails.md` specifies one.
+    ///
+    /// The same fixture `crate::preview`'s tests use, written out again here
+    /// rather than shared because the two modules test different things with it
+    /// and a `#[cfg(test)]` helper does not cross a module boundary without
+    /// being made part of the crate's surface.
+    fn store_a_thumbnail(cache: &Path, recording: &Path, picture: &[u8]) {
+        let identity = clipped_library::thumbnail::SourceIdentity::of(recording)
+            .expect("the stand-in recording can be stat-ed");
+        let key = identity.cache_key();
+        std::fs::write(cache.join(format!("{key}.jpg")), picture)
+            .expect("the picture can be written");
+        let sidecar = serde_json::json!({
+            "version": 1,
+            "recording": recording.to_string_lossy(),
+            "size_bytes": identity.size(),
+            "modified_nanos": identity.modified_nanos(),
+            "image": {
+                "file": format!("{key}.jpg"),
+                "width": 640,
+                "height": 360,
+                "at_seconds": 12.5,
+                "blank": false
+            }
+        });
+        std::fs::write(
+            cache.join(format!("{key}.json")),
+            serde_json::to_vec(&sidecar).expect("the sidecar serialises"),
+        )
+        .expect("the sidecar can be written");
     }
 
     #[test]

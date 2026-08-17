@@ -51,6 +51,7 @@
         "plugins",
         "export_recording",
         "open_playback",
+        "open_preview",
         "get_hotkeys",
         "get_settings",
         "apply_settings",
@@ -138,7 +139,8 @@
         "settings",
         "microphone_level",
         "startup",
-        "automatic"
+        "automatic",
+        "previews"
       ],
       "tolerates_unrecognised": true
     },
@@ -154,6 +156,21 @@
       "values": [
         "ok",
         "error"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "preview_kind": {
+      "values": [
+        "thumbnail",
+        "waveform"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "preview_state": {
+      "values": [
+        "pending",
+        "ready",
+        "unavailable"
       ],
       "tolerates_unrecognised": false
     },
@@ -178,6 +195,7 @@
         "library_games",
         "recording_exported",
         "playback_opened",
+        "preview_opened",
         "hotkeys",
         "settings",
         "audio_devices",
@@ -471,6 +489,15 @@
         "audio_track"
       ]
     },
+    "open_preview": {
+      "required": [
+        "kind",
+        "source"
+      ],
+      "optional": [
+        "buckets"
+      ]
+    },
     "outcome.error": {
       "required": [
         "error"
@@ -508,6 +535,41 @@
         "default",
         "language",
         "name"
+      ]
+    },
+    "preview": {
+      "required": [
+        "kind",
+        "state"
+      ],
+      "optional": [
+        "picture",
+        "reason",
+        "tracks"
+      ]
+    },
+    "preview_picture": {
+      "required": [
+        "at_seconds",
+        "bytes",
+        "height",
+        "media_type",
+        "width"
+      ],
+      "optional": [
+        "blank"
+      ]
+    },
+    "preview_track": {
+      "required": [
+        "channels",
+        "duration_seconds",
+        "index",
+        "sample_rate"
+      ],
+      "optional": [
+        "name",
+        "peaks"
       ]
     },
     "protocol_error": {
@@ -665,6 +727,13 @@
     },
     "reply.pong": {
       "required": [
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.preview_opened": {
+      "required": [
+        "preview",
         "reply"
       ],
       "optional": []
@@ -1007,6 +1076,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "open_preview",
+      "params": "open_preview",
+      "reply": "reply.preview_opened",
+      "available_in_this_build": true
+    },
+    {
       "name": "get_hotkeys",
       "params": null,
       "reply": "reply.hotkeys",
@@ -1188,6 +1263,38 @@
       "discriminant": "request.open_playback"
     },
     {
+      "name": "asking for a recording's thumbnail",
+      "direction": "client",
+      "frame": {
+        "command": "open_preview",
+        "id": 14,
+        "params": {
+          "buckets": 1280,
+          "kind": "thumbnail",
+          "source": "D:\\clips\\Counter-Strike 2\\cs2-20260811-201400-1.mkv"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.open_preview"
+    },
+    {
+      "name": "asking for the peaks of a recording's sound, at the width they will be drawn",
+      "direction": "client",
+      "frame": {
+        "command": "open_preview",
+        "id": 15,
+        "params": {
+          "buckets": 1280,
+          "kind": "waveform",
+          "source": "D:\\clips\\Counter-Strike 2\\cs2-20260811-201400-1.mkv"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.open_preview"
+    },
+    {
       "name": "asking the recorder to exit",
       "direction": "client",
       "frame": {
@@ -1233,7 +1340,8 @@
           "settings",
           "microphone_level",
           "startup",
-          "automatic"
+          "automatic",
+          "previews"
         ],
         "protocol_version": 2,
         "recorder": {
@@ -2046,6 +2154,166 @@
       },
       "parses": true,
       "discriminant": "response.ok.playback_opened.prepared"
+    },
+    {
+      "name": "a thumbnail, which is the picture itself and not a path to one",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "preview": {
+              "kind": "thumbnail",
+              "picture": {
+                "at_seconds": 184.5,
+                "blank": false,
+                "bytes": "/9j/4A==",
+                "height": 360,
+                "media_type": "image/jpeg",
+                "width": 640
+              },
+              "state": "ready",
+              "tracks": []
+            },
+            "reply": "preview_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.preview_opened.thumbnail.ready"
+    },
+    {
+      "name": "a thumbnail that has not been generated yet, and now has been asked for",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "preview": {
+              "kind": "thumbnail",
+              "state": "pending",
+              "tracks": []
+            },
+            "reply": "preview_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.preview_opened.thumbnail.pending"
+    },
+    {
+      "name": "a thumbnail there will never be one of, and why",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "preview": {
+              "kind": "thumbnail",
+              "reason": "cs2-20260811-201400-1.mkv holds no video stream, so there is no frame                          to show",
+              "state": "unavailable",
+              "tracks": []
+            },
+            "reply": "preview_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.preview_opened.thumbnail.unavailable"
+    },
+    {
+      "name": "the peaks of a recording with three sound tracks",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "ok": {
+            "preview": {
+              "kind": "waveform",
+              "state": "ready",
+              "tracks": [
+                {
+                  "channels": 2,
+                  "duration_seconds": 6540.5,
+                  "index": 1,
+                  "name": "Game",
+                  "peaks": [
+                    -118,
+                    120,
+                    -12,
+                    9,
+                    0,
+                    0,
+                    -127,
+                    127
+                  ],
+                  "sample_rate": 48000
+                },
+                {
+                  "channels": 2,
+                  "duration_seconds": 6540.5,
+                  "index": 1,
+                  "name": "Microphone",
+                  "peaks": [
+                    -118,
+                    120,
+                    -12,
+                    9,
+                    0,
+                    0,
+                    -127,
+                    127
+                  ],
+                  "sample_rate": 48000
+                },
+                {
+                  "channels": 2,
+                  "duration_seconds": 6540.5,
+                  "index": 2,
+                  "peaks": [
+                    -118,
+                    120,
+                    -12,
+                    9,
+                    0,
+                    0,
+                    -127,
+                    127
+                  ],
+                  "sample_rate": 48000
+                }
+              ]
+            },
+            "reply": "preview_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.preview_opened.waveform.ready"
+    },
+    {
+      "name": "a recording that has no sound at all, which is not a failure",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "ok": {
+            "preview": {
+              "kind": "waveform",
+              "state": "ready",
+              "tracks": []
+            },
+            "reply": "preview_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.preview_opened.waveform.ready"
     },
     {
       "name": "playback refused because the recording's file has gone",

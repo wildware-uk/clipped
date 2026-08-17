@@ -77,6 +77,9 @@ use crate::message::{
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
+use crate::preview::{
+    OpenPreview, Preview, PreviewKind, PreviewPicture, PreviewState, PreviewTrack,
+};
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
 use crate::status::{
     ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
@@ -381,6 +384,34 @@ fn enumerations() -> BTreeMap<String, Enumeration> {
             },
         ),
         (
+            "preview_kind".to_owned(),
+            Enumeration {
+                values: every_preview_kind()
+                    .iter()
+                    .map(|kind| kind.as_str().to_owned())
+                    .collect(),
+                // The same asymmetry as `recorder_state` below. There are two
+                // kinds of preview and they are drawn by different code; a
+                // window that met a third and guessed would draw peaks as a
+                // picture, or a picture as peaks.
+                tolerates_unrecognised: false,
+            },
+        ),
+        (
+            "preview_state".to_owned(),
+            Enumeration {
+                values: every_preview_state()
+                    .iter()
+                    .map(|state| state.as_str().to_owned())
+                    .collect(),
+                // And for the same reason again: "not generated yet" and "there
+                // will not be one" are the two facts issue #448's second
+                // criterion is about, and a state this build cannot name would
+                // be drawn as one it can.
+                tolerates_unrecognised: false,
+            },
+        ),
+        (
             "recorder_state".to_owned(),
             Enumeration {
                 values: every_recorder_status().iter().map(state_tag).collect(),
@@ -519,6 +550,27 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_playback_track(), &[]),
         ),
         (
+            "open_preview".to_owned(),
+            structure_of(&exemplar_open_preview(), &[]),
+        ),
+        // `kind` and `state` are named as tags: each is a closed enumeration
+        // whose value decides how the rest of the object is read, and removing
+        // one leaves a `Preview` that will not deserialise at all rather than
+        // one that survives with a default. `structure_of` would report that as
+        // "required" either way; naming them says which fact it is.
+        (
+            "preview".to_owned(),
+            structure_of(&exemplar_preview_fields(), &["kind", "state"]),
+        ),
+        (
+            "preview_picture".to_owned(),
+            structure_of(&exemplar_preview_picture(), &[]),
+        ),
+        (
+            "preview_track".to_owned(),
+            structure_of(&exemplar_preview_track(), &[]),
+        ),
+        (
             "apply_settings".to_owned(),
             structure_of(&exemplar_apply_settings(), &[]),
         ),
@@ -622,6 +674,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::SetLock(_) => Some("set_lock".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::OpenPlayback(_) => Some("open_playback".to_owned()),
+                Command::OpenPreview(_) => Some("open_preview".to_owned()),
                 Command::ApplySettings(_) => Some("apply_settings".to_owned()),
                 Command::GetMicrophoneLevel(_) => Some("microphone_level_request".to_owned()),
                 Command::SetStartAtLogin(_) => Some("set_start_at_login".to_owned()),
@@ -654,6 +707,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::OpenPlayback(_) => Some("reply.playback_opened".to_owned()),
+                Command::OpenPreview(_) => Some("reply.preview_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 // Both settings commands answer with the same reply: what a
                 // change produced is the settings as they now stand
@@ -751,6 +805,27 @@ fn samples() -> Vec<Sample> {
                 command: "open_playback".to_owned(),
                 params: serde_json::to_value(exemplar_open_playback())
                     .expect("the playback options serialise"),
+            }),
+        ),
+        (
+            "asking for a recording's thumbnail",
+            ClientMessage::Request(Request {
+                id: 14,
+                command: "open_preview".to_owned(),
+                params: serde_json::to_value(exemplar_open_preview())
+                    .expect("the preview options serialise"),
+            }),
+        ),
+        (
+            "asking for the peaks of a recording's sound, at the width they will be drawn",
+            ClientMessage::Request(Request {
+                id: 15,
+                command: "open_preview".to_owned(),
+                params: serde_json::to_value(OpenPreview {
+                    kind: PreviewKind::Waveform,
+                    ..exemplar_open_preview()
+                })
+                .expect("the preview options serialise"),
             }),
         ),
         (
@@ -1175,6 +1250,69 @@ fn samples() -> Vec<Sample> {
                 id: 13,
                 outcome: Outcome::Ok(Reply::PlaybackOpened {
                     playback: exemplar_playback(),
+                }),
+            }),
+        ),
+        (
+            "a thumbnail, which is the picture itself and not a path to one",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::PreviewOpened {
+                    preview: exemplar_preview(),
+                }),
+            }),
+        ),
+        (
+            "a thumbnail that has not been generated yet, and now has been asked for",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::PreviewOpened {
+                    preview: Preview::pending(PreviewKind::Thumbnail),
+                }),
+            }),
+        ),
+        (
+            "a thumbnail there will never be one of, and why",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::PreviewOpened {
+                    preview: Preview::unavailable(
+                        PreviewKind::Thumbnail,
+                        "cs2-20260811-201400-1.mkv holds no video stream, so there is no frame                          to show",
+                    ),
+                }),
+            }),
+        ),
+        (
+            "the peaks of a recording with three sound tracks",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Ok(Reply::PreviewOpened {
+                    preview: Preview::waveform(vec![
+                        PreviewTrack {
+                            index: 1,
+                            name: Some("Game".to_owned()),
+                            ..exemplar_preview_track()
+                        },
+                        exemplar_preview_track(),
+                        PreviewTrack {
+                            index: 2,
+                            // The track a file from elsewhere carries no title
+                            // for: a window shows the position rather than
+                            // inventing a name.
+                            name: None,
+                            ..exemplar_preview_track()
+                        },
+                    ]),
+                }),
+            }),
+        ),
+        (
+            "a recording that has no sound at all, which is not a failure",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Ok(Reply::PreviewOpened {
+                    preview: Preview::waveform(Vec::new()),
                 }),
             }),
         ),
@@ -1653,6 +1791,15 @@ fn reply_discriminant(reply: &Reply) -> String {
             } else {
                 "as_recorded"
             }
+        ),
+        // Which kind and which of the three states is part of the path: a
+        // mirror that carried the picture and dropped the state would reach the
+        // same discriminant for a thumbnail that is here and one that will never
+        // exist, which is the distinction issue #448's second criterion is about.
+        Reply::PreviewOpened { preview } => format!(
+            "preview_opened.{}.{}",
+            preview.kind.as_str(),
+            preview.state.as_str()
         ),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
@@ -2285,6 +2432,69 @@ fn exemplar_open_playback() -> OpenPlayback {
     }
 }
 
+/// Every `open_preview` parameter at once.
+fn exemplar_open_preview() -> OpenPreview {
+    OpenPreview {
+        source: r"D:\clips\Counter-Strike 2\cs2-20260811-201400-1.mkv".to_owned(),
+        kind: PreviewKind::Thumbnail,
+        buckets: Some(1280),
+    }
+}
+
+/// A thumbnail that is here.
+fn exemplar_preview() -> Preview {
+    Preview::thumbnail(exemplar_preview_picture())
+}
+
+/// Every field of a preview at once, for [`structures`] and for nothing else.
+///
+/// Not a preview any recorder answers with: a picture that is here and a reason
+/// for there never being one are exclusive, and no state carries both. It exists
+/// because [`structure_of`] can only see fields that were actually serialised,
+/// and `reason` is skipped when it is `None` — so an exemplar in a real state
+/// would leave the field this schema exists to describe out of the description,
+/// and the TypeScript mirror would then be free to drop it. That is the same
+/// reason `exemplar_start_at_login` is the *broken* arrangement rather than a
+/// working one. The sample frames carry the shapes a recorder really sends.
+fn exemplar_preview_fields() -> Preview {
+    Preview {
+        reason: Some(
+            "that recording holds no video stream, so there is no frame to show".to_owned(),
+        ),
+        tracks: vec![exemplar_preview_track()],
+        ..Preview::thumbnail(exemplar_preview_picture())
+    }
+}
+
+/// The picture itself.
+///
+/// The bytes are the two markers a JPEG opens with, encoded the way a real one
+/// would be, rather than a placeholder string: a mirror that mangled base64
+/// would still agree with a schema whose sample was not base64 in the first
+/// place.
+fn exemplar_preview_picture() -> PreviewPicture {
+    PreviewPicture {
+        media_type: "image/jpeg".to_owned(),
+        bytes: crate::preview::base64(&[0xFF, 0xD8, 0xFF, 0xE0]),
+        width: 640,
+        height: 360,
+        at_seconds: 184.5,
+        blank: false,
+    }
+}
+
+/// One sound track reduced to peaks, with every optional field present.
+fn exemplar_preview_track() -> PreviewTrack {
+    PreviewTrack {
+        index: 1,
+        name: Some("Microphone".to_owned()),
+        sample_rate: 48_000,
+        channels: 2,
+        duration_seconds: 6540.5,
+        peaks: vec![-118, 120, -12, 9, 0, 0, -127, 127],
+    }
+}
+
 /// A recording opened for playback, with every optional field present so the
 /// schema sees them.
 fn exemplar_playback() -> PlaybackStream {
@@ -2465,6 +2675,7 @@ fn every_built_command() -> Vec<Command> {
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::OpenPlayback(exemplar_open_playback()),
+        Command::OpenPreview(exemplar_open_preview()),
         Command::GetHotkeys,
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
@@ -2494,6 +2705,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::OpenPlayback(_)
+            | Command::OpenPreview(_)
             | Command::GetHotkeys
             | Command::GetSettings
             | Command::ApplySettings(_)
@@ -2673,6 +2885,12 @@ fn every_reply() -> Vec<Reply> {
         Reply::PlaybackOpened {
             playback: exemplar_playback(),
         },
+        // The thumbnail exemplar, because it is the one that carries a picture,
+        // and every optional field of it: a reply built from a `Pending` would
+        // leave `picture` out and the schema would then describe none of it.
+        Reply::PreviewOpened {
+            preview: exemplar_preview(),
+        },
         Reply::Hotkeys {
             hotkeys: every_hotkey_state()
                 .into_iter()
@@ -2802,6 +3020,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::StartAtLogin { .. }
             | Reply::RecordingExported { .. }
             | Reply::PlaybackOpened { .. }
+            | Reply::PreviewOpened { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }
@@ -2825,7 +3044,33 @@ fn exemplar_plugin() -> crate::plugins::PluginDeclaration {
     }
 }
 
-/// Every state a binding can be in.
+/// Every kind of preview the protocol defines.
+fn every_preview_kind() -> Vec<PreviewKind> {
+    let kinds = vec![PreviewKind::Thumbnail, PreviewKind::Waveform];
+    for kind in &kinds {
+        match kind {
+            PreviewKind::Thumbnail | PreviewKind::Waveform => {}
+        }
+    }
+    kinds
+}
+
+/// Every state a preview can be in.
+fn every_preview_state() -> Vec<PreviewState> {
+    let states = vec![
+        PreviewState::Pending,
+        PreviewState::Ready,
+        PreviewState::Unavailable,
+    ];
+    for state in &states {
+        match state {
+            PreviewState::Pending | PreviewState::Ready | PreviewState::Unavailable => {}
+        }
+    }
+    states
+}
+
+/// Every state a hotkey can be in.
 fn every_hotkey_state() -> Vec<HotkeyState> {
     let states = vec![
         HotkeyState::Unbound,
@@ -3038,6 +3283,16 @@ mod tests {
                 json!({"state": PROBE})
             )),
             "a state the recorder can report and this schema does not describe"
+        );
+        assert_eq!(
+            listed("preview_kind"),
+            sorted(variants_the_deserialiser_has::<PreviewKind>(json!(PROBE))),
+            "a kind of preview the recorder can answer with and this schema does not describe"
+        );
+        assert_eq!(
+            listed("preview_state"),
+            sorted(variants_the_deserialiser_has::<PreviewState>(json!(PROBE))),
+            "a state a preview can be in and this schema does not describe"
         );
         assert_eq!(
             listed("client_message_type"),

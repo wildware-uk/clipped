@@ -2376,6 +2376,82 @@ fn a_track_chosen_for_playback_is_the_one_that_can_be_heard_in_what_is_served() 
 }
 
 #[test]
+fn a_preview_of_a_recording_that_is_not_there_is_an_answer_and_not_a_refusal() {
+    // Issue #448 over a real recorder, a real pipe and a real handshake, which
+    // is the hop that says the command is *served* rather than merely defined:
+    // a build that advertised `previews` and never dispatched the command would
+    // pass every unit test in `crates/ipc` and in `apps/recorder/src/preview`.
+    //
+    // It asks about a recording that does not exist, deliberately. A path that
+    // did exist would be one belonging to whoever is running the tests, and
+    // asking about it would put it in the recorder's generation queue and write
+    // a picture into their cache (AGENTS.md section 25). A path that is not
+    // there is answered from a `stat` that fails, so nothing is queued and
+    // nothing is written.
+    let recorder = ServedRecorder::start("preview-missing");
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::PREVIEWS),
+        "a recorder that answers `open_preview` has to say so, or a window will not ask: {:?}",
+        client.welcome().features
+    );
+
+    let reply = client
+        .call(&IpcCommand::OpenPreview(clipped_ipc::OpenPreview {
+            source: r"D:\clips recording nobody has\match.mkv".to_owned(),
+            kind: clipped_ipc::PreviewKind::Thumbnail,
+            buckets: None,
+        }))
+        .expect("a recording that is not there is still an answer about a picture");
+
+    match reply {
+        Reply::PreviewOpened { preview } => {
+            assert_eq!(
+                preview.state,
+                clipped_ipc::PreviewState::Unavailable,
+                "a recording that cannot be read has no picture coming"
+            );
+            assert!(
+                preview.reason.is_some(),
+                "an unavailable preview says why: {preview:?}"
+            );
+            assert!(
+                preview.picture.is_none() && preview.tracks.is_empty(),
+                "nothing is drawn for it: {preview:?}"
+            );
+        }
+        other => panic!("expected a preview, got {other:?}"),
+    }
+
+    // And a waveform of the same recording comes back the same way, over the
+    // same command — which is the whole of #448's third criterion. A second
+    // mechanism would be a second thing to keep in step with this one.
+    let reply = client
+        .call(&IpcCommand::OpenPreview(clipped_ipc::OpenPreview {
+            source: r"D:\clips recording nobody has\match.mkv".to_owned(),
+            kind: clipped_ipc::PreviewKind::Waveform,
+            buckets: Some(256),
+        }))
+        .expect("the peaks are asked for the same way");
+
+    match reply {
+        Reply::PreviewOpened { preview } => {
+            assert_eq!(preview.kind, clipped_ipc::PreviewKind::Waveform);
+            assert_eq!(preview.state, clipped_ipc::PreviewState::Unavailable);
+        }
+        other => panic!("expected a preview, got {other:?}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
 fn a_recording_whose_file_has_gone_is_refused_with_something_a_person_can_act_on() {
     // Issue #304's fourth criterion. The window draws this sentence instead of a
     // player, so it has to name the file and say what probably happened to it

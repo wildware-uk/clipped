@@ -64,6 +64,11 @@ import type {
   MicrophoneLevel,
   PlaybackStream,
   PlaybackTrack,
+  Preview,
+  PreviewKind,
+  PreviewPicture,
+  PreviewState,
+  PreviewTrack,
   PluginDeclaration,
   SettingEntry,
   SettingsView,
@@ -413,6 +418,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'recording_exported', export: readExport(reply['export']) };
     case 'playback_opened':
       return { reply: 'playback_opened', playback: readPlayback(reply['playback']) };
+    case 'preview_opened':
+      return { reply: 'preview_opened', preview: readPreview(reply['preview']) };
     case 'hotkeys':
       return {
         reply: 'hotkeys',
@@ -781,6 +788,102 @@ function readPlaybackTrack(value: JsonValue | undefined): PlaybackTrack {
     ...(language === undefined ? {} : { language }),
     ...(chosen === undefined ? {} : { default: chosen }),
   };
+}
+
+/**
+ * A thumbnail or a waveform, and how far it has got.
+ *
+ * `kind` and `state` are both closed, so both are read the way a recorder state
+ * is: a value this build does not know fails the frame rather than being
+ * softened into one it does. Drawing peaks as a picture, or "not generated yet"
+ * as "there will never be one", would be a screen saying something untrue about
+ * a recording (issue #448).
+ */
+function readPreview(value: JsonValue | undefined): Preview {
+  const preview = object(value, 'a preview');
+  const what = 'a preview';
+  const picture = preview['picture'];
+  const tracks = preview['tracks'];
+  const reason = optionalStringField(preview, 'reason', what);
+
+  return {
+    kind: readPreviewKind(stringField(preview, 'kind', what)),
+    state: readPreviewState(stringField(preview, 'state', what)),
+    // Absent is "there is no picture here", which follows from the kind and the
+    // state rather than being a gap: a pending thumbnail carries none, and a
+    // waveform never does.
+    ...(picture === undefined || picture === null ? {} : { picture: readPreviewPicture(picture) }),
+    ...(tracks === undefined || tracks === null
+      ? {}
+      : { tracks: arrayField(tracks, 'a preview track list', readPreviewTrack) }),
+    // Kept as it arrives and shown as it arrives: only the recorder knows what
+    // failed, so the window invents no wording of its own.
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+function readPreviewPicture(value: JsonValue | undefined): PreviewPicture {
+  const picture = object(value, 'a preview picture');
+  const what = 'a preview picture';
+  const blank = optionalBooleanField(picture, 'blank', what);
+  return {
+    media_type: stringField(picture, 'media_type', what),
+    bytes: stringField(picture, 'bytes', what),
+    width: numberField(picture, 'width', what),
+    height: numberField(picture, 'height', what),
+    at_seconds: numberField(picture, 'at_seconds', what),
+    // Absent is "not a flat colour", which is what a build older than the field
+    // means by leaving it out.
+    ...(blank === undefined ? {} : { blank }),
+  };
+}
+
+function readPreviewTrack(value: JsonValue | undefined): PreviewTrack {
+  const track = object(value, 'a preview track');
+  const what = 'a preview track';
+  const name = optionalStringField(track, 'name', what);
+  const peaks = track['peaks'];
+  return {
+    index: numberField(track, 'index', what),
+    // A track a recording did not name is shown by its position rather than
+    // given one here, exactly as {@link readPlaybackTrack} does.
+    ...(name === undefined ? {} : { name }),
+    sample_rate: numberField(track, 'sample_rate', what),
+    channels: numberField(track, 'channels', what),
+    duration_seconds: numberField(track, 'duration_seconds', what),
+    // A peak that is not a number fails the whole track rather than being
+    // dropped: a waveform missing one bucket is a waveform that looks right and
+    // is not, which is worse than a refusal somebody can report.
+    ...(peaks === undefined || peaks === null
+      ? {}
+      : { peaks: numberArrayField(track, 'peaks', what) }),
+  };
+}
+
+function readPreviewKind(value: string): PreviewKind {
+  switch (value) {
+    case 'thumbnail':
+    case 'waveform':
+      return value;
+    default:
+      // No catch-all: the two kinds are drawn by different code, so a third
+      // guessed at would draw peaks as a picture or a picture as peaks.
+      return unreadable(`\`${value}\` is not a kind of preview this build knows`);
+  }
+}
+
+function readPreviewState(value: string): PreviewState {
+  switch (value) {
+    case 'pending':
+    case 'ready':
+    case 'unavailable':
+      return value;
+    default:
+      // Nor here: "not generated yet" and "there will never be one" are the two
+      // facts a tile has to tell apart, and a fourth state drawn as one of them
+      // would be the window saying something untrue about the recording.
+      return unreadable(`\`${value}\` is not a preview state this build knows`);
+  }
 }
 
 function readSessionPage(value: JsonValue | undefined): LibrarySessionPage {

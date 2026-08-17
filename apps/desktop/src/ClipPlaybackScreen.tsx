@@ -18,7 +18,9 @@ import {
   trackLabel,
   usePlayback,
 } from './playback';
-import type { RecorderLinkView } from './useRecorderLink';
+import { PREVIEWS, pictureUri, type ThumbnailView, useThumbnail, useWaveform } from './preview';
+import { recorderCanDo, type RecorderLinkView } from './useRecorderLink';
+import { Waveform } from './Waveform';
 
 /**
  * The clip playback screen (issue #52), and the player on it (issue #304).
@@ -40,6 +42,21 @@ import type { RecorderLinkView } from './useRecorderLink';
  * answers with a file carrying it — and the position is carried across, because
  * changing track is not a request to start again.
  *
+ * # The poster frame and the waveform
+ *
+ * Both come from the recorder, over `open_preview`, and both are the first time
+ * anything has drawn either (issue #448). The poster is the thumbnail
+ * `crates/library` already generates for the Library's tiles — the same picture,
+ * the same command — handed to the element's `poster` attribute so that
+ * something of the recording is on screen before a frame has been decoded. The
+ * waveform is the peaks `crates/waveform` computes, drawn under the transport.
+ *
+ * Neither arrives as a file. The picture is base64 in the reply and is drawn
+ * from a `data:` URI, which the content security policy already permits; the
+ * `clip` scheme this screen plays through still serves recordings and only
+ * recordings (`src-tauri/src/playback.rs`,
+ * `docs/adr/0015-derived-pictures-cross-the-control-protocol.md`).
+ *
  * # What is drawn only when it is true
  *
  * A recording still being written gets no player: its container has no trailer,
@@ -47,6 +64,28 @@ import type { RecorderLinkView } from './useRecorderLink';
  * whose file has gone gets the recorder's own sentence about it. Neither draws
  * a transport over nothing, which is AGENTS.md section 27.
  */
+
+/**
+ * The element's `poster`, when there is a picture to be one.
+ *
+ * Spread rather than passed as `poster={undefined}`, because an empty `poster`
+ * attribute is not the same as none: a `<video>` given one shows nothing at all
+ * where it would otherwise show its first frame.
+ *
+ * Every state but a ready thumbnail is no poster. A recording whose picture has
+ * not been made yet, or will never be made, still plays — and the element's own
+ * first frame is a better stand-in than a tile saying why there is no tile,
+ * which is a sentence a player has no room for and no need of.
+ */
+function posterOf(view: ThumbnailView): { poster?: string } {
+  if (view.state !== 'answered') {
+    return {};
+  }
+  const picture = view.preview.picture;
+  return view.preview.state === 'ready' && picture !== undefined
+    ? { poster: pictureUri(picture) }
+    : {};
+}
 
 /** What the playback screen is given. */
 export interface ClipPlaybackScreenProps {
@@ -77,6 +116,24 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
   const recording = recordingOf(resolution);
   const source = playbackSource(resolution, handed);
   const playback = usePlayback(source.file);
+
+  /*
+   * Asked of the recorder that is attached rather than assumed of the one this
+   * window shipped with: a recorder from before issue #448 has no
+   * `open_preview` and would refuse both of these by name, and a poster that
+   * never arrives is better drawn as no poster than as a failure.
+   */
+  const previews = recorderCanDo(view.link, PREVIEWS) ? source.file : null;
+  const poster = useThumbnail(previews);
+  /*
+   * A round number rather than a measured width, because nothing in jsdom or in
+   * a window that has not laid out yet can measure one, and because merging
+   * buckets is exact: peaks answered at 1,200 and drawn at 1,340 are the same
+   * answer stretched, not a wrong one. 1,200 is a little under the widest this
+   * panel is at the window's minimum size on a 200%-scaled display, which is
+   * the machine this runs on (`docs/waveforms.md`).
+   */
+  const peaks = useWaveform(previews, 1_200);
 
   const video = useRef<HTMLVideoElement>(null);
   /** Where the recording was when a different track was asked for. */
@@ -145,6 +202,7 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
               src={playback.stream.url}
               controls
               aria-label={`Playing ${fileName(source.file)}`}
+              {...posterOf(poster)}
               onLoadedMetadata={() => {
                 // Choosing a track is a different file, so the element starts
                 // at zero; putting it back where it was is what makes the
@@ -155,6 +213,17 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
                   video.current.currentTime = resume;
                 }
               }}
+            />
+
+            {/*
+             * Under the transport, because that is where a waveform belongs and
+             * because it describes the recording rather than the track being
+             * played: `tracks` is every sound track of the file, which is what
+             * the selector below chooses between.
+             */}
+            <Waveform
+              preview={peaks.state === 'answered' ? peaks.preview : null}
+              of={fileName(source.file)}
             />
 
             {playback.stream.audio_tracks.length > 1 && (
