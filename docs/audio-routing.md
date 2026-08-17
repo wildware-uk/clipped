@@ -1,7 +1,7 @@
 # Audio routing
 
-**Status: three captures and a mixer exist; nothing assembles them into a
-recording's tracks yet.**
+**Status: a recording of a window now assembles them — a game track, an
+everything-else track and a microphone track, plus the compatibility mix.**
 [Issue #19](https://github.com/wildware-uk/clipped/issues/19) built system audio
 capture: `clipped-audio` can record the output device Windows is playing
 through, as a continuous, timestamped stream of `f32` samples.
@@ -12,11 +12,26 @@ product exists for: **everything one game's process tree plays, and nothing
 else**. [Issue #29](https://github.com/wildware-uk/clipped/issues/29) added the
 other end of the model — the **compatibility mix**, the single track a player
 that takes one arbitrarily should take — which is the only place in Clipped where
-sources are deliberately combined. What is still to come is the routing that
-decides which captures a recording opens and which track each one feeds, and
-capturing the complement of a game
-([issue #27](https://github.com/wildware-uk/clipped/issues/27)); the sections at
-the end that describe those are unwritten because describing behaviour before it
+sources are deliberately combined.
+[Issue #27](https://github.com/wildware-uk/clipped/issues/27) added the
+complement — everything the machine played *except* one process tree — and with
+both modes present, `clipped_session::audio` now decides which captures a
+recording opens and which track each one feeds.
+
+**The rule is that the two scoped captures are opened together or not at all.**
+A recording of a window opens the include mode against that window's process tree
+and the exclude mode against the same tree, so every sample the machine played
+lands on exactly one of the two tracks. Opening one alone would leave the other
+half unrecorded; opening a scoped capture beside a whole-endpoint one would put
+the game's audio on two tracks, which nobody discovers until they mute the game
+in an editor and it is still audible. A recording with no process to scope to —
+a monitor capture, or a window whose process has already exited — records the
+whole endpoint on the other-system-audio track instead, which is coarser rather
+than broken.
+
+What is still to come is routing a *named* application to a track of its own
+([issue #33](https://github.com/wildware-uk/clipped/issues/33)); the sections at
+the end that describe it are unwritten because describing behaviour before it
 is built produces a page that is wrong from the day it is committed (AGENTS.md
 section 7).
 

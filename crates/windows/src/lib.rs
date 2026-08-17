@@ -135,6 +135,6 @@ pub use process_table::{process_table, ProcessTableEntry};
 pub use process_tree::{ProcessTree, TreeChange};
 pub use selection::{resolve, ResolveError, TargetSelector};
 pub use window::{
-    enable_per_monitor_dpi_awareness, enumerate_windows, is_window, window_geometry, DpiAwareness,
-    Exclusion, WindowGeometry, WindowHandle, WindowInfo,
+    enable_per_monitor_dpi_awareness, enumerate_windows, is_window, window_geometry,
+    window_process, DpiAwareness, Exclusion, WindowGeometry, WindowHandle, WindowInfo,
 };

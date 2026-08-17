@@ -22,9 +22,9 @@
 //! # What happens when the queue fills
 //!
 //! Stated plainly, because the alternative is a recorder that silently drops
-//! half a recording. The queue holds [`QUEUE_CAPACITY`] items, and that
+//! half a recording. The queue holds [`VIDEO_CAPACITY`] plus the audio share, and that
 //! capacity is **divided** between the two producers: [`VIDEO_CAPACITY`] for
-//! encoded packets and [`AUDIO_CAPACITY`] for captured buffers. Each producer is
+//! encoded packets and [`audio_capacity`] for captured buffers. Each producer is
 //! held to its own share, so neither can fill the queue underneath the other and
 //! turn its unblocked `send` into a blocking one.
 //!
@@ -66,7 +66,7 @@
 //!
 //! The audio half rests on the same arithmetic and is checked the same way: an
 //! audio producer counts its own outstanding buffers and refuses to send past
-//! [`AUDIO_CAPACITY`], so `try_send` is never the thing that discovers the queue
+//! its own share, so `try_send` is never the thing that discovers the queue
 //! is full. The constant assertions at the foot of this file are what hold the
 //! two shares to the one capacity.
 //!
@@ -114,23 +114,38 @@ use crate::error::SessionError;
 /// small: at 33 Mbit/s, two seconds of packets is about eight megabytes.
 const VIDEO_CAPACITY: usize = 128;
 
-/// How many captured audio buffers may be waiting to be written.
+/// How many captured audio buffers may be waiting to be written, **per source**.
 ///
 /// Sized in the same currency as [`VIDEO_CAPACITY`] — about two seconds of
 /// production — but audio arrives an order of magnitude more often: Windows
-/// delivers loopback in 10 ms packets, and a recording has up to two sources, so
-/// two seconds is around four hundred buffers. Five hundred and twelve gives
-/// that some slack while staying small in memory: a 10 ms stereo buffer at
-/// 48 kHz is 3,840 bytes of `f32`, so the whole share is about two megabytes.
+/// delivers loopback in 10 ms packets, so two seconds is around two hundred
+/// buffers from one source. Two hundred and fifty-six gives that some slack
+/// while staying small in memory: a 10 ms stereo buffer at 48 kHz is 3,840
+/// bytes of `f32`, so each source's share is under a megabyte.
 ///
-/// It is deliberately a separate number rather than more room in one pool. The
+/// **Per source, and not a fixed pool.** It was a fixed 512 while a recording
+/// had at most two sources — the whole system mix and a microphone. Issues
+/// [#26](https://github.com/wildware-uk/clipped/issues/26) and
+/// [#27](https://github.com/wildware-uk/clipped/issues/27) made it three, and
+/// three sources against a two-source pool is a queue that overflows in normal
+/// use: the tracks then end early, by a different amount on every run, and the
+/// A/V synchronisation check is what notices. Routing an application to a track
+/// of its own ([#33](https://github.com/wildware-uk/clipped/issues/33)) will
+/// make it more again, so the number scales rather than being raised.
+///
+/// It is deliberately a separate share rather than more room in one pool. The
 /// point of the split is that a slow disk cannot make the audio threads consume
 /// the video's headroom, which would turn the capture loop's unblocking `send`
 /// into a blocking one.
-const AUDIO_CAPACITY: usize = 512;
+const AUDIO_CAPACITY_PER_SOURCE: usize = 256;
 
-/// How many items of any kind may be waiting to be written.
-const QUEUE_CAPACITY: usize = VIDEO_CAPACITY + AUDIO_CAPACITY;
+/// The audio share of the queue for a recording with `sources` audio sources.
+///
+/// At least one source's worth even when a recording has no audio at all, so
+/// the queue is never zero-sized and the arithmetic below has no special case.
+const fn audio_capacity(sources: usize) -> usize {
+    AUDIO_CAPACITY_PER_SOURCE * if sources == 0 { 1 } else { sources }
+}
 
 /// How many packets of headroom are kept above the point at which the capture
 /// loop stops submitting frames.
@@ -326,13 +341,16 @@ pub(crate) enum AudioQueued {
 /// need no borrow of the [`MuxingThread`] and can be joined after the capture
 /// loop has finished with it. It carries the audio share of the queue's depth
 /// with it, which is what makes [`write`](Self::write) able to promise it never
-/// blocks: it refuses at [`AUDIO_CAPACITY`] rather than discovering a full queue
+/// blocks: it refuses at its own share rather than discovering a full queue
 /// inside a send.
 #[derive(Debug, Clone)]
 pub(crate) struct AudioQueue {
     sender: SyncSender<Queued>,
     depth: Arc<AtomicUsize>,
     dropped: Arc<AtomicU64>,
+    /// The audio share this recording was built with, which depends on how many
+    /// sources it has ([`audio_capacity`]).
+    capacity: usize,
 }
 
 impl AudioQueue {
@@ -347,7 +365,7 @@ impl AudioQueue {
         // before its own: a depth that lagged the queue would let a producer
         // send into a queue that is already full, and a full `sync_channel` is
         // where a capture thread waits on the filesystem (AGENTS.md section 20).
-        if self.depth.fetch_add(1, Ordering::Relaxed) >= AUDIO_CAPACITY {
+        if self.depth.fetch_add(1, Ordering::Relaxed) >= self.capacity {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return AudioQueued::DroppedWriterBehind;
@@ -391,6 +409,10 @@ pub(crate) struct MuxingThread {
     audio_depth: Arc<AtomicUsize>,
     /// How many audio buffers were dropped because the writer was behind.
     audio_dropped: Arc<AtomicU64>,
+    /// The audio share this recording was sized for, handed to every
+    /// [`AudioQueue`] so each source refuses at the same number
+    /// ([`audio_capacity`]).
+    audio_capacity: usize,
     /// What the writer thread last found out about the drive.
     space: Arc<SpaceWatch>,
     handle: Option<JoinHandle<Result<RecordingSummary, MuxError>>>,
@@ -423,7 +445,10 @@ impl MuxingThread {
         // contend for it (`CompatibilityMixer`).
         let mixer = CompatibilityMixer::new(layout);
 
-        let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        // Sized from the layout rather than from a constant: the audio share is
+        // per source, so a three-track recording gets three sources' worth.
+        let audio_share = audio_capacity(layout.audio_tracks().len());
+        let (sender, receiver) = mpsc::sync_channel(VIDEO_CAPACITY + audio_share);
         let depth = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&depth);
         let audio_depth = Arc::new(AtomicUsize::new(0));
@@ -457,6 +482,7 @@ impl MuxingThread {
             depth,
             audio_depth,
             audio_dropped: Arc::new(AtomicU64::new(0)),
+            audio_capacity: audio_share,
             space,
             handle: Some(handle),
         })
@@ -476,6 +502,7 @@ impl MuxingThread {
                 .expect("audio queues are taken before the recording is finished"),
             depth: Arc::clone(&self.audio_depth),
             dropped: Arc::clone(&self.audio_dropped),
+            capacity: self.audio_capacity,
         }
     }
 
@@ -980,14 +1007,18 @@ const _: () = {
         "the queue holds more video memory than a queue should"
     );
     assert!(
-        QUEUE_CAPACITY == VIDEO_CAPACITY + AUDIO_CAPACITY,
-        "the two producers' shares have to add up to the capacity, or one of them can fill \
-         the queue underneath the other and turn its send into a wait on the filesystem"
+        AUDIO_CAPACITY_PER_SOURCE >= 200,
+        "one source's share holds less than two seconds at Windows' 10 ms loopback period"
     );
     assert!(
-        AUDIO_CAPACITY >= 400,
-        "the audio share holds less than two seconds of two sources at Windows' 10 ms \
-         loopback period"
+        audio_capacity(3) == AUDIO_CAPACITY_PER_SOURCE * 3,
+        "the audio share has to grow with the number of sources: a recording with a game \
+         track, an other-system-audio track and a microphone is three, and holding it to \
+         two sources' worth drops buffers in ordinary use"
+    );
+    assert!(
+        audio_capacity(0) > 0,
+        "a recording with no audio at all must still have a queue with room in it"
     );
 };
 
@@ -1046,13 +1077,16 @@ mod tests {
     /// The receiver is returned rather than dropped: dropping it would
     /// disconnect the channel, and every write would come back
     /// [`AudioQueued::WriterLost`] instead of filling it.
+    /// A queue nobody drains, sized for the one source that writes to it.
     fn stalled_queue() -> (AudioQueue, Receiver<Queued>) {
-        let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        let capacity = audio_capacity(1);
+        let (sender, receiver) = mpsc::sync_channel(VIDEO_CAPACITY + capacity);
         (
             AudioQueue {
                 sender,
                 depth: Arc::new(AtomicUsize::new(0)),
                 dropped: Arc::new(AtomicU64::new(0)),
+                capacity,
             },
             receiver,
         )
@@ -1076,7 +1110,8 @@ mod tests {
             let samples = vec![0.0_f32; 480];
             let mut written = 0_usize;
             let mut dropped = 0_usize;
-            for _ in 0..QUEUE_CAPACITY * 2 {
+            let capacity = audio_capacity(1);
+            for _ in 0..(VIDEO_CAPACITY + capacity) * 2 {
                 match queue.write(TrackId::Audio(0), MediaTime::ZERO, &samples) {
                     AudioQueued::Written => written += 1,
                     AudioQueued::DroppedWriterBehind => dropped += 1,
@@ -1094,10 +1129,14 @@ mod tests {
             );
 
         assert_eq!(
-            written, AUDIO_CAPACITY,
+            written,
+            audio_capacity(1),
             "an audio producer must stop at its own share of the queue and not one item further"
         );
-        assert_eq!(dropped, QUEUE_CAPACITY * 2 - AUDIO_CAPACITY);
+        assert_eq!(
+            dropped,
+            (VIDEO_CAPACITY + audio_capacity(1)) * 2 - audio_capacity(1)
+        );
 
         // And the point of the share: the video's slots are still there. A
         // producer allowed to fill the whole queue would leave the capture
@@ -1106,7 +1145,7 @@ mod tests {
         // without anything failing.
         assert_eq!(
             receiver.try_iter().count(),
-            AUDIO_CAPACITY,
+            audio_capacity(1),
             "the queue should hold exactly the audio share, leaving the video's {} free",
             VIDEO_CAPACITY
         );
