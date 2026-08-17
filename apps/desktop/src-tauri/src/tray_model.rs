@@ -174,49 +174,7 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
             "Looking for the recorder".to_owned(),
             "Clipped — looking for the recorder".to_owned(),
         ),
-        RecorderLinkState::Attached {
-            status: RecorderStatus::Idle,
-            ..
-        } => (
-            TrayMark::Idle,
-            "Not recording".to_owned(),
-            "Clipped — not recording".to_owned(),
-        ),
-        // Nothing is being recorded, so the mark is the idle one: a badge of
-        // its own would be a tray design decision, and this issue's scope is
-        // the protocol having a word for the state rather than the tray
-        // gaining a fourth mark for it.
-        //
-        // The sentence is not the idle one, though. A sitting still open in
-        // its restart grace has a game name, and dropping it for those seconds
-        // is exactly the flicker `Watching::session` exists to prevent.
-        RecorderLinkState::Attached {
-            status: RecorderStatus::Watching(watching),
-            ..
-        } => match watching
-            .session
-            .as_deref()
-            .and_then(|s| s.game_name.as_deref())
-        {
-            Some(game) => (
-                TrayMark::Idle,
-                format!("Watching — {game}"),
-                format!("Clipped — watching for {game}"),
-            ),
-            None => (
-                TrayMark::Idle,
-                "Watching for a game".to_owned(),
-                "Clipped — watching for a game".to_owned(),
-            ),
-        },
-        RecorderLinkState::Attached {
-            status: RecorderStatus::Recording(active),
-            ..
-        } => (
-            TrayMark::Recording,
-            format!("Recording {}", active.target),
-            format!("Clipped — recording {}", active.target),
-        ),
+        RecorderLinkState::Attached { status, .. } => describe_status(status),
         RecorderLinkState::Reconnecting {
             attempt,
             attempts_allowed,
@@ -239,6 +197,96 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
     }
 }
 
+/// The same three things, for what an attached recorder says it is doing.
+///
+/// One arm per status and no default, for the reason [`describe`] has one per
+/// link state: a fourth state added to `RecorderStatus` is a protocol version
+/// bump, and it must stop this compiling rather than be drawn as whichever arm
+/// happened to be last.
+fn describe_status(status: &RecorderStatus) -> (TrayMark, String, String) {
+    match status {
+        RecorderStatus::Idle => (
+            TrayMark::Idle,
+            "Not recording".to_owned(),
+            "Clipped — not recording".to_owned(),
+        ),
+        // Nothing is being recorded, so the mark is the idle one: a badge of
+        // its own would be a tray design decision, and issue #584's scope was
+        // the protocol having a word for the state rather than the tray
+        // gaining a fourth mark for it.
+        //
+        // The sentence is not the idle one, though. A sitting still open in
+        // its restart grace has a game name, and dropping it for those seconds
+        // is exactly the flicker `Watching::session` exists to prevent.
+        RecorderStatus::Watching(_) => match game_in(status) {
+            Some(game) => (
+                TrayMark::Idle,
+                format!("Watching — {game}"),
+                format!("Clipped — watching for {game}"),
+            ),
+            None => (
+                TrayMark::Idle,
+                "Watching for a game".to_owned(),
+                "Clipped — watching for a game".to_owned(),
+            ),
+        },
+        // **The game, when the recording's sitting names one.** This said
+        // `Recording process 4242` until
+        // [issue #588](https://github.com/wildware-uk/clipped/issues/588),
+        // which is the line above going from a game's name while the recorder
+        // waited to a process identifier the moment it started recording it —
+        // backwards, and precisely the sentence issue #241 put
+        // `ActiveRecording::session` on the wire to make sayable. The tray knew
+        // the game and said the selector, which is withholding rather than
+        // lying and is no more allowed (AGENTS.md section 27).
+        RecorderStatus::Recording(active) => {
+            let of = game_in(status).unwrap_or(&active.target);
+            let line = match sitting_position(status) {
+                // "the second file of this sitting", which is what stops the
+                // next file of a game somebody is still playing looking like an
+                // unrelated recording. Said only when there is more than one,
+                // because "file 1 of this sitting" is noise.
+                Some(index) => format!("Recording {of}, file {index} of this sitting"),
+                None => format!("Recording {of}"),
+            };
+            let tooltip = format!("Clipped — recording {of}");
+            (TrayMark::Recording, line, tooltip)
+        }
+    }
+}
+
+/// The game the recorder's sitting is of, when the catalogue named one.
+///
+/// Asked of the whole status rather than of each arm, through
+/// `RecorderStatus::session`, because a sitting spans two of them: one being
+/// recorded is on `Recording` and one waiting out its restart grace is on
+/// `Watching`, and they are the same sitting a few seconds apart. Matching on
+/// the state twice here would be a second answer to a question the protocol
+/// crate already answers (AGENTS.md section 55).
+///
+/// [`None`] for a sitting the catalogue would not attribute, and for a recording
+/// that belongs to no sitting at all. Neither is a name to invent: what the
+/// caller falls back to is the selector the user actually gave.
+fn game_in(status: &RecorderStatus) -> Option<&str> {
+    status
+        .session()
+        .and_then(|sitting| sitting.game_name.as_deref())
+}
+
+/// Which file of its sitting the running recording is, when it is not the first.
+///
+/// `SessionSummary::recordings` includes the one being written and is in the
+/// order they were recorded, so the count *is* the position. [`None`] for a
+/// sitting on its first file, and for a recording carrying no sitting: there is
+/// nothing to say in either case, and "file 1 of this sitting" would be a
+/// sentence that only ever adds words.
+fn sitting_position(status: &RecorderStatus) -> Option<usize> {
+    status
+        .session()
+        .map(|sitting| sitting.recordings.len())
+        .filter(|recordings| *recordings > 1)
+}
+
 /// What the window is told when Exit could not reach the recorder.
 ///
 /// Exit is the only path that stops the recorder, so a shutdown that could not
@@ -258,11 +306,16 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
 pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str) -> String {
     let at_stake = match link {
         RecorderLinkState::Attached {
-            status: RecorderStatus::Recording(active),
+            status: status @ RecorderStatus::Recording(active),
             ..
         } => format!(
+            // The game rather than the capture selector, for the reason
+            // `describe_status` names it: somebody about to go looking for a
+            // recording in Task Manager is better served by "Counter-Strike 2"
+            // than by `process 4242`, and this window knows which it is.
             "It was last recording {} to {}, and that recording is still running.",
-            active.target, active.output
+            game_in(status).unwrap_or(&active.target),
+            active.output
         ),
         _ => "Clipped cannot tell whether it is still recording.".to_owned(),
     };
@@ -409,7 +462,7 @@ fn record_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipped_ipc::ActiveRecording;
+    use clipped_ipc::{ActiveRecording, SessionRecording, SessionSummary, Watching};
 
     /// A recorder of this build: one that advertises everything this build's
     /// own `serve` does.
@@ -465,6 +518,47 @@ mod tests {
         }
     }
 
+    /// A sitting the catalogue attributed, holding `files` recordings.
+    ///
+    /// The one being written is one of them, which is what makes the count the
+    /// position of the file the recorder is on.
+    fn sitting(files: usize) -> Box<SessionSummary> {
+        Box::new(SessionSummary {
+            session_id: "cs2-20260816-201400".to_owned(),
+            game_id: Some("counter-strike-2".to_owned()),
+            game_name: Some("Counter-Strike 2".to_owned()),
+            started_at: "2026-08-16T20:14:00+01:00".to_owned(),
+            recordings: (1..=files)
+                .map(|index| SessionRecording {
+                    session_index: u32::try_from(index).expect("a small count"),
+                    output: format!(r"D:\clips\cs2-{index}.mkv"),
+                    ..SessionRecording::default()
+                })
+                .collect(),
+            ..SessionSummary::default()
+        })
+    }
+
+    /// A sitting the catalogue would not attribute: it claimed nothing, or
+    /// reported a tie, and the sitting is filed under no game rather than a
+    /// guess.
+    fn unattributed_sitting() -> Box<SessionSummary> {
+        Box::new(SessionSummary {
+            session_id: "unknown-20260816-201400".to_owned(),
+            started_at: "2026-08-16T20:14:00+01:00".to_owned(),
+            recordings: vec![SessionRecording::default()],
+            ..SessionSummary::default()
+        })
+    }
+
+    /// A recording that belongs to `session`.
+    fn active_in(session: Option<Box<SessionSummary>>) -> ActiveRecording {
+        ActiveRecording {
+            session,
+            ..active(None)
+        }
+    }
+
     fn game() -> ForegroundWindow {
         ForegroundWindow {
             process_id: 4_242,
@@ -478,11 +572,22 @@ mod tests {
     /// recorder said it could do, because that is the difference the properties
     /// below have to hold across: an older recorder mid-recording is the case
     /// where a control looks most clearly clickable and is most clearly not.
+    ///
+    /// Both watching states are here as well, and a recording that carries the
+    /// sitting it belongs to. A recorder that watches for games is not
+    /// recording, so every property about a control that needs a recording has
+    /// to hold across it — and until issue #588 no watching state was in this
+    /// list at all, so nothing here had ever been asked.
     fn every_link_state() -> Vec<RecorderLinkState> {
         vec![
             RecorderLinkState::Connecting,
             attached(RecorderStatus::Idle),
+            attached(RecorderStatus::Watching(Watching { session: None })),
+            attached(RecorderStatus::Watching(Watching {
+                session: Some(sitting(1)),
+            })),
             recording(),
+            attached(RecorderStatus::Recording(active_in(Some(sitting(2))))),
             attached_with(Vec::new(), RecorderStatus::Recording(active(Some(30)))),
             RecorderLinkState::Reconnecting {
                 attempt: 2,
@@ -708,6 +813,99 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_that_knows_its_game_is_named_by_it_rather_than_by_a_process_id() {
+        // Issue #588's first half. `ActiveRecording::session` has carried the
+        // game since issue #241 (PR #586) and this arm went on formatting
+        // `target`, which is a capture selector — so the line went from
+        // "Watching — Counter-Strike 2" while the recorder waited to
+        // "Recording process 4242" the moment it started recording that very
+        // game. Backwards, and withholding something the window was holding
+        // (AGENTS.md section 27).
+        let model = tray_model(
+            &attached(RecorderStatus::Recording(active_in(Some(sitting(1))))),
+            Some(&game()),
+        );
+
+        assert_eq!(model.mark, TrayMark::Recording);
+        assert_eq!(model.status.label, "Recording Counter-Strike 2");
+        assert_eq!(model.tooltip, "Clipped — recording Counter-Strike 2");
+        assert!(
+            !model.status.label.contains("cs2.exe"),
+            "the selector is what the window could not turn into a game name; having been given \
+             the name, it must not go back to it: {}",
+            model.status.label,
+        );
+    }
+
+    #[test]
+    fn the_second_file_of_a_sitting_says_which_file_of_the_sitting_it_is() {
+        // The sentence issue #241 exists to make sayable, and the reason the
+        // sitting carries `recordings` at all: a game restarted inside its
+        // grace period keeps one sitting, and the file that follows would
+        // otherwise look like an unrelated recording of the same game.
+        let second = tray_model(
+            &attached(RecorderStatus::Recording(active_in(Some(sitting(2))))),
+            None,
+        );
+        assert_eq!(
+            second.status.label,
+            "Recording Counter-Strike 2, file 2 of this sitting"
+        );
+
+        // And a sitting on its first file says nothing about it, because "file
+        // 1 of this sitting" only ever adds words.
+        let first = tray_model(
+            &attached(RecorderStatus::Recording(active_in(Some(sitting(1))))),
+            None,
+        );
+        assert_eq!(first.status.label, "Recording Counter-Strike 2");
+    }
+
+    #[test]
+    fn a_recording_with_no_game_behind_it_still_says_what_it_is_recording() {
+        // The fallback, and the half that stops the change above being a screen
+        // that goes blank. Two recordings have no game name to show: one
+        // carrying no sitting at all, and one whose sitting the catalogue would
+        // not attribute — it claimed nothing, or reported a tie, and inventing
+        // a name for it is precisely what `game_name` is optional to prevent.
+        // Both show the selector the user actually gave, which is what this
+        // line said before issue #588.
+        let no_sitting = tray_model(&recording(), None);
+        assert_eq!(no_sitting.status.label, "Recording process `cs2.exe`");
+        assert_eq!(no_sitting.tooltip, "Clipped — recording process `cs2.exe`");
+
+        let unattributed = tray_model(
+            &attached(RecorderStatus::Recording(active_in(Some(
+                unattributed_sitting(),
+            )))),
+            None,
+        );
+        assert_eq!(unattributed.status.label, "Recording process `cs2.exe`");
+    }
+
+    #[test]
+    fn a_watching_recorder_names_the_game_whose_sitting_is_still_open() {
+        // The arm this one was already right about, asserted here because
+        // nothing had ever asked it: the whole point of issue #588 is that the
+        // two lines stopped agreeing, and a test of one of them is not a test
+        // of that.
+        let waiting = tray_model(
+            &attached(RecorderStatus::Watching(Watching {
+                session: Some(sitting(1)),
+            })),
+            Some(&game()),
+        );
+        assert_eq!(waiting.status.label, "Watching — Counter-Strike 2");
+        assert_eq!(waiting.mark, TrayMark::Idle, "nothing is being recorded");
+
+        let anything = tray_model(
+            &attached(RecorderStatus::Watching(Watching { session: None })),
+            Some(&game()),
+        );
+        assert_eq!(anything.status.label, "Watching for a game");
+    }
+
+    #[test]
     fn exiting_while_recording_says_that_is_what_it_will_do() {
         // The whole of "the user must not silently lose footage" as the menu
         // expresses it: the item stops saying "Exit" and says what it is about
@@ -775,6 +973,16 @@ mod tests {
         assert!(said.contains("process `cs2.exe`"), "{said}");
         assert!(said.contains("still running"), "{said}");
         assert!(said.contains("the pipe was busy"), "{said}");
+
+        // And it names the game when the recording knows one, for the reason
+        // the status line does: somebody who is about to be sent to Task
+        // Manager is better served by the name of the game than by a selector.
+        let named = could_not_reach_the_recorder(
+            &attached(RecorderStatus::Recording(active_in(Some(sitting(1))))),
+            "the pipe was busy",
+        );
+        assert!(named.contains("Counter-Strike 2"), "{named}");
+        assert!(named.contains(r"D:\clips\session.mkv"), "{named}");
     }
 
     #[test]

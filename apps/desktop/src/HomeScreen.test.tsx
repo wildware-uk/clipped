@@ -107,6 +107,29 @@ function recordingFor(elapsedMs: number): RecorderStatus {
   };
 }
 
+/**
+ * The same recording, in a sitting the catalogue named `game` — or would not
+ * name at all, which is what `undefined` is here.
+ *
+ * Every recording this recorder makes belongs to a sitting; whether that
+ * sitting has a game behind it is what the catalogue decided (issue #241).
+ */
+function recordingIn(game: string | undefined): RecorderStatus {
+  return {
+    state: 'recording',
+    recording_id: 'rec-1',
+    output: OUTPUT,
+    target: 'process cs2.exe',
+    elapsed_ms: 754_000,
+    session: {
+      session_id: 'cs2-20260816-201400',
+      ...(game === undefined ? {} : { game_name: game }),
+      started_at: '2026-08-16T20:14:00+01:00',
+      recordings: [],
+    },
+  };
+}
+
 /** What `get_status` answers when nothing is being recorded. */
 const IDLE: RecorderStatus = { state: 'idle' };
 
@@ -213,6 +236,30 @@ const STATES: readonly (readonly [
     'Recording process cs2.exe',
     /being written now/,
   ],
+  [
+    'when the recorder answers that it is watching for a game',
+    ATTACHED,
+    { state: 'watching' },
+    null,
+    'This recorder is watching for a game',
+    /will record the next game that launches/,
+  ],
+  [
+    'when the recorder answers that it is watching, in a sitting it has not left',
+    ATTACHED,
+    {
+      state: 'watching',
+      session: {
+        session_id: 'cs2-20260816-201400',
+        game_name: 'Counter-Strike 2',
+        started_at: '2026-08-16T20:14:00+01:00',
+        recordings: [],
+      },
+    },
+    null,
+    'This recorder is watching for a game',
+    /in a Counter-Strike 2 sitting/,
+  ],
 ];
 
 describe('what the Home screen says about the recording now', () => {
@@ -247,6 +294,48 @@ describe('what the Home screen says about the recording now', () => {
       );
     },
   );
+
+  /*
+   * Issue #588. `target` is the capture selector the recording was started
+   * with — `process 4242` for one nobody asked for — and only the recorder's
+   * catalogue can turn it into a game name, which is why the sitting rides on
+   * the status at all (issue #241). A screen handed the name and drawing the
+   * selector is withholding what it knows.
+   *
+   * The fallback is asserted beside it, because it is what stops this being a
+   * screen that goes blank: a recording with no sitting, or one whose sitting
+   * the catalogue would not attribute, still says what is being recorded.
+   */
+  it('names the game being recorded, and falls back to the selector when there is none', () => {
+    const named = describeRecordingNow(ATTACHED, recordingIn('Counter-Strike 2'), null);
+    expect(named.state).toBe('Recording Counter-Strike 2');
+
+    const unattributed = describeRecordingNow(ATTACHED, recordingIn(undefined), null);
+    expect(unattributed.state).toBe('Recording process cs2.exe');
+    expect(describeRecordingNow(ATTACHED, recordingFor(754_000), null).state).toBe(
+      'Recording process cs2.exe',
+    );
+  });
+
+  /*
+   * The distinction issue #584 put on the wire, arriving on the screen that is
+   * about what is being recorded now. A watching recorder will record the next
+   * game to launch and an idle one will record nothing until it is asked; this
+   * screen drew both as "This recorder is not recording" with a sentence saying
+   * it was idle, and the recorder the window starts for itself is the watching
+   * kind.
+   */
+  it('tells a recorder that is watching from one that is idle', () => {
+    const watching = describeRecordingNow(ATTACHED, { state: 'watching' }, null);
+    const idle = describeRecordingNow(ATTACHED, IDLE, null);
+
+    expect(watching.state).not.toBe(idle.state);
+    expect(watching.detail).toMatch(/will record the next game/);
+    expect(idle.detail).toMatch(/will record nothing until it is asked/);
+    // Neither claims a file or a duration: nothing is being recorded in either.
+    expect(watching.output).toBeUndefined();
+    expect(watching.elapsed).toBeUndefined();
+  });
 
   /*
    * The file and the duration are only ever drawn for a recording the recorder

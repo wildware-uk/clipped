@@ -304,10 +304,20 @@ pub mod features {
         /// [issue #241](https://github.com/wildware-uk/clipped/issues/241) is
         /// about, arrived at from the other side.
         ///
-        /// It is therefore also the switch
-        /// [issue #421](https://github.com/wildware-uk/clipped/issues/421) turns
-        /// on: converging `serve` and `watch` is a recorder that advertises this
-        /// where today's does not, and needs nothing here to change.
+        /// It is therefore the one name here that is a fact about **this
+        /// recorder** rather than about the build.
+        /// [Issue #421](https://github.com/wildware-uk/clipped/issues/421) put
+        /// both kinds in one binary: a plain `clipped-recorder serve` does not
+        /// advertise it and a `serve --watch-for-games` does, and the recorder
+        /// answers it from the same claim
+        /// [`RecorderStatus::Watching`](crate::RecorderStatus::Watching) is
+        /// answered from — never from the argument it was started with, which
+        /// could disagree with the status of a recorder whose detection failed
+        /// to start (`apps/recorder/src/serve.rs`,
+        /// [issue #587](https://github.com/wildware-uk/clipped/issues/587)).
+        ///
+        /// A recorder that is *recording* still advertises it. What it is doing
+        /// now is the status; this is what it will do next.
         AUTOMATIC = "automatic";
         /// The recorder can answer with a recording's thumbnail or the peaks of
         /// its sound: `open_preview`.

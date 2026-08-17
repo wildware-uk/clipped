@@ -2660,6 +2660,81 @@ fn a_recorder_watching_for_games_is_told_apart_from_one_that_is_not() {
     let _ = std::fs::remove_dir_all(&idle_home);
 }
 
+#[test]
+fn only_a_recorder_that_records_games_by_itself_advertises_that_it_does() {
+    // Issue #587. `features::AUTOMATIC` was defined, was documented as the
+    // switch a window reads before it draws a screen saying whether games are
+    // being recorded, and **no recorder advertised it** — so the one question
+    // it exists to answer had no answer at all.
+    //
+    // It is a fact about this recorder rather than about the build. Since issue
+    // #421 both kinds are the same binary: a plain `serve` records only what it
+    // is asked to and reports `idle` for ever, and a `serve --watch-for-games`
+    // records the next game to launch. The desktop application starts the
+    // second (`SupervisorSettings::watch_for_games`), so a window that could
+    // not tell them apart was describing the wrong one.
+    //
+    // Both directions are here, in one test, because that is the whole of it: a
+    // build that advertised the feature unconditionally would pass the first
+    // half perfectly well, and would tell somebody who started `serve` at a
+    // terminal that Clipped was about to record whatever game they had open.
+    let watching_home = scratch_home("automatic-feature");
+    let watching = ServedRecorder::started_with(
+        "automatic-feature",
+        Some(&watching_home),
+        &["--watch-for-games"],
+    );
+    let mut client = watching.client();
+
+    let advertised = client.welcome().features.clone();
+    assert!(
+        advertised.iter().any(|name| name == features::AUTOMATIC),
+        "a recorder that will record the next game to launch has to say so in its welcome, or a \
+         window has no way to ask: {advertised:?}",
+    );
+    // The status agrees, because the feature is answered from the same claim
+    // rather than from a second flag beside it: a recorder that advertised
+    // `automatic` and then reported `idle` would be telling a window two
+    // opposite things about itself in the same second.
+    assert!(
+        matches!(status_of(&mut client), RecorderStatus::Watching(_)),
+        "the capability and the status are the same claim, so a recorder advertising `automatic` \
+         cannot report that it will never record anything",
+    );
+
+    drop(client);
+    watching.stop();
+    let _ = std::fs::remove_dir_all(&watching_home);
+
+    // The other direction, and what makes the half above mean anything.
+    let idle_home = scratch_home("automatic-feature-off");
+    let idle = ServedRecorder::start_under("automatic-feature-off", Some(&idle_home));
+    let mut client = idle.client();
+
+    let advertised = client.welcome().features.clone();
+    assert!(
+        !advertised.iter().any(|name| name == features::AUTOMATIC),
+        "nothing asked this recorder to watch for games, so nothing may tell a window that it \
+         will record one: {advertised:?}",
+    );
+    // And it still advertises what it can do. A recorder that had lost its
+    // whole feature list would pass the assertion above for a reason that has
+    // nothing to do with this issue.
+    assert!(
+        advertised.iter().any(|name| name == features::RECORDING),
+        "a recorder that records what it is asked to still says so: {advertised:?}",
+    );
+    assert_eq!(
+        status_of(&mut client),
+        RecorderStatus::Idle,
+        "and the status agrees in this direction too",
+    );
+
+    drop(client);
+    idle.stop();
+    let _ = std::fs::remove_dir_all(&idle_home);
+}
+
 /// The `get_status` reply exactly as it appears on the pipe.
 ///
 /// Every other test here uses `clipped-ipc`'s own client, which is the right

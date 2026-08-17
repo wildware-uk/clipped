@@ -67,6 +67,86 @@ describe('what the status block says about the recorder', () => {
     expect(recording.detail).toContain('process cs2.exe');
   });
 
+  it('names the game it is recording, when the recording knows one', () => {
+    // Issue #588, in the block that is on screen whichever screen is open.
+    // `target` is the capture selector — `process 4242` for a recording nobody
+    // asked for — and the sitting on the status is the recorder having already
+    // turned it into a name with the catalogue only it holds (issue #241). A
+    // window that had been handed the name and drew the selector would be
+    // withholding rather than lying, which AGENTS.md section 27 rules out
+    // equally.
+    const shown = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: ['automatic'],
+      status: {
+        state: 'recording',
+        recording_id: 'r-1',
+        output: 'D:\\clips\\cs2-1.mkv',
+        target: 'process 4242',
+        elapsed_ms: 4200,
+        session: {
+          session_id: 'cs2-20260816-201400',
+          game_name: 'Counter-Strike 2',
+          started_at: '2026-08-16T20:14:00+01:00',
+          recordings: [],
+        },
+      },
+    });
+
+    expect(shown.state).toBe('Recording');
+    expect(shown.detail).toBe('Recording Counter-Strike 2.');
+    expect(shown.detail).not.toContain('4242');
+  });
+
+  it('tells a recorder that is watching for a game from one that is idle', () => {
+    // The distinction issue #584 put on the wire, arriving in the one place a
+    // user sees on every screen. This block drew a watching recorder as "Idle —
+    // the recorder is running. Nothing is being recorded", which is the same
+    // sentence it draws for a recorder that will never record anything — and
+    // the recorder the window starts for itself is the watching kind.
+    const watching = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: ['automatic'],
+      status: { state: 'watching' },
+    });
+
+    expect(watching.state).toBe('Watching');
+    expect(watching.detail).toMatch(/will record the next one/);
+
+    // And a sitting still open in its restart grace keeps the game's name,
+    // rather than blanking it for those few seconds and filling it in again.
+    const inASitting = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: ['automatic'],
+      status: {
+        state: 'watching',
+        session: {
+          session_id: 'cs2-20260816-201400',
+          game_name: 'Counter-Strike 2',
+          started_at: '2026-08-16T20:14:00+01:00',
+          recordings: [],
+        },
+      },
+    });
+
+    expect(inASitting.state).toBe('Watching');
+    expect(inASitting.detail).toContain('Counter-Strike 2');
+
+    // The other direction: an idle recorder is not described as one that is
+    // about to record something.
+    const idle = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: [],
+      status: { state: 'idle' },
+    });
+    expect(idle.state).toBe('Idle');
+    expect(idle.detail).not.toMatch(/watch/i);
+  });
+
   it('carries the reason and the attempt while it is reconnecting', () => {
     // A window that said only "Reconnecting" would leave the user with no idea
     // whether to wait or to do something (AGENTS.md section 45).

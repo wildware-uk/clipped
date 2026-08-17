@@ -138,6 +138,13 @@ use crate::record::{resolve_window, settings_for};
 /// A UI reads this rather than inferring capability from a version number, so
 /// that a control whose command would be refused is never offered at all
 /// (AGENTS.md section 27).
+///
+/// **Everything here is a fact about the build**, which is why
+/// [`features::AUTOMATIC`] is deliberately not in the list: since issue #421 a
+/// plain `serve` and a `serve --watch-for-games` are the same binary and differ
+/// in what *this* recorder does, so it is added by
+/// [`RecorderService::features`] from the recorder's own claim instead
+/// ([issue #587](https://github.com/wildware-uk/clipped/issues/587)).
 fn features_of_this_build() -> Vec<String> {
     vec![
         features::RECORDING.to_owned(),
@@ -831,8 +838,28 @@ impl CommandHandler for RecorderService {
         self.recordings.status()
     }
 
+    /// What this build can do, plus the one capability that is a fact about
+    /// *this recorder* rather than about the binary.
+    ///
+    /// [`features::AUTOMATIC`] says the recorder records games by itself, and
+    /// since [issue #421](https://github.com/wildware-uk/clipped/issues/421)
+    /// both kinds live in one binary: a plain `serve` will never record
+    /// anything it was not asked for, and a `serve --watch-for-games` will
+    /// record the next game to launch. A window has no other way to tell them
+    /// apart before it draws a screen that says one of those two things
+    /// ([issue #587](https://github.com/wildware-uk/clipped/issues/587)).
+    ///
+    /// It is answered from [`RecordingState::watches_for_games`] — the same
+    /// claim [`RecorderStatus::Watching`] is answered from, and literally the
+    /// same field — rather than from the `--watch-for-games` flag, so that a
+    /// recorder asked to watch whose detection could not start does not
+    /// advertise a capability its status denies.
     fn features(&self) -> Vec<String> {
-        features_of_this_build()
+        let mut features = features_of_this_build();
+        if self.recordings.watches_for_games() {
+            features.push(features::AUTOMATIC.to_owned());
+        }
+        features
     }
 }
 
@@ -1440,6 +1467,25 @@ impl RecordingState {
     /// worst a poisoned read can be is out of date.
     fn watching_now(&self) -> Option<Watching> {
         self.watching_lock().clone()
+    }
+
+    /// Whether this recorder will record a game by itself.
+    ///
+    /// **The same claim [`RecorderStatus::Watching`] is answered from** — the
+    /// same field, read through the same lock — rather than a second flag
+    /// beside it, so that a recorder cannot advertise
+    /// [`features::AUTOMATIC`] and then report a status that says it will never
+    /// record anything ([issue #587](https://github.com/wildware-uk/clipped/issues/587)).
+    ///
+    /// Deliberately **not** `matches!(self.status(), Watching(_))`. A recorder
+    /// that is watching *and* recording reports `recording`, because that is
+    /// the thing a window has to be able to see and stop ([`status_of`]) — and
+    /// it goes on watching throughout. Reading the status here would make the
+    /// capability appear and disappear with every recording, which is a window
+    /// watching a control it drew from the welcome stop applying to the
+    /// recorder it drew it for.
+    pub(crate) fn watches_for_games(&self) -> bool {
+        self.watching_lock().is_some()
     }
 
     fn watching_lock(&self) -> MutexGuard<'_, Option<Watching>> {
@@ -4499,6 +4545,50 @@ mod tests {
             features.contains(&clipped_ipc::features::MICROPHONE_LEVEL.to_owned()),
             cfg!(windows),
             "a build with no audio backend must not claim it can listen: {features:?}",
+        );
+    }
+
+    #[test]
+    fn only_a_recorder_that_is_watching_advertises_that_it_records_games_by_itself() {
+        // Issue #587. Every other name in the welcome is a fact about the
+        // build; this one is a fact about the recorder, and the difference is
+        // the whole reason the feature exists. `features_of_this_build` never
+        // listed it, so no window could tell a recorder that records by itself
+        // from one that never will.
+        //
+        // The guard is what decides it, which is what makes the third
+        // assertion worth making: detection that starts and then stops takes
+        // the claim with it, exactly as it takes `RecorderStatus::Watching`
+        // (`WatchingForGames`, issue #584). A recorder that went on advertising
+        // it would be telling every window that the next game to launch will be
+        // recorded, with nothing left to record it (AGENTS.md sections 27 and
+        // 54).
+        //
+        // Over the real protocol, both directions, in
+        // `tests/ipc_protocol.rs::only_a_recorder_that_records_games_by_itself_advertises_that_it_does`.
+        let service = RecorderService::new(EventPublisher::new());
+        let automatic = clipped_ipc::features::AUTOMATIC.to_owned();
+
+        assert!(
+            !service.features().contains(&automatic),
+            "nothing has asked this recorder to watch, so it will record nothing it is not asked \
+             for: {:?}",
+            service.features(),
+        );
+
+        let watching = service.recordings.watch_for_games();
+        assert!(
+            service.features().contains(&automatic),
+            "a recorder watching for games records them by itself, and a window has no other way \
+             to find that out: {:?}",
+            service.features(),
+        );
+
+        drop(watching);
+        assert!(
+            !service.features().contains(&automatic),
+            "a watcher that has gone must take the claim with it: {:?}",
+            service.features(),
         );
     }
 

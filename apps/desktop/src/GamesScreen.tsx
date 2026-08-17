@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import { describeGameDetection, WHAT_WORKS_TODAY } from './gameDetection';
+import { describeGameDetection, whatWorksToday } from './gameDetection';
 import type { RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -108,7 +108,7 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
       <section className="clipped-panel" aria-label="Game detection" aria-live="polite">
         <h2 className="clipped-panel__heading">{detection.state}</h2>
         <p className="clipped-panel__body">{detection.detail}</p>
-        <p className="clipped-panel__body clipped-muted">{WHAT_WORKS_TODAY}</p>
+        <p className="clipped-panel__body clipped-muted">{whatWorksToday(link)}</p>
       </section>
 
       <h2 className="clipped-screen__heading">What this screen will show</h2>

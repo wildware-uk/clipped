@@ -152,6 +152,16 @@ fn main() -> ExitCode {
                 recording_id,
                 error,
             } => say(&format!("failed={recording_id} {error}")),
+            // A sitting the recorder has finished, with the files it produced
+            // (issue #588). The identifier and the count rather than the whole
+            // sitting: what a test reading this line by line asserts is that
+            // the end of a sitting reached a client at all, and how many files
+            // it was told about.
+            RecorderLinkEvent::SessionEnded(session) => say(&format!(
+                "session_ended={} recordings={}",
+                session.session_id,
+                session.recordings.len()
+            )),
             // Reported once the link attaches, when Windows would not give the
             // recorder a combination it asked for (issue #417). Said here as the
             // actions rather than the whole rows: this fixture's output is read
