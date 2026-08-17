@@ -223,6 +223,17 @@
   --editor-ruler-height: 18px;
   --editor-lane-label-width: 132px;
 
+  /*
+   * A recording's thumbnail where it is drawn beside its name in a list
+   * (issue #448). Not a step on any scale, which is why it is here with its
+   * reason: `docs/thumbnails.md` sizes the stored picture for the 320-pixel
+   * tile the Library's eventual grid draws (#57), and this is the other place
+   * one appears — a row in a dense table, where the picture has to be
+   * recognisable beside a file name without making the row twice as tall as
+   * every row above it.
+   */
+  --thumb-width: 96px;
+
   /* — shell metrics — */
   --shell-sidebar-width: 210px;
   /* The rail of sections down the left of a screen that has more than one

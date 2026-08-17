@@ -12,6 +12,7 @@ import {
 import type { Favourites, FavouriteTarget } from './favourites';
 import type { Locks, LockTarget } from './locks';
 import { canActOn, fileName, type RecordingActions } from './recordingActions';
+import { Thumbnail } from './Thumbnail';
 import { useSessionWindow } from './virtualWindow';
 
 /**
@@ -62,11 +63,23 @@ import { useSessionWindow } from './virtualWindow';
  * (`docs/library.md`) whether or not the file is where the index last saw it.
  * The three actions need the file; this does not.
  *
- * # No thumbnails
+ * # Thumbnails
  *
- * The deck draws a grid of them. Thumbnails are generated beside the recordings
- * (#57) and this window has no file-system permission to load one, so there is
- * nothing to draw and no placeholder is drawn in their place.
+ * A recording's row carries its thumbnail, which is the first time any build has
+ * drawn one (issue #448). The picture does not come off the disk — this window
+ * still has no file-system permission and no asset scope — it comes back as
+ * base64 in the recorder's own reply and is drawn from a `data:` URI
+ * (`preview.ts`, `crates/ipc/src/preview.rs`).
+ *
+ * `thumbnails` is off unless the recorder advertises `previews`, and off is what
+ * every caller that has not said otherwise gets. That is not tidiness: asking is
+ * one round trip **per row**, and a recorder built before #448 would refuse
+ * every one of them by name, so a list that asked anyway would spend a page of
+ * refusals to draw a column of nothing.
+ *
+ * The deck's grid of tiles is still not this: a grid is the Library's own view
+ * of a game's footage (#57), and what a row can carry is one small picture
+ * beside the file name.
  *
  * # Large libraries scroll smoothly
  *
@@ -78,6 +91,15 @@ import { useSessionWindow } from './virtualWindow';
  * `.clipped-shell__main` to measure, which is why every case in
  * `LibraryScreen.test.tsx` and `HomeScreen.test.tsx` still sees every session it
  * always saw: jsdom has no layout engine and reports a viewport of zero.
+ *
+ * A drawn thumbnail makes a recording's row taller than
+ * `ESTIMATED_ROW_HEIGHT_PX` says — a tile is `--thumb-width` at 16:9, so about
+ * 70 pixels against the 40 the estimate assumes. That is left alone rather than
+ * corrected: `virtualWindow.ts` estimates a session's height from its row count
+ * on purpose, because measuring one means mounting one, and what it guards
+ * against is ten thousand sessions in the DOM at once rather than a scrollbar
+ * thumb that is short. The window it computes stays a small bounded slice
+ * either way, which is what `SessionList.test.tsx` asserts.
  */
 
 /** What a session list is given. */
@@ -120,6 +142,16 @@ export interface SessionListProps {
    * them is *about* that.
    */
   readonly locks?: Locks;
+  /**
+   * Whether the recorder can answer for a recording's thumbnail (issue #448).
+   *
+   * The caller's answer to `recorderCanDo(link, 'previews')` rather than a
+   * question asked here, because this component is handed a list and holds no
+   * link of its own. Absent draws no tiles and asks nothing, which is what Home
+   * takes and what any caller in front of an older recorder gets: that recorder
+   * would refuse one round trip per row.
+   */
+  readonly thumbnails?: boolean;
 }
 
 /** The sittings, one row each, and their recordings under them. */
@@ -130,6 +162,7 @@ export function SessionList({
   favourites,
   locks,
   onPlay,
+  thumbnails = false,
 }: SessionListProps): ReactNode {
   const table = useRef<HTMLTableElement>(null);
   const showsRecordings = actions !== undefined;
@@ -211,6 +244,7 @@ export function SessionList({
                 actions={actions}
                 onPlay={onPlay}
                 session={session}
+                thumbnails={thumbnails}
                 {...(favourites === undefined ? {} : { favourites })}
                 {...(locks === undefined ? {} : { locks })}
               />
@@ -236,6 +270,7 @@ function RecordingRow({
   session,
   favourites,
   locks,
+  thumbnails,
 }: {
   readonly recording: LibraryRecording;
   readonly actions: RecordingActions;
@@ -246,6 +281,7 @@ function RecordingRow({
   readonly session: LibrarySession;
   readonly favourites?: Favourites;
   readonly locks?: Locks;
+  readonly thumbnails: boolean;
 }): ReactNode {
   const available = canActOn(recording);
   const busy =
@@ -264,7 +300,18 @@ function RecordingRow({
 
   return (
     <tr>
-      <td colSpan={4}>
+      {/*
+       * A cell of its own rather than a picture floated into the name beside it,
+       * so that a column of thumbnails lines up down the table — and the name
+       * cell gives up exactly the one column it takes, so a row spans the same
+       * five whether the recorder can serve a picture or not.
+       */}
+      {thumbnails && (
+        <td>
+          <Thumbnail source={recording.path} of={of} />
+        </td>
+      )}
+      <td colSpan={thumbnails ? 3 : 4}>
         {fileName(recording.path)}
         {recording.duration_seconds !== undefined && (
           <span className="clipped-muted"> · {formatDuration(recording.duration_seconds)}</span>

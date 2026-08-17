@@ -18,11 +18,17 @@ recording worth reading after each successful reconciliation (`:852`, `:1101`),
 so thumbnails are made on a real machine as recordings are indexed
 ([#57](https://github.com/wildware-uk/clipped/issues/57)).
 
-**Nothing draws the result yet.** The library screen is
-[#52](https://github.com/wildware-uk/clipped/issues/52), and carrying a
-thumbnail to the window is
-[#448](https://github.com/wildware-uk/clipped/issues/448). So the files are
-generated and cached, and no user has seen one.
+**And the Library screen draws them.**
+[#448](https://github.com/wildware-uk/clipped/issues/448) carried the picture to
+the window, over the `open_preview` command below, and each recording's row now
+holds one. That sentence read *"Nothing draws the result"* for three milestones,
+and what was missing was never the generator: it was a way for 20 kB of JPEG to
+reach a webview with no file-system permission, which is a design question
+rather than a wiring one and is why it was an issue of its own.
+
+The playback screen's poster frame is
+[#52](https://github.com/wildware-uk/clipped/issues/52) and uses the same
+command.
 
 One half of the "never interferes with a recording" promise is also mechanism
 without a caller. `ThumbnailService::suspend_for_recording` and `resume` are
@@ -262,6 +268,74 @@ picture **before** the sidecar that describes it. A process killed mid-store
 therefore leaves either the previous entry or a picture no lookup will read and
 pruning will collect — never a sidecar pointing at a picture that is not there.
 
+## How it reaches the window
+
+The window can read neither the picture nor the sidecar. It has no file-system
+permission, and `tests/integration/tests/workspace_layering.rs` permits the
+Tauri host exactly one crate of this workspace — so it links no cache reader
+either. The recorder does both, and answers `open_preview` with the picture
+itself, base64 in the reply ([ipc.md](ipc.md)).
+
+**Bytes on the protocol, and not an asset scope.**
+[ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md) is the
+record. The alternative was a narrow Tauri file-system scope over the cache
+directory, letting the webview load each picture as a file. Three things decided
+it:
+
+- **A scope cannot carry the peaks.** [waveforms.md](waveforms.md)'s `.cwf` is a
+  binary sidecar the Tauri host may not link a reader for, so serving *those* as
+  files would mean a second implementation of the format in TypeScript. A scope
+  would therefore have carried the thumbnail and left the waveform needing a
+  transport of its own, which is the "one mechanism, not two" #448 asked for.
+- **This costs the window nothing.** A `data:` URI is already permitted by
+  `tauri.conf.json`'s `img-src`, so `capabilities/default.json` grows by
+  nothing, the content security policy is untouched, and
+  `apps/desktop/src/playbackReach.test.ts` — which fails if either changes —
+  passes unmodified. A scope is a file-system permission the window has never
+  had.
+- **A page of pictures was the objection, and this is not one.** One recording is
+  asked about at a time, as its row is drawn.
+
+Asking is also what makes one. `ThumbnailService::thumbnail` looks the recording
+up and queues the work when it misses, so a screen drawing a row is what puts
+that recording at the front of the queue — which is why the queue drops its
+oldest waiting request rather than its newest. Before this the only thing that
+ever asked was the whole-library sweep after a reconciliation, in whatever order
+the index happened to be in.
+
+### What a page costs
+
+`a_page_of_thumbnails_is_a_page_of_frames_and_each_one_fits` in
+`apps/recorder/src/preview/tests.rs` measures it, against the page size
+[library.md](library.md) uses — 25 sittings, which is what the Library screen
+asks for — and prints the figures with `--nocapture`.
+
+| | |
+| --- | --- |
+| Per picture, stored | 20,073 bytes (the measurement above) |
+| Per picture, base64 | 26,764 characters |
+| Per picture, whole frame | about 27 kB |
+| A page of 25 | about 670 kB, in **25 frames** |
+| The frame limit | 1,048,576 bytes (`clipped_ipc::MAX_FRAME_BYTES`) |
+
+**The bound that has to hold is per picture, not per page**, because each
+crosses in its own request: a page is twenty-five frames of 27 kB, not one frame
+of 670 kB. That is what keeps the ten-thousand-session library
+[library.md](library.md) measures out of the size question — a library of any
+size is drawn a page at a time, and the Library screen's virtual window
+(`virtualWindow.ts`) narrows even that to the rows actually on screen.
+
+The test asserts both halves: that one picture is well inside a frame, and that
+a picture which had somehow grown past half a frame is answered `Unavailable`
+with a reason rather than becoming a frame the recorder cannot send and a window
+left waiting.
+
+**Not measured here:** how long a page of twenty-five round trips takes on a
+real machine. That needs a running recorder and a window, so it is a manual
+measurement rather than a test; what is asserted instead is the property the
+answer depends on, which is that the work is bounded per row and the rows are
+bounded by the viewport.
+
 ## Missing data is not an error
 
 Issue #57's third acceptance criterion: a failure to generate a thumbnail leaves
@@ -273,6 +347,13 @@ them is an error a screen has to handle:
 | `Pending`            | Draw the tile with no picture. One is being made.  |
 | `Ready(Thumbnail)`   | Draw `image_path()`.                               |
 | `Unavailable(error)` | Draw the tile with no picture, and it may say why. |
+
+All three cross the process boundary as they are — `clipped_ipc::PreviewState`
+is this table — because the first and the third are **different facts about a
+library**, and a screen that drew them the same way would report a disconnected
+drive as a library nobody has indexed yet. That is #448's second acceptance
+criterion, and it is why the state is a field on the wire rather than something
+inferred from whether a picture happened to be attached.
 
 Every one of these is reached by a real case:
 
@@ -308,7 +389,9 @@ On **one** thread that `ThumbnailService` creates and owns, and nowhere else.
 
 The intended host is the recorder process, which is the process that already
 knows when a recording is running and can therefore suspend generation
-truthfully. Nothing hosts it yet.
+truthfully, and it does host it: `LibraryIndexer::for_this_user` starts the
+service beside the index (issue #293). What it does not yet do is *suspend* it,
+which is the paragraph in "What exists today" above.
 
 ### What bounds it
 

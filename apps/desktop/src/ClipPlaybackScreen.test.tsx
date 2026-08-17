@@ -38,6 +38,17 @@ function opened(url: string, audioTrack: number) {
   };
 }
 
+/** A recorder this window is talking to, advertising nothing in particular. */
+const ATTACHED = {
+  link: 'attached',
+  recorder_process_id: 7,
+  features: [],
+  status: { state: 'idle' },
+} as const;
+
+/** The same recorder, built after issue #448 and able to answer for a picture. */
+const ATTACHED_WITH_PREVIEWS = { ...ATTACHED, features: ['previews'] } as const;
+
 /** An interruption the supervisor would emit, naming the file it left. */
 const INTERRUPTION = {
   event: 'recording_interrupted',
@@ -392,13 +403,105 @@ describe('the clip playback screen', () => {
     openClip('r-7');
 
     const main = screen.getByRole('main');
-    // What is left after the player: a poster frame nothing has ever drawn and
-    // a waveform that is a file this window has no route to. Each row names the
-    // work, which is the contract every unbuilt row on every screen keeps.
-    expect(within(main).getAllByText(/poster frame/i).length).toBeGreaterThan(0);
-    expect(within(main).getAllByText(/waveform/i).length).toBeGreaterThan(0);
+    // What is left after the player, the poster and the peaks: a playhead, marks
+    // on the waveform, and a waveform that follows the chosen track. Each row
+    // names the work, which is the contract every unbuilt row on every screen
+    // keeps.
     expect(within(main).getAllByText(/#\d+/).length).toBeGreaterThan(0);
-    // And nothing on the screen claims a player is still to come.
+    expect(within(main).getAllByText(/playhead/i).length).toBeGreaterThan(0);
+    // And nothing on the screen claims a player, a poster frame or a waveform
+    // is still to come. Issue #448 built the last two, and a row still naming
+    // one would be a screen apologising for something it is doing.
     expect(main.textContent).not.toMatch(/cannot play a Clipped recording/i);
+    expect(within(main).queryAllByText(/A poster frame before playback starts/i)).toHaveLength(0);
+    expect(within(main).queryAllByText(/nothing has ever drawn one/i)).toHaveLength(0);
+  });
+
+  it('draws the recorder\u2019s own thumbnail as the poster frame, and the peaks under it', async () => {
+    // Issue #448 on this screen: the picture and the peaks reach the window over
+    // one command, and the element is handed the picture itself rather than an
+    // address for it. A `poster` built from anything else \u2014 a file name, a
+    // number on the `clip` scheme \u2014 is a picture this window cannot load, and
+    // jsdom would not notice either, so the assertion is on what the attribute
+    // actually says.
+    const runtime = stubRecorderLinkRuntime(ATTACHED_WITH_PREVIEWS, null, {
+      openPlayback: () => opened('http://clip.localhost/1', 1),
+      preview: (args) =>
+        args['kind'] === 'thumbnail'
+          ? {
+              kind: 'thumbnail',
+              state: 'ready',
+              tracks: [],
+              picture: {
+                media_type: 'image/jpeg',
+                bytes: 'Zm9v',
+                width: 640,
+                height: 360,
+                at_seconds: 12.5,
+                blank: false,
+              },
+            }
+          : {
+              kind: 'waveform',
+              state: 'ready',
+              tracks: [
+                {
+                  index: 1,
+                  name: 'Game',
+                  sample_rate: 48000,
+                  channels: 2,
+                  duration_seconds: 0.04,
+                  peaks: [-127, 127, -10, 10],
+                },
+              ],
+            },
+    });
+    openClip('r-7');
+    runtime.emit(INTERRUPTION);
+
+    const main = screen.getByRole('main');
+    await waitFor(() => {
+      expect(main.querySelector('video')?.getAttribute('poster')).toBe(
+        'data:image/jpeg;base64,Zm9v',
+      );
+    });
+    expect(
+      await within(main).findByRole('img', { name: /Sound of Game in 2026-08-11 cs2\.mkv/ }),
+    ).toBeInTheDocument();
+
+    // Both asked about the recording the player was pointed at, and the
+    // waveform asked at a width it can draw. A screen that asked about the
+    // wrong file would draw another recording's picture over this one, and
+    // nothing in jsdom would report it.
+    expect(runtime.invocations).toContainEqual({
+      command: 'recording_preview',
+      args: { source: 'D:\\clips\\2026-08-11 cs2.mkv', kind: 'thumbnail', buckets: null },
+    });
+    expect(runtime.invocations).toContainEqual({
+      command: 'recording_preview',
+      args: { source: 'D:\\clips\\2026-08-11 cs2.mkv', kind: 'waveform', buckets: 1200 },
+    });
+  });
+
+  it('asks a recorder that cannot answer for neither a poster nor peaks', async () => {
+    // A recorder from before issue #448 refuses `open_preview` by name. The
+    // window checks the capability first, so the element keeps its own first
+    // frame and nothing is asked \u2014 rather than two refusals arriving after the
+    // event for a picture nobody was going to see.
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      openPlayback: () => opened('http://clip.localhost/1', 1),
+    });
+    openClip('r-7');
+    runtime.emit(INTERRUPTION);
+
+    const main = screen.getByRole('main');
+    await waitFor(() => {
+      expect(main.querySelector('video')).not.toBeNull();
+    });
+
+    expect(
+      runtime.invocations.filter((invocation) => invocation.command === 'recording_preview'),
+    ).toHaveLength(0);
+    expect(main.querySelector('video')?.hasAttribute('poster')).toBe(false);
   });
 });
