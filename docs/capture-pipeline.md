@@ -209,6 +209,66 @@ is authoritative and why, where a conversion is allowed to happen, what is done
 about a dropped frame, an audio gap or a clock that steps, and how far the audio
 device's own clock was measured to drift against the reference over a long run.
 
+## An odd width or height: which row goes, and where
+
+**Every frame this crate hands over has an even width and an even height.** A
+target whose size has an odd dimension is captured at
+`FrameSize::rounded_down_to_even` of it — the bottom row, the right-hand column,
+or both — and `FrameFormat` reports that smaller size.
+
+The reason is downstream. H.264, HEVC and AV1 all sample 4:2:0 chroma at half
+resolution in both directions, so an odd width or height has no representation
+in any of them, and all four backends in `clipped-encoder` refuse one at `open`
+with the same sentence: *"has an odd dimension, and 4:2:0 chroma needs both to
+be even"*. That is not an exotic shape. An ordinary bordered window sized to
+1000x600 has a client area of **986x593** on Windows 11 at 96 DPI, and before
+[issue #561](https://github.com/wildware-uk/clipped/issues/561) such a window
+could not be recorded at all: the recording failed before its first frame with
+`encoder-unavailable`, and under
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md) a window
+*resized* into that shape failed every recording for the rest of the sitting.
+
+**The texture is genuinely that size.** Reporting 986x592 while handing over a
+986x593 texture would be cheaper and is what
+[ADR 0013](adr/0013-capture-rounds-an-odd-dimension-away.md) refuses: a track
+declares the size of the pictures in it (AGENTS.md section 22), the software
+encoder's readback compares the texture's description against the session's
+resolution and refuses a mismatch outright, and what a vendor's driver does with
+a surface a row taller than the session it was opened for is a question about
+three drivers rather than about this code.
+
+So each backend crops, and what that costs depends on what it was already doing:
+
+| Backend and target | What happens | Cost |
+| --- | --- | --- |
+| Desktop Duplication, window | The destination texture the window is already copied into is created one row or column smaller, and `place_window_in_output` clamps the copy to it. | Nothing. The copy was already happening. |
+| Desktop Duplication, display | Zero-copy unless the *display mode* has an odd dimension, which no physical monitor does and a remote-desktop session sized to its window often does. Then the even crop is copied into a texture the backend owns. | One GPU copy per frame, for that case only. |
+| Windows Graphics Capture, either | The frame pool keeps the content's own odd size, and the even crop of each frame is copied into a texture the backend owns. | One GPU copy per frame, for an odd source only. |
+
+The frame pool keeps the odd size deliberately. A pool one row shorter than the
+content would make every frame's `ContentSize` disagree with it — which is
+exactly how this backend recognises a resize — so it would report
+`Acquisition::SizeChanged` for ever, and under ADR 0012 a session follows every
+one of those with a new file. What the compositor would do with the row that did
+not fit is undocumented besides: a crop and a rescale are indistinguishable
+through the API, and only one of them is honest.
+
+`crates/capture/src/windows/crop.rs` is the copy, and it is a
+`CopySubresourceRegion` on the capture thread — a GPU-to-GPU copy of one frame,
+not a readback: no `Map`, no CPU wait, nothing that leaves video memory.
+
+Two consequences worth knowing:
+
+- **A resize that does not change the even size is not a resize.** Desktop
+  Duplication compares the window's client area against the frame *as it would
+  be recorded*, so a window taken from 986x593 to 987x593 keeps recording into
+  the same file — the picture is the same shape and the crop simply takes a
+  different column. Windows Graphics Capture cannot do the same, because its
+  pool has to match the compositor exactly, and reports the change.
+- **A target one pixel wide or one pixel high is refused**, by
+  `CaptureError::UnsupportedTarget` naming 4:2:0, rather than by an encoder that
+  can only say that nothing could be opened.
+
 ## Choosing a backend
 
 `select(candidates, target, setting)` is a pure function. With
@@ -395,7 +455,7 @@ Two things it does not do, stated rather than glossed:
 
 | What happens | What the backend does |
 | --- | --- |
-| The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. |
+| The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. The pool's size is the content's own, odd or not, which is why an odd-sized window is cropped rather than composed into a smaller pool ("An odd width or height" above). |
 | The window is minimised | It stops composing, so acquisitions report `Acquisition::TargetMinimised` — and go on reporting it until the window comes back, rather than deciding the window has gone. `IsIconic` is asked on the same path `IsWindow` is, so it costs a handful of calls a second and never one per frame. The silence is not counted as dropped frames. |
 | The window is restored | Frames resume, and **no size change is reported**. This needs saying because the obvious implementation gets it wrong: measured on Windows 11 build 26200, restoring a minimised 1280x720 window makes the compositor produce one frame whose `ContentSize` is **160x28** — the legacy shape a minimised window is reduced to — and it arrives *after* `IsIconic` has gone false again. Reported as a `SizeChanged` it finishes the recording of a window that is back on screen at the size it always was. It is told apart by asking the window: `GetClientRect` answers 0x0 while a window is minimised or part way through being restored, and a window that has genuinely been resized has a client area. This one is verified end to end rather than in a unit test, and the test says why: the crate's own test window is a `STATIC` window whose thread is inside `acquire`, so its restore never completes and it *really is* 146x28 — asserting on it would be asserting on the test's own artefact. The evidence is on the issue: `test-apps/video-pattern` minimised for five seconds mid-recording produced one 823-frame file that ended only when the window closed. |
 | Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
@@ -1302,7 +1362,11 @@ platform actually exists is a question for then.
 6. **Write the `SAFETY` comment.** `FrameTexture::new` is `unsafe` precisely so
    that a backend author has to state why the texture outlives the frame
    (AGENTS.md section 58).
-7. **Test it for real.** Selection logic is unit tested; a backend cannot be.
+7. **Round the size down to even, and crop to match.** `FrameSize::rounded_down_to_even`
+   and `windows/crop.rs` are the shared halves of it; "An odd width or height"
+   above is why, and the rule is that the texture handed over must be the size
+   the format declares, not merely no smaller than it.
+8. **Test it for real.** Selection logic is unit tested; a backend cannot be.
    There are two patterns to follow, and which one fits depends on what the
    backend can be asked. `crates/capture/examples/wgc_probe.rs` is a controlled
    test window, a real capture of it, and measured pacing, dropped frames and

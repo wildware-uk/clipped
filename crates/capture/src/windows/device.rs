@@ -107,6 +107,16 @@ impl CaptureDevice {
         &self.winrt
     }
 
+    /// The device as Direct3D 11 sees it, for a texture the backend owns.
+    ///
+    /// The compositor's frames belong to this device, so anything a backend
+    /// creates to copy one into has to be created on it as well: a texture from
+    /// a second device could not be a `CopySubresourceRegion` destination at
+    /// all, which is the cross-adapter copy this type exists to prevent.
+    pub(super) const fn d3d11(&self) -> &ID3D11Device {
+        &self.d3d11
+    }
+
     /// The adapter this device was created on, as its driver describes it.
     ///
     /// Logged once when capture starts. On a machine with more than one GPU —

@@ -179,7 +179,10 @@ below that is worth watching.
   and four consecutive `encoder-unavailable` failures until the game exited. It is
   filed as its own issue and is not solved here; the note is here because this
   record is what makes it a session-ending fault rather than a recording-ending
-  one.
+  one. It was decided separately in
+  [ADR 0013](0013-capture-rounds-an-odd-dimension-away.md): capture rounds the
+  odd dimension away and crops the frame to match, so the successor recording
+  opens.
 - **What to watch**: sessions with many short recordings in them. That is the
   signature of both the cap being reached and the odd-dimension failure, and both
   are visible in the sidecar without a log.
