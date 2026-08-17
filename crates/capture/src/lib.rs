@@ -146,6 +146,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod awake;
 mod backend;
 mod blackness;
 mod error;
@@ -161,6 +162,7 @@ mod time;
 #[cfg(windows)]
 pub mod windows;
 
+pub use awake::DisplayAwake;
 pub use backend::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
     CaptureBackendFactory, CaptureConfig, Unavailable,

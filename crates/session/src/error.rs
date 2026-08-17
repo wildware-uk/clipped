@@ -236,7 +236,9 @@ impl fmt::Display for SessionError {
             Self::NoFrames => formatter.write_str(
                 "capture never produced a frame, so there was nothing to record. A window \
                  that is not drawing — minimised, or on a virtual desktop that is not \
-                 showing — produces none",
+                 showing — produces none, and so does a display the computer has already \
+                 powered down: a recorder can stop a screen going to sleep, but nothing \
+                 except a keypress turns one back on",
             ),
             Self::WriterLost => formatter.write_str(
                 "the thread writing the recording stopped unexpectedly; what reached the \

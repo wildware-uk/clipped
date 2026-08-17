@@ -39,6 +39,7 @@ mod apartment;
 mod crop;
 mod desktop_duplication;
 mod device;
+mod display_required;
 mod graphics_capture;
 mod pixel_sample;
 mod still;
@@ -47,6 +48,8 @@ pub use desktop_duplication::DesktopDuplication;
 pub use graphics_capture::WindowsGraphicsCapture;
 pub use pixel_sample::D3d11FrameSampler;
 pub use still::D3d11StillCopier;
+
+pub(crate) use display_required::{release as release_display, require as require_display};
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
