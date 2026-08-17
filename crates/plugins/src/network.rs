@@ -32,10 +32,24 @@
 //! different token, the comparison fails, and the user is asked again — which is
 //! `docs/privacy.md`'s "the consent lapses", implemented as a value rather than
 //! as a rule somebody has to remember.
+//!
+//! The token a plugin is actually enabled with covers both halves of what it
+//! declares — the network ([`NetworkAccess`]) and the filesystem
+//! ([`crate::FilesystemAccess`]) — through
+//! [`PluginManifest::consent_token`](crate::PluginManifest::consent_token).
+//! [`ConsentToken::of`] is where the two are combined, and it is written so
+//! that a plugin declaring no filesystem access — every plugin written before
+//! that field existed — gets exactly the token it always got: an empty
+//! [`crate::FilesystemAccess`] contributes nothing to it. Only a plugin whose
+//! manifest starts declaring filesystem access sees its token change, which is
+//! the point of the design — a build learning a new word must not silently
+//! ask every already-consented plugin to be agreed to again.
 
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::filesystem::FilesystemAccess;
 
 /// The most a network declaration may say, in bytes of endpoint and purpose.
 ///
@@ -115,10 +129,16 @@ impl NetworkAccess {
         self.0.iter().map(NetworkGrant::describe).collect()
     }
 
-    /// The token that records consent to exactly this declaration.
+    /// The token that records consent to exactly this network declaration, on
+    /// its own.
+    ///
+    /// A plugin's actual consent token also covers what it declares about the
+    /// filesystem — [`PluginManifest::consent_token`](crate::PluginManifest::consent_token)
+    /// is the one that is stored and compared. This exists for testing this
+    /// declaration in isolation.
     #[must_use]
     pub fn consent_token(&self) -> ConsentToken {
-        ConsentToken::of(self)
+        ConsentToken::of(self, &FilesystemAccess::none())
     }
 
     /// Checks the declaration as a whole.
@@ -277,17 +297,35 @@ impl fmt::Display for NetworkDirection {
 pub struct ConsentToken(String);
 
 impl ConsentToken {
-    /// The token for `access`.
+    /// The token for the combination of `network` and `filesystem` — what a
+    /// plugin is actually enabled with.
+    ///
+    /// Each network grant and each filesystem grant contributes one line, in
+    /// its own vocabulary (a network line never looks like a filesystem line,
+    /// since [`NetworkClass`] and [`crate::FilesystemScope`] do not share any
+    /// words), and the whole set is sorted together so that declaring the two
+    /// halves in a different order is not a different token. When there is
+    /// nothing at all — the case every manifest got before filesystem access
+    /// existed to declare, and still gets by leaving both fields out — the
+    /// token is the literal `"no network access"`, unchanged from before this
+    /// type had two things to say, so that field's addition alone never lapses
+    /// an existing consent.
     #[must_use]
-    pub fn of(access: &NetworkAccess) -> Self {
-        if access.is_empty() {
-            return Self("no network access".to_owned());
-        }
-        let mut lines: Vec<String> = access
+    pub fn of(network: &NetworkAccess, filesystem: &FilesystemAccess) -> Self {
+        let mut lines: Vec<String> = network
             .grants()
             .iter()
             .map(|grant| format!("{} {} {}", grant.class, grant.direction, grant.endpoint))
             .collect();
+        lines.extend(
+            filesystem
+                .grants()
+                .iter()
+                .map(|grant| format!("{} {}", grant.scope, grant.access)),
+        );
+        if lines.is_empty() {
+            return Self("no network access".to_owned());
+        }
         lines.sort();
         Self(lines.join("; "))
     }
@@ -436,7 +474,10 @@ fn is_loopback_host(host: &str) -> bool {
 ///
 /// Control characters are refused because both fields are rendered: a newline
 /// in a purpose is a plugin adding lines to somebody else's consent dialogue.
-fn is_one_plain_line(text: &str) -> bool {
+/// `pub(crate)` because [`crate::filesystem`] holds a plugin to the same rule
+/// for its own purpose field, and duplicating it would be two definitions of
+/// what "one plain line" means (AGENTS.md section 55).
+pub(crate) fn is_one_plain_line(text: &str) -> bool {
     !text.chars().any(char::is_control)
 }
 
