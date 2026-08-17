@@ -1969,7 +1969,19 @@ mod tests {
         );
     }
 
+    /// # Why this is `#[ignore]`d
+    ///
+    /// It is the only test in this file that asks Windows Graphics Capture for
+    /// a real window, and the CI runner will not give one: `CreateCaptureItem    /// ForWindow` answers `0x80070057` there for any window, odd-sized or not.
+    /// So this ran green on a developer's machine and red on `main`, which is
+    /// the worst way to find out.
+    ///
+    /// It is a real check and it passes on a machine with a desktop — run it
+    /// with `cargo test -p clipped-capture -- --ignored`. What it cannot be is
+    /// a gate, because the gate has no desktop. `docs/testing.md` lists it with
+    /// the other suites that need real hardware.
     #[test]
+    #[ignore = "needs a real desktop session; WGC refuses a window capture item on a CI runner"]
     fn a_window_with_an_odd_dimension_is_captured_one_row_short_of_it_rather_than_not_at_all() {
         // Issue #561, end to end through this backend. Before it, a window like
         // this reached the encoder at its own odd size and *every* encoder
