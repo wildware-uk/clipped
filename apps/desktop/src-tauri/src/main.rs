@@ -211,6 +211,7 @@ fn main() {
             record_target,
             recorder_status,
             recorder_hotkeys,
+            recorder_diagnostics,
             recorder_settings,
             apply_recorder_settings,
             audio_devices,
@@ -692,6 +693,33 @@ fn recorder_hotkeys(
     match link.call(&clipped_ipc::Command::GetHotkeys)? {
         clipped_ipc::Reply::Hotkeys { hotkeys } => Ok(hotkeys),
         _ => Err(wrong_reply("get_hotkeys")),
+    }
+}
+
+/// How the recorder is capturing, and what this machine can encode.
+///
+/// The two of SPEC.md section 36's twelve diagnostics that the recorder already
+/// knows and nothing carried here
+/// ([issue #302](https://github.com/wildware-uk/clipped/issues/302)). Both are
+/// its to answer and neither is this window's: the capture backend is chosen on
+/// a capture thread inside the recorder, and the capability report comes from
+/// `clipped-encoder`, which this window may not link
+/// (`tests/integration/tests/workspace_layering.rs`) and which on Windows brings
+/// four FFmpeg libraries with it.
+///
+/// Asked when the Diagnostics screen opens rather than pushed, because both
+/// answers are settled long before anybody opens a window — see
+/// [`clipped_ipc::diagnostics`].
+///
+/// `async` for the reason [`recorder_status`] is: it opens a pipe and waits for
+/// an answer, and the thread drawing the window may not.
+#[tauri::command(async)]
+fn recorder_diagnostics(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::Diagnostics, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetDiagnostics)? {
+        clipped_ipc::Reply::Diagnostics { diagnostics } => Ok(diagnostics),
+        _ => Err(wrong_reply("get_diagnostics")),
     }
 }
 

@@ -345,7 +345,8 @@ into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
 `shutdown`, `library`, `export`, `playback`, `previews`, `hotkeys`, `replay`,
-`export_progress`, `settings`, `microphone_level`, `startup`, `automatic`.
+`export_progress`, `settings`, `microphone_level`, `diagnostics`, `startup`,
+`automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -448,6 +449,15 @@ missing progress bar for a window that no longer knows whether anything is being
 recorded. A recorder without the feature exports exactly as it always did and
 says nothing while it does, which is neither failure nor completion: the reply
 is still the thing that says the copy finished.
+
+`diagnostics` is the check in front of the two rows of the Diagnostics screen
+that name a measurement rather than a piece of missing work, and it is the pair
+of answers on this list that would be most costly to confuse. A recorder built
+before [`get_diagnostics`](#get_diagnostics) refuses it by name; a recorder that
+answers it on a machine with no hardware encoder replies with a report saying
+so. Drawn without the check, "Clipped found no encoder on this machine" is what a
+window would show for a question it never managed to put — on the one screen
+whose entire subject is what is and is not known.
 
 `settings` says the build has all three of [`get_settings`](#the-settings),
 `apply_settings` and [`get_audio_devices`](#get_audio_devices) — one build has
@@ -676,6 +686,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `open_playback` | `source`, `audio_track` (optional) | `playback_opened` | yes |
 | `open_preview` | `source`, `kind`, `buckets` (optional) | `preview_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
+| `get_diagnostics` | none | `diagnostics` | yes |
 | `get_settings` | none | `settings` | yes |
 | `apply_settings` | `values`, below | `settings` | yes |
 | `get_audio_devices` | none | `audio_devices` | yes |
@@ -1653,6 +1664,88 @@ action differs:
 The recording itself is opened for reading and is never modified, on either
 path.
 
+### `get_diagnostics`
+
+**How the recording in progress is capturing, and what this machine can encode.**
+Two of the twelve diagnostics SPEC.md section 36 asks a recorder to record; the
+other ten are not measured by anything yet and the screen says which
+([diagnostics.md](diagnostics.md)).
+
+```json
+{"type":"response","id":13,"outcome":{"ok":{"reply":"diagnostics","diagnostics":{
+  "capture":{"setting":"Automatic",
+             "started_with":"Windows Graphics Capture",
+             "current":"Desktop Duplication",
+             "changes":[{"from":"Windows Graphics Capture",
+                         "to":"Desktop Duplication",
+                         "restart":false,
+                         "trigger":"initialisation_failed",
+                         "reason":"this build has no Windows Graphics Capture backend to create"}]},
+  "encoders":{"probed":false,"detected_at":"2026-08-11T20:14:00+01:00","elapsed_ms":3,
+              "adapters":[{"description":"NVIDIA GeForce RTX 4090","vendor":"nvidia",
+                           "kind":"own_video_memory","video_memory_bytes":25769803776,
+                           "driver_version":"32.0.15.6094","captures":true}],
+              "encoders":[{"encoder":"nvenc","label":"NVIDIA NVENC","available":true,
+                           "implemented":true,"adapter":"NVIDIA GeForce RTX 4090",
+                           "asked":false,
+                           "codecs":[{"codec":"h264","supported":true,
+                                      "max_width":4096,"max_height":4096,
+                                      "max_framerate_1080p":522,"inferred":true}]}]}}}}}
+```
+
+**`capture` is absent when nothing is being recorded**, and that is a fact rather
+than a gap: there is no capture backend running between recordings, and naming
+the last one used would answer "what is capturing" with a reading of what was.
+It is absent as well for the few milliseconds between a recording starting and
+its backend opening — "not chosen yet" and "chose this" are different things,
+which is the same answer a recording that has produced no frame gives when
+[`add_bookmark`](#add_bookmark) asks where it has reached.
+
+**`encoders` is never absent.** A machine with no hardware encoder still has the
+software one and still has adapters, and *"Clipped did not find your NVIDIA
+card"* is the report somebody with a problem needs. Every encoder family SPEC.md
+section 9 names is in the list whether or not it is here, for the same reason.
+
+Three fields are worth reading carefully, because each separates two things a
+naive rendering would draw alike:
+
+- **`available` and `implemented`.** The first is what the machine can do, the
+  second what *this build* can do with it. A report of ticks from a build that
+  can drive some of them would be worse than no report (AGENTS.md sections 27
+  and 54).
+- **`inferred`, per codec.** `true` means at least one number beside it comes
+  from the encoder family's published limits rather than from this machine. A
+  published limit is true of the hardware the vendor's table covers and is not a
+  promise about the card in front of the user.
+- **`asked`.** Whether an encoder session was ever opened and asked. **Answering
+  this command never opens one** — that takes a session slot from a game which
+  may be mid-match, and the only thing in the build that does it is
+  `clipped-recorder capabilities --refresh` — so `true` means the *stored*
+  answer was measured that way.
+
+**Asked rather than pushed**, for the reason [`get_hotkeys`](#get_hotkeys) is:
+both answers are settled before a window is likely to exist. A recording chooses
+its backend in its first milliseconds, and the capability report is read when the
+recorder starts, from a cache keyed on the driver version.
+
+**What it costs a recording: nothing on any capture path.** The capture account
+is one clone out of a mutex the recording thread wrote once before its first
+frame — `clipped_capture::CaptureStatus` borrows the fallback's change list and
+so cannot leave the capture thread at all, which is why there is a copy
+(`clipped_session::CaptureAccounting`) rather than a reference. The capability
+report is adapter enumeration, a `LoadLibrary` per vendor runtime and a transform
+enumeration, answered from a cache on a machine whose driver has not changed
+(AGENTS.md sections 17 and 20).
+
+**No path crosses.** The capability cache lives under the user's account name and
+the terminal report prints where it is; this reply does not
+([logging.md](logging.md), AGENTS.md section 13). What crosses instead is
+`probed` and `detected_at` — whether the machine was asked or a stored answer
+used, and when that answer was taken — which is the part that changes how a bug
+report reads. `apps/recorder/tests/ipc_protocol.rs::a_recorder_carries_no_path_into_its_diagnostics`
+asserts it over the bytes of the frame rather than over a parsed reply, so a path
+in a field this build does not define is caught too.
+
 ### `stop_recording`
 
 `recording_id` is optional. Absent means "whatever is running", which is what a
@@ -2403,7 +2496,7 @@ cargo run -p clipped-ipc --bin protocol-schema
 | --- | --- |
 | `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
-| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C, a recorder watching for games told apart from one that is not — including the bytes of the reply, since an absent sitting is what a parsed status cannot show — a recorder that records games by itself told apart from one that never will, by what each advertises in its welcome, and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
+| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C, what `get_diagnostics` reports about this machine's encoders and that no path is in the frame that carries it, a recorder watching for games told apart from one that is not — including the bytes of the reply, since an absent sitting is what a parsed status cannot show — a recorder that records games by itself told apart from one that never will, by what each advertises in its welcome, and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 | `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
 | `apps/recorder/src/preview/tests.rs` | `open_preview` against thumbnail and waveform caches built for the test: that the picture is the picture of *that* recording, that "not made yet" and "there will not be one" stay apart, that a recording changed since its picture was made is not shown the old one, that peaks come back at the width the caller asked for, and what a page of twenty-five costs |

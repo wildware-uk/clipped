@@ -123,8 +123,8 @@ use clipped_session::screenshot::{
     StillFrame,
 };
 use clipped_session::{
-    CaptureTargetSettings, RecordingProgress, RecordingReport, RecordingSettings, ReplayRecording,
-    ReplaySaveError,
+    CaptureAccounting, CaptureTargetSettings, RecordingProgress, RecordingReport,
+    RecordingSettings, ReplayRecording, ReplaySaveError,
 };
 use clipped_windows::WindowInfo;
 
@@ -206,6 +206,13 @@ fn features_of_this_build() -> Vec<String> {
         // to start at sign-in. Those are opposite answers, and the second is
         // what an unanswered command looks like if nobody checks.
         features::STARTUP.to_owned(),
+        // And this before a Diagnostics screen draws anything against the
+        // capture backend or the encoder. A recorder built before issue #302
+        // has no `get_diagnostics` at all, and "Clipped found no encoder on
+        // this machine" and "Clipped never asked" are opposite answers — which
+        // is the worst pair of readings to confuse on the one screen whose
+        // whole subject is what is and is not known.
+        features::DIAGNOSTICS.to_owned(),
     ]
 }
 
@@ -778,6 +785,18 @@ impl CommandHandler for RecorderService {
             Command::GetHotkeys => Ok(Reply::Hotkeys {
                 hotkeys: self.hotkeys()?,
             }),
+            // On the connection thread, like a library read, and for a stronger
+            // version of the same reason: neither half touches a recording. The
+            // capture account is one clone out of a mutex the recording thread
+            // wrote once before its first frame, and the capability report is a
+            // cached reading that never opens an encoder session — so a window
+            // asking this during a recording costs that recording nothing
+            // (`crate::diagnostics`, AGENTS.md sections 17 and 20, issue #302).
+            Command::GetDiagnostics => Ok(Reply::Diagnostics {
+                diagnostics: crate::diagnostics::diagnostics(
+                    self.recordings.capture_account().as_ref(),
+                )?,
+            }),
             // Answered on the connection thread, like a library read: reading
             // or writing one small file shares nothing with a recording, and
             // the only lock it takes is the settings file's own
@@ -967,6 +986,15 @@ struct Running {
     /// [`RecordingState::current`] while it does — the recording thread stores
     /// its outcome through that same mutex.
     screenshots: ScreenshotRequests,
+    /// Which capture backend this recording settled on, and everything it fell
+    /// past to get there.
+    ///
+    /// Cloned rather than borrowed, like `screenshots` and for the same reason:
+    /// the recording thread writes it and connection threads read it, and
+    /// neither may hold [`RecordingState::current`] to do so. It is the only
+    /// route `clipped_capture::CaptureStatus` has out of the capture thread
+    /// (`clipped_session::CaptureAccounting`, issue #302).
+    capture: CaptureAccounting,
     /// The session this recording is the whole of, and its record on disk.
     ///
     /// [`Some`] for the whole life of the recording. It is an [`Option`] for one
@@ -1214,6 +1242,7 @@ impl RecordingState {
             thread: None,
             progress: RecordingProgress::new(),
             screenshots: ScreenshotRequests::new(),
+            capture: CaptureAccounting::new(),
             session: Some(Arc::new(Mutex::new(session))),
             sitting: Some(sitting),
             // Attached afterwards by [`Running::with_replay`], because it is the
@@ -1275,6 +1304,7 @@ impl RecordingState {
 
         let id = format!("r-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
         let screenshots = ScreenshotRequests::new();
+        let capture = CaptureAccounting::new();
         *current = Some(Running {
             id: id.clone(),
             bookmarks: Arc::new(BookmarkLog::for_recording(output)),
@@ -1288,6 +1318,7 @@ impl RecordingState {
             thread: None,
             progress: progress.clone(),
             screenshots: screenshots.clone(),
+            capture: capture.clone(),
             session: None,
             // And no copy of one either: the sitting this recording belongs to
             // is the driver's, reported on to `watching` once a pass, and it is
@@ -1327,6 +1358,7 @@ impl RecordingState {
             state: Arc::clone(self),
             id,
             screenshots,
+            capture,
             released: false,
         })
     }
@@ -1458,6 +1490,27 @@ impl RecordingState {
         self.events.publish(&clipped_ipc::Event::StatusChanged {
             status: self.status(),
         });
+    }
+
+    /// How the recording in progress is capturing, or [`None`] when there is
+    /// none.
+    ///
+    /// Two ways to get [`None`], and both are the honest answer rather than a
+    /// gap: nothing is being recorded, so there is no capture backend running at
+    /// all; or a recording has started and has not opened its backend yet, which
+    /// is a few milliseconds and is when "not chosen yet" is true
+    /// (`clipped_session::CaptureAccounting`, issue #302).
+    ///
+    /// A clone of a small value out of the lock, released before the caller does
+    /// anything with it, which is the discipline every reader of this state
+    /// keeps (AGENTS.md section 20).
+    fn capture_account(&self) -> Option<clipped_session::CaptureAccount> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|running| running.outcome.is_none())
+            .and_then(|running| running.capture.account())
     }
 
     /// What the watcher is doing, as [`status_of`] needs it.
@@ -1615,9 +1668,12 @@ impl RecordingState {
             &id,
             settings,
             running.stop.clone(),
-            running.progress.clone(),
-            running.screenshots.clone(),
-            running.replay.clone(),
+            RecordingChannels {
+                progress: running.progress.clone(),
+                screenshots: running.screenshots.clone(),
+                capture: running.capture.clone(),
+                replay: running.replay.clone(),
+            },
         ));
 
         *current = Some(running);
@@ -2134,6 +2190,7 @@ pub(crate) struct Adopted {
     state: Arc<RecordingState>,
     id: String,
     screenshots: ScreenshotRequests,
+    capture: CaptureAccounting,
     released: bool,
 }
 
@@ -2146,6 +2203,16 @@ impl Adopted {
     /// capture of the same window (`RecordingState::screenshot`).
     pub(crate) fn screenshots(&self) -> &ScreenshotRequests {
         &self.screenshots
+    }
+
+    /// Where this recording says which capture backend it is using.
+    ///
+    /// Handed to [`clipped_session::RecordingOutputs`] by the driver, like the
+    /// screenshots above: a recording detection started has to reach the
+    /// Diagnostics screen the same way one the window started does, or the
+    /// answer would depend on who asked for the recording (issue #302).
+    pub(crate) fn capture(&self) -> &CaptureAccounting {
+        &self.capture
     }
 
     /// Hands the recording back with what became of it.
@@ -2185,6 +2252,25 @@ fn report_of(outcome: &RecordingOutcome) -> Result<RecordingReport, String> {
     }
 }
 
+/// Everything a recording publishes through, cloned out of the [`Running`] it
+/// belongs to.
+///
+/// One struct rather than four parameters because they are one thing: the set of
+/// places a recording writes to that are not its file. Each is a handle over
+/// shared state, so cloning costs a reference count and the recording thread and
+/// the connection threads reading them never wait on each other for longer than
+/// a `memcpy` (AGENTS.md section 20).
+struct RecordingChannels {
+    /// Where the recording has reached on its own timeline.
+    progress: RecordingProgress,
+    /// Where a `take_screenshot` asks it for a frame it already has.
+    screenshots: ScreenshotRequests,
+    /// Where it says which capture backend it settled on (issue #302).
+    capture: CaptureAccounting,
+    /// The rolling window a `save_replay` saves from, when it has one.
+    replay: Option<Arc<ReplayRecording>>,
+}
+
 /// Runs one recording on a thread of its own.
 ///
 /// The panic guard is the reason this is not two lines. `clipped_session`
@@ -2197,19 +2283,28 @@ fn spawn_recording(
     id: &str,
     settings: RecordingSettings,
     stop: crate::shutdown::ShutdownSignal,
-    progress: RecordingProgress,
-    screenshots: ScreenshotRequests,
-    replay: Option<Arc<ReplayRecording>>,
+    channels: RecordingChannels,
 ) -> JoinHandle<()> {
     let state = Arc::clone(state);
     let id = id.to_owned();
+    let RecordingChannels {
+        progress,
+        screenshots,
+        capture,
+        replay,
+    } = channels;
 
     thread::Builder::new()
         .name("clipped-recording".to_owned())
         .spawn(move || {
             let mut outputs = clipped_session::RecordingOutputs::default()
                 .with_progress(&progress)
-                .with_screenshots(&screenshots);
+                .with_screenshots(&screenshots)
+                // Where the capture backend this recording settles on leaves the
+                // capture thread. Without it `get_diagnostics` would have
+                // nothing to report while a recording was running, which is the
+                // only time there is a backend to report (issue #302).
+                .with_capture_account(&capture);
             // The buffer is filled from the packets this recording produces —
             // one encoder, two consumers — and the handle outlives the
             // recording because whoever saves from it is on another thread

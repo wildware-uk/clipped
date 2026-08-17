@@ -134,6 +134,7 @@ export const FEATURES = [
   'export_progress',
   'settings',
   'microphone_level',
+  'diagnostics',
   'startup',
   'automatic',
   'previews',
@@ -174,6 +175,7 @@ export const COMMANDS = [
   'open_playback',
   'open_preview',
   'get_hotkeys',
+  'get_diagnostics',
   'get_settings',
   'apply_settings',
   'get_audio_devices',
@@ -274,6 +276,7 @@ export const REPLIES = [
   'microphone_level',
   'start_at_login',
   'shutting_down',
+  'diagnostics',
 ] as const;
 
 /** The name of a reply. Closed: a reply nobody can read is a failed command. */
@@ -1859,6 +1862,170 @@ export interface StartAtLoginReply {
   readonly start_at_login: StartAtLogin;
 }
 
+/**
+ * One replacement or restart of the capture backend, and why.
+ *
+ * A restart of the same backend is one of these too, with {@link restart} set:
+ * "it fell over and came back" is what explains a gap in an otherwise
+ * unexplained recording.
+ */
+export interface CaptureMethodChange {
+  /** The method that was in use before. */
+  readonly from: string;
+  /** The method in use after it, equal to {@link from} for a restart. */
+  readonly to: string;
+  /** Whether the same backend started again rather than a different one taking over. */
+  readonly restart: boolean;
+  /**
+   * What made it necessary: `initialisation_failed`, `capture_failed` or
+   * `black_frames`.
+   *
+   * Open, like an end reason: a trigger this build has never heard of is shown
+   * rather than failing the frame that carried it, and nothing branches on it.
+   */
+  readonly trigger: string;
+  /** The failure, in the recorder's own words and phrased for this screen. */
+  readonly reason: string;
+}
+
+/**
+ * How the recording in progress is capturing.
+ *
+ * The three things SPEC.md section 8 asks a recorder to be able to say: what
+ * was asked for, what is running, and how it got there.
+ */
+export interface CaptureAccount {
+  /** What the user asked for: `Automatic`, or the method they pinned. */
+  readonly setting: string;
+  /** The method this recording started with. */
+  readonly started_with: string;
+  /** The method capturing now. */
+  readonly current: string;
+  /**
+   * Every replacement and restart, in the order they happened.
+   *
+   * Empty is a measurement rather than an absence: it says the backend this
+   * recording started with is still the one running.
+   */
+  readonly changes: readonly CaptureMethodChange[];
+}
+
+/** One graphics adapter. */
+export interface AdapterSummary {
+  /** The model name the driver publishes: `NVIDIA GeForce RTX 4090`. */
+  readonly description: string;
+  /** `nvidia`, `amd`, `intel`, `microsoft` or `other`. */
+  readonly vendor: string;
+  /** `own_video_memory`, `shared_video_memory` or `software`. */
+  readonly kind: string;
+  /** Bytes of video memory of its own; zero for one that shares the machine's. */
+  readonly video_memory_bytes: number;
+  /** The driver version, where the adapter reported one. */
+  readonly driver_version?: string;
+  /**
+   * Whether this is the adapter a recording creates its graphics device on.
+   *
+   * The reason an encoder can be present, working and unusable.
+   */
+  readonly captures: boolean;
+}
+
+/** What is known about one codec on one encoder family. */
+export interface CodecSummary {
+  /** `h264`, `hevc` or `av1`. */
+  readonly codec: string;
+  /**
+   * Whether the encoder can produce it.
+   *
+   * **Absent is not `false`.** Absent means nothing knows; `false` means
+   * something was asked and said no.
+   */
+  readonly supported?: boolean;
+  /** The widest picture, where a limit is known. */
+  readonly max_width?: number;
+  /** The tallest picture, where a limit is known. */
+  readonly max_height?: number;
+  /** Frames a second at 1080p, where a rate is known. */
+  readonly max_framerate_1080p?: number;
+  /**
+   * Whether any value above came from the family's published limits rather
+   * than from this machine.
+   */
+  readonly inferred: boolean;
+}
+
+/** One encoder family, and what is known about it. */
+export interface EncoderSummary {
+  /** `nvenc`, `amf`, `quick_sync` or `software`. */
+  readonly encoder: string;
+  /** The family in the words a person reads: `NVIDIA NVENC`. */
+  readonly label: string;
+  /** Whether a recording made on this machine could use it. */
+  readonly available: boolean;
+  /** Why it cannot be used, when it cannot. The recorder's own sentence. */
+  readonly unavailable?: string;
+  /**
+   * Whether **this build** has a backend proven to encode with it.
+   *
+   * The distance between "your machine can do this" and "Clipped can do this".
+   */
+  readonly implemented: boolean;
+  /** The adapter it runs on, by {@link AdapterSummary.description}. */
+  readonly adapter?: string;
+  /**
+   * Whether an encoder session was ever opened and asked about this family.
+   *
+   * Not a claim about this call: answering `get_diagnostics` never opens one.
+   * `true` means the stored answer was measured that way. Whether a particular
+   * number came from the machine is {@link CodecSummary.inferred}.
+   */
+  readonly asked: boolean;
+  /** What is known about each codec, most efficient first. Empty when absent. */
+  readonly codecs: readonly CodecSummary[];
+}
+
+/** What this machine can encode, as `clipped-recorder capabilities` reports it. */
+export interface EncoderAccount {
+  /** Whether the machine was asked in this run rather than a stored answer used. */
+  readonly probed: boolean;
+  /** When a stored answer was measured, RFC 3339. Absent when {@link probed}. */
+  readonly detected_at?: string;
+  /** How long the answer took to obtain, cache lookup included. */
+  readonly elapsed_ms: number;
+  /** The graphics adapters, in the order the system enumerated them. */
+  readonly adapters: readonly AdapterSummary[];
+  /**
+   * Every encoder family, including the ones that are not here.
+   *
+   * "Clipped did not find your NVIDIA card" is the report a user with a problem
+   * needs, and a list that left the absent ones out would be indistinguishable
+   * from a build that had never heard of them.
+   */
+  readonly encoders: readonly EncoderSummary[];
+}
+
+/** What the recorder can say about capture and encoding, right now. */
+export interface Diagnostics {
+  /**
+   * How the recording in progress is capturing.
+   *
+   * Absent when nothing is being recorded: there is no backend running between
+   * recordings, and naming the last one used would be saying what *is*
+   * happening from a reading of what happened.
+   */
+  readonly capture?: CaptureAccount;
+  /** What this machine can encode. Never absent. */
+  readonly encoders: EncoderAccount;
+}
+
+/** How the recorder is capturing, and what this machine can encode. */
+export interface DiagnosticsReply {
+  /** The tag. */
+  readonly reply: 'diagnostics';
+  /** What the recorder can say about capture and encoding, right now. */
+  readonly diagnostics: Diagnostics;
+}
+
 /** Every action a global hotkey can perform, and where each one stands. */
 export interface HotkeysReply {
   /** The tag. */
@@ -1913,6 +2080,7 @@ export type Reply =
   | PlaybackOpenedReply
   | PreviewOpenedReply
   | HotkeysReply
+  | DiagnosticsReply
   | SettingsReply
   | AudioDevicesReply
   | MicrophoneLevelReply

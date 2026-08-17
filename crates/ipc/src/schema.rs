@@ -66,6 +66,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
+use crate::diagnostics::{
+    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics, EncoderAccount,
+    EncoderSummary,
+};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use crate::hotkeys::{HotkeyBinding, HotkeyState};
@@ -636,6 +640,34 @@ fn structures() -> BTreeMap<String, Structure> {
         "hotkey_binding".to_owned(),
         structure_of(&exemplar_hotkey_binding(), &[]),
     );
+    structures.insert(
+        "diagnostics".to_owned(),
+        structure_of(&exemplar_diagnostics(), &[]),
+    );
+    structures.insert(
+        "capture_account".to_owned(),
+        structure_of(&exemplar_capture_account(), &[]),
+    );
+    structures.insert(
+        "capture_method_change".to_owned(),
+        structure_of(&exemplar_capture_method_change(), &[]),
+    );
+    structures.insert(
+        "encoder_account".to_owned(),
+        structure_of(&exemplar_encoder_account(), &[]),
+    );
+    structures.insert(
+        "adapter_summary".to_owned(),
+        structure_of(&exemplar_adapter_summary(), &[]),
+    );
+    structures.insert(
+        "encoder_summary".to_owned(),
+        structure_of(&exemplar_encoder_summary(), &[]),
+    );
+    structures.insert(
+        "codec_summary".to_owned(),
+        structure_of(&exemplar_codec_summary(), &[]),
+    );
     for state in every_hotkey_state() {
         structures.insert(
             format!("hotkey_state.{}", hotkey_state_tag(&state)),
@@ -696,6 +728,7 @@ fn commands() -> Vec<CommandSchema> {
                 | Command::LibraryGames
                 | Command::Plugins
                 | Command::GetHotkeys
+                | Command::GetDiagnostics
                 | Command::GetSettings
                 | Command::GetAudioDevices
                 | Command::GetStartAtLogin => None,
@@ -721,6 +754,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::OpenPlayback(_) => Some("reply.playback_opened".to_owned()),
                 Command::OpenPreview(_) => Some("reply.preview_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
+                Command::GetDiagnostics => Some("reply.diagnostics".to_owned()),
                 // Both settings commands answer with the same reply: what a
                 // change produced is the settings as they now stand
                 // (`crate::settings`).
@@ -1500,6 +1534,60 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "the diagnostics of a recorder that is recording, whose preferred capture backend \
+             could not be started",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::Diagnostics {
+                    diagnostics: exemplar_diagnostics(),
+                }),
+            }),
+        ),
+        (
+            // The sample the "not recording" reading has to survive. Every
+            // capture field is absent, and what proves a mirror read it rather
+            // than defaulted it is that `encoders` is still whole.
+            "the diagnostics of a recorder with nothing being recorded",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::Diagnostics {
+                    diagnostics: Diagnostics {
+                        capture: None,
+                        encoders: EncoderAccount {
+                            probed: true,
+                            detected_at: None,
+                            elapsed_ms: 41,
+                            adapters: vec![AdapterSummary {
+                                description: "Microsoft Basic Render Driver".to_owned(),
+                                vendor: "microsoft".to_owned(),
+                                kind: "software".to_owned(),
+                                video_memory_bytes: 0,
+                                driver_version: None,
+                                captures: true,
+                            }],
+                            // A machine with no hardware encoder at all, which
+                            // is the report somebody with a problem needs: the
+                            // software encoder is here, nothing else is, and
+                            // the codec nobody has asked about is absent rather
+                            // than unsupported.
+                            encoders: vec![EncoderSummary {
+                                encoder: "nvenc".to_owned(),
+                                label: "NVIDIA NVENC".to_owned(),
+                                available: false,
+                                unavailable: Some(
+                                    "there is no NVIDIA adapter on this machine".to_owned(),
+                                ),
+                                implemented: true,
+                                adapter: None,
+                                asked: false,
+                                codecs: Vec::new(),
+                            }],
+                        },
+                    },
+                }),
+            }),
+        ),
+        (
             "a shutdown accepted, with nothing being recorded",
             ServerMessage::Response(Response {
                 id: 8,
@@ -1909,6 +1997,15 @@ fn reply_discriminant(reply: &Reply) -> String {
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
+        // Whether a recording is being captured is part of the path, for the
+        // reason `shutting_down`'s `finalising` is: a mirror that dropped
+        // `capture` would reach the same discriminant for a recorder that is
+        // recording and one that is not, and which of those it is decides
+        // whether there is a capture backend to name at all.
+        Reply::Diagnostics { diagnostics } => match diagnostics.capture {
+            None => "diagnostics".to_owned(),
+            Some(_) => "diagnostics.capturing".to_owned(),
+        },
         Reply::Settings { .. } => "settings".to_owned(),
         Reply::AudioDevices { .. } => "audio_devices".to_owned(),
         Reply::MicrophoneLevel { .. } => "microphone_level".to_owned(),
@@ -2843,6 +2940,7 @@ fn every_built_command() -> Vec<Command> {
         Command::OpenPlayback(exemplar_open_playback()),
         Command::OpenPreview(exemplar_open_preview()),
         Command::GetHotkeys,
+        Command::GetDiagnostics,
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
         Command::GetAudioDevices,
@@ -2873,6 +2971,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::OpenPlayback(_)
             | Command::OpenPreview(_)
             | Command::GetHotkeys
+            | Command::GetDiagnostics
             | Command::GetSettings
             | Command::ApplySettings(_)
             | Command::GetAudioDevices
@@ -3168,6 +3267,14 @@ fn every_reply() -> Vec<Reply> {
                 reason: "its manifest is not readable JSON".to_owned(),
             }],
         },
+        // One entry, like every other reply: this list is what names the tags,
+        // and a tag named twice is one enumeration value too many. The two
+        // things a diagnostics screen says differently — a recorder that is
+        // capturing and one that is not — are two *samples* below, which is
+        // where a discriminant with more than one reading is exercised.
+        Reply::Diagnostics {
+            diagnostics: exemplar_diagnostics(),
+        },
     ];
     for reply in &replies {
         match reply {
@@ -3188,6 +3295,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Locked { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
+            | Reply::Diagnostics { .. }
             | Reply::Settings { .. }
             | Reply::AudioDevices { .. }
             | Reply::MicrophoneLevel { .. }
@@ -3280,6 +3388,109 @@ fn exemplar_hotkey_binding() -> HotkeyBinding {
         unavailable: Some(
             "Open overlay is not in this build: the overlay arrives in M5 (issue #53)".to_owned(),
         ),
+    }
+}
+
+/// What `get_diagnostics` answers with, with every optional field present so
+/// that the schema sees it.
+///
+/// A recorder that is recording, therefore, because
+/// [`Diagnostics::capture`](crate::Diagnostics::capture) is absent for one that
+/// is not and is the field the schema would otherwise never see.
+fn exemplar_diagnostics() -> Diagnostics {
+    Diagnostics {
+        capture: Some(exemplar_capture_account()),
+        encoders: exemplar_encoder_account(),
+    }
+}
+
+/// How a recording is capturing, with a backend that fell back so that the
+/// change list is not empty here.
+fn exemplar_capture_account() -> CaptureAccount {
+    CaptureAccount {
+        setting: "Automatic".to_owned(),
+        started_with: "Desktop Duplication".to_owned(),
+        current: "Desktop Duplication".to_owned(),
+        changes: vec![exemplar_capture_method_change()],
+    }
+}
+
+/// One replacement of the capture backend.
+///
+/// The start-up fall-through, which is the change a recorder in this build
+/// actually produces: the preferred method could not be created, and the next
+/// candidate is recording instead.
+fn exemplar_capture_method_change() -> CaptureMethodChange {
+    CaptureMethodChange {
+        from: "Windows Graphics Capture".to_owned(),
+        to: "Desktop Duplication".to_owned(),
+        restart: false,
+        trigger: "initialisation_failed".to_owned(),
+        reason: "this build has no Windows Graphics Capture backend to create".to_owned(),
+    }
+}
+
+/// What this machine can encode, with every optional field present.
+///
+/// A stored answer rather than one measured just now, because
+/// [`EncoderAccount::detected_at`](crate::EncoderAccount::detected_at) is absent
+/// for the other case and is the field the schema would otherwise never see.
+fn exemplar_encoder_account() -> EncoderAccount {
+    EncoderAccount {
+        probed: false,
+        detected_at: Some("2026-08-11T20:14:00+01:00".to_owned()),
+        elapsed_ms: 3,
+        adapters: vec![exemplar_adapter_summary()],
+        encoders: vec![exemplar_encoder_summary()],
+    }
+}
+
+/// One graphics adapter, with every optional field present.
+fn exemplar_adapter_summary() -> AdapterSummary {
+    AdapterSummary {
+        description: "NVIDIA GeForce RTX 4090".to_owned(),
+        vendor: "nvidia".to_owned(),
+        kind: "own_video_memory".to_owned(),
+        video_memory_bytes: 25_769_803_776,
+        driver_version: Some("32.0.15.6094".to_owned()),
+        captures: true,
+    }
+}
+
+/// One encoder family, with every optional field present.
+///
+/// An encoder that is *not* available, because
+/// [`EncoderSummary::unavailable`](crate::EncoderSummary::unavailable) is only
+/// ever sent for one of those and is the field the schema would otherwise never
+/// see. Its `adapter` is present all the same: an encoder can be real, sitting
+/// on an adapter no recording will hand a frame to, and unusable for exactly
+/// that reason.
+fn exemplar_encoder_summary() -> EncoderSummary {
+    EncoderSummary {
+        encoder: "amf".to_owned(),
+        label: "AMD AMF".to_owned(),
+        available: false,
+        unavailable: Some(
+            "it is on an AMD adapter, and a recording on this machine creates its device on the \
+             NVIDIA one"
+                .to_owned(),
+        ),
+        implemented: true,
+        adapter: Some("AMD Radeon(TM) Graphics".to_owned()),
+        asked: false,
+        codecs: vec![exemplar_codec_summary()],
+    }
+}
+
+/// One codec on one encoder family, with every optional field present.
+fn exemplar_codec_summary() -> CodecSummary {
+    CodecSummary {
+        codec: "hevc".to_owned(),
+        supported: Some(true),
+        max_width: Some(4096),
+        max_height: Some(4096),
+        max_framerate_1080p: Some(240),
+        inferred: true,
     }
 }
 

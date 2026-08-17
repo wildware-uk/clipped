@@ -269,6 +269,21 @@ pub mod features {
         /// which is what the check turns into "this recorder cannot show you a
         /// level" before a meter is drawn that would never move.
         MICROPHONE_LEVEL = "microphone_level";
+        /// The recorder can say how it is capturing and what this machine can
+        /// encode: `get_diagnostics`.
+        ///
+        /// A UI asks for this before drawing anything against those rows, and
+        /// the failure it prevents is the one a diagnostics screen can least
+        /// afford. A recorder built before
+        /// [issue #302](https://github.com/wildware-uk/clipped/issues/302) has
+        /// no `get_diagnostics` command and refuses it with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// and a screen whose whole subject is what *is* and *is not* known
+        /// must not report "Clipped found no encoder on this machine" when what
+        /// happened is that it never asked. Those are opposite answers, and
+        /// they are the reason the screen names this capability rather than
+        /// inferring it from an empty reply.
+        DIAGNOSTICS = "diagnostics";
         /// The recorder can say whether it starts when this user signs in, and
         /// turn that on and off: `get_start_at_login` and
         /// `set_start_at_login`.

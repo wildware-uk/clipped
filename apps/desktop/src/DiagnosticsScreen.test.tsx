@@ -1,3 +1,4 @@
+import type { Diagnostics, EncoderAccount } from '@clipped/shared';
 import { PROTOCOL_VERSION } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -12,6 +13,7 @@ import {
   diagnostics,
   type DiagnosticsReportInput,
 } from './diagnostics';
+import type { LibraryRead } from './library';
 import { DiagnosticsScreen } from './DiagnosticsScreen';
 import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
 import type { RecorderLinkView } from './useRecorderLink';
@@ -62,6 +64,67 @@ async function openDiagnostics(user: ReturnType<typeof userEvent.setup>): Promis
 function healthPanel(): HTMLElement {
   return screen.getByRole('region', { name: 'Capture health' });
 }
+
+/**
+ * What a recorder that has been asked and answered says, for a case to vary.
+ *
+ * A machine with a working NVENC and an AMD encoder it cannot use, which is the
+ * ordinary gaming laptop and the arrangement with the most to get wrong.
+ */
+const ENCODERS: EncoderAccount = {
+  probed: false,
+  detected_at: '2026-08-11T20:14:00+01:00',
+  elapsed_ms: 3,
+  adapters: [
+    {
+      description: 'NVIDIA GeForce RTX 4090',
+      vendor: 'nvidia',
+      kind: 'own_video_memory',
+      video_memory_bytes: 25_769_803_776,
+      driver_version: '32.0.15.6094',
+      captures: true,
+    },
+  ],
+  encoders: [
+    {
+      encoder: 'nvenc',
+      label: 'NVIDIA NVENC',
+      available: true,
+      implemented: true,
+      adapter: 'NVIDIA GeForce RTX 4090',
+      asked: false,
+      codecs: [
+        {
+          codec: 'h264',
+          supported: true,
+          max_width: 4096,
+          max_height: 4096,
+          max_framerate_1080p: 522,
+          inferred: true,
+        },
+      ],
+    },
+    {
+      encoder: 'amf',
+      label: 'AMD AMF',
+      available: false,
+      unavailable: 'no adapter from this vendor is present',
+      implemented: true,
+      asked: false,
+      codecs: [],
+    },
+  ],
+};
+
+function answered(overrides: Partial<Diagnostics> = {}): LibraryRead<Diagnostics> {
+  return { state: 'read', value: { encoders: ENCODERS, ...overrides } };
+}
+
+/** A recorder that could not be asked at all. */
+const UNREACHABLE: LibraryRead<Diagnostics> = {
+  state: 'unread',
+  problem: { code: 'recorder_unreachable', message: 'the recorder is not running.' },
+};
 
 /** A view with nothing wrong and nothing known, for a case to vary one field. */
 function view(overrides: Partial<RecorderLinkView> = {}): RecorderLinkView {
@@ -271,6 +334,20 @@ describe('what the Diagnostics screen says has gone wrong', () => {
  * that failure, the file an earlier interruption left, and the startup notice.
  */
 const LEAKY: DiagnosticsReportInput = {
+  /*
+   * A sixth. The recorder's refusals carry its own sentences, and those name
+   * files: `get_diagnostics` refused because the recorder went missing reads
+   * "the recorder was not found at C:\Users\alice\...". A report that scrubbed
+   * the five above and passed this one through would leak the same account name
+   * by a newer route (issue #302).
+   */
+  recorder: {
+    state: 'unread',
+    problem: {
+      code: 'recorder_unreachable',
+      message: String.raw`the recorder was not found at C:\Users\alice\AppData\Local\Clipped\clipped-recorder.exe`,
+    },
+  },
   view: {
     link: {
       link: 'attached',
@@ -428,6 +505,8 @@ describe('the support report', () => {
       'Recording file',
       'Elapsed when observed',
       'Capture health',
+      'Capture backend',
+      'Encoders',
       'Recording failed',
       'seen',
       'code',
@@ -452,6 +531,7 @@ describe('the support report', () => {
       notice: undefined,
       userAgent: 'jsdom',
       takenAt: new Date('2026-08-12T09:14:02.311Z'),
+      recorder: answered(),
     });
 
     expect(report).toMatch(/Recording failed\s+none since this window opened/);
@@ -608,7 +688,7 @@ describe('the Diagnostics screen', () => {
     ).toBeVisible();
     const scope = within(healthPanel()).getByText(/recorder this window is attached to/);
     expect(scope).toHaveTextContent(/since this window opened/);
-    expect(scope).toHaveTextContent(/issue #302/);
+    expect(scope).toHaveTextContent(/issue #100/);
   });
 
   /*
@@ -618,16 +698,23 @@ describe('the Diagnostics screen', () => {
    * satisfied by a table holding one invented row. The claim being made is that
    * *these* are the twelve the specification asks for, each pinned to the work
    * that supplies it.
+   *
+   * Four of them carry no issue any more, and that is the change issue #302
+   * made: Recording paths always came from the status, Game detection came with
+   * protocol 2's sitting, and the Capture backend and the Encoder come from
+   * `get_diagnostics`. An empty list here means "this row is supplied", so a row
+   * that quietly went back to naming an issue would fail the entry below rather
+   * than pass unnoticed.
    */
   const MUST_BE_NAMED: readonly (readonly [string, readonly number[]])[] = [
-    ['Game detection', [241]],
-    ['Capture backend', [97, 302]],
-    ['Resolution changes', [98, 302]],
-    ['Encoder', [14, 302]],
+    ['Game detection', []],
+    ['Capture backend', []],
+    ['Resolution changes', [98]],
+    ['Encoder', []],
     ['Dropped frames', [100]],
     ['Encoder latency', [100]],
     ['Audio drift', [100]],
-    ['Audio devices', [180]],
+    ['Audio devices', [100, 180]],
     ['Recording paths', []],
     ['Muxer status', [100]],
     ['Disk latency', [100]],
@@ -637,16 +724,25 @@ describe('the Diagnostics screen', () => {
 
   it('names every diagnostic the specification asks for, and the issue that lands it', async () => {
     const user = userEvent.setup();
-    stubRecorderLinkRuntime({
-      link: 'attached',
-      recorder_process_id: 7,
-      features: [],
-      status: { state: 'idle' },
-    });
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: { state: 'idle' },
+      },
+      null,
+      { recorderDiagnostics: () => ({ encoders: ENCODERS }) },
+    );
     renderApp();
     await openDiagnostics(user);
 
-    const rows = within(screen.getByRole('table')).getAllByRole('row').slice(1);
+    await waitFor(() => {
+      expect(screen.getAllByRole('table').length).toBeGreaterThan(1);
+    });
+    const rows = within(screen.getAllByRole('table')[0] as HTMLElement)
+      .getAllByRole('row')
+      .slice(1);
     expect(rows).toHaveLength(MUST_BE_NAMED.length);
 
     for (const [subject, issues] of MUST_BE_NAMED) {
@@ -863,6 +959,92 @@ describe('the Diagnostics screen', () => {
   });
 
   /*
+   * Issue #302's third acceptance criterion, through the whole application: the
+   * capture backend and the encoder arrive from the recorder over
+   * `recorder_diagnostics` and are drawn, in place of two rows naming the issue.
+   *
+   * Driven through `App` and the real Tauri wrapper rather than by handing the
+   * component a value, because what is being asserted is that the screen *asks*.
+   * A case that passed the diagnostics in as a prop would go on passing after
+   * the command had been disconnected from the screen.
+   */
+  it('shows the capture backend and the encoder the recorder reports', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: {
+          state: 'recording',
+          recording_id: 'r-1',
+          output: 'D:\\clips\\match.mkv',
+          target: 'process cs2.exe',
+          elapsed_ms: 4_200,
+        },
+      },
+      null,
+      {
+        recorderDiagnostics: () => ({
+          capture: {
+            setting: 'Automatic',
+            started_with: 'Windows Graphics Capture',
+            current: 'Desktop Duplication',
+            changes: [
+              {
+                from: 'Windows Graphics Capture',
+                to: 'Desktop Duplication',
+                restart: false,
+                trigger: 'capture_failed',
+                reason: 'the compositor stopped delivering frames',
+              },
+            ],
+          },
+          encoders: ENCODERS,
+        }),
+      },
+    );
+    renderApp();
+    await openDiagnostics(user);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Desktop Duplication, chosen automatically/)).toBeVisible();
+    });
+    // The reason, in the recorder's own words. A row that named the backend and
+    // dropped why it changed would be the fact with no explanation attached that
+    // `CaptureStatus` exists to prevent.
+    // Asserted with `getAllByText` because it is deliberately in two places: the
+    // row somebody reads, and the report they paste into a bug tracker.
+    expect(screen.getAllByText(/the compositor stopped delivering frames/).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText(/The recording started with Windows Graphics Capture/)).toBeVisible();
+  });
+
+  /*
+   * The other half, and the one worth more than the first: a recorder that could
+   * not be asked must not be drawn as a machine with nothing to report. "Clipped
+   * found no encoder here" and "Clipped never asked" are opposite readings of the
+   * same blank row (AGENTS.md section 27).
+   */
+  it('says the recorder could not be asked, rather than that it has no encoder', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime({
+      link: 'attached',
+      recorder_process_id: 7,
+      features: [],
+      status: { state: 'idle' },
+    });
+    renderApp();
+    await openDiagnostics(user);
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/could not ask the recorder/i).length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/no encoder on this machine/i)).toBeNull();
+  });
+
+  /*
    * The screen's table is the one place the twelve are enumerated for a reader,
    * so its headings say what it is: not a list of measurements.
    */
@@ -874,6 +1056,6 @@ describe('the Diagnostics screen', () => {
         .getAllByRole('columnheader')
         .map((header) => header.textContent),
     ).toEqual(['Diagnostic', 'What this build reports']);
-    expect(diagnostics(view()).filter((entry) => entry.known)).toHaveLength(0);
+    expect(diagnostics(view(), UNREACHABLE).filter((entry) => entry.known)).toHaveLength(0);
   });
 });

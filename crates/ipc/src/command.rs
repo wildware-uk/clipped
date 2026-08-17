@@ -38,6 +38,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::diagnostics::Diagnostics;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
@@ -132,6 +133,15 @@ pub enum Command {
     /// starts, which is usually before any window exists to be told
     /// (`crate::hotkeys`).
     GetHotkeys,
+    /// How the recording in progress is capturing, and what this machine can
+    /// encode.
+    ///
+    /// Asked rather than pushed for the reason [`Self::GetHotkeys`] is: both
+    /// answers are settled before a window is likely to exist — the capability
+    /// report when the recorder starts a recording, the capture backend in the
+    /// first moments of one — so an event would be published to nobody
+    /// (`crate::diagnostics`, issue #302).
+    GetDiagnostics,
     /// Every setting, what it resolves to, and whether anything reads it.
     ///
     /// Asked of the recorder rather than read from the file, because the
@@ -208,6 +218,7 @@ impl Command {
             Self::OpenPlayback(_) => "open_playback",
             Self::OpenPreview(_) => "open_preview",
             Self::GetHotkeys => "get_hotkeys",
+            Self::GetDiagnostics => "get_diagnostics",
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
             Self::GetAudioDevices => "get_audio_devices",
@@ -248,6 +259,7 @@ impl Command {
             "open_playback" => Ok(Self::OpenPlayback(parse_params(request)?)),
             "open_preview" => Ok(Self::OpenPreview(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
+            "get_diagnostics" => Ok(Self::GetDiagnostics),
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
             "get_audio_devices" => Ok(Self::GetAudioDevices),
@@ -278,6 +290,7 @@ impl Command {
             | Self::LibraryGames
             | Self::Plugins
             | Self::GetHotkeys
+            | Self::GetDiagnostics
             | Self::GetSettings
             | Self::GetAudioDevices
             | Self::GetStartAtLogin => Ok(serde_json::Value::Null),
@@ -788,6 +801,18 @@ pub enum Reply {
         /// an action missing from the list is indistinguishable from an action
         /// the recorder has never heard of.
         hotkeys: Vec<HotkeyBinding>,
+    },
+    /// How the recording in progress is capturing, and what this machine can
+    /// encode.
+    ///
+    /// One reply for both, because the transport is the point: they are the two
+    /// of SPEC.md section 36's twelve diagnostics that the recorder already
+    /// knows and nothing carried to a window, and two commands for one screen's
+    /// one question would be two things to keep in step
+    /// (`crate::diagnostics`, issue #302).
+    Diagnostics {
+        /// What the recorder can say about capture and encoding, right now.
+        diagnostics: Diagnostics,
     },
     /// Every setting, as it now stands.
     ///

@@ -1,9 +1,12 @@
 //! The `capabilities` subcommand: what this machine can encode.
 //!
 //! Detection lives in `clipped-encoder`; this module is the presentation of it.
-//! The split matters because the desktop application will show the same
-//! information in a window (milestone M5) and must not re-derive any of it —
-//! what it should share is the report, not the layout.
+//! The split matters because the desktop application shows the same information
+//! in a window and must not re-derive any of it — what it shares is the report,
+//! not the layout. That is [`detection`] and
+//! [`get_diagnostics`](../../../docs/ipc.md), which the Diagnostics screen asks
+//! and this module's own [`run`] answers from as well
+//! ([issue #302](https://github.com/wildware-uk/clipped/issues/302)).
 //!
 //! # What the output has to make obvious
 //!
@@ -107,6 +110,34 @@ pub fn run(args: &CapabilitiesArgs) -> Result<(), CapabilitiesError> {
 
     print!("{}", render(&detection, &cache));
     Ok(())
+}
+
+/// What this machine can encode, without opening an encoder session.
+///
+/// The same reading this command makes without `--refresh`, for callers that
+/// want the report rather than the page — the Diagnostics screen, through
+/// `get_diagnostics` (`crate::diagnostics`, issue #302). Sharing the reading
+/// rather than the layout is what `run` above was already written for, and it is
+/// the reason there is one place that decides whether a session may be opened.
+///
+/// **It never opens one.** [`Probing::WithoutSessions`] is not a parameter here,
+/// deliberately: a command a window can send at any moment must not be able to
+/// take an encode session slot from a game that is mid-match, and the way to
+/// guarantee that is for the caller to have no say.
+///
+/// # Errors
+///
+/// [`CapabilitiesError::Probe`] when the graphics adapters could not be
+/// enumerated. A machine with no encoder is not an error; a machine that could
+/// not be asked is.
+pub(crate) fn detection() -> Result<Detection, CapabilitiesError> {
+    let probe = system_probe();
+    let cache = cache(false);
+    Ok(detect_cached(
+        probe.as_ref(),
+        &cache,
+        Probing::WithoutSessions,
+    )?)
 }
 
 /// Whether this run may open an encoder session to measure the numeric limits.

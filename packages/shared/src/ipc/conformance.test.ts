@@ -34,6 +34,14 @@ import { describe, expect, it } from 'vitest';
 import { LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES } from './frame';
 import { parseClientMessage, parseServerMessage } from './parse';
 import type {
+  AdapterSummary,
+  CaptureAccount,
+  CaptureMethodChange,
+  CodecSummary,
+  Diagnostics,
+  DiagnosticsReply,
+  EncoderAccount,
+  EncoderSummary,
   ActiveRecording,
   AddBookmarkParams,
   ApplySettingsParams,
@@ -647,6 +655,54 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reason: 'required',
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
+  diagnostics: fields<Diagnostics>({ capture: 'optional', encoders: 'required' }),
+  capture_account: fields<CaptureAccount>({
+    setting: 'required',
+    started_with: 'required',
+    current: 'required',
+    changes: 'required',
+  }),
+  capture_method_change: fields<CaptureMethodChange>({
+    from: 'required',
+    to: 'required',
+    restart: 'required',
+    trigger: 'required',
+    reason: 'required',
+  }),
+  encoder_account: fields<EncoderAccount>({
+    probed: 'required',
+    detected_at: 'optional',
+    elapsed_ms: 'required',
+    adapters: 'required',
+    encoders: 'required',
+  }),
+  adapter_summary: fields<AdapterSummary>({
+    description: 'required',
+    vendor: 'required',
+    kind: 'required',
+    video_memory_bytes: 'required',
+    driver_version: 'optional',
+    captures: 'required',
+  }),
+  encoder_summary: fields<EncoderSummary>({
+    encoder: 'required',
+    label: 'required',
+    available: 'required',
+    unavailable: 'optional',
+    implemented: 'required',
+    adapter: 'optional',
+    asked: 'required',
+    codecs: 'required',
+  }),
+  codec_summary: fields<CodecSummary>({
+    codec: 'required',
+    supported: 'optional',
+    max_width: 'optional',
+    max_height: 'optional',
+    max_framerate_1080p: 'optional',
+    inferred: 'required',
+  }),
+  'reply.diagnostics': fields<DiagnosticsReply>({ reply: 'required', diagnostics: 'required' }),
   setting_entry: fields<SettingEntry>({
     key: 'required',
     label: 'required',
@@ -845,6 +901,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_diagnostics',
+    params: null,
+    reply: 'reply.diagnostics',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_settings',
     params: null,
     reply: 'reply.settings',
@@ -957,6 +1019,12 @@ function replyDiscriminant(reply: Reply): string {
       return 'library_trash';
     case 'hotkeys':
       return 'hotkeys';
+    case 'diagnostics':
+      // Whether a recording is being captured is part of the path: a mirror
+      // that dropped `capture` would reach the same discriminant for a recorder
+      // that has a backend to name and one that has none, and which of those it
+      // is decides whether the screen has a capture row to draw at all.
+      return reply.diagnostics.capture === undefined ? 'diagnostics' : 'diagnostics.capturing';
     case 'settings':
       // One discriminant: a settings view with nothing in it is the same shape
       // carrying nothing, and `settings` is always present.

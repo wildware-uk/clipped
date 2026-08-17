@@ -41,10 +41,17 @@
 
 import type {
   ActiveRecording,
+  AdapterSummary,
   AudioDevice,
   AudioDevices,
   BookmarkSummary,
+  CaptureAccount,
+  CaptureMethodChange,
   ClientMessage,
+  CodecSummary,
+  Diagnostics,
+  EncoderAccount,
+  EncoderSummary,
   ErrorDetail,
   ExportProgress,
   ExportSummary,
@@ -426,6 +433,8 @@ function readReply(value: JsonValue | undefined): Reply {
         reply: 'hotkeys',
         hotkeys: arrayField(reply['hotkeys'], 'a hotkey list', readHotkeyBinding),
       };
+    case 'diagnostics':
+      return { reply: 'diagnostics', diagnostics: readDiagnostics(reply['diagnostics']) };
     case 'settings':
       return { reply: 'settings', settings: readSettingsView(reply['settings']) };
     case 'audio_devices':
@@ -614,6 +623,115 @@ function readHotkeyBinding(value: JsonValue | undefined): HotkeyBinding {
     state: readHotkeyState(binding['state']),
     handled: booleanField(binding, 'handled', what),
     ...(unavailable === undefined ? {} : { unavailable }),
+  };
+}
+
+function readDiagnostics(value: JsonValue | undefined): Diagnostics {
+  const diagnostics = object(value, 'the diagnostics');
+  const capture = diagnostics['capture'];
+  return {
+    // Absent means nothing is being recorded, which is a fact rather than a gap:
+    // there is no capture backend running between recordings, and an empty
+    // account here would read as a recording that had chosen none.
+    ...(capture === undefined || capture === null ? {} : { capture: readCaptureAccount(capture) }),
+    encoders: readEncoderAccount(diagnostics['encoders']),
+  };
+}
+
+function readCaptureAccount(value: JsonValue | undefined): CaptureAccount {
+  const account = object(value, 'a capture account');
+  const what = 'a capture account';
+  return {
+    setting: stringField(account, 'setting', what),
+    started_with: stringField(account, 'started_with', what),
+    current: stringField(account, 'current', what),
+    // Never optional: an empty list says the backend this recording started
+    // with is still the one running, and a reader that could not see it would
+    // have to guess whether the recorder had looked.
+    changes: arrayField(account['changes'], 'a capture change list', readCaptureMethodChange),
+  };
+}
+
+function readCaptureMethodChange(value: JsonValue | undefined): CaptureMethodChange {
+  const change = object(value, 'a capture change');
+  const what = 'a capture change';
+  return {
+    from: stringField(change, 'from', what),
+    to: stringField(change, 'to', what),
+    restart: booleanField(change, 'restart', what),
+    // Kept whatever it says. A trigger a newer recorder invented is shown
+    // rather than failing the account that carried it, the way an end reason is.
+    trigger: stringField(change, 'trigger', what),
+    reason: stringField(change, 'reason', what),
+  };
+}
+
+function readEncoderAccount(value: JsonValue | undefined): EncoderAccount {
+  const account = object(value, 'an encoder account');
+  const what = 'an encoder account';
+  const detectedAt = optionalStringField(account, 'detected_at', what);
+  return {
+    probed: booleanField(account, 'probed', what),
+    // Absent because the machine was asked just now, so there is nothing older
+    // to date.
+    ...(detectedAt === undefined ? {} : { detected_at: detectedAt }),
+    elapsed_ms: numberField(account, 'elapsed_ms', what),
+    adapters: arrayField(account['adapters'], 'an adapter list', readAdapterSummary),
+    encoders: arrayField(account['encoders'], 'an encoder list', readEncoderSummary),
+  };
+}
+
+function readAdapterSummary(value: JsonValue | undefined): AdapterSummary {
+  const adapter = object(value, 'an adapter');
+  const what = 'an adapter';
+  const driverVersion = optionalStringField(adapter, 'driver_version', what);
+  return {
+    description: stringField(adapter, 'description', what),
+    vendor: stringField(adapter, 'vendor', what),
+    kind: stringField(adapter, 'kind', what),
+    video_memory_bytes: numberField(adapter, 'video_memory_bytes', what),
+    ...(driverVersion === undefined ? {} : { driver_version: driverVersion }),
+    captures: booleanField(adapter, 'captures', what),
+  };
+}
+
+function readEncoderSummary(value: JsonValue | undefined): EncoderSummary {
+  const encoder = object(value, 'an encoder');
+  const what = 'an encoder';
+  const unavailable = optionalStringField(encoder, 'unavailable', what);
+  const adapter = optionalStringField(encoder, 'adapter', what);
+  return {
+    encoder: stringField(encoder, 'encoder', what),
+    label: stringField(encoder, 'label', what),
+    available: booleanField(encoder, 'available', what),
+    // Present exactly when the encoder cannot be used, and it is the recorder's
+    // own sentence: only it knows whether the runtime is missing or the silicon
+    // belongs to somebody else.
+    ...(unavailable === undefined ? {} : { unavailable }),
+    implemented: booleanField(encoder, 'implemented', what),
+    ...(adapter === undefined ? {} : { adapter }),
+    asked: booleanField(encoder, 'asked', what),
+    codecs: arrayField(encoder['codecs'], 'a codec list', readCodecSummary),
+  };
+}
+
+function readCodecSummary(value: JsonValue | undefined): CodecSummary {
+  const codec = object(value, 'a codec');
+  const what = 'a codec';
+  const supported = optionalBooleanField(codec, 'supported', what);
+  const maxWidth = optionalNumberField(codec, 'max_width', what);
+  const maxHeight = optionalNumberField(codec, 'max_height', what);
+  const maxFramerate = optionalNumberField(codec, 'max_framerate_1080p', what);
+  return {
+    codec: stringField(codec, 'codec', what),
+    // Absent is not `false`. Absent means nothing here knows, which is the
+    // honest answer for a codec no driver advertises and nobody has asked
+    // about; `false` means something was asked and said no.
+    ...(supported === undefined ? {} : { supported }),
+    ...(maxWidth === undefined ? {} : { max_width: maxWidth }),
+    ...(maxHeight === undefined ? {} : { max_height: maxHeight }),
+    ...(maxFramerate === undefined ? {} : { max_framerate_1080p: maxFramerate }),
+    inferred: booleanField(codec, 'inferred', what),
   };
 }
 

@@ -6,8 +6,10 @@ built — `docs/logging.md` covers where they go, what may appear in them and wh
 may not — and this document covers the other half: the screen a user opens when
 something is wrong, and the report they send.
 
-It is also the honest account of how little that screen can currently show, and
-why the answer is a list of what is missing rather than a dashboard of zeros.
+It is also the honest account of what that screen can and cannot show, and why
+the rest is a list of what is missing rather than a dashboard of zeros. Four of
+the twelve reach the window; nine of the remaining rows name the work that would
+supply them.
 
 Related standards: SPEC.md sections 36 and 37, AGENTS.md sections 13, 27 and 45,
 [privacy.md](privacy.md), [logging.md](logging.md).
@@ -46,11 +48,18 @@ Diagnostics
 ▌ This describes the recorder this window is attached to, since …
 
 What this build reports             ← the twelve of SPEC.md section 36
-  Game detection      Not reported. …  Issue #241.
-  Capture backend     Not reported. …  Issues #97 and #302.
+  Game detection      Counter-Strike 2, in the sitting cs2-20260811-201400 …
+  Capture backend     Desktop Duplication, chosen automatically. …
+  Resolution changes  Not reported. Issue #98.
+  Encoder             NVIDIA NVENC on NVIDIA GeForce RTX 4090. …
   …
   Recording paths     D:\clips\match.mkv
   …
+
+What this machine can encode        ← the report `capabilities` prints
+  NVIDIA GeForce RTX 4090   nvidia, own video memory, driver 32.0.15.6094 …
+  NVIDIA NVENC              Available, and this build can record with it.
+  AMD AMF                   no adapter from this vendor is present
 
 Support report                      ← what you send, shown in full
   Clipped diagnostics report
@@ -119,25 +128,25 @@ because instructions under a working recorder are noise.
 
 ## What this build reports
 
-SPEC.md section 36 lists twelve diagnostics. **This window can report one of
-them.** The rest are inside the recorder process with nothing to carry them here.
+SPEC.md section 36 lists twelve diagnostics. **This window can report four of
+them.** The rest are inside the recorder process with nothing measuring them.
 
 The screen draws all twelve as a table, one row each, with what this build
-reports against each. Drawing twelve gauges reading zero was the tempting
-alternative and is the one AGENTS.md section 27 rules out: a dropped-frame count
-of zero and a dropped-frame count nobody took are different facts, and this build
-has not counted.
+reports against each. Drawing gauges reading zero was the tempting alternative
+and is the one AGENTS.md section 27 rules out: a dropped-frame count of zero and
+a dropped-frame count nobody took are different facts, and this build has not
+counted.
 
 | Diagnostic | What this build reports |
 | --- | --- |
-| Game detection | Not reported. The protocol describes a recording by its capture target — `process 4242` — and has no vocabulary for a game or a session. [#241](https://github.com/wildware-uk/clipped/issues/241) |
-| Capture backend | Not reported. `clipped-capture` already tracks the method in use, the method a recording started with, and every fallback and restart with its reason ([#97](https://github.com/wildware-uk/clipped/issues/97)); nothing carries it here. [#302](https://github.com/wildware-uk/clipped/issues/302) |
-| Resolution changes | Not reported. [#98](https://github.com/wildware-uk/clipped/issues/98), [#302](https://github.com/wildware-uk/clipped/issues/302) |
-| Encoder | Not reported. `clipped-recorder capabilities` prints the adapters, the encoder runtimes, the codecs the installed driver registers and the limits it measured ([#14](https://github.com/wildware-uk/clipped/issues/14), [encoder-capabilities.md](encoder-capabilities.md)) — to a terminal. [#302](https://github.com/wildware-uk/clipped/issues/302) |
+| **Game detection** | **The game the open sitting is of**, and when that sitting started — or that no sitting is open. Read off the `session` a `recording` or `watching` status carries, so the name survives the seconds a sitting spends waiting out a restart grace with nothing being recorded ([#241](https://github.com/wildware-uk/clipped/issues/241), protocol 2). |
+| **Capture backend** | **The method capturing the recording in progress**, what it was asked for, the method that recording started with, and every replacement and restart with the recorder's own reason. From `clipped_capture::CaptureStatus` ([#97](https://github.com/wildware-uk/clipped/issues/97)) through [`get_diagnostics`](ipc.md#get_diagnostics). Absent when nothing is being recorded, because there is no backend running then. |
+| Resolution changes | Not reported. A recording follows its target being resized ([#98](https://github.com/wildware-uk/clipped/issues/98)); nothing counts the times it happened. |
+| **Encoder** | **The adapters, the encoder families, the codecs and the limits** — everything `clipped-recorder capabilities` prints ([#14](https://github.com/wildware-uk/clipped/issues/14), [encoder-capabilities.md](encoder-capabilities.md)), through the same command, drawn as its own section below the table. |
 | Dropped frames | Not reported. The `metrics` event stream is defined and this recorder refuses it with `not_implemented`. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Encoder latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Audio drift | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
-| Audio devices | Not reported. A recording does capture audio (#180); which devices it used is not carried into diagnostics. [#100](https://github.com/wildware-uk/clipped/issues/100) |
+| Audio devices | Not reported. A recording does capture audio (#180) and the recorder can list this machine's microphones for the Settings screen; which devices a *recording* used is not carried into diagnostics. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | **Recording paths** | **The path of the recording in progress**, which arrives inside a `recording` status — or, when nothing is being recorded, that there is none. |
 | Muxer status | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Disk latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
@@ -148,15 +157,31 @@ The last row is not on the specification's list and is on the screen because it
 is the one thing a user can act on today: the logs exist, they are the primary
 diagnostic, and attaching them by hand is a thing a person can do.
 
-**Why the window cannot see the rest.** It reaches the recorder over
-[the control protocol](ipc.md), which has commands for recording and nothing for
-diagnostics, and it reaches its own Tauri host through three commands —
-`recorder_link_state`, `startup_notice` and the window title. Its whole privilege
-is `apps/desktop/src-tauri/capabilities/default.json`, which grants three `core:`
-permissions and nothing that touches the file system.
-[Issue #302](https://github.com/wildware-uk/clipped/issues/302) is the work that
-changes that, and every row above names either it or the subsystem that has not
-measured its figure yet.
+**How the four get here, and why the rest do not.** The window reaches the
+recorder over [the control protocol](ipc.md). The recording path and the game
+arrive inside a `recording` or `watching` status, which it was already
+subscribed to; the capture backend and the encoder are what
+[`get_diagnostics`](ipc.md#get_diagnostics) answers, asked once when this screen
+opens through the `recorder_diagnostics` command on the Tauri host
+(`apps/desktop/src/recorderDiagnostics.ts`).
+
+The rest are not waiting on a transport any more. **Nine of them are waiting on a
+measurement**: the `metrics` stream is defined and this recorder refuses it with
+`not_implemented` because nothing counts a dropped frame, times an encode or
+watches the muxer during a recording ([#100](https://github.com/wildware-uk/clipped/issues/100)),
+and there is no plugin system for a plugin event to come from. The log files are
+a file-system permission this window does not have
+([#303](https://github.com/wildware-uk/clipped/issues/303)). Each row names its
+own, which is the difference between a screen that is missing a feature and one
+that is broken.
+
+**One of them was waiting on nothing.** The Game detection row named
+[#241](https://github.com/wildware-uk/clipped/issues/241) and said the protocol
+had "no vocabulary for a game or a session" long after protocol 2 had given it
+one — the sitting is on the status, the recording-now panel was already reading
+the game's name off it, and this screen had not been changed to. That is the
+shape of defect this repository keeps finding: not a producer that was never
+built, but one nothing was rewired to consume.
 
 ## The support report
 
@@ -190,6 +215,13 @@ Recording target       process cs2.exe
 Recording file         match.mkv#eb9715073a66288e
 Elapsed when observed  42 s
 Capture health         Recording — Recording process cs2.exe to match.mkv#eb9715073a66288e.
+Capture backend        Desktop Duplication
+  asked for            Automatic
+  started with         Windows Graphics Capture
+  changed              Desktop Duplication took over from Windows Graphics Capture
+                       (capture_failed): the compositor stopped delivering frames
+Encoders               nvenc on NVIDIA GeForce RTX 4090 (h264, hevc, av1)
+  reading              stored, taken 2026-08-11T20:14:00+01:00
 Recording failed       r-7
   seen                 2026-08-12T09:13:12.000Z
   code                 recording_failed
@@ -201,9 +233,8 @@ Recording interrupted  r-6
   elapsed              1 min 30 s
 Notice                 the recorder was not found at clipped-recorder.exe#c01c72cf03258db7
 
-Not reported by this build: Game detection, Capture backend, Resolution changes,
-Encoder, Dropped frames, Encoder latency, Audio drift, Audio devices, Muxer
-status, Disk latency, Plugin events, Log files.
+Not reported by this build: Resolution changes, Dropped frames, Encoder latency,
+Audio drift, Audio devices, Muxer status, Disk latency, Plugin events, Log files.
 Log files are not in this report. They are in %LOCALAPPDATA%\Clipped\logs; attach
 clipped.*.log yourself if the problem is a recording that failed (issue #303).
 Paths are reduced to a file name and a digest of the whole path, the way Clipped
@@ -236,6 +267,8 @@ to be added to that list, and to this table, before the suite goes green.
 | `Recording file` | The `recording` status, redacted | Which file, without saying where it lives |
 | `Elapsed when observed` | The `recording` status | How long it had been going when the recorder last answered |
 | `Capture health` | The summary above, redacted | One line saying what the screen said |
+| `Capture backend` + `asked for`, `started with`, `changed` | [`get_diagnostics`](ipc.md#get_diagnostics) | Which backend recorded the file, and every one it fell past. `none — nothing is being recorded` when there is no recording, `not read: …` when the recorder could not be asked — the two are different facts and neither is left blank |
+| `Encoders` + `reading` | The same reply | What this machine can encode, and whether the answer was taken now or stored. A recording that failed on a machine whose driver was updated last week reads differently from one that failed on a machine with no hardware encoder |
 | `Recording failed` + `seen`, `code`, `message`, `file` | The `recording_failed` event | The reason anybody sends a report at all |
 | `Recording interrupted` + `target`, `file`, `elapsed` | The `recording_interrupted` event | A recorder that died mid-recording, and the file it left |
 | `Notice` | The startup notice and the tray | The only record of a failure that happened before React was running — a notification-area icon that could not be added changes what closing the window does |
@@ -333,11 +366,26 @@ the same reasoning the Games screen applied to its Add Game control). What the
 screen does instead is name the directory, so that attaching `clipped.*.log` is
 something a person can do today.
 
-**The eleven diagnostics.**
-[Issue #302](https://github.com/wildware-uk/clipped/issues/302) is the command
-that would carry the capture status and the capability report to this window.
-Until it lands, the table of what is missing *is* the diagnostics screen, in the
-same way the Games screen's table is the games screen.
+**The nine that nothing measures.**
+[Issue #302](https://github.com/wildware-uk/clipped/issues/302) built the
+command that carries the capture status and the capability report, so those two
+rows are measurements now. The nine that remain are not waiting on a way to
+travel; they are waiting on something to count them, which is
+[#100](https://github.com/wildware-uk/clipped/issues/100) for the eight figures a
+running recording would produce and
+[#69](https://github.com/wildware-uk/clipped/issues/69) for plugin events. Until
+those land, the table of what is missing is as much a part of this screen as the
+four rows that are not.
+
+**Falling back mid-recording.** `CaptureFallback::recover` and
+`recover_from_black_frames` are built and tested in `clipped-capture` and are
+called by nothing: `clipped_session::record` uses the fallback to choose a
+backend and drops it before the frame loop starts. So the change list this screen
+draws only ever carries the start-up fall-through — a preferred backend that
+could not be created — and a backend that dies mid-recording still ends the
+recording rather than being replaced. The screen is honest about it either way,
+because an empty change list says the backend has not been replaced and that is
+true; what is missing is the *behaviour*, not the reporting of it.
 
 **A Try again control** for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221). The health
@@ -357,14 +405,37 @@ summary says what restarting Clipped does in the meantime.
   asserted over every state.
 - **A failed recording survives the "idle" that follows it**, through the hook,
   the shell and the screen, which is where it would be dropped.
-- **The report leaks nothing**, from the worst state the window can be in: five
-  separate places a Windows path arrives at once. Each leaked string is asserted
-  separately, so a failure names which one got through.
+- **The report leaks nothing**, from the worst state the window can be in: six
+  separate places a Windows path arrives at once — the sixth being the refusal
+  `get_diagnostics` produces when the recorder has gone, whose sentence names the
+  executable it was looking for. Each leaked string is asserted separately, so a
+  failure names which one got through.
+- **The capture backend and the encoder come from the recorder**, asserted by
+  driving the whole application and answering `recorder_diagnostics` from a stub,
+  rather than by handing the component a value. A case that passed them in as a
+  prop would go on passing after the command had been disconnected from the
+  screen.
+- **A recorder that could not be asked is not drawn as a machine with nothing to
+  report.** "Clipped found no encoder here" and "Clipped never asked" are the two
+  readings this whole command exists to keep apart (AGENTS.md section 27).
 - **The report carries the fields it says it carries and no others**, as an exact
   list. A check that only looked for known leaks could not see a new kind of one.
 - **What is copied is what was shown.**
 - **Both clipboard failures say so** — no clipboard, and a clipboard that
   refuses — and both name the way out.
+
+The recorder's half is in `cargo test`, against a real recorder over a real pipe:
+`apps/recorder/tests/ipc_protocol.rs::a_recorder_reports_what_this_machine_can_encode_without_a_terminal`
+for the encoder report, which needs no GPU because a machine with no hardware
+encoder is exactly the report it must produce;
+`apps/recorder/tests/ipc_protocol.rs::a_recorder_carries_no_path_into_its_diagnostics`
+for the fourth acceptance criterion, asserted over the bytes of the frame rather
+than a parsed reply so that a path in a field this build does not define is
+caught too; and
+`apps/recorder/tests/ipc_protocol.rs::a_recording_driven_entirely_over_the_protocol_produces_a_playable_file`
+for the capture account, which is `#[ignore]`d because it needs a GPU, an encoder
+and a desktop session — a capture backend exists only while something is being
+captured, so there is nowhere else the claim can be made.
 
 **Not verified:** that the clipboard works in the real WebView2 window. It needs
 a secure context, and establishing that means opening a window on a machine

@@ -249,6 +249,7 @@ pub mod plugins;
 pub mod replay;
 pub mod screenshot;
 
+mod capture_account;
 mod error;
 mod pacing;
 mod progress;
@@ -269,6 +270,7 @@ mod windows;
 
 #[cfg(windows)]
 pub use audio::{available_microphones, microphone_level, MicrophoneChoice, MicrophoneLevel};
+pub use capture_account::{CaptureAccount, CaptureAccounting};
 pub use disk::{SpaceVerdict, VolumeSpace, VolumeUnreadable, DEFAULT_MINIMUM_FREE_SPACE};
 pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};
@@ -385,6 +387,17 @@ pub struct RecordingOutputs<'a> {
     /// already being captured — see [`screenshot::capture_still`] for what that
     /// costs.
     pub screenshots: Option<&'a screenshot::ScreenshotRequests>,
+    /// Where the recording says which capture backend it is using.
+    ///
+    /// The one place `clipped_capture::CaptureStatus` escapes the capture
+    /// thread. Without it the backend a recording chose, and every one it fell
+    /// past to get there, exist only in the log — which is what stopped the
+    /// desktop application reporting either
+    /// ([issue #302](https://github.com/wildware-uk/clipped/issues/302),
+    /// `crate::capture_account`).
+    ///
+    /// A recording given none captures identically and says nothing about it.
+    pub capture: Option<&'a CaptureAccounting>,
     /// Where the recording has reached on its own timeline.
     ///
     /// What a manual bookmark is placed against
@@ -407,6 +420,13 @@ impl<'a> RecordingOutputs<'a> {
     #[must_use]
     pub const fn with_progress(mut self, progress: &'a RecordingProgress) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// The same outputs, also saying which capture backend it settled on.
+    #[must_use]
+    pub const fn with_capture_account(mut self, capture: &'a CaptureAccounting) -> Self {
+        self.capture = Some(capture);
         self
     }
 

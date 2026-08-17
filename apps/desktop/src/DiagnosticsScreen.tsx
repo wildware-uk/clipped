@@ -4,18 +4,32 @@ import {
   buildDiagnosticsReport,
   describeCaptureHealth,
   describeConcerns,
+  describeEncoderSource,
   diagnostics,
   LOG_DIRECTORY,
   NOTHING_HAS_FAILED,
   SCOPE_OF_THIS_SUMMARY,
 } from './diagnostics';
+import { describeDiagnosticsProblem, useRecorderDiagnostics } from './recorderDiagnostics';
 import type { RecorderLinkView } from './useRecorderLink';
 
 /**
  * The Diagnostics screen (issue #101, SPEC.md section 36).
  *
- * Three parts, in the order somebody with a problem reads them: whether anything
- * is wrong, what this build can and cannot tell them, and the report they send.
+ * Four parts, in the order somebody with a problem reads them: whether anything
+ * is wrong, what this build can and cannot tell them, what this machine can
+ * encode, and the report they send.
+ *
+ * # Where the middle two come from
+ *
+ * Four of SPEC.md section 36's twelve reach this window. Two of them arrive
+ * inside a status it was already subscribed to — the recording's path, and the
+ * game the open sitting is of — and two are asked for once when this screen
+ * opens: the capture backend of the recording in progress, and the capability
+ * report `clipped-recorder capabilities` prints
+ * (`recorderDiagnostics.ts`, issue #302). The other nine name the work that
+ * would measure them, which is what this screen does instead of drawing gauges
+ * at zero.
  *
  * # Why there is no Export Support Bundle button
  *
@@ -66,6 +80,14 @@ type CopyOutcome = string | undefined;
 export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): ReactNode {
   const health = describeCaptureHealth(view);
   const concerns = describeConcerns(view);
+  /*
+   * Asked once, when this screen opens. Both answers are settled before this
+   * window is likely to exist — a recording chooses its backend in its first
+   * milliseconds, and the capability report is read when the recorder starts —
+   * so there is no event to wait for and a window that waited for one would show
+   * an empty screen for ever (`recorderDiagnostics.ts`, issue #302).
+   */
+  const recorder = useRecorderDiagnostics();
 
   /*
    * Composed on every render rather than memoised. The report is a description
@@ -80,6 +102,7 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
     notice,
     userAgent: navigator.userAgent,
     takenAt: new Date(),
+    recorder,
   });
 
   const [copied, setCopied] = useState<CopyOutcome>(undefined);
@@ -151,7 +174,7 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
 
       <h2 className="clipped-screen__heading">What this build reports</h2>
       <p className="clipped-screen__lead clipped-muted">
-        SPEC.md section 36 asks a recorder to record all of these. One of them reaches this window.
+        SPEC.md section 36 asks a recorder to record all of these. Four of them reach this window.
         The rest are not drawn as empty gauges — a dropped-frame count of zero and a dropped-frame
         count nobody took are different things — so each row names the work that supplies it.
       </p>
@@ -164,7 +187,7 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
           </tr>
         </thead>
         <tbody>
-          {diagnostics(view).map((entry) => (
+          {diagnostics(view, recorder).map((entry) => (
             <tr key={entry.subject}>
               <td>{entry.subject}</td>
               <td className={entry.known ? undefined : 'clipped-muted'}>{entry.reported}</td>
@@ -172,6 +195,99 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
           ))}
         </tbody>
       </table>
+
+      <h2 className="clipped-screen__heading">What this machine can encode</h2>
+      {recorder.state === 'reading' && (
+        <p className="clipped-screen__lead clipped-muted">Asking the recorder.</p>
+      )}
+      {recorder.state === 'unread' && (
+        <p className="clipped-screen__lead">{describeDiagnosticsProblem(recorder.problem)}</p>
+      )}
+      {recorder.state === 'read' && (
+        <>
+          <p className="clipped-screen__lead clipped-muted">
+            {describeEncoderSource(recorder.value.encoders)}
+          </p>
+
+          <table className="clipped-table">
+            <thead>
+              <tr>
+                <th scope="col">Adapter</th>
+                <th scope="col">What it is</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recorder.value.encoders.adapters.map((adapter) => (
+                <tr key={adapter.description}>
+                  <td>{adapter.description}</td>
+                  <td>
+                    {adapter.vendor}, {adapter.kind.replaceAll('_', ' ')}
+                    {adapter.driver_version === undefined
+                      ? ''
+                      : `, driver ${adapter.driver_version}`}
+                    {adapter.captures ? '. Recordings capture on this one.' : ''}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <table className="clipped-table">
+            <thead>
+              <tr>
+                <th scope="col">Encoder</th>
+                <th scope="col">Where it stands</th>
+                <th scope="col">Codecs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recorder.value.encoders.encoders.map((encoder) => (
+                <tr key={encoder.encoder}>
+                  <td>{encoder.label}</td>
+                  {/*
+                   * Three things a row can be, and they are deliberately not
+                   * collapsed into a tick: an encoder this machine has and this
+                   * build cannot drive is not the same as one that is not here,
+                   * and a report of green ticks from a build that can use half of
+                   * them would be worse than no report (AGENTS.md sections 27
+                   * and 54).
+                   */}
+                  <td className={encoder.available ? undefined : 'clipped-muted'}>
+                    {encoder.unavailable ??
+                      (encoder.implemented
+                        ? 'Available, and this build can record with it.'
+                        : 'Available, and this build has no backend proven to record with it.')}
+                  </td>
+                  <td className={encoder.codecs.length === 0 ? 'clipped-muted' : undefined}>
+                    {encoder.codecs.length === 0
+                      ? 'None: an encoder that is not here has no codecs.'
+                      : encoder.codecs
+                          .map((codec) => {
+                            const size =
+                              codec.max_width === undefined || codec.max_height === undefined
+                                ? ''
+                                : ` up to ${String(codec.max_width)}×${String(codec.max_height)}`;
+                            const rate =
+                              codec.max_framerate_1080p === undefined
+                                ? ''
+                                : ` at ${String(codec.max_framerate_1080p)} fps at 1080p`;
+                            /*
+                             * The one thing this table has to make obvious: a
+                             * figure from a vendor's published table is true of
+                             * the hardware that table covers and is not a promise
+                             * about this card.
+                             */
+                            const evidence = codec.inferred ? ' (inferred)' : '';
+                            return `${codec.codec}${size}${rate}${evidence}`;
+                          })
+                          .join('; ')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
 
       <h2 className="clipped-screen__heading">Support report</h2>
       <p className="clipped-screen__lead">

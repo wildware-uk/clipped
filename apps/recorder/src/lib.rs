@@ -46,6 +46,7 @@
 pub mod capabilities;
 pub mod cli;
 pub mod config;
+pub(crate) mod diagnostics;
 pub mod export;
 pub mod hotkeys;
 pub mod library;

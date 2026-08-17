@@ -962,9 +962,19 @@ interface: what the recorder records, what reaches this window, and exactly what
 a support report may and may not contain.
 
 The shape is the Games screen's, for the same reason — a live panel saying what
-this window can establish, and a table of what the rest is waiting for — with a
-third part the Games screen has no equivalent of: the support report, composed
-here, shown in full, and copied to the clipboard.
+this window can establish, and a table of what the rest is waiting for — with two
+parts the Games screen has no equivalent of: what this machine can encode, which
+is the report `clipped-recorder capabilities` prints drawn as two tables
+([issue #302](https://github.com/wildware-uk/clipped/issues/302)); and the
+support report, composed here, shown in full, and copied to the clipboard.
+
+Four of the twelve rows are measurements rather than missing work, and the two
+that arrive over the protocol — the capture backend and the encoder — are read
+once when the screen opens, through `recorder_diagnostics` on the Tauri host.
+The screen asks the recorder rather than waiting for an event, because both
+answers are settled before this window is likely to exist: a recording chooses
+its capture backend in its first milliseconds
+(`apps/desktop/src/recorderDiagnostics.ts`, [ipc.md](ipc.md#get_diagnostics)).
 
 Two things it adds to this document. Its `Copy report` is the **one control in a
 screen that acts** rather than navigating: a browser clipboard call, needing no
