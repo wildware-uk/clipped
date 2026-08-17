@@ -96,7 +96,8 @@
 //!
 //! # Responsibilities
 //!
-//! - The manifest and what it declares ([`PluginManifest`], [`NetworkAccess`]).
+//! - The manifest and what it declares ([`PluginManifest`], [`NetworkAccess`],
+//!   [`FilesystemAccess`]).
 //! - Finding plugins, and refusing them out loud ([`discover`]).
 //! - The wire a plugin speaks ([`PluginReport`], [`HostCommand`]).
 //! - Turning what a plugin says into `clipped_events` types
@@ -120,6 +121,7 @@
 //! events. It knows nothing about capture, encoding or files.
 
 mod discovery;
+mod filesystem;
 #[cfg(test)]
 mod fixture;
 mod inbox;
@@ -133,6 +135,10 @@ mod supervisor;
 pub use discovery::{
     discover, ConsentLapsed, Discovery, EnabledPlugin, InstalledPlugin, RejectedPlugin, Rejection,
     MANIFEST_FILE,
+};
+pub use filesystem::{
+    FilesystemAccess, FilesystemAccessLevel, FilesystemDeclarationError, FilesystemGrant,
+    FilesystemScope,
 };
 pub use inbox::{inbox, Delivery, EventInbox, EventReceiver, InboxStats, DEFAULT_CAPACITY};
 pub use manifest::{

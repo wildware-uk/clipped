@@ -306,6 +306,12 @@ pub struct ShippedRule {
 /// deciding what the user's library contains. The window it *would* get is a
 /// real one, so switching it on in the settings needs one change and not four.
 ///
+/// [`UserLabelled`](EventKind::UserLabelled) is off too, and not for that
+/// reason — the user chose that name, so there is nobody to distrust. It is off
+/// because the signals it exists for can fire many times a minute, and because
+/// marking a moment is not the same act as asking for a clip of it. It carries
+/// the same real window for anyone who wants both.
+///
 /// The window sizes are SPEC.md section 7's worked example — fifteen seconds
 /// before a kill and ten after — and issue #75's for a death, with the rest
 /// following the same shape: a moment that is the *result* of what came before
@@ -333,6 +339,21 @@ pub fn shipped_rule(kind: &EventKind) -> ShippedRule {
 
         // Somebody else's word for something. See the function documentation.
         EventKind::Custom(_) | EventKind::Unrecognised(_) => (false, 15, 10),
+
+        // The user's own word for something. Off for a different reason than
+        // the line above, and the difference is worth stating: the objection to
+        // a plugin's invention is who chose the name, and there is no such
+        // objection here. The objection here is volume. The signals this kind
+        // exists for (issue #345: an input binding that means "my ultimate", a
+        // fingerprint match, a salience peak) can fire many times a minute,
+        // where a game event fires when the game says so — and a default that
+        // turned every one of them into a row in the library would be the
+        // "clip nobody asked for" problem at a rate no game event can reach.
+        //
+        // Labelling a moment is not the same act as asking for a clip of it.
+        // The window is a real one, so a user who does want the clips gets
+        // them by switching one thing on.
+        EventKind::UserLabelled(_) => (false, 15, 10),
     };
 
     ShippedRule {

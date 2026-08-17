@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::Reply;
 use crate::error::ProtocolError;
-use crate::status::RecorderStatus;
+use crate::status::{RecorderStatus, SessionSummary};
 
 /// The protocol version this build speaks.
 ///
@@ -71,14 +71,29 @@ use crate::status::RecorderStatus;
 /// a field removed or given a new meaning, a command's parameters changed, a
 /// reply restructured. Adding a command, a field, an event, an error code or a
 /// feature does not touch it (AGENTS.md section 43).
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 added [`RecorderStatus::Watching`](crate::RecorderStatus::Watching)
+/// ([issue #241](https://github.com/wildware-uk/clipped/issues/241)). A
+/// *state* is the one addition that cannot be additive: [`RecorderStatus`] has
+/// no catch-all on purpose, so a client compiled against version 1 that met
+/// `{"state":"watching"}` would fail to read the message rather than guess —
+/// which is the wanted behaviour, and which is why the version moved instead.
+/// The rest of the same change — the sitting on a recording, the
+/// [`Event::SessionEnded`] event, the `automatic` feature — would each have
+/// cost nothing.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Every version this build will accept from a client.
 ///
 /// A recorder may speak more than one version at once, which is how a breaking
 /// change is deployed without requiring the two processes to be updated in the
-/// same instant. Today there has only ever been one version, so there is one
-/// entry.
+/// same instant. This build speaks one, and version 1 is deliberately not on the
+/// list: serving it would mean promising never to say `watching` down that
+/// connection, and a recorder that watches cannot keep that promise without
+/// reporting a state it is not in. A version 1 client is therefore refused with
+/// [`ErrorCode::UnsupportedProtocolVersion`](crate::ErrorCode::UnsupportedProtocolVersion)
+/// and told which side is behind, which is the outcome the handshake exists to
+/// produce (`docs/ipc.md`).
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
 /// The names of the capabilities a recorder can advertise in
@@ -196,6 +211,26 @@ pub mod features {
         /// [`ActiveRecording::replay_seconds`](crate::ActiveRecording), because
         /// it is a property of the recording rather than of the build.
         REPLAY = "replay";
+        /// The recorder watches for games and records them by itself: its
+        /// status can be
+        /// [`RecorderStatus::Watching`](crate::RecorderStatus::Watching), a
+        /// recording carries the sitting it belongs to, and a sitting ending is
+        /// an [`Event::SessionEnded`].
+        ///
+        /// The protocol version says a recorder can *describe* an automatic
+        /// sitting; this says it *makes* them. A recorder serving a window and
+        /// recording only what it is asked to speaks the same version and
+        /// reports `idle` for ever, and a window that drew "Watching for games"
+        /// from the version alone would be saying something untrue about a
+        /// recorder that will never record on its own — the whole distinction
+        /// [issue #241](https://github.com/wildware-uk/clipped/issues/241) is
+        /// about, arrived at from the other side.
+        ///
+        /// It is therefore also the switch
+        /// [issue #421](https://github.com/wildware-uk/clipped/issues/421) turns
+        /// on: converging `serve` and `watch` is a recorder that advertises this
+        /// where today's does not, and needs nothing here to change.
+        AUTOMATIC = "automatic";
     }
 }
 
@@ -392,6 +427,26 @@ pub enum Event {
         /// The new state.
         status: RecorderStatus,
     },
+    /// A sitting ended, and this is what it produced.
+    ///
+    /// On the `status` stream rather than a stream of its own, because it is the
+    /// end of the thing [`Event::StatusChanged`] has been describing: the
+    /// recorder leaving a sitting is a change in what it is doing, and a client
+    /// that wanted one of these and not the other would be a client that
+    /// watched a sitting start and never saw it finish.
+    ///
+    /// It carries the sitting rather than only its identifier because the files
+    /// are the point. A window is told a sitting is over at the moment it can
+    /// offer to open it, and the recorder is the only side that knows what it
+    /// wrote — the library has not necessarily indexed any of it yet
+    /// (`docs/library.md`), so an identifier alone would be an announcement
+    /// with nothing to act on.
+    SessionEnded {
+        /// The sitting, with
+        /// [`ended_at`](crate::SessionSummary::ended_at) and
+        /// [`end_reason`](crate::SessionSummary::end_reason) filled in.
+        session: SessionSummary,
+    },
     /// A recording ended because something failed, rather than because it was
     /// asked to.
     ///
@@ -429,7 +484,7 @@ impl Event {
     #[must_use]
     pub const fn stream(&self) -> Option<EventStream> {
         match self {
-            Self::StatusChanged { .. } => Some(EventStream::Status),
+            Self::StatusChanged { .. } | Self::SessionEnded { .. } => Some(EventStream::Status),
             Self::RecordingFailed { .. } => Some(EventStream::Errors),
             Self::Other(_) => None,
         }
@@ -573,6 +628,49 @@ mod tests {
             }
             .stream(),
             Some(EventStream::Errors)
+        );
+        assert_eq!(
+            Event::SessionEnded {
+                session: SessionSummary::default(),
+            }
+            .stream(),
+            Some(EventStream::Status),
+            "a sitting ending is the end of what the status stream has been describing, and a \
+             client subscribed to it must not have to ask for a second stream to see one"
+        );
+    }
+
+    #[test]
+    fn a_sitting_ending_reaches_the_wire_with_the_files_it_produced() {
+        let event = ServerMessage::Event(Event::SessionEnded {
+            session: SessionSummary {
+                session_id: "cs2-20260811-201400".to_owned(),
+                game_id: Some("cs2".to_owned()),
+                game_name: Some("Counter-Strike 2".to_owned()),
+                started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+                ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+                end_reason: Some("game-exited".to_owned()),
+                recordings: vec![crate::status::SessionRecording {
+                    session_index: 1,
+                    output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
+                    outcome: Some("recorded".to_owned()),
+                    duration_ms: Some(6_540_000),
+                }],
+            },
+        });
+
+        let json = serde_json::to_string(&event).expect("it serialises");
+        assert!(
+            json.starts_with(r#"{"type":"event","event":"session_ended","session":{"#),
+            "a sitting ending is one tagged event like any other: {json}"
+        );
+        assert!(
+            json.contains(r"cs2-20260811-201400-01.mkv"),
+            "an announcement with no files in it is nothing a window can act on: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("and deserialises"),
+            event
         );
     }
 

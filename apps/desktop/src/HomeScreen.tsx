@@ -38,8 +38,9 @@ const RECENT = 5;
  *
  * The other two are still waiting on the things that produce them rather than on
  * a way to read them: a saved replay is the only thing that makes a clip (#38),
- * the timeline that would make the rest is #91, and nothing can favourite
- * anything (#58).
+ * and the timeline that would make the rest is #91. Favourites can now be set —
+ * the Library screen's Keep control does it (#58) — so what is missing here is
+ * the list of them rather than any way to make one.
  *
  * A library that could not be read says so and says why. It is never drawn as an
  * empty one: four tiles reading "0" over a database that could not be opened
@@ -63,7 +64,7 @@ const WAITING: readonly Waiting[] = [
   {
     shows: 'Favourites, which are also what storage cleanup protects',
     needs:
-      'Favouriting anything at all. Issue #58. The read already carries which things are favourited',
+      'A read that asks for them. Marking works on the Library screen (#58) and `favourite` is already in the query language, so this is a `library_sessions` call with a query (`docs/search.md`)',
   },
 ];
 

@@ -289,7 +289,7 @@ mod tests {
         let known: Vec<u32> = snapshot::process_table()
             .expect("the process table can be read")
             .iter()
-            .map(|row| row.pid)
+            .map(|row| row.pid())
             .collect();
         let source = Source::start_polling(WatchConfig::default(), &known)
             .expect("the fallback poller can be started");
@@ -334,7 +334,7 @@ mod tests {
         let known: Vec<u32> = snapshot::process_table()
             .expect("the process table can be read")
             .iter()
-            .map(|row| row.pid)
+            .map(|row| row.pid())
             .collect();
         let source =
             Source::start_polling(config, &known).expect("the fallback poller can be started");

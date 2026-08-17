@@ -126,16 +126,20 @@ impl fmt::Display for GameEvent {
 
 /// Who reported an event.
 ///
-/// A plugin identifier, or [`APPLICATION`](Self::APPLICATION) for the parts of
-/// Clipped that report events themselves — the process watcher knows when a
-/// game started without any plugin's help.
+/// A plugin identifier, or [`APPLICATION`](Self::APPLICATION) — or one of its
+/// own named components, [`application_component`](Self::application_component)
+/// — for the parts of Clipped that report events themselves: the process
+/// watcher knows when a game started without any plugin's help, and an input
+/// binding or a fingerprint matcher is host code the same way (issue #345).
 ///
 /// It is one string on the wire rather than a tagged union, because the set of
 /// things that can report an event grows and a reader must never fail over a
 /// source it has not met. The syntax is [`CustomName`](crate::CustomName)'s
 /// without the namespace requirement: lowercase ASCII letters, digits, `-`,
 /// `_` and `.`, each dot-separated segment starting with a letter, at most
-/// [`MAX_IDENTIFIER_BYTES`] bytes, and not [`APPLICATION`](Self::APPLICATION).
+/// [`MAX_IDENTIFIER_BYTES`] bytes, and not [`APPLICATION`](Self::APPLICATION)
+/// or namespaced under it — the whole `clipped` namespace is the host's, not
+/// only the bare word.
 ///
 /// # Checked when produced, not when read
 ///
@@ -169,6 +173,35 @@ impl EventSource {
         Self(Self::APPLICATION.to_owned())
     }
 
+    /// A source for one part of Clipped itself — an input binding watcher, a
+    /// fingerprint matcher — distinguishable from the rest of the host and
+    /// from every other part, without being mistaken for a plugin.
+    ///
+    /// The identifier is `clipped.<component>`, so a mark from the input
+    /// bindings and a mark from the fingerprint matcher are two different
+    /// sources on the same timeline rather than both collapsing into
+    /// `clipped` (issue #345). No plugin can produce the same string:
+    /// [`plugin`](Self::plugin) refuses any identifier whose namespace is
+    /// [`RESERVED_NAMESPACE`], exactly as it refuses `clipped` itself, so an
+    /// event claiming to come from `clipped.<anything>` came from Clipped.
+    ///
+    /// `component` is one segment — no dot — because this names one part of
+    /// the host, not a hierarchy of them; a subsystem that needs to say more
+    /// puts the detail in the event's payload, not in a deeper source.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidSource`] when `component` is empty, is not lowercase ASCII
+    /// starting with a letter (digits, `-` and `_` after that), or makes the
+    /// whole identifier longer than [`MAX_IDENTIFIER_BYTES`].
+    pub fn application_component(component: &str) -> Result<Self, InvalidSource> {
+        let identifier = format!("{}.{component}", Self::APPLICATION);
+        if !is_valid_segment(component) || identifier.len() > MAX_IDENTIFIER_BYTES {
+            return Err(InvalidSource::Malformed { identifier });
+        }
+        Ok(Self(identifier))
+    }
+
     /// A plugin's identifier.
     ///
     /// # Errors
@@ -176,7 +209,17 @@ impl EventSource {
     /// [`InvalidSource`] when the identifier breaks the syntax above, naming
     /// the rule it broke.
     pub fn plugin(identifier: &str) -> Result<Self, InvalidSource> {
-        if identifier == Self::APPLICATION {
+        // Refused whether the identifier is exactly `clipped` or namespaced
+        // under it (`clipped.cs2`): the whole `clipped` namespace is reserved
+        // to the host, the same rule `CustomName` applies to a custom event's
+        // namespace, and for the same reason — otherwise a plugin naming
+        // itself `clipped.something` could put a mark on a timeline the user
+        // reads as Clipped's own (issue #345).
+        if identifier == Self::APPLICATION
+            || identifier
+                .split_once('.')
+                .is_some_and(|(namespace, _)| namespace == Self::APPLICATION)
+        {
             return Err(InvalidSource::Reserved {
                 identifier: identifier.to_owned(),
             });
@@ -198,10 +241,12 @@ impl EventSource {
         &self.0
     }
 
-    /// Whether this is Clipped itself rather than a plugin.
+    /// Whether this is Clipped itself — including one of its own named
+    /// components ([`application_component`](Self::application_component)) —
+    /// rather than a plugin.
     #[must_use]
     pub fn is_application(&self) -> bool {
-        self.0 == Self::APPLICATION
+        self.0 == Self::APPLICATION || self.0.starts_with(&format!("{}.", Self::APPLICATION))
     }
 
     /// Whether the identifier obeys the syntax.
@@ -609,12 +654,68 @@ mod tests {
             refused.to_string().contains("reserved"),
             "the message should say why: {refused}"
         );
-        // A namespaced identifier under the reserved name is a different
-        // string, and is nobody's impersonation of the application.
+        // A hyphenated identifier is a different string and not reserved: only
+        // the `clipped` namespace is the host's, not everything that starts
+        // with the same letters.
         assert!(EventSource::plugin("clipped-cs2").is_ok());
-        assert!(!EventSource::plugin("clipped.cs2")
-            .expect("namespaced, and not the reserved identifier")
-            .is_application());
+        // But a *namespaced* identifier under the reserved name is refused
+        // too, not only the bare word — otherwise a plugin naming itself
+        // `clipped.cs2` could put a mark on a timeline the user reads as
+        // Clipped's own, which is exactly the impersonation this rule exists
+        // to rule out (issue #345).
+        let namespaced = EventSource::plugin("clipped.cs2")
+            .expect_err("the whole `clipped` namespace is reserved, not only `clipped` itself");
+        assert_eq!(
+            namespaced,
+            InvalidSource::Reserved {
+                identifier: "clipped.cs2".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_host_component_is_a_source_no_plugin_can_produce() {
+        let input = EventSource::application_component("input").expect("a valid component");
+        assert_eq!(input.as_str(), "clipped.input");
+        assert!(input.is_application());
+
+        // Two components are two sources, so a mark from the input bindings
+        // and a mark from the fingerprint matcher are distinguishable on a
+        // timeline (issue #345), even though both are Clipped and neither is
+        // a plugin.
+        let fingerprint =
+            EventSource::application_component("fingerprint").expect("a valid component");
+        assert_ne!(input, fingerprint);
+        assert!(fingerprint.is_application());
+
+        // And nothing a plugin can send reaches the same string: `plugin`
+        // refuses the whole `clipped` namespace, so this identifier is only
+        // ever reachable through `application_component`.
+        assert!(EventSource::plugin("clipped.input").is_err());
+    }
+
+    #[test]
+    fn a_host_component_is_bounded_and_a_single_segment() {
+        assert!(matches!(
+            EventSource::application_component(""),
+            Err(InvalidSource::Malformed { .. })
+        ));
+        assert!(matches!(
+            EventSource::application_component("Input"),
+            Err(InvalidSource::Malformed { .. })
+        ));
+        assert!(matches!(
+            EventSource::application_component("input.overlay"),
+            Err(InvalidSource::Malformed { .. })
+        ));
+
+        let longest = "a".repeat(MAX_IDENTIFIER_BYTES - "clipped.".len());
+        assert!(EventSource::application_component(&longest).is_ok());
+        let too_long = "a".repeat(MAX_IDENTIFIER_BYTES - "clipped.".len() + 1);
+        assert!(matches!(
+            EventSource::application_component(&too_long),
+            Err(InvalidSource::Malformed { .. })
+        ));
     }
 
     #[test]

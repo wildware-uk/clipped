@@ -6,6 +6,11 @@
 //! puts it on every row it returns and [`crate::search`] has a `favourite`
 //! filter. **Nothing could set one.** This is the half that was missing.
 //!
+//! Reaching it is the other half, and for a while this module was itself the
+//! thing nobody called: the recorder answers `set_favourite` with it
+//! (`apps/recorder/src/library.rs`) and the Library screen's Keep control is
+//! what sends one, so a mark a user makes ends up here.
+//!
 //! # What favouriting a session means
 //!
 //! The issue asks for this to be documented rather than left to be discovered,

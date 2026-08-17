@@ -182,6 +182,33 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
             "Not recording".to_owned(),
             "Clipped — not recording".to_owned(),
         ),
+        // Nothing is being recorded, so the mark is the idle one: a badge of
+        // its own would be a tray design decision, and this issue's scope is
+        // the protocol having a word for the state rather than the tray
+        // gaining a fourth mark for it.
+        //
+        // The sentence is not the idle one, though. A sitting still open in
+        // its restart grace has a game name, and dropping it for those seconds
+        // is exactly the flicker `Watching::session` exists to prevent.
+        RecorderLinkState::Attached {
+            status: RecorderStatus::Watching(watching),
+            ..
+        } => match watching
+            .session
+            .as_deref()
+            .and_then(|s| s.game_name.as_deref())
+        {
+            Some(game) => (
+                TrayMark::Idle,
+                format!("Watching — {game}"),
+                format!("Clipped — watching for {game}"),
+            ),
+            None => (
+                TrayMark::Idle,
+                "Watching for a game".to_owned(),
+                "Clipped — watching for a game".to_owned(),
+            ),
+        },
         RecorderLinkState::Attached {
             status: RecorderStatus::Recording(active),
             ..
@@ -434,6 +461,7 @@ mod tests {
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 4_200,
             replay_seconds,
+            session: None,
         }
     }
 

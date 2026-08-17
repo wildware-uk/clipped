@@ -135,9 +135,10 @@ pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
-    EmptyTrash, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
-    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LibraryTrash,
-    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem,
+    EmptyTrash, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
+    LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+    LibraryTrash, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied, TrashListing,
+    TrashedItem,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
@@ -150,7 +151,7 @@ pub use server::{
 };
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
-    ReplaySummary, ScreenshotSummary,
+    ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,

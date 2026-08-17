@@ -13,6 +13,20 @@
 //! commands, and [`RecordingState`] owns the one recording this process will
 //! run at a time and the thread it runs on.
 //!
+//! # What it records
+//!
+//! What the window asks for, and — with `--watch-for-games` — what a game
+//! launching asks for. The second is the shape a shipped build runs in: one
+//! process holds the launch watcher, the control protocol and the global
+//! hotkeys, so a bookmark, a screenshot and a stop reach a recording nobody had
+//! to start (`crate::watch::AutomaticRecorder`, [`RecordingState::adopt`],
+//! [issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+//!
+//! Both kinds of recording live in the same [`RecordingState`] and are acted on
+//! by the same commands. What differs is who owns the *session*: a recording the
+//! window asked for is the whole of its own, and an automatic one belongs to a
+//! sitting the session manager on the watcher's thread owns.
+//!
 //! # What it can actually do
 //!
 //! Start a recording, stop one, mark a moment in one, say what it is doing,
@@ -86,7 +100,7 @@ use std::error::Error;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
@@ -258,6 +272,16 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     );
     service.publish_hotkeys(registered);
 
+    // After the hotkeys, because this is the process that has them: one
+    // process watches for games, serves the protocol and owns the
+    // combinations, which is what makes `Ctrl`+`F9` reach a recording nobody
+    // had to start (ADR 0009, issue #421). Started before the ready line so
+    // that a window connecting the instant it appears is told about a game
+    // already being recorded rather than finding out a moment later.
+    let automatic = args
+        .watch_for_games
+        .then(|| crate::watch::AutomaticRecorder::start(&service));
+
     println!("ready endpoint={}", endpoint.path());
     // Flushed explicitly: whatever started this process is very likely blocked
     // reading that line, and standard output to a pipe is buffered.
@@ -280,6 +304,14 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     // combination back to Windows and waits for the handler that is running, so
     // by the line below no press can be in flight.
     hotkeys.stop();
+
+    // Then the automatic recorder, before the line below: it owns a recording
+    // of its own and a session record that has to be closed and written out,
+    // and stopping it waits for both (AGENTS.md section 17). Nothing new can
+    // start after this, because the process watcher has gone with it.
+    if let Some(automatic) = automatic {
+        automatic.stop();
+    }
 
     // The listener has stopped, so nothing new can arrive. What is left is the
     // recording, which is the only thing in this process that must be finished
@@ -473,6 +505,16 @@ impl RecorderService {
         &self.recordings.configuration
     }
 
+    /// The one recording this process runs at a time.
+    ///
+    /// For the automatic recorder, which hands its recordings over to it so
+    /// that a bookmark, a screenshot and a stop reach a recording nobody asked
+    /// for through the same commands they reach one somebody did
+    /// (`RecordingState::adopt`, issue #421).
+    pub(crate) fn recordings(&self) -> &Arc<RecordingState> {
+        &self.recordings
+    }
+
     /// Records what became of the global hotkeys, so `get_hotkeys` can answer.
     ///
     /// Called once, by `serve`, immediately after registering them. A second
@@ -603,6 +645,12 @@ impl CommandHandler for RecorderService {
             Command::EmptyTrash(request) => Ok(Reply::TrashEmptied {
                 emptied: self.library.empty(&request)?,
             }),
+            // One row update, under the same argument again: a favourite mark
+            // is a single `UPDATE` against a primary key and touches no file at
+            // all (`clipped_library::favourites`).
+            Command::SetFavourite(request) => Ok(Reply::Favourited {
+                mark: self.library.set_favourite(&request, SystemTime::now())?,
+            }),
             // Also on the connection thread: reading a handful of manifests and
             // one settings file is bounded local work that shares nothing with
             // a recording, which is the same argument the library reads above
@@ -667,7 +715,7 @@ impl CommandHandler for RecorderService {
 /// for it. A second `start_recording` is refused with
 /// [`ErrorCode::AlreadyRecording`] rather than queued.
 #[derive(Debug)]
-struct RecordingState {
+pub(crate) struct RecordingState {
     current: Mutex<Option<Running>>,
     /// Signalled when a recording's thread has stored its outcome.
     finished: Condvar,
@@ -763,6 +811,21 @@ struct Running {
     /// it. Shared for the reason the session is — a save runs on the connection
     /// thread while this one carries on recording.
     replay: Option<Arc<ReplayRecording>>,
+    /// Present when the automatic recorder started this recording, and the flag
+    /// its driver reads.
+    ///
+    /// [`RecordingState::stop`] raises it before it raises the stop signal, and
+    /// the driver's loop turns it into
+    /// [`SessionManager::asked_to_stop_recording`](clipped_session::automatic::SessionManager::asked_to_stop_recording).
+    /// Without it the file would stop and the session would start another
+    /// recording of the same game five seconds later, because the game is still
+    /// running and the manager cannot tell a stop somebody asked for from a
+    /// window that went (issue #421).
+    ///
+    /// [`None`] for a recording `start_recording` asked for: there is no
+    /// session policy behind one, and the recording ending *is* the session
+    /// ending.
+    asked_to_stop: Option<Arc<AtomicBool>>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
@@ -823,6 +886,13 @@ impl Running {
     /// If the recording has already ended: [`RecordingState::finish`] takes the
     /// session to close it, and nothing asks a recording that has stopped what
     /// it is recording into.
+    ///
+    /// And on a recording [`RecordingState::adopt`] handed over, which holds no
+    /// session of its own — the automatic recorder's manager owns that sitting.
+    /// The one caller is `save_replay`, which is reached only by a recording
+    /// with a replay buffer, and an adopted recording never has one
+    /// ([issue #427](https://github.com/wildware-uk/clipped/issues/427) is what
+    /// would give it one, and would have to give it a session here too).
     fn session(&self) -> &Arc<Mutex<ManualSession>> {
         self.session
             .as_ref()
@@ -927,8 +997,122 @@ impl RecordingState {
             // Attached afterwards by [`Running::with_replay`], because it is the
             // one thing about a recording that is optional.
             replay: None,
+            // Nothing to tell: this recording is the whole of its session.
+            asked_to_stop: None,
             outcome: None,
         }
+    }
+
+    /// Makes a recording the automatic recorder started reachable over the
+    /// protocol, for as long as it runs.
+    ///
+    /// **This is the whole of issue #421.** `serve` answers `add_bookmark`,
+    /// `take_screenshot`, `stop_recording` and `get_status` against
+    /// [`Self::current`], and until now the only recordings in there were the
+    /// ones `start_recording` asked for — so the recordings a user is most
+    /// likely to want to bookmark, the ones nobody had to start, were the ones
+    /// nothing could bookmark. Handing one over here is what a press of
+    /// `Ctrl`+`F9` reaches, through exactly the same [`Self::bookmark`] a button
+    /// reaches: there is one implementation of what a bookmark is, and it cannot
+    /// drift between the two ways of starting a recording (AGENTS.md section
+    /// 55).
+    ///
+    /// What is deliberately *not* handed over is the session record. An
+    /// automatic recording belongs to a sitting the
+    /// [`SessionManager`](clipped_session::automatic::SessionManager) on the
+    /// driver's thread owns — it may be the second file of one, and it is that
+    /// manager that writes the sidecar — so [`Running::session`] is [`None`]
+    /// here and this state closes nothing. A recording started from the window
+    /// is the whole of its own session, which is why that one carries a
+    /// [`ManualSession`].
+    ///
+    /// # Errors
+    ///
+    /// The sentence for a recorder that is already recording. One at a time is
+    /// this process's rule whoever asked for the recording, and a game launching
+    /// while the user is recording something by hand does not take the encoder
+    /// away from them.
+    pub(crate) fn adopt(
+        self: &Arc<Self>,
+        output: &Path,
+        target: String,
+        progress: &RecordingProgress,
+        stop: &crate::shutdown::ShutdownSignal,
+        asked_to_stop: &Arc<AtomicBool>,
+    ) -> Result<Adopted, String> {
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| "the recording state was poisoned by an earlier panic".to_owned())?;
+        if let Some(running) = current.as_ref().filter(|running| running.outcome.is_none()) {
+            return Err(format!(
+                "this recorder is already recording {}, and it records one thing at a time",
+                running.target
+            ));
+        }
+
+        let id = format!("r-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let screenshots = ScreenshotRequests::new();
+        *current = Some(Running {
+            id: id.clone(),
+            bookmarks: Arc::new(BookmarkLog::for_recording(output)),
+            output: output.to_path_buf(),
+            target,
+            started: Instant::now(),
+            stop: stop.clone(),
+            // The driver owns it, and joins it itself: what it gets back is a
+            // `RecordingOutcome` its session manager needs, which is not
+            // something this state has any use for.
+            thread: None,
+            progress: progress.clone(),
+            screenshots: screenshots.clone(),
+            session: None,
+            // No buffer, so `save_replay` refuses an automatic recording in the
+            // recorder's own words.
+            // [Issue #427](https://github.com/wildware-uk/clipped/issues/427)
+            // gave the recordings the *window* starts one, through
+            // [`StartRecording::replay`](clipped_ipc::StartRecording::replay);
+            // an automatic recording is one nobody asked for, and whether it
+            // should spend roughly 140 MiB a minute on a buffer nobody asked
+            // for is a decision about memory that issue did not make.
+            replay: None,
+            asked_to_stop: Some(Arc::clone(asked_to_stop)),
+            outcome: None,
+        });
+        let status = status_of(current.as_ref());
+        drop(current);
+
+        tracing::info!(
+            recording = id,
+            output = %RedactedPath::new(output),
+            "a recording detection started can be reached over the protocol"
+        );
+        self.events
+            .publish(&clipped_ipc::Event::StatusChanged { status });
+
+        Ok(Adopted {
+            state: Arc::clone(self),
+            id,
+            screenshots,
+            released: false,
+        })
+    }
+
+    /// Asks for the library index to be brought up to date, on its own thread.
+    ///
+    /// The automatic recorder calls it when a session ends, because the session
+    /// record it has just written is what the index reads. A recording
+    /// `start_recording` made asks for the same run from [`Self::finish`], where
+    /// this state is what closed the session; an automatic session is closed by
+    /// its manager, so there is nowhere else this could be asked from
+    /// (`crate::library`, issue #402).
+    pub(crate) fn index_now(&self) {
+        self.indexer.request();
+    }
+
+    /// What Clipped knows about games, as it stood when this process started.
+    pub(crate) fn catalogue(&self) -> &Catalogue {
+        &self.catalogue
     }
 
     /// Validates the request, resolves the target, opens a session and starts
@@ -1044,6 +1228,15 @@ impl RecordingState {
                         format!("recording `{wanted}` is not the one this recorder is running"),
                     ));
                 }
+            }
+            // Before the signal is raised, and deliberately: the driver reads
+            // this flag once round its loop *before* it collects a finished
+            // recording, so a stop that is seen at all is seen before the
+            // outcome it produced. Raising the signal first would let the
+            // recording end, be collected and be followed by another one of the
+            // same game — which is the stop undoing itself (issue #421).
+            if let Some(asked_to_stop) = &running.asked_to_stop {
+                asked_to_stop.store(true, Ordering::SeqCst);
             }
             running.stop.clone()
         };
@@ -1465,6 +1658,70 @@ impl RecordingState {
     }
 }
 
+/// A recording the automatic recorder handed over, for as long as it runs.
+///
+/// Handing it back is what takes it out of the recorder's status and stores its
+/// outcome, and it happens on every path out of a recording including a panic:
+/// [`Drop`] releases one that was never released deliberately. A recording left
+/// in [`RecordingState::current`] with no outcome would leave `stop_recording`
+/// waiting for one for ever, which would cost the user their ability to stop the
+/// recorder (AGENTS.md section 17).
+#[derive(Debug)]
+pub(crate) struct Adopted {
+    state: Arc<RecordingState>,
+    id: String,
+    screenshots: ScreenshotRequests,
+    released: bool,
+}
+
+impl Adopted {
+    /// Where a `take_screenshot` asks this recording for a frame it has already
+    /// captured.
+    ///
+    /// Handed to [`clipped_session::RecordingOutputs`] by the driver, which is
+    /// what makes the still come from the recording rather than from a second
+    /// capture of the same window (`RecordingState::screenshot`).
+    pub(crate) fn screenshots(&self) -> &ScreenshotRequests {
+        &self.screenshots
+    }
+
+    /// Hands the recording back with what became of it.
+    pub(crate) fn finished(mut self, outcome: &RecordingOutcome) {
+        self.release(report_of(outcome));
+    }
+
+    fn release(&mut self, outcome: Result<RecordingReport, String>) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        self.state.finish(&self.id, outcome);
+    }
+}
+
+impl Drop for Adopted {
+    fn drop(&mut self) {
+        self.release(Err(
+            "the automatic recording ended without reporting an outcome".to_owned(),
+        ));
+    }
+}
+
+/// What a recording turned out to be, in the vocabulary this state keeps.
+///
+/// The inverse of [`session_outcome`], which is what the session below is told.
+/// There are two vocabularies because there are two questions: a session asks
+/// what the sitting got, and this asks what to answer the client that is waiting
+/// on `stop_recording` with.
+fn report_of(outcome: &RecordingOutcome) -> Result<RecordingReport, String> {
+    match outcome {
+        RecordingOutcome::Recorded(report) => Ok((**report).clone()),
+        RecordingOutcome::NoWindow { detail } | RecordingOutcome::Failed { detail } => {
+            Err(detail.clone())
+        }
+    }
+}
+
 /// Runs one recording on a thread of its own.
 ///
 /// The panic guard is the reason this is not two lines. `clipped_session`
@@ -1552,6 +1809,11 @@ fn status_of(running: Option<&Running>) -> RecorderStatus {
                 .replay
                 .as_ref()
                 .map(|replay| u32::try_from(replay.window().as_secs()).unwrap_or(u32::MAX)),
+            // A recording `serve` was asked for directly is not part of a
+            // sitting the recorder is driving, so there is no game name to
+            // give and `target` is the whole of what is known about it. The
+            // watcher is what fills this in, which is issue #421.
+            session: None,
         }),
         _ => RecorderStatus::Idle,
     }
@@ -3417,5 +3679,206 @@ mod tests {
         ));
 
         assert_eq!(refusal.code, ErrorCode::Internal);
+    }
+
+    /// A recording the automatic recorder would have handed over, and the two
+    /// things its driver keeps a hold of.
+    ///
+    /// Through `adopt`, never a `Running { … }` literal, for the reason
+    /// `started_recording` gives about the other kind: a test that assembled
+    /// the fields itself would be testing a recording this recorder cannot
+    /// make.
+    fn adopted_recording(
+        state: &Arc<RecordingState>,
+        output: &Path,
+        position: Option<Duration>,
+    ) -> (
+        Adopted,
+        RecordingProgress,
+        crate::shutdown::ShutdownSignal,
+        Arc<AtomicBool>,
+    ) {
+        let progress = RecordingProgress::new();
+        if let Some(position) = position {
+            progress.reached(position);
+        }
+        let stop = crate::shutdown::ShutdownSignal::new();
+        let asked_to_stop = Arc::new(AtomicBool::new(false));
+        let adopted = state
+            .adopt(
+                output,
+                "A Test Game".to_owned(),
+                &progress,
+                &stop,
+                &asked_to_stop,
+            )
+            .expect("nothing else is being recorded");
+
+        (adopted, progress, stop, asked_to_stop)
+    }
+
+    #[test]
+    fn a_recording_detection_started_is_marked_by_the_same_bookmark_a_button_takes() {
+        // Issue #421's first acceptance criterion, at the layer that decides
+        // it. `add_bookmark` is answered against whatever is in `current`, and
+        // before this a recording `watch` made was never in there — so a
+        // recording nobody had to start was one nothing could mark. There is no
+        // second bookmark implementation here and there must not be: this is
+        // `RecordingState::bookmark`, the one a press and a button both reach.
+        let directory = scratch("adopted-bookmark");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let state = idle_state(&directory);
+        let (adopted, _progress, _stop, _asked) =
+            adopted_recording(&state, &output, Some(Duration::from_secs(120)));
+
+        let RecorderStatus::Recording(active) = state.status() else {
+            panic!("a recording that has been handed over is one this recorder is running");
+        };
+        assert_eq!(active.target, "A Test Game");
+        assert_eq!(active.output, output.to_string_lossy());
+        assert!(
+            active.replay_seconds.is_none(),
+            "an automatic recording keeps no buffer, so nothing may offer Save Replay for it"
+        );
+
+        let summary = state
+            .bookmark(&AddBookmark::default(), moment())
+            .expect("a bookmark can be taken in a recording detection started");
+
+        assert_eq!(summary.recording_id, active.recording_id);
+        assert_eq!(summary.pressed_at_seconds, 120.0);
+        assert_eq!(summary.at_seconds, 120.0 - DEFAULT_LEAD.as_secs_f64());
+        let read = BookmarkFile::for_recording(&output)
+            .expect("the bookmark is on disk by the time the reply is built");
+        assert_eq!(read.bookmarks.len(), 1);
+
+        drop(adopted);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_handed_back_leaves_the_recorder_idle_however_it_ended() {
+        // The half that keeps the recorder honest afterwards. A recording left
+        // in `current` with no outcome would have `stop_recording` waiting for
+        // one for ever, and `get_status` claiming a recording that ended
+        // minutes ago — so `Adopted` releases itself on drop, which is the path
+        // a panicking recording thread takes.
+        let directory = scratch("adopted-dropped");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let state = idle_state(&directory);
+        let (adopted, _progress, _stop, _asked) =
+            adopted_recording(&state, &output, Some(Duration::from_secs(5)));
+
+        drop(adopted);
+
+        assert!(
+            matches!(state.status(), RecorderStatus::Idle),
+            "a recording nobody is making must not be reported as one that is"
+        );
+        let error = state
+            .bookmark(&AddBookmark::default(), moment())
+            .expect_err("the recording has ended, so there is no moment to mark");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_game_launching_while_somebody_is_recording_by_hand_is_refused_the_encoder() {
+        // One recording at a time is this process's rule whoever asked for it,
+        // and the person who pressed record is the one looking at the screen.
+        // The refusal is what the session's record keeps, so the sitting says
+        // it got no footage rather than silently having none.
+        let directory = scratch("adopted-busy");
+        let manual = directory.join("clipped-cs2.mkv");
+        let automatic = directory.join("clipped-a-test-game.mkv");
+        let state = recording_at(&manual, Some(Duration::from_secs(5)));
+
+        let refusal = state
+            .adopt(
+                &automatic,
+                "A Test Game".to_owned(),
+                &RecordingProgress::new(),
+                &crate::shutdown::ShutdownSignal::new(),
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .expect_err("this recorder is already recording something");
+
+        assert!(
+            refusal.contains("already recording"),
+            "the sitting's record has to say why it got nothing: {refusal}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn stopping_an_automatic_recording_tells_its_driver_before_it_stops_the_file() {
+        // The ordering the whole stop rests on. The driver reads this flag once
+        // round its loop *before* it collects a finished recording, so raising
+        // the stop signal first would let the recording end, be collected, and
+        // be followed by another recording of the same game five seconds later
+        // — a Stop button that undoes itself (AGENTS.md section 27).
+        let directory = scratch("adopted-stop");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let state = idle_state(&directory);
+        let (adopted, _progress, stop, asked_to_stop) =
+            adopted_recording(&state, &output, Some(Duration::from_secs(5)));
+
+        let stopping = {
+            let state = Arc::clone(&state);
+            thread::spawn(move || state.stop(None))
+        };
+
+        // The signal is raised second, so seeing it means the flag has already
+        // been raised. A build that raised them the other way round fails here
+        // rather than intermittently.
+        while !stop.is_requested() {
+            thread::yield_now();
+        }
+        assert!(
+            asked_to_stop.load(Ordering::SeqCst),
+            "the driver has to be told the user asked, before the recording it made can end"
+        );
+
+        adopted.finished(&RecordingOutcome::Failed {
+            detail: "the stand-in recording reports a failure".to_owned(),
+        });
+        let outcome = stopping.join().expect("the stopping thread does not panic");
+        assert_eq!(
+            outcome.expect_err("the recording failed").code,
+            ErrorCode::RecordingFailed,
+            "and whoever asked for the stop is told what became of the file"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_replay_asked_for_of_an_automatic_recording_is_refused_rather_than_taken() {
+        // An automatic recording keeps no buffer: `start_recording`'s `replay`
+        // is what asks for one (issue #427) and nothing asks on detection's
+        // behalf, so `save_replay` has to refuse it in the same words it
+        // refuses a window-started recording without one, and must not reach
+        // for a session it does not have.
+        let directory = scratch("adopted-replay");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let state = idle_state(&directory);
+        let (adopted, _progress, _stop, _asked) =
+            adopted_recording(&state, &output, Some(Duration::from_secs(30)));
+
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("this recording keeps no buffer");
+
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(
+            error.message.contains("replay_seconds"),
+            "the refusal has to name what to ask for instead: {}",
+            error.message
+        );
+
+        drop(adopted);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

@@ -589,3 +589,68 @@ pub struct TrashEmptied {
     /// the trash is empty when it is not.
     pub refused: Vec<String>,
 }
+
+/// Marking one thing a favourite, or clearing the mark.
+///
+/// [Issue #58](https://github.com/wildware-uk/clipped/issues/58). Every read in
+/// this protocol has carried `favourite` since the library screen was built, the
+/// database has carried `favourited_at` since its first migration, and
+/// `clipped_library::favourites` has known how to write one — and there was no
+/// way to *ask*. This is that.
+///
+/// # Why the target takes two fields
+///
+/// A sitting is addressed by the identifier the recorder generated, which is
+/// text; a recording and a clip are addressed by the integer key the index gave
+/// them. That is the schema, not a choice made here, and one field pretending to
+/// be both would be a number written as a string half the time.
+///
+/// So exactly one of them is meaningful, and which one is decided by [`Self::kind`]:
+///
+/// | `kind` | Addressed by |
+/// | --- | --- |
+/// | `session` | [`Self::session_id`], and [`Self::id`] is ignored |
+/// | `recording` | [`Self::id`] |
+/// | `clip` | [`Self::id`] |
+///
+/// A request whose target is not filled in is refused, naming the field that was
+/// missing, rather than silently favouriting whatever row happens to be at zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SetFavourite {
+    /// `session`, `recording` or `clip`.
+    pub kind: String,
+    /// The sitting's own identifier, for `session`.
+    pub session_id: String,
+    /// The library's integer identifier, for `recording` and `clip`.
+    pub id: i64,
+    /// Whether it should be a favourite afterwards.
+    ///
+    /// The state to be in, not a toggle. Two windows open on the same library
+    /// would disagree about what a toggle means, and a screen that has just
+    /// drawn a star already knows which way it points.
+    pub favourite: bool,
+}
+
+/// What the mark is now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FavouriteMark {
+    /// Which thing it was, echoed so a window can match the reply to the row.
+    pub kind: String,
+    /// The sitting's identifier, for `session`.
+    pub session_id: String,
+    /// The integer identifier, for `recording` and `clip`.
+    pub id: i64,
+    /// Whether it is a favourite now.
+    ///
+    /// The state after the write rather than what was asked for. They are the
+    /// same unless the row has gone, and a screen should draw what is true.
+    pub favourite: bool,
+    /// Whether this request is what changed it.
+    ///
+    /// `false` for a star that was already full. Worth sending: it is the
+    /// difference between "you did that" and "that was already so", and a
+    /// second click on a full star must not look like a failure.
+    pub changed: bool,
+}

@@ -9,7 +9,7 @@
 use std::error::Error;
 use std::fmt;
 
-use clipped_capture::{CaptureError, SelectionError};
+use clipped_capture::{CaptureError, FallbackError, SelectionError};
 use clipped_encoder::{EncodeError, EncoderKind, ProbeError};
 use clipped_muxer::MuxError;
 
@@ -33,6 +33,15 @@ pub enum SessionError {
     },
     /// No capture backend was willing to capture this target.
     NoCaptureBackend(SelectionError),
+    /// Every backend that could have captured this target was tried, and none
+    /// of them started.
+    ///
+    /// Distinct from [`NoCaptureBackend`](Self::NoCaptureBackend), which is
+    /// nothing being *willing* — this is candidates being willing and then
+    /// failing, and the error carries every attempt and why each one could not
+    /// take over, because "capture failed" is not something a user can act on
+    /// (AGENTS.md section 15).
+    CaptureExhausted(FallbackError),
     /// Capture failed.
     Capture(CaptureError),
     /// Selection chose a method this build registered no backend for.
@@ -142,6 +151,7 @@ impl fmt::Display for SessionError {
                  off the game. Record at `source` and scale afterwards"
             ),
             Self::NoCaptureBackend(error) => write!(formatter, "{error}"),
+            Self::CaptureExhausted(error) => write!(formatter, "{error}"),
             Self::Capture(error) => write!(formatter, "capture failed: {error}"),
             Self::BackendNotRegistered { method } => write!(
                 formatter,
@@ -240,6 +250,7 @@ impl Error for SessionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoCaptureBackend(error) => Some(error),
+            Self::CaptureExhausted(error) => Some(error),
             Self::Capture(error) => Some(error),
             Self::Detection(error) => Some(error),
             Self::Encode(error) => Some(error),
@@ -293,9 +304,67 @@ impl From<ProbeError> for SessionError {
     }
 }
 
+impl From<FallbackError> for SessionError {
+    /// Keeps the two failures that already had a name, and gives the third one.
+    ///
+    /// `Selection` and `Unrecoverable` are the same facts this crate already
+    /// reported before `CaptureFallback` was wired in (issue #285), so they keep
+    /// the variants and the messages they had; only "every candidate was tried"
+    /// is new, and it is new because nothing used to try a second one.
+    fn from(error: FallbackError) -> Self {
+        match error {
+            FallbackError::Selection(error) => Self::NoCaptureBackend(error),
+            FallbackError::Unrecoverable(error) => Self::Capture(error),
+            // `FallbackError` is `#[non_exhaustive]`. A variant added later is
+            // still "the fallback could not keep the capture going", and this
+            // arm carries the whole error, so its own message is what reaches
+            // the user rather than a guess made here.
+            other => Self::CaptureExhausted(other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two failures that already had a name keep it, so wiring the fallback
+    /// in did not change what a user is told about them (issue #285).
+    #[test]
+    fn a_fallback_failure_keeps_the_name_the_same_fact_already_had() {
+        let unrecoverable = SessionError::from(FallbackError::Unrecoverable(
+            clipped_capture::CaptureError::UnsupportedTarget {
+                method: clipped_capture::CaptureMethod::WindowsGraphicsCapture,
+                target: clipped_capture::TargetKind::Window,
+                reason: "the window has opted out of being captured",
+            },
+        ));
+
+        assert!(
+            matches!(unrecoverable, SessionError::Capture(_)),
+            "an unrecoverable capture failure is the same `Capture` it always was, got              {unrecoverable:?}"
+        );
+    }
+
+    /// And the one that is new is new: nothing used to try a second backend, so
+    /// "every candidate was tried" had no way to happen.
+    #[test]
+    fn every_candidate_having_been_tried_is_reported_with_the_attempts_kept() {
+        let exhausted = SessionError::from(FallbackError::Exhausted {
+            trigger: clipped_capture::FallbackTrigger::CaptureFailed,
+            cause: None,
+            attempts: Vec::new(),
+        });
+
+        assert!(
+            matches!(exhausted, SessionError::CaptureExhausted(_)),
+            "got {exhausted:?}"
+        );
+        assert!(
+            std::error::Error::source(&exhausted).is_some(),
+            "the fallback error is kept as the source, so the attempts it lists survive"
+        );
+    }
 
     #[test]
     fn a_scaling_request_names_both_sizes_and_says_what_to_do_instead() {
