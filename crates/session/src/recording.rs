@@ -335,11 +335,22 @@ fn record_frames(
                 // to carry on into the same file. The recording is finished
                 // where it is rather than filled with frames of a size the
                 // track does not declare.
+                //
+                // **This is a seam, not the end of a sitting.** A session
+                // follows a size change with the next file in the same session,
+                // and does not scale to keep one file's dimensions constant:
+                // ADR 0011 has the decision, the alternatives it closes and what
+                // it costs. What this loop owes that decision is a file that is
+                // complete up to the change and a reason on the report the
+                // session can read, which is what the two lines below produce.
+                // `clipped-recorder record` writes to the one path it was given
+                // and therefore does stop here (`docs/recorder-cli.md`).
                 tracing::warn!(
                     width = size.width(),
                     height = size.height(),
-                    "the recorded window changed size, which this build cannot follow within \
-                     one file; the recording was finished at that point"
+                    "the recorded window changed size, which one file cannot follow; this \
+                     recording was finished at that point and an automatic session continues \
+                     in the next file"
                 );
                 end_reason = EndReason::TargetResized;
                 break;
@@ -2286,6 +2297,73 @@ mod tests {
 
         assert_eq!(report.times_target_minimised(), 0);
         assert_eq!(report.frames_captured(), 3);
+    }
+
+    #[test]
+    fn a_window_resized_mid_recording_keeps_everything_captured_before_the_resize() {
+        // Issue #184's half of the bargain, and the half that must never be
+        // given up. A session follows a resize by finishing this file and
+        // starting the next one (ADR 0011), and that is only an honest
+        // answer if the file it finishes holds the footage: everything up to the
+        // resize, encoded, written and finalised, with a track that declares the
+        // size the pictures in it actually are (AGENTS.md sections 22 and 56).
+        //
+        // Three things would each break it silently. Dropping the frames the
+        // loop had already captured costs the user the run-up to whatever made
+        // them resize the window. Carrying on past the size change writes
+        // pictures of one size into a track that declares another, which no
+        // player and nothing downstream can detect. Ending without the flush and
+        // the trailer leaves a file that is not seekable and does not say how
+        // long it is.
+        //
+        // The first frame of the script is the one the recording releases rather
+        // than encodes: it exists to say which device the textures are on.
+        let report = recording_of(
+            "resized-mid-recording",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Resized(1920, 1080),
+                // Never reached, and that is the assertion below: the loop ends
+                // at the size change rather than encoding frames of a shape the
+                // track does not declare.
+                Step::Drew,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(
+            report.end_reason(),
+            EndReason::TargetResized,
+            "the recording must say why it ended, because the session reads that to decide \
+             whether to follow it with another file"
+        );
+        assert_eq!(
+            report.frames_captured(),
+            3,
+            "every frame captured before the resize belongs in the file, and none after it"
+        );
+        assert!(
+            report.frames_encoded() > 0,
+            "the frames before the resize were captured and never encoded"
+        );
+        assert_eq!(
+            report.packets_written(),
+            report.frames_encoded(),
+            "the encoder's output did not reach the file before it was closed"
+        );
+        assert!(
+            !report.duration().is_zero(),
+            "the file was closed without a span in it, so nothing was finalised"
+        );
+        assert_eq!(
+            report.size(),
+            TEST_SIZE,
+            "the track must declare the size of the pictures that are in it, not the size the \
+             window became"
+        );
     }
 
     #[test]

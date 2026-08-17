@@ -17,7 +17,9 @@ issue that builds it.
 [#46]: https://github.com/wildware-uk/clipped/issues/46
 [#55]: https://github.com/wildware-uk/clipped/issues/55
 [#240]: https://github.com/wildware-uk/clipped/issues/240
+[#184]: https://github.com/wildware-uk/clipped/issues/184
 [#241]: https://github.com/wildware-uk/clipped/issues/241
+[#561]: https://github.com/wildware-uk/clipped/issues/561
 
 ## What a session is
 
@@ -268,6 +270,25 @@ through the watcher up to `notification_interval + exit_settle_period` — three
 seconds with the shipped configuration — later. Restarting sooner would have the
 recorder go looking for the window of a game it does not yet know has quit, on
 every ordinary exit.
+
+**A recording that ended because its target changed size does not wait.** There
+is no exit to race: the window is on screen, drawing, at a new size, and the only
+reason the file ended is that a Matroska track's dimensions and an encoder
+session's resolution are both fixed for the length of one file
+([ADR 0011](adr/0011-a-session-follows-a-resize-with-a-new-file.md), [#184]).
+Waiting the delay out there would spend five seconds of a game somebody is still
+playing on every dragged window edge and every resolution change, which is the
+opposite of what following a resize with a new file is for. Every other ending
+keeps the delay, including the ones that look similar: a window that was *lost*
+is the exit race itself, a suspend's exits arrive as a batch afterwards, and a
+recording that failed or found no window says nothing about whether the process
+is still there.
+
+Two consequences of that are worth knowing. Every resize spends one of the
+hundred recordings below, so a window dragged repeatedly can reach the cap; and a
+window resized to a client area with an **odd** dimension cannot be encoded at
+all, so the recording that follows such a resize fails to open and the sitting
+records nothing more ([#561]).
 
 A recording that found **no window at all** is not retried for the same process.
 The window timeout has already given the game its chance, and retrying would have
@@ -642,7 +663,7 @@ Three mechanisms carry most of it, and none of them is new to this section:
 | An audio device is unplugged mid-recording | Everything, including the track: it becomes silence of the right length | A warning, and how much of the track was silence when the recording ends | Plug it back in; the capture picks it up again |
 | An audio device cannot be opened at the start | Nothing was recorded; it failed before the file existed | `audio-unavailable`, naming the track | Connect the device, choose another, or record with that source turned off |
 | The recorder process is killed | Everything up to the last closed cluster | Nothing at the time. `clipped-recorder recover` finds it on the next launch | Keep it or discard it — see below |
-| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session | Nothing |
+| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session, at once ([ADR 0011](adr/0011-a-session-follows-a-resize-with-a-new-file.md)) | Nothing |
 | The machine sleeps | Everything up to the suspend | `system-resumed` in the session's events; a second recording follows | Nothing |
 | A metadata write fails | The video, always | A warning; the session is in memory until the next change | Nothing |
 

@@ -1042,13 +1042,22 @@ is fixed at 1920x1080 BGRA8 unorm
 This is the honest answer rather than a limitation nobody mentioned: continuing
 would write frames of one size into a track that declares another, and a player
 would show the difference as a stretched or torn picture in a file that looks
-finished. It is also the same answer the pipeline already gives to a window
-resized mid-recording, which is
-[issue #184](https://github.com/wildware-uk/clipped/issues/184). When #184
-decides how a session follows a size change — by scaling in the capture path, or
-by starting a second file — the rule here relaxes in that same change, and the
-seam it relaxes at is `CaptureFallback::resize`, which is how a caller that
-followed a resize tells the fallback what size the recording now is.
+finished. It is also the same answer the pipeline gives to a window resized
+mid-recording, and that is now a decision rather than a limitation:
+[ADR 0011](adr/0011-a-session-follows-a-resize-with-a-new-file.md) settled
+[issue #184](https://github.com/wildware-uk/clipped/issues/184) as **finish this
+file and let the session start the next one**, and ruled out scaling in the
+capture path — a resample per frame on the path the game is paying for, recording
+an enlarged window as an upscale of the smaller picture in a track that admits
+nothing about it.
+
+So the rule here stands as written for a replacement *within* one file: a
+recording committed to a size cannot change it, whatever produced the change. It
+relaxes in exactly one direction, which is that a caller who has followed a resize
+into a new file tells the fallback so through `CaptureFallback::resize`, and the
+next replacement is judged against the size the recording now uses. Wiring that
+into the recording loop is
+[issue #285](https://github.com/wildware-uk/clipped/issues/285).
 
 In practice the mismatch is rare: both Windows backends produce the target's
 client area in `B8G8R8A8`, so a replacement normally produces exactly what the
