@@ -788,7 +788,7 @@ function Test-CorrespondingSourceGate {
         a false statement inside an artefact nobody can recall, so it is checked
         here rather than left to whoever is drafting at the time.
 
-        Three things, and each of them has a way of being wrong that the others
+        Four things, and each of them has a way of being wrong that the others
         do not catch:
 
         - the manifest is there at all, which is what fails when the step that
@@ -797,6 +797,10 @@ function Test-CorrespondingSourceGate {
           the pin moves and a directory assembled for the previous build is
           left behind - the case where every file exists and every one of them
           is the source of something else;
+        - it promises two archives rather than one. FFmpeg without the build
+          recipe is not the corresponding source of these DLLs: the configure
+          arguments and the versions of every external library compiled into
+          them live in BtbN/FFmpeg-Builds;
         - every archive the manifest promises exists and opens as an archive,
           which is what fails on a truncated fetch.
 
