@@ -527,13 +527,24 @@ pub struct TrashedItem {
     /// The library's own identifier for it, which `restore_from_trash` names.
     pub id: i64,
     /// Where the file is **now**, inside the trash.
-    pub path: String,
+    ///
+    /// Absent for an item that has no file: a clip nothing has exported is a
+    /// range of a recording, and deleting it deletes the clip rather than a
+    /// file ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+    /// Absent rather than `null` or `""`, because an empty string is a file
+    /// name a window would try to open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Where it was, and where restoring puts it back.
     ///
     /// The one a person recognises: a file's name inside the trash is not what
     /// they deleted, and a screen that showed only that would be asking them to
     /// identify their own recording by a name they have never seen.
-    pub original_path: String,
+    ///
+    /// Absent for the same reason [`Self::path`] is: an item that never had a
+    /// file was never anywhere, and a screen names it by what it is instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
     /// When it was deleted, RFC 3339 with an offset.
     pub deleted_at: String,
     /// When it will be removed for good, RFC 3339, or absent when the retention
@@ -595,12 +606,17 @@ pub struct RestoredItem {
     /// Its identifier.
     pub id: i64,
     /// Where the file is now, which is where the index now points.
-    pub path: String,
+    ///
+    /// Absent for an item that has no file — a clip nothing has exported —
+    /// which comes back with none, exactly as it went.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Whether there was a file to move back.
     ///
     /// `false` for something whose media had already gone before it was
-    /// deleted: the row returns to the library and reports itself missing,
-    /// which is the truth rather than a row with no explanation.
+    /// deleted, and for something that never had any: the row returns to the
+    /// library and reports itself missing or fileless, which is the truth
+    /// rather than a row with no explanation.
     pub file_restored: bool,
     /// Whether it had to go somewhere other than where it came from, because
     /// something else was there.

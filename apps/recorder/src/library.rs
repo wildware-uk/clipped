@@ -208,6 +208,11 @@ fn empty_refused(error: clipped_library::trash::TrashError) -> ProtocolError {
     ProtocolError::new(code, error.to_string())
 }
 
+/// A path as the window is told about it, or nothing where there is none.
+fn text(path: Option<&std::path::Path>) -> Option<String> {
+    path.map(|path| path.to_string_lossy().into_owned())
+}
+
 /// One trash entry, as the window is told about it.
 ///
 /// `original_path` is the one a person recognises: a file inside the trash is
@@ -220,8 +225,11 @@ fn trashed_item(entry: clipped_library::trash::TrashEntry) -> TrashedItem {
             clipped_library::trash::ItemKind::Clip => "clip".to_owned(),
         },
         id: entry.item.id,
-        path: entry.path.to_string_lossy().into_owned(),
-        original_path: entry.original_path.to_string_lossy().into_owned(),
+        // Absent rather than blank where there is no file. A clip nothing has
+        // exported has never been anywhere, and `""` is a file name a window
+        // would try to open (issue #593).
+        path: text(entry.path.as_deref()),
+        original_path: text(entry.original_path.as_deref()),
         deleted_at: entry.deleted_at,
         // See `LibraryReader::trash`: nothing configures the retention period,
         // so there is no date to give that would not be invented.
@@ -471,7 +479,7 @@ impl LibraryReader {
             Ok(RestoredItem {
                 kind: request.kind.clone(),
                 id: request.id,
-                path: outcome.path.to_string_lossy().into_owned(),
+                path: text(outcome.path.as_deref()),
                 file_restored: outcome.file_restored,
                 renamed: outcome.path != outcome.original_path,
             })
@@ -1635,6 +1643,166 @@ mod tests {
             sent["outcome"]["ok"]["page"]["sessions"][0]["recordings"][0]["path"].as_str(),
             Some(r"D:\clips\cs2-20260811-201400-1.mkv"),
             "the recording went missing from the frame: {sent}"
+        );
+    }
+
+    /// A reader over a trash holding a recording and a clip that has no file.
+    ///
+    /// Written as SQL because what is under test is the *read*: the row a
+    /// generated highlight leaves has `path` NULL whichever writer made it
+    /// (`0004_clips_without_a_file.sql`), and the deleted recording beside it
+    /// is there so that the frame can be checked for losing anything else.
+    fn trash_holding_a_clip_with_no_file(name: &str) -> LibraryReader {
+        let path = scratch_directory(name).join("library.db");
+        {
+            let database = Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, started_at) \
+                     VALUES ('cs2-20260811-201400', '2026-08-11T20:14:00+01:00')",
+                    [],
+                )
+                .expect("a session inserts");
+            connection
+                .execute(
+                    "INSERT INTO recordings \
+                        (session_id, session_index, path, started_at, size_bytes, deleted_at, \
+                         deleted_from) \
+                     VALUES ('cs2-20260811-201400', 1, ?1, '2026-08-11T20:14:00+01:00', 4096, \
+                             '2026-08-15T09:00:00+01:00', ?2)",
+                    params![
+                        r"D:\Clips.trash\cs2-20260811-201400-1.mkv",
+                        r"D:\Clips\cs2-20260811-201400-1.mkv"
+                    ],
+                )
+                .expect("a deleted recording inserts");
+            connection
+                .execute(
+                    "INSERT INTO clips \
+                        (session_id, path, created_at, origin, origin_detail, deleted_at) \
+                     VALUES ('cs2-20260811-201400', NULL, '2026-08-11T20:45:00+01:00', \
+                             'highlight', '{\"kind\":\"kill\"}', '2026-08-16T09:00:00+01:00')",
+                    [],
+                )
+                .expect("a deleted highlight with no file inserts");
+            // And one the user has not deleted, so that the listing can be
+            // shown to carry the trashed rows and only those, and so that
+            // something can be asked to restore that is not in the trash.
+            connection
+                .execute(
+                    "INSERT INTO clips (session_id, path, created_at, origin, origin_detail) \
+                     VALUES ('cs2-20260811-201400', NULL, '2026-08-11T20:47:00+01:00', \
+                             'highlight', '{\"kind\":\"headshot\"}')",
+                    [],
+                )
+                .expect("a live highlight with no file inserts");
+        }
+        LibraryReader::at(Some(path))
+    }
+
+    /// The JSON one `ServerMessage` becomes on the wire, read back with none of
+    /// this build's own types involved.
+    ///
+    /// The length prefix is checked against the payload, so what is asserted on
+    /// is a frame a peer could actually read rather than a `serde_json::Value`
+    /// this process happened to make.
+    fn frame_of(message: &clipped_ipc::ServerMessage) -> serde_json::Value {
+        let mut frame = Vec::new();
+        clipped_ipc::frame::write_message(&mut frame, message).expect("the reply fits in a frame");
+        let declared = u32::from_le_bytes(
+            frame[..clipped_ipc::LENGTH_PREFIX_BYTES]
+                .try_into()
+                .expect("a frame carries its length"),
+        ) as usize;
+        let body = &frame[clipped_ipc::LENGTH_PREFIX_BYTES..];
+        assert_eq!(declared, body.len(), "the frame's length is its payload's");
+        serde_json::from_slice(body).expect("the frame carries JSON")
+    }
+
+    #[test]
+    fn a_clip_with_no_file_in_the_trash_reaches_the_window_with_no_path_rather_than_no_trash() {
+        // Issue #593 at the boundary. The index half is `clipped-library`'s
+        // `a_clip_with_no_file_is_deleted_listed_and_restored_like_anything_else`;
+        // this is what the window actually receives, asserted **on the bytes of
+        // the frame** rather than on a parsed reply. #576 and #586 were both
+        // fields whose absence a parsed reply could not tell from their
+        // presence, so a mirror agreeing with a `TrashedItem` this process
+        // built would prove nothing about what went down the pipe.
+        let library = trash_holding_a_clip_with_no_file("trash-pathless");
+
+        let listing = library
+            .trash()
+            .expect("a trash holding a clip with no file still lists");
+
+        let sent = frame_of(&clipped_ipc::ServerMessage::Response(
+            clipped_ipc::Response {
+                id: 1,
+                outcome: clipped_ipc::Outcome::Ok(clipped_ipc::Reply::LibraryTrash {
+                    trash: listing,
+                }),
+            },
+        ));
+        let items = sent["outcome"]["ok"]["trash"]["items"]
+            .as_array()
+            .expect("the trash is on the wire");
+        assert_eq!(
+            items.len(),
+            2,
+            "an item with no file is an item somebody deleted and must be sent, not dropped: {sent}"
+        );
+
+        // Newest deletion first, so the clip leads.
+        let clip = items[0].as_object().expect("a trashed item is an object");
+        assert_eq!(clip["kind"].as_str(), Some("clip"), "{clip:?}");
+        assert!(
+            !clip.contains_key("path"),
+            "an item with no file must carry no `path` key at all -- a null or an empty string \
+             would be a file name a window would try to open: {clip:?}"
+        );
+        assert!(
+            !clip.contains_key("original_path"),
+            "an item that never had a file was never anywhere, and must not reach a window \
+             claiming somewhere to be put back to: {clip:?}"
+        );
+
+        // Nothing else in the trash may be lost by tolerating it (AGENTS.md
+        // section 56).
+        let recording = items[1].as_object().expect("a trashed item is an object");
+        assert_eq!(
+            recording["original_path"].as_str(),
+            Some(r"D:\Clips\cs2-20260811-201400-1.mkv"),
+            "the deleted recording went missing from the frame: {sent}"
+        );
+        assert_eq!(
+            sent["outcome"]["ok"]["trash"]["total_items"].as_u64(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn restoring_a_clip_that_has_no_file_is_the_callers_mistake_and_not_an_unreadable_library() {
+        // The half of #593 that was reachable before anything ever put a
+        // pathless clip in the trash. `Trash::read` is where every trash
+        // operation starts, and reading `clips.path` into a `String` made a
+        // perfectly readable library answer `library_unavailable` -- "try
+        // again, or check the drive" -- for a caller that had simply named
+        // something the trash does not hold.
+        let library = trash_holding_a_clip_with_no_file("trash-pathless-restore");
+
+        // Clip 2 is the highlight nobody has deleted: it has no file, and it is
+        // not in the trash.
+        let refusal = library
+            .restore(&RestoreFromTrash {
+                kind: "clip".to_owned(),
+                id: 2,
+            })
+            .expect_err("a clip the trash does not hold cannot be restored");
+
+        assert_eq!(
+            refusal.code,
+            ErrorCode::InvalidParameters,
+            "restoring a clip with no file blamed the library rather than the request: {refusal:?}"
         );
     }
 

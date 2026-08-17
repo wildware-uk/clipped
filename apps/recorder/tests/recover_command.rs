@@ -399,10 +399,13 @@ fn discarding_a_named_recording_moves_it_to_the_trash_and_records_that_it_did() 
         1,
         "the discarded recording should be a real trash entry, not just a moved file: {listed:?}"
     );
+    let listed_path = listed[0]
+        .path
+        .as_deref()
+        .expect("a recording in the trash names its file");
     assert!(
-        listed[0].path.starts_with(trash_beside(directory.path())),
-        "the listed entry should point at the file inside the trash: {:?}",
-        listed[0].path
+        listed_path.starts_with(trash_beside(directory.path())),
+        "the listed entry should point at the file inside the trash: {listed_path:?}"
     );
 }
 

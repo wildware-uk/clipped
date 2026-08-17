@@ -1092,6 +1092,29 @@ describe('the Library screen', () => {
     };
   }
 
+  /**
+   * A trash holding one thing that has no file at all.
+   *
+   * `path` and `original_path` are absent rather than blank, which is what the
+   * recorder sends for a clip nothing has exported
+   * ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+   */
+  function trashHoldingAClipWithNoFile() {
+    return {
+      items: [
+        {
+          kind: 'clip',
+          id: 7,
+          deleted_at: '2026-08-16T09:00:00+01:00',
+          dependent_clips: 0,
+        },
+      ],
+      total_items: 1,
+      total_bytes: 0,
+      directory: 'D:/Clips.trash',
+    };
+  }
+
   it('has a heading for each of its parts', async () => {
     stubRecorderLinkRuntime(ATTACHED, null, {
       sessions: () => Promise.resolve(page([])),
@@ -1156,6 +1179,45 @@ describe('the Library screen', () => {
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('will show as missing');
+  });
+
+  it('shows a deleted clip that has no file, and names it by what it is', async () => {
+    // Issue #593. A generated highlight is a range of a recording until
+    // somebody exports it, so a deleted one has no file to be in the trash and
+    // nowhere to be put back to. It is still something the user deleted, so it
+    // is on the screen — an empty cell would be indistinguishable from a value
+    // the window failed to read.
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(trashHoldingAClipWithNoFile()),
+    });
+    renderScreen();
+
+    expect(await screen.findByText(/No file/)).toBeInTheDocument();
+    // Absent, not blank: an empty cell is indistinguishable from a value the
+    // window failed to read, and the item is still restorable.
+    expect(screen.queryByText('undefined')).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  it('does not tell somebody a clip that never had a file has gone missing', async () => {
+    // The wrong sentence is the one meant for an item whose media had already
+    // gone. Nothing has gone here, and nothing will show as missing.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(trashHoldingAClipWithNoFile()),
+      restoreFromTrash: () =>
+        Promise.resolve({ kind: 'clip', id: 7, file_restored: false, renamed: false }),
+    });
+    renderScreen();
+
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+
+    const said = (await screen.findByRole('status')).textContent ?? '';
+    expect(said).toContain('no file');
+    expect(said).not.toContain('missing');
+    expect(said).not.toContain('undefined');
   });
 
   it('asks before emptying the trash, and sends the counts it showed', async () => {

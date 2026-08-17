@@ -855,6 +855,17 @@
       ],
       "optional": []
     },
+    "restored_item": {
+      "required": [
+        "file_restored",
+        "id",
+        "kind",
+        "renamed"
+      ],
+      "optional": [
+        "path"
+      ]
+    },
     "save_replay": {
       "required": [],
       "optional": [
@@ -974,6 +985,20 @@
         "process",
         "recording_id",
         "window"
+      ]
+    },
+    "trashed_item": {
+      "required": [
+        "deleted_at",
+        "dependent_clips",
+        "id",
+        "kind"
+      ],
+      "optional": [
+        "expires_at",
+        "original_path",
+        "path",
+        "size_bytes"
       ]
     },
     "welcome": {
@@ -1962,6 +1987,55 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_trash"
+    },
+    {
+      "name": "a clip with no file waiting in the trash",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "reply": "library_trash",
+            "trash": {
+              "directory": "D:\\\\Clips.trash",
+              "items": [
+                {
+                  "deleted_at": "2026-08-15T09:00:00+01:00",
+                  "dependent_clips": 0,
+                  "id": 7,
+                  "kind": "clip"
+                }
+              ],
+              "total_bytes": 0,
+              "total_items": 1
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_trash"
+    },
+    {
+      "name": "a clip with no file put back, which brings no file with it",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "ok": {
+            "reply": "restored",
+            "restored": {
+              "file_restored": false,
+              "id": 7,
+              "kind": "clip",
+              "renamed": false
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.restored"
     },
     {
       "name": "one recording put back where it was",

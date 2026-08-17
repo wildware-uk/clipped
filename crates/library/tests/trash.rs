@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
@@ -68,6 +68,36 @@ impl Library {
     /// "the same bytes came back" is a real comparison rather than one that any
     /// two files of the same length would pass.
     fn with_recordings(self, session: &str, files: &[&str]) -> Self {
+        self.with_sidecar(session, files, Vec::new())
+    }
+
+    /// The same, and one generated highlight: a clip with **no path**.
+    ///
+    /// That is the normal shape of a highlight and the reason
+    /// `0004_clips_without_a_file.sql` made the column nullable — a range of a
+    /// recording costs no disk and no encoder time until somebody exports it —
+    /// so `ingest::write_clips` writes NULL there. Every library below that
+    /// exercises a pathless clip is built this way rather than by inserting a
+    /// row, because the defect in [issue
+    /// #593](https://github.com/wildware-uk/clipped/issues/593) survived
+    /// precisely because the tests over such clips asked the database for the
+    /// column instead of going through a read path.
+    fn with_a_generated_highlight(self, session: &str, files: &[&str]) -> Self {
+        self.with_sidecar(
+            session,
+            files,
+            vec![json!({
+                "created_at": "2026-08-11T14:45:00+01:00",
+                "source_recording": 1,
+                "duration_seconds": 12.0,
+                "edit": "{\"version\":1}",
+                "origin": "highlight",
+                "origin_detail": "{\"kind\":\"kill\",\"at\":600000000000,\"source\":\"acme-cs2\"}",
+            })],
+        )
+    }
+
+    fn with_sidecar(self, session: &str, files: &[&str], clips: Vec<serde_json::Value>) -> Self {
         let recordings: Vec<_> = files
             .iter()
             .enumerate()
@@ -89,12 +119,13 @@ impl Library {
         fs::write(
             self.root.join(format!("clipped-{session}.session.json")),
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "session_id": session,
                 "game": { "kind": "known", "game_id": "cs2", "name": "Counter-Strike 2" },
                 "started_at": "2026-08-11T14:32:05+01:00",
                 "ended_at": "2026-08-11T15:31:21+01:00",
                 "recordings": recordings,
+                "clips": clips,
                 "events": [
                     { "at": "2026-08-11T15:31:21+01:00", "event": "session-ended",
                       "reason": "game-exited" }
@@ -143,6 +174,17 @@ impl Library {
             )
             .expect("the recording is in the index");
         TrashItem::recording(id)
+    }
+
+    /// The clip the index holds that has no file.
+    fn clip_with_no_file(&self, database: &Database) -> TrashItem {
+        let id: i64 = database
+            .connection()
+            .query_row("SELECT clip_id FROM clips WHERE path IS NULL", [], |row| {
+                row.get(0)
+            })
+            .expect("the generated highlight is in the index");
+        TrashItem::clip(id)
     }
 }
 
@@ -197,6 +239,48 @@ fn recording_row(database: &Database, item: TrashItem) -> HashMap<&'static str, 
     row
 }
 
+/// One clip's columns, as text, for asserting on what a delete and a restore
+/// wrote — including `path`, which is NULL for a clip nothing has exported.
+fn clip_row(database: &Database, item: TrashItem) -> HashMap<&'static str, Option<String>> {
+    let mut row = HashMap::new();
+    let columns = database
+        .connection()
+        .query_row(
+            "SELECT path, deleted_at, deleted_from, edit, origin FROM clips WHERE clip_id = ?1",
+            [item.id],
+            |row| {
+                Ok([
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ])
+            },
+        )
+        .expect("the clip is in the index");
+    for (name, value) in ["path", "deleted_at", "deleted_from", "edit", "origin"]
+        .into_iter()
+        .zip(columns)
+    {
+        row.insert(name, value);
+    }
+    row
+}
+
+/// The file a trash entry, a restore or a removal names.
+///
+/// [`TrashEntry::path`] is optional because `clips.path` is nullable and a clip
+/// nothing has exported has no file. Every item in the tests below that uses
+/// this is a *recording*, whose `path` is `NOT NULL` in the schema, so this is
+/// an assertion and not a convenience: a recording that came out of the trash
+/// with no path would be a defect, and it would fail here rather than silently
+/// comparing equal to nothing.
+fn file_of(path: &Option<PathBuf>) -> &Path {
+    path.as_deref()
+        .expect("the item in the trash names a file; only an unexported clip does not")
+}
+
 fn count(database: &Database, query: &str) -> i64 {
     database
         .connection()
@@ -222,21 +306,21 @@ fn deleting_a_recording_moves_the_file_rather_than_unlinking_it() {
 
     assert!(!original.exists(), "the file was left where it was");
     assert!(
-        entry.path.starts_with(library.trash.directory()),
+        file_of(&entry.path).starts_with(library.trash.directory()),
         "the file went somewhere other than the trash: {}",
-        entry.path.display()
+        file_of(&entry.path).display()
     );
     assert_eq!(
-        fs::read(&entry.path).expect("the trashed file can be read"),
+        fs::read(file_of(&entry.path)).expect("the trashed file can be read"),
         bytes,
         "the footage changed on the way into the trash"
     );
-    assert_eq!(entry.original_path, original);
+    assert_eq!(entry.original_path.as_deref(), Some(original.as_path()));
 
     let row = recording_row(&database, item);
     assert_eq!(
         row["path"].as_deref(),
-        Some(entry.path.display().to_string()).as_deref()
+        Some(file_of(&entry.path).display().to_string()).as_deref()
     );
     assert_eq!(
         row["deleted_from"].as_deref(),
@@ -268,11 +352,14 @@ fn a_restore_returns_the_file_byte_for_byte() {
         .restore(&mut database, item)
         .expect("it is restored");
 
-    assert_eq!(outcome.path, original);
+    assert_eq!(outcome.path.as_deref(), Some(original.as_path()));
     assert!(!outcome.diverted());
     assert!(outcome.file_restored);
     assert!(
-        !entry.path.parent().expect("an entry directory").exists(),
+        !file_of(&entry.path)
+            .parent()
+            .expect("an entry directory")
+            .exists(),
         "the trash kept an empty folder for something that was restored"
     );
     let after = fs::read(&original).expect("the restored recording can be read");
@@ -403,7 +490,7 @@ fn a_restored_recording_still_plays() {
         .restore(&mut database, item)
         .expect("it is restored");
 
-    clipped_media_validation::Media::open(&outcome.path)
+    clipped_media_validation::Media::open(file_of(&outcome.path))
         .expect("the restored recording opens")
         .validate()
         .stream_count(1)
@@ -444,12 +531,12 @@ fn restoring_into_an_occupied_location_never_overwrites_what_is_there() {
         "restoring destroyed a file the user did not ask to lose"
     );
     assert_eq!(
-        fs::read(&outcome.path).expect("the restored file can be read"),
+        fs::read(file_of(&outcome.path)).expect("the restored file can be read"),
         restored_footage
     );
     assert_eq!(
         recording_row(&database, item)["path"].as_deref(),
-        Some(outcome.path.display().to_string()).as_deref(),
+        Some(file_of(&outcome.path).display().to_string()).as_deref(),
         "the index points at where the file used to be rather than where it is"
     );
 }
@@ -472,7 +559,7 @@ fn restoring_recreates_the_folder_the_recording_came_from() {
         .restore(&mut database, item)
         .expect("it is restored");
 
-    assert_eq!(outcome.path, original);
+    assert_eq!(outcome.path.as_deref(), Some(original.as_path()));
     assert!(original.exists(), "the recording did not come back");
 }
 
@@ -491,7 +578,10 @@ fn retention_expiry_is_judged_from_the_moment_of_deletion_and_not_by_waiting() {
         .expire(&mut database, Retention::SevenDays, deleted_at() + 6 * DAY)
         .expect("the sweep runs");
     assert!(early.removed.is_empty(), "footage expired a day early");
-    assert!(entry.path.exists(), "the file was removed a day early");
+    assert!(
+        file_of(&entry.path).exists(),
+        "the file was removed a day early"
+    );
 
     let late = library
         .trash
@@ -502,7 +592,10 @@ fn retention_expiry_is_judged_from_the_moment_of_deletion_and_not_by_waiting() {
     assert_eq!(late.removed[0].item, item);
     assert_eq!(late.removed[0].file, FileOutcome::Deleted);
     assert_eq!(late.bytes_reclaimed(), 4_096);
-    assert!(!entry.path.exists(), "the file survived its retention");
+    assert!(
+        !file_of(&entry.path).exists(),
+        "the file survived its retention"
+    );
     assert_eq!(
         count(&database, "SELECT COUNT(*) FROM recordings"),
         0,
@@ -632,7 +725,7 @@ fn deleting_something_twice_is_refused_rather_than_moving_it_again() {
         "{error}"
     );
     assert!(
-        entry.path.exists(),
+        file_of(&entry.path).exists(),
         "a second delete moved the file out from under the first"
     );
     assert_eq!(
@@ -687,7 +780,11 @@ fn an_item_whose_file_has_already_gone_can_still_be_deleted_and_restored() {
         .trash
         .send(&mut database, item, deleted_at())
         .expect("an item with no file can still be deleted");
-    assert_eq!(entry.path, original, "a trash entry was invented for it");
+    assert_eq!(
+        entry.path.as_deref(),
+        Some(original.as_path()),
+        "a trash entry was invented for it"
+    );
     assert!(
         !library.trash.directory().exists(),
         "a trash directory was created for a file that does not exist"
@@ -702,7 +799,7 @@ fn an_item_whose_file_has_already_gone_can_still_be_deleted_and_restored() {
         !outcome.file_restored,
         "a file that was never there was reported as restored"
     );
-    assert_eq!(outcome.path, original);
+    assert_eq!(outcome.path.as_deref(), Some(original.as_path()));
     assert_eq!(recording_row(&database, item)["deleted_at"], None);
 }
 
@@ -720,7 +817,7 @@ fn a_trash_somebody_has_emptied_in_explorer_still_restores_the_row() {
         .trash
         .send(&mut database, item, deleted_at())
         .expect("it is deleted");
-    fs::remove_file(&entry.path).expect("the user empties the trash themselves");
+    fs::remove_file(file_of(&entry.path)).expect("the user empties the trash themselves");
 
     let outcome = library
         .trash
@@ -731,7 +828,7 @@ fn a_trash_somebody_has_emptied_in_explorer_still_restores_the_row() {
         !outcome.file_restored,
         "a file that is not there was reported as restored"
     );
-    assert_eq!(outcome.path, library.file("a.mkv"));
+    assert_eq!(outcome.path, Some(library.file("a.mkv")));
     assert_eq!(recording_row(&database, item)["deleted_at"], None);
 }
 
@@ -759,14 +856,14 @@ fn a_clip_is_deleted_and_restored_the_same_way_a_recording_is() {
         .send(&mut database, item, deleted_at())
         .expect("a clip is deleted");
     assert!(!file.exists());
-    assert!(entry.path.starts_with(library.trash.directory()));
+    assert!(file_of(&entry.path).starts_with(library.trash.directory()));
 
     let outcome = library
         .trash
         .restore(&mut database, item)
         .expect("a clip is restored");
 
-    assert_eq!(outcome.path, file);
+    assert_eq!(outcome.path, Some(file.clone()));
     assert_eq!(fs::read(&file).expect("it can be read"), bytes);
 }
 
@@ -798,7 +895,7 @@ fn what_is_in_the_trash_is_listed_newest_first_with_what_is_left_of_its_retentio
         Some(2 * DAY),
         "the days left are not counted from when the item was deleted"
     );
-    assert_eq!(listing[0].original_path, library.file("b.mkv"));
+    assert_eq!(listing[0].original_path, Some(library.file("b.mkv")));
 }
 
 #[test]
@@ -822,7 +919,7 @@ fn a_trashed_recording_survives_the_indexer_running_over_its_session_again() {
     let row = recording_row(&database, item);
     assert_eq!(
         row["path"].as_deref(),
-        Some(entry.path.display().to_string()).as_deref(),
+        Some(file_of(&entry.path).display().to_string()).as_deref(),
         "re-indexing lost the only record of where the deleted file is"
     );
     assert!(row["deleted_at"].is_some(), "re-indexing undeleted the row");
@@ -836,7 +933,7 @@ fn a_trashed_recording_survives_the_indexer_running_over_its_session_again() {
         .restore(&mut database, item)
         .expect("it can still be restored");
     assert!(outcome.file_restored);
-    assert_eq!(outcome.path, library.file("a.mkv"));
+    assert_eq!(outcome.path, Some(library.file("a.mkv")));
 }
 
 #[test]
@@ -956,4 +1053,162 @@ fn deleting_a_recording_clips_were_cut_from_says_how_many_depend_on_it() {
         .send(&mut database, clip, deleted_at())
         .expect("a clip can be deleted too");
     assert_eq!(clip_entry.dependent_clips, 0);
+}
+
+#[test]
+fn restoring_a_clip_that_has_no_file_is_refused_as_something_not_in_the_trash() {
+    // `Trash::read` is the function every operation here starts from, and it
+    // read `clips.path` into a `String` while the schema allows NULL. That made
+    // restoring a clip nothing had exported answer
+    // `Database(InvalidColumnType(0, "path", Null))`, which
+    // `apps/recorder/src/library.rs::restore_refused` reports as
+    // `library_unavailable` — "the library could not be read", for a library
+    // that read perfectly well. The truth is that the caller named something
+    // the trash does not hold, which is `invalid_parameters`
+    // ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+    let library = Library::new("pathless-not-in-trash")
+        .with_a_generated_highlight("cs2-20260811-143205", &["a.mkv"]);
+    let mut database = library.open();
+    let highlight = library.clip_with_no_file(&database);
+
+    let refusal = library
+        .trash
+        .restore(&mut database, highlight)
+        .expect_err("a clip that was never deleted cannot be restored");
+
+    assert!(
+        matches!(refusal, TrashError::NotInTrash { item } if item == highlight),
+        "restoring a clip with no file did not say what was actually wrong: {refusal:?}"
+    );
+}
+
+#[test]
+fn a_clip_with_no_file_is_deleted_listed_and_restored_like_anything_else() {
+    // The whole round trip through the real calls, beside a recording that is
+    // in the trash at the same time: `Trash::list` used to read `path` into a
+    // `String` too, so a single pathless row failed the *listing* rather than
+    // itself, and the recording the user was looking for went with it (AGENTS.md
+    // section 56).
+    let library = Library::new("pathless-round-trip")
+        .with_a_generated_highlight("cs2-20260811-143205", &["a.mkv"]);
+    let mut database = library.open();
+    let highlight = library.clip_with_no_file(&database);
+    let recording = library.recording(&database, "a.mkv");
+    library
+        .trash
+        .send(&mut database, recording, deleted_at())
+        .expect("the recording is deleted");
+
+    let entry = library
+        .trash
+        .send(&mut database, highlight, deleted_at() + DAY)
+        .expect("a clip with no file can be deleted");
+
+    assert_eq!(
+        entry.path, None,
+        "a file was invented for a clip that has never had one"
+    );
+    assert_eq!(entry.original_path, None);
+    assert_eq!(
+        clip_row(&database, highlight)["deleted_from"],
+        None,
+        "the clip was recorded as having come from somewhere it never was"
+    );
+
+    let listing = library.trash.list(&database).expect("the trash lists");
+
+    assert_eq!(
+        listing.iter().map(|entry| entry.item).collect::<Vec<_>>(),
+        vec![highlight, recording],
+        "the trash listing lost a clip with no file, or the recording beside it"
+    );
+    assert_eq!(listing[0].path, None);
+    assert_eq!(
+        listing[1].path.as_deref(),
+        Some(file_of(&listing[1].path)),
+        "the recording in the trash lost the file it names"
+    );
+
+    let outcome = library
+        .trash
+        .restore(&mut database, highlight)
+        .expect("a clip with no file can be put back");
+
+    assert_eq!(outcome.path, None, "a file was invented by the restore");
+    assert!(
+        !outcome.file_restored,
+        "a file that never existed was reported as restored"
+    );
+    let row = clip_row(&database, highlight);
+    assert_eq!(row["deleted_at"], None, "the clip is still in the trash");
+    assert_eq!(row["path"], None, "the restore gave the clip a file");
+    assert_eq!(
+        row["edit"].as_deref(),
+        Some(r#"{"version":1}"#),
+        "what the clip is made of did not come back with it"
+    );
+    assert_eq!(row["origin"].as_deref(), Some("highlight"));
+
+    // And the recording is exactly where it was, still recoverable.
+    assert_eq!(
+        library
+            .trash
+            .list(&database)
+            .expect("the trash lists")
+            .iter()
+            .map(|entry| entry.item)
+            .collect::<Vec<_>>(),
+        vec![recording],
+        "restoring the clip disturbed what else was in the trash"
+    );
+}
+
+#[test]
+fn emptying_the_trash_destroys_a_clip_with_no_file_rather_than_stranding_it() {
+    // Why the listing has to carry it, rather than filtering it out. `expire`
+    // and `empty` are both built from `Trash::list`, and `empty` confirms
+    // against the listing the user was shown — so a row a filter hid would be
+    // marked deleted for ever: never shown, never restorable, never destroyed,
+    // and never counted by the confirmation, which would then disagree with
+    // what is actually in the trash (AGENTS.md section 56).
+    let library = Library::new("pathless-empty")
+        .with_a_generated_highlight("cs2-20260811-143205", &["a.mkv"]);
+    let mut database = library.open();
+    let highlight = library.clip_with_no_file(&database);
+    let recording = library.recording(&database, "a.mkv");
+    library
+        .trash
+        .send(&mut database, recording, deleted_at())
+        .expect("the recording is deleted");
+    library
+        .trash
+        .send(&mut database, highlight, deleted_at())
+        .expect("the clip is deleted");
+
+    let listing = library.trash.list(&database).expect("the trash lists");
+    let report = library
+        .trash
+        .empty(&mut database, EmptyTrash::for_listing(&listing))
+        .expect("the trash the user was shown is the trash that is emptied");
+
+    assert_eq!(report.failures.len(), 0, "{report}");
+    assert_eq!(report.removed.len(), 2, "{report}");
+    assert_eq!(
+        report.bytes_reclaimed(),
+        4_096,
+        "a clip that never had a file reclaimed bytes it never occupied"
+    );
+    assert_eq!(
+        count(&database, "SELECT COUNT(*) FROM clips"),
+        0,
+        "the clip with no file was left in the trash for ever"
+    );
+    assert!(
+        library
+            .trash
+            .list(&database)
+            .expect("the trash lists")
+            .is_empty(),
+        "something was left behind by emptying the trash"
+    );
 }
