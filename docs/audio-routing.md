@@ -84,12 +84,28 @@ Because the comparison is always against the anchor rather than against the
 previous packet, an ignored difference is still there next time; the deadband
 bounds the offset instead of letting it accumulate. The deadband is 20 ms,
 which is about two thousand times the packet-to-packet jitter measured on
-Windows 11 build 26200 and well under a perceptible synchronisation error. Its
-cost, stated plainly, is that a device whose sample clock genuinely differs
-from the performance counter is corrected in one 20 ms step roughly once an
-hour rather than continuously. Removing that step needs resampling against a
-reference clock, which is
-[issue #30](https://github.com/wildware-uk/clipped/issues/30).
+Windows 11 build 26200 and well under a perceptible synchronisation error.
+
+Left alone, a device whose sample clock genuinely differs from the performance
+counter would be corrected in one 20 ms step roughly once an hour rather than
+continuously — inside the deadband on every single packet, and still 20 ms out
+an hour later, because the same small ignored error is added every time.
+[Issue #30](https://github.com/wildware-uk/clipped/issues/30) removed that
+step for a *steady* clock error: `Timeline::correction_ratio` measures the
+rate the offset has been growing at since the timeline was last known to be
+right, and `crate::resample::LinearResampler` applies it to every real
+packet's own samples, by linear interpolation, before the packet ever reaches
+the table above. A source running a few parts per million fast or slow is
+therefore nudged continuously, by a resampling ratio too small to hear, and
+the correction that used to be one 20 ms event an hour is now nothing a
+listener could point to. The table above still governs — a real gap or a
+device change is not a rate to track, it is silence to fill or samples to
+trim — but a steady clock no longer needs either. The rate estimate itself
+resets whenever the table above fires, because an ignored offset erased by a
+step correction, or a gap, may describe a different piece of hardware than the
+one the estimate was measuring; `crates/audio/src/timeline.rs` and
+`crates/audio/src/resample.rs` are the arithmetic and the reasoning behind it,
+respectively.
 
 While an endpoint is quiet the timeline is topped up to `now - 60 ms` rather
 than to `now`, because audio for the last few milliseconds may still be inside
@@ -173,9 +189,16 @@ range and nothing downstream has to clip. The sample rate and channel count are
 passed through untouched, and the endpoint's `dwChannelMask` is reported as a
 `ChannelMask` so that a 5.1 recording is not labelled by guesswork.
 
-Resampling belongs to the stage that reconciles several capture clocks
-(issue #30) and downmixing is a decision about what the user hears, which this
-crate is not entitled to make on its own (AGENTS.md section 21).
+**Sample rate and channel count are still untouched, but every source's own
+samples are now nudged by a fraction of a percent to stay aligned with the
+reference clock** (issue #30, [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
+That is a correction against drift within one source's declared rate, not a
+conversion between two different declared rates: two sources captured at
+genuinely different sample rates still cannot be combined without a real
+resampling stage, which is why the compatibility mix still refuses one (see
+[What it will not do](#the-compatibility-mix)). Downmixing is a decision about
+what the user hears, which this crate is not entitled to make on its own
+(AGENTS.md section 21).
 
 ## Device changes during a recording
 
@@ -209,10 +232,12 @@ silence in somebody's recording.
 The last row of the second kind — a different sample rate — is the one
 compromise. A track's format is fixed when the capture opens, because a muxer
 that has written a stream header cannot be handed 44.1 kHz halfway through, and
-this crate has no resampler yet (issue #30). Changing shape underneath the
-caller would be worse than silence, and ending the recording over a headset
-would be worse still, so the capture says what happened, keeps the timeline
-running, and waits.
+this crate has no rate-conversion resampler: issue #30 keeps one source's own
+clock aligned with the reference clock over a long recording, which is a
+different problem from converting between two endpoints that disagree about
+the shape of a frame. Changing shape underneath the caller would be worse than
+silence, and ending the recording over a headset would be worse still, so the
+capture says what happened, keeps the timeline running, and waits.
 
 Opening is the one asymmetry: `SystemAudioCapture::open` fails with
 `AudioError::NoEndpoint` on a machine with no output device, because there is
@@ -656,16 +681,19 @@ than asserting it. There is no look-ahead, deliberately: a true brickwall limite
 delays the signal by a few milliseconds, and a mix that is late against the
 picture to avoid an artefact nobody can hear is a bad trade.
 
-**What it will not do.** It does not resample, so a source captured at a rate the
-mix is not being written at is refused when it is *added* — before the recording
-starts, with a message saying so — rather than dropped from the mix during it.
-Reconciling capture clocks is
-[issue #30](https://github.com/wildware-uk/clipped/issues/30). Channel layouts
-are handled for the cases a recording actually produces: channel for channel, a
-mono source spread across every channel of the mix, and any source folded into a
-mono mix. A genuine downmix — 5.1 into stereo — needs a coefficient table, which
-is a decision about what the user hears, and is refused the same way for the same
-reason.
+**What it will not do.** It does not convert between sample rates, so a source
+captured at a rate the mix is not being written at is refused when it is
+*added* — before the recording starts, with a message saying so — rather than
+dropped from the mix during it. [Issue #30](https://github.com/wildware-uk/clipped/issues/30)
+keeps a single source's own clock from drifting against the reference clock
+over a long recording ([above](#loopback-delivers-nothing-while-the-endpoint-is-silent));
+it does not convert between two sources that were never at the same rate to
+begin with, which is a genuine resampling stage this mixer still does not
+have. Channel layouts are handled for the cases a recording actually produces:
+channel for channel, a mono source spread across every channel of the mix, and
+any source folded into a mono mix. A genuine downmix — 5.1 into stereo — needs
+a coefficient table, which is a decision about what the user hears, and is
+refused the same way for the same reason.
 
 **Where it runs.** A `Mixer` is owned by one thread and holds no lock; it is
 `Send` and not `Sync`. The alternative would be a lock every capture thread takes
@@ -842,7 +870,16 @@ cargo test -p clipped-audio
 - **The arithmetic**, in `src/timeline.rs`: silence of the exact length of the
   gap, jitter absorbed, ignored jitter not accumulating into drift,
   over-synthesised silence trimmed back out, buffers exactly contiguous across
-  all of it. These run anywhere, including on a machine with no sound card.
+  all of it, the drift-correction ratio staying at `1.0` until enough history
+  has accrued to trust it and clamped rather than following a bad measurement
+  once it is, and a real gap resetting the estimate rather than extending it.
+  These run anywhere, including on a machine with no sound card.
+- **The resampler**, in `src/resample.rs`: a ratio of `1.0` reproducing its
+  input exactly, including across a packet boundary; a ratio below or above
+  `1.0` producing correspondingly fewer or more frames; a long run at a steady
+  ratio converging on `frames * ratio` rather than drifting away from it; a
+  reset discarding carried state rather than blending it into the next
+  packet. Also machine-independent.
 - **The conversions**, in `src/format.rs` and `src/windows/endpoint.rs`: every
   endpoint sample format converting to the same amplitude, 24-bit sign
   extension, the mix format Windows actually reports here, a 44.1 kHz 5.1
@@ -1061,10 +1098,17 @@ Written during M2, alongside the code:
   the track off (SPEC.md section 13). What the mix does with what it is given is
   written above; the remaining half of
   [issue #29](https://github.com/wildware-uk/clipped/issues/29) is the wiring.
-- Clock drift and sample-rate handling between independent capture clients, and
-  how audio stays aligned with video over a multi-hour session
-  ([issue #30](https://github.com/wildware-uk/clipped/issues/30)) — including
-  what replaces the deadband correction described above.
+- A drift measurement taken from an actual multi-hour recording on real
+  hardware, the way the numbers elsewhere on this page were taken, rather than
+  from the synthetic packet sequences `crates/audio/src/timeline.rs` and
+  `crates/audio/src/resample.rs` are unit tested against
+  ([issue #30](https://github.com/wildware-uk/clipped/issues/30) — the
+  continuous correction itself, and what it replaced, are described
+  [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
+  Converting between two sources at genuinely different declared sample rates
+  — as opposed to correcting one source's own clock against the reference
+  clock, which is what is built — is a separate resampling stage neither this
+  crate nor the compatibility mix has.
 - Following an endpoint whose mix format differs from the one a recording
   started with, which today produces silence and a `Capture::FormatChanged`.
 - Per-source processing — gain, mute, noise suppression, gate, compressor,
