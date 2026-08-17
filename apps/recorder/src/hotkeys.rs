@@ -173,7 +173,13 @@ pub fn start(
 /// both carry the milestone and issue that would build it. A handler that
 /// swallowed the press to make the key look alive is what AGENTS.md section 54
 /// forbids.
-fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
+///
+/// `pub(crate)` for one caller and it is a test: `crate::watch` presses the
+/// bookmark key against a real recording detection started, which is issue
+/// #421's acceptance criterion and cannot be asserted from here — this module
+/// has no way to make a recording. Pressing through the handlers this registers,
+/// rather than calling [`perform`], is what makes it the real path.
+pub(crate) fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
     let mut handlers = Handlers::new();
     for action in [
         // `Ctrl`+`F10` is the reason this list exists at all (SPEC.md section

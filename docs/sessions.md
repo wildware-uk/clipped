@@ -10,6 +10,52 @@ they start and finalises the recording when they stop
 ([#46]). What is deliberately not built is named as such throughout, with the
 issue that builds it.
 
+## Which process watches
+
+**`clipped-recorder serve --watch-for-games`**, in a shipped build, and
+`clipped-recorder watch` at a terminal. They run the same loop over the same
+session manager; the difference is what can reach the recordings it makes.
+
+```text
+serve --watch-for-games                    watch
+  the launch watcher                         the launch watcher
+  the control protocol   ◀── add_bookmark
+  the global hotkeys     ◀── Ctrl+F9
+```
+
+`serve` is what the desktop supervisor starts, what `start-at-login` writes into
+the `Run` key, and what registers the global hotkeys — so it is the only process
+in which a bookmark, a screenshot or a stop can reach a recording nobody asked
+for ([#421]). Before it gained the watcher, the two halves were in different
+processes and the recordings a user is most likely to want to bookmark were the
+ones nothing could bookmark.
+
+Giving `watch` a control endpoint of its own was the alternative and was
+rejected: [ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md) rests on
+exactly one process registering the combinations, and it is the endpoint that
+decides which one — a second recorder has already exited saying the pipe name
+was taken before it could ask Windows for a key. Two recorders both watching for
+games would be two processes both wanting them.
+
+So `watch` stays as it is: it records, and nothing can reach what it records.
+That is a terminal-facing command's honest shape, and it is why the flag exists
+rather than `serve` always watching — a `serve` started by hand, or by a test,
+must not begin recording whatever game happens to be running (AGENTS.md
+section 25).
+
+**What reaches an automatic recording.** The recording is handed to the same
+state `start_recording` puts one in, from the moment the game's window is found
+until the file is finished, so every command below is the one implementation
+there has ever been of it (`apps/recorder/src/serve.rs`):
+
+| Command | What it does to an automatic recording |
+| --- | --- |
+| `add_bookmark`, and `Ctrl`+`F9` | Marks the moment, in the recording's own bookmark file (`docs/bookmarks.md`) |
+| `take_screenshot` | Writes a still from a frame the recording already captured |
+| `stop_recording` | Finishes the file, and the sitting starts no further recording of a game that is still running — pressing stop is not undone five seconds later |
+| `get_status` | Reports it, so the window shows what is being recorded and offers no control that would be refused |
+| `save_replay` | Refused: an automatic recording keeps no replay buffer. Whether it should is [#427] |
+
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#38]: https://github.com/wildware-uk/clipped/issues/38
 [#41]: https://github.com/wildware-uk/clipped/issues/41
@@ -18,6 +64,8 @@ issue that builds it.
 [#55]: https://github.com/wildware-uk/clipped/issues/55
 [#240]: https://github.com/wildware-uk/clipped/issues/240
 [#241]: https://github.com/wildware-uk/clipped/issues/241
+[#421]: https://github.com/wildware-uk/clipped/issues/421
+[#427]: https://github.com/wildware-uk/clipped/issues/427
 
 ## What a session is
 
@@ -83,9 +131,13 @@ The other three modes are not offered rather than offered and doing nothing.
 Match Recording needs an integration that can say when a match begins, which is
 the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
 replay buffer a clip can be *saved* from: the buffer exists, fills from the same
-encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). What
-is still missing is anything that asks for one — a command ([#38]) or a hotkey
-that reaches the recorder.
+encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). The
+command exists ([#38]) and the hotkey now reaches an automatic recording ([#421])
+— what is still missing is a *buffer* on one. An automatic recording keeps none,
+because a rolling window costs about 140 MiB a minute and nothing has decided to
+spend it on every game somebody launches; that is [#427]. So `save_replay` is
+refused during an automatic session, in the recorder's own words, rather than
+being a key that quietly does nothing.
 
 ## How a launch becomes a recording
 
@@ -504,11 +556,12 @@ every session did before.
 `bookmarks` is **still always empty**. It is written so that a reader can tell
 "no bookmarks" from "a file that predates them", and its presence is not a claim
 that a session has none: a session's bookmarks are in its recordings' own files
-(`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
-yet either: `watch` serves no protocol, so no `add_bookmark` can reach it, and
-it registers no hotkey either — the global hotkeys belong to `serve`
-([ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md)). Joining the two
-is [#421](https://github.com/wildware-uk/clipped/issues/421).
+(`docs/bookmarks.md`). Bookmarks *are* taken during an automatic session now —
+`serve --watch-for-games` is one process with the watcher, the protocol and the
+hotkeys in it ([#421], and "Which process watches" above) — and each one is
+written into the bookmark file of the recording it is in, which is where a reader
+looks for it. A sitting recorded by `clipped-recorder watch` still has none,
+because nothing can reach a recording that command makes.
 
 An ambiguous session writes its candidates instead of a name it did not earn:
 

@@ -369,6 +369,14 @@ struct Active {
     /// one. Cleared when the game relaunches, which is a new process and a new
     /// question.
     no_window: bool,
+    /// Set when the user asked for the recording to stop, so the manager does
+    /// not start another one of a game that is still running.
+    ///
+    /// Cleared on a relaunch, exactly as [`Self::no_window`] is and for the same
+    /// reason: a new process is a new question, and somebody who stopped
+    /// recording one match has not said anything about the next one
+    /// ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+    stop_asked_for: bool,
     /// Set once the cap has been reported, so it is reported once.
     limit_reported: bool,
 }
@@ -525,6 +533,43 @@ impl SessionManager {
             .is_some_and(|active| active.recording.is_some())
     }
 
+    /// Records that the user asked for the recording that is running to stop.
+    ///
+    /// Returns whether there was an open session to tell.
+    ///
+    /// **It does not raise the stop signal**, and deliberately so: whoever the
+    /// user asked already holds it — in `serve` that is the recorder answering
+    /// `stop_recording`, which has to wait for the file to be finalised in order
+    /// to answer at all. What this decides is the *next* recording, which is a
+    /// question only the session owns. Without it, a stop that reaches an
+    /// automatic recording would be undone by
+    /// [`recording_restart_delay`](AutomaticSettings::recording_restart_delay)
+    /// seconds later: the game is still running, so the manager would treat the
+    /// end of the recording as a window that went and start another one
+    /// ([issue #421](https://github.com/wildware-uk/clipped/issues/421),
+    /// AGENTS.md section 27).
+    ///
+    /// It does not end the session. The sitting is still the sitting — the game
+    /// is still running, its plugins still belong to it, and a relaunch still
+    /// joins it — there is simply no more footage of it until the game restarts,
+    /// which is what somebody who pressed stop asked for.
+    pub fn asked_to_stop_recording(&mut self) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        active.stop_asked_for = true;
+        // A restart that had already been scheduled — by an outcome that
+        // arrived before this did — is cancelled here, so that the order the
+        // two arrive in cannot decide whether the stop holds.
+        active.pending_start = None;
+        tracing::info!(
+            session = active.session.id().as_str(),
+            "the recording was stopped by the user, so no further recording of this session will \
+             start while the game keeps running"
+        );
+        true
+    }
+
     /// Which of the processes that were already running are games.
     ///
     /// None of them will be recorded — see the module documentation — and this
@@ -629,7 +674,7 @@ impl SessionManager {
         );
 
         if !stopping {
-            if active.subject.alive && !active.no_window {
+            if active.subject.alive && !active.no_window && !active.stop_asked_for {
                 // The game is still running, so the session is not over: the
                 // window went, or changed size, or the machine slept. Another
                 // recording follows, after long enough that an exit the watcher
@@ -833,6 +878,9 @@ impl SessionManager {
             active.live_children = matched.child_pids;
             active.idle_since = None;
             active.no_window = false;
+            // A relaunch is a new process and a new question, so a stop the
+            // user asked for during the last one does not carry into it.
+            active.stop_asked_for = false;
             persist(self.settings.directory(), &active.session);
             active.recording.is_some()
         };
@@ -974,6 +1022,7 @@ impl SessionManager {
             idle_since: None,
             started_recordings: 0,
             no_window: false,
+            stop_asked_for: false,
             limit_reported: false,
         });
 

@@ -239,6 +239,15 @@ impl RecoverArgs {
     }
 }
 
+/// How long a game is given to put a window on screen before it is given up on.
+///
+/// A constant rather than a literal in the attribute below, because `serve
+/// --watch-for-games` records games at the same defaults `watch` does and takes
+/// no command line of its own to read them from
+/// (`crate::watch::RecordingPlan`). Two spellings of two minutes would be two
+/// answers to one question (AGENTS.md section 55).
+pub const DEFAULT_WINDOW_TIMEOUT_SECONDS: u32 = 120;
+
 /// Arguments to `clipped-recorder watch`.
 ///
 /// The video and audio options are `record`'s, and mean the same things. What
@@ -269,7 +278,7 @@ pub struct WatchArgs {
     /// can take much longer than that to reach a window while it compiles
     /// shaders, so this is not a timeout on anything going wrong; it is how
     /// long a game is allowed to take to appear.
-    #[arg(long, value_name = "SECONDS", default_value_t = 120)]
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WINDOW_TIMEOUT_SECONDS)]
     pub window_timeout: u32,
 
     /// Size to encode at, as WIDTHxHEIGHT, or `source` for the game's own size.
@@ -379,6 +388,22 @@ pub struct ServeArgs {
     // show what it will be.
     #[arg(long, value_name = "NAME")]
     pub endpoint: Option<String>,
+
+    /// Also record games automatically as they launch. [default: off]
+    ///
+    /// This is what a shipped Clipped runs: one process that watches for
+    /// games, serves the desktop application and owns the global hotkeys, so
+    /// that a bookmark, a screenshot and a stop reach a recording nobody had to
+    /// start ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+    /// `clipped-recorder watch` does the same watching in a terminal, with
+    /// nothing able to reach the recordings it makes.
+    ///
+    /// Off unless asked for, because a `serve` started by hand or by a test must
+    /// not begin recording whatever game happens to be running on the machine
+    /// (AGENTS.md section 25). `start-at-login` and the desktop supervisor both
+    /// pass it.
+    #[arg(long)]
+    pub watch_for_games: bool,
 }
 
 /// The mutually exclusive ways of naming one window to `list-windows`.
