@@ -1,4 +1,5 @@
-import type { LibraryRecording, TrashListing, TrashedItem } from '@clipped/shared';
+import type { ExportProgress, LibraryRecording, TrashListing, TrashedItem } from '@clipped/shared';
+import { exportFraction } from '@clipped/shared';
 import { type ReactNode, useState } from 'react';
 import { useNavigate } from 'react-router';
 
@@ -14,6 +15,7 @@ import {
 } from './library';
 import {
   describeActionProblem,
+  describeExportProgress,
   fileName,
   headlineActionProblem,
   useRecordingActions,
@@ -293,6 +295,33 @@ function Trash(): ReactNode {
 }
 
 /** The Library screen. */
+/**
+ * How far a running export has got, as a bar.
+ *
+ * A native `<meter>`, which is the pattern `SetupScreen`'s input level already
+ * uses: it is the element this is, it is announced as one, and it needs no
+ * stylesheet of its own.
+ *
+ * **With no `value` when the recording never said how long it was.** That is a
+ * meter's own way of saying "something is happening and I cannot say how much",
+ * and it is the honest drawing for an interrupted recording — which keeps every
+ * packet it wrote and no total (ADR 0001). A `value` of nought would be a claim,
+ * and one that never moved for the length of the copy. What advances in that
+ * case is the bytes, which are in the sentence above this.
+ */
+function ExportBar({ of }: { readonly of: ExportProgress }): ReactNode {
+  const fraction = exportFraction(of);
+
+  return (
+    <meter
+      aria-label={`Export progress for ${fileName(of.destination)}`}
+      min={0}
+      max={1}
+      value={fraction ?? undefined}
+    />
+  );
+}
+
 export function LibraryScreen(): ReactNode {
   /**
    * What has been typed, and what has been searched for.
@@ -423,7 +452,11 @@ export function LibraryScreen(): ReactNode {
               `That could not be kept from cleanup. ${describeLockProblem(locks.outcome.problem)}`}
             {favourites.outcome.state === 'idle' &&
               actions.outcome.state === 'working' &&
-              `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}
+              (actions.outcome.progress === null
+                ? `${actions.outcome.what} ${fileName(actions.outcome.path)}…`
+                : `${actions.outcome.what} ${fileName(actions.outcome.path)} — ${describeExportProgress(
+                    actions.outcome.progress,
+                  )}`)}
             {favourites.outcome.state === 'idle' &&
               actions.outcome.state === 'done' &&
               actions.outcome.message}
@@ -433,6 +466,26 @@ export function LibraryScreen(): ReactNode {
                 actions.outcome.problem,
               )}`}
           </p>
+          {/*
+           * The bar, drawn only once the recorder has actually said something.
+           *
+           * A copy of a four-second recording finishes before there is anything
+           * to report and this never appears; a copy of a two-hour one is what
+           * it exists for (issue #446). It is deliberately absent rather than
+           * sitting at nought against a recorder without the `export_progress`
+           * feature — that recorder copies the file exactly as it always did
+           * and cannot say how far it has got, and a bar that never moves is a
+           * control that does nothing (AGENTS.md section 27). The sentence
+           * above still says an export is running, which is what that recorder
+           * can honestly support.
+           *
+           * `max` is 1 with no value when the recording never said how long it
+           * was, which is what a native meter draws as "something is happening
+           * and I cannot say how much" — the bytes copied are in the sentence.
+           */}
+          {actions.outcome.state === 'working' && actions.outcome.progress !== null && (
+            <ExportBar of={actions.outcome.progress} />
+          )}
           {hasMore && (
             <button
               type="button"

@@ -532,6 +532,184 @@ describe('the Library screen', () => {
     );
   });
 
+  /*
+   * Issue #446, from the window's side. A copy of a four-second recording
+   * finishes before there is anything to draw; a copy of a two-hour one is what
+   * this is for, and the only thing that reaches the window while the control
+   * connection is blocked on the reply is an event.
+   *
+   * The export here never resolves until the test says so, which is what a long
+   * one looks like from here.
+   */
+  it('shows how far a long export has got, and stops showing it when the file is written', async () => {
+    const user = userEvent.setup();
+    let finish: (summary: unknown) => void = () => undefined;
+    const written = new Promise((resolve) => {
+      finish = resolve;
+    });
+
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => written,
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    // Before the recorder has said anything. The screen says an export is
+    // running — which it can honestly support against any recorder — and draws
+    // no bar, because a bar at nought that has never moved is a control that
+    // does nothing (AGENTS.md section 27). This is also exactly what an older
+    // recorder, which sends no progress at all, looks like for the whole copy.
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting cs2-20260811-201400-1\.mkv…/);
+    });
+    expect(
+      screen.queryByRole('meter'),
+      'a bar was drawn before the recorder had said how far it had got',
+    ).toBeNull();
+
+    const progress = (written_ms: number, packets: number, bytes: number): unknown => ({
+      event: 'export_progress',
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      written_ms,
+      total_ms: 6_540_000,
+      packets,
+      bytes,
+    });
+
+    runtime.emit(progress(1_308_000, 117_624, 1_962_240_822));
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exporting cs2-20260811-201400-1\.mkv — 20%/,
+      );
+    });
+    expect(Number(screen.getByRole('meter').getAttribute('value'))).toBeCloseTo(0.2, 2);
+
+    // And it advances. A screen that drew the first event and ignored the rest
+    // would satisfy every assertion above.
+    runtime.emit(progress(4_905_000, 441_090, 7_358_403_084));
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exporting cs2-20260811-201400-1\.mkv — 75%/,
+      );
+    });
+    expect(Number(screen.getByRole('meter').getAttribute('value'))).toBeCloseTo(0.75, 2);
+
+    // The reply is the only thing that says an export finished, and when it
+    // lands the bar goes with the sentence it replaced.
+    finish({
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      duration_ms: 6_540_000,
+      packets: 588_120,
+      bytes: 9_811_204_112,
+      elapsed_ms: 4_182,
+      lossless: true,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /Exported ace on mirage\.mp4 .* 9\.1 GB copied/,
+      );
+    });
+    expect(screen.queryByRole('meter'), 'the bar outlived the export it was drawn for').toBeNull();
+  });
+
+  /*
+   * An interrupted recording keeps every packet it wrote and no total, which is
+   * the property ADR 0001 chose Matroska for. There is no percentage to draw for
+   * one, and a denominator invented in the window would be a bar that lied — so
+   * what it shows is what advances.
+   */
+  it('says how much has been copied when the recording never said how long it was', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => new Promise(() => undefined),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    runtime.emit({
+      event: 'export_progress',
+      source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+      destination: 'E:\\share\\ace on mirage.mp4',
+      written_ms: 1_308_000,
+      packets: 117_624,
+      bytes: 1_962_240_822,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/1\.8 GB copied so far/);
+    });
+    // A meter with no value is the element's own way of saying "something is
+    // happening and I cannot say how much", which is the honest drawing here. A
+    // value of nought would be a claim.
+    expect(screen.getByRole('meter').getAttribute('value')).toBeNull();
+  });
+
+  /*
+   * Progress for somebody else's export must not move this one's bar. The
+   * events name the file they belong to precisely so that this is answerable,
+   * and matching on nothing would make a second window's copy of a different
+   * recording repaint this screen.
+   */
+  it('ignores progress for a recording it is not exporting', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => new Promise(() => undefined),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting/);
+    });
+
+    runtime.emit({
+      event: 'export_progress',
+      source: 'D:\\clips\\dota2-20260810-190000-1.mkv',
+      destination: 'E:\\share\\somebody else.mp4',
+      written_ms: 3_270_000,
+      total_ms: 6_540_000,
+      packets: 294_060,
+      bytes: 4_905_602_056,
+    });
+
+    // Nothing to wait for, which is the difficulty: give the subscription the
+    // same turn of the loop the accepted events above got, then assert nothing
+    // moved.
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(/Exporting cs2-20260811-201400-1\.mkv…/);
+    });
+    expect(
+      screen.queryByRole('meter'),
+      'a bar was drawn from another recording’s export',
+    ).toBeNull();
+  });
+
   it('says nothing at all when the Save As dialog is dismissed', async () => {
     // Dismissing a dialog is somebody changing their mind, not a failure, and a
     // screen that reported it would be noise (AGENTS.md section 28). The

@@ -461,6 +461,77 @@ pub struct ExportSummary {
     pub losses: Vec<String>,
 }
 
+/// How far an export has got, while it is still going.
+///
+/// The payload of [`Event::ExportProgress`](crate::Event::ExportProgress), and
+/// the answer to a copy of a two-hour recording looking like a hang
+/// ([issue #446](https://github.com/wildware-uk/clipped/issues/446)). It has to
+/// be an event and not a field on the reply, because the reply arrives when the
+/// copy has finished, which is the moment there is nothing left to report.
+///
+/// # What identifies it
+///
+/// [`Self::destination`], which the client chose and named in the request that
+/// started this. There is no request identifier on the event path — a
+/// `CommandHandler` is never shown the [`Request`](crate::Request) — and
+/// inventing one for this would be a change to what `export_recording` means
+/// rather than an addition to the protocol. The destination is enough: a
+/// destination that already exists is refused, so two exports cannot be writing
+/// the same file at once.
+///
+/// # Measurements, not a percentage
+///
+/// A window that wants a percentage divides, and gets to decide what to draw
+/// when there is nothing to divide by. [`Self::total_ms`] is absent for a
+/// recording whose container declares no duration — an interrupted one keeps
+/// every packet it wrote and no total, which is the property ADR 0001 chose
+/// Matroska for — and a single `percent` field could only have spelled that as
+/// zero. Drawing "0 %" for "no idea" is the sort of control that does nothing
+/// AGENTS.md section 27 forbids; [`Self::bytes`] is what still advances, and is
+/// what an unbounded indication should be showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportProgress {
+    /// The recording being copied, unchanged by the copy.
+    pub source: String,
+    /// The file being written. This is what identifies the export.
+    pub destination: String,
+    /// How much of the recording's own timeline has been copied so far.
+    ///
+    /// The same measurement [`ExportSummary::duration_ms`] carries, so the last
+    /// progress event of a copy and the reply that follows it agree rather than
+    /// disagreeing by whatever the reporting interval was.
+    pub written_ms: u64,
+    /// How long the recording says it is, where it says at all.
+    ///
+    /// Absent rather than zero when the container declares no duration. See the
+    /// type's documentation: the two are different things to draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
+    /// How many coded packets have been copied, across every carried track.
+    pub packets: u64,
+    /// How many bytes of coded media have been copied, before the container's
+    /// own overhead.
+    pub bytes: u64,
+}
+
+impl ExportProgress {
+    /// How far through, between zero and one, or [`None`] if the recording never
+    /// said how long it was.
+    ///
+    /// Here rather than in the window so that both ends of the protocol agree
+    /// about what "no total" means, including the clamp: a source's declared
+    /// duration and the end of its last packet need not agree to the
+    /// millisecond, and a progress bar that reads 101 % is a bug report.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f64> {
+        let total = self.total_ms?;
+        if total == 0 {
+            return None;
+        }
+        Some((self.written_ms as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
 /// Why a recording ended.
 ///
 /// Mirrors `clipped_session::EndReason`. It is restated here rather than
@@ -713,5 +784,38 @@ mod tests {
         )
         .expect("an unknown field must not break a known message");
         assert!(status.is_recording());
+    }
+
+    #[test]
+    fn an_export_fraction_is_none_when_there_is_nothing_to_divide_by() {
+        let progress = |written_ms, total_ms| {
+            ExportProgress {
+                source: r"D:\clips\match.mkv".to_owned(),
+                destination: r"D:\clips\match.mp4".to_owned(),
+                written_ms,
+                total_ms,
+                packets: 1,
+                bytes: 1,
+            }
+            .fraction()
+        };
+
+        // An interrupted recording declares no duration. `None` rather than
+        // zero, because a window draws an unbounded indication for one and a bar
+        // at nought for the other, and the second is a control that does nothing
+        // (AGENTS.md section 27).
+        assert_eq!(progress(1_308_000, None), None);
+        // And a total of nought, which would otherwise be a division by zero
+        // producing infinity or a NaN — either of which reaches a `<meter>` as
+        // an attribute nobody can draw.
+        assert_eq!(progress(0, Some(0)), None);
+
+        assert_eq!(progress(0, Some(6_540_000)), Some(0.0));
+        assert_eq!(progress(1_635_000, Some(6_540_000)), Some(0.25));
+        assert_eq!(progress(6_540_000, Some(6_540_000)), Some(1.0));
+        // A recording's declared duration and the end of its last packet need
+        // not agree to the millisecond, and a progress bar reading 101 % is a
+        // bug report.
+        assert_eq!(progress(6_600_000, Some(6_540_000)), Some(1.0));
     }
 }

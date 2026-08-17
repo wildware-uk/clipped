@@ -395,6 +395,14 @@ impl NotificationPolicy {
             RecorderLinkEvent::HotkeysUnavailable { conflicts } => {
                 self.hotkeys_unavailable(conflicts)
             }
+            // Deliberately no notification. An export is something the person
+            // asked for and is watching a bar for on the screen they asked from
+            // (issue #446); a desktop notification for each percentage point,
+            // or even one at the end of a copy somebody is sitting in front of,
+            // is the interruption AGENTS.md section 28 exists to prevent. It is
+            // matched rather than fallen through so that the next event added
+            // to this enumeration has to be thought about here.
+            RecorderLinkEvent::ExportProgress(_) => None,
         }
     }
 

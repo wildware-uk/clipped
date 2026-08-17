@@ -165,6 +165,18 @@ fn main() -> ExitCode {
                     .collect::<Vec<&str>>()
                     .join(",")
             )),
+            // How far a running export has got (issue #446). The fraction and
+            // the file, rather than the whole event: a test reading this line
+            // by line asserts that the figure advances, and the destination is
+            // what says which export it belongs to.
+            RecorderLinkEvent::ExportProgress(progress) => say(&format!(
+                "export_progress={} {}",
+                progress.fraction().map_or_else(
+                    || "unmeasured".to_owned(),
+                    |fraction| format!("{:.0}%", fraction * 100.0)
+                ),
+                progress.destination
+            )),
         }
     }
 

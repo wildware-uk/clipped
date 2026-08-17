@@ -331,8 +331,8 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `settings`,
-`microphone_level`, `startup`, `automatic`.
+`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`,
+`export_progress`, `settings`, `microphone_level`, `startup`, `automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -378,6 +378,18 @@ nobody would question it. Whether the recording that is running has a buffer to
 save from is `active_recording.replay_seconds`, because that is a property of
 the recording rather than of the build: a window offering the control needs both
 to be true.
+
+`export_progress` is the one a client checks before *subscribing* rather than
+before drawing anything, and that difference is the whole reason it exists. What
+it gates is the [`exports`](#events) stream, and a stream a recorder does not
+have is refused **by name, and the refusal takes the whole events connection
+with it**. A window that asked a recorder built before
+[issue #446](https://github.com/wildware-uk/clipped/issues/446) for `exports`
+would therefore lose its `status` subscription as well, and would have traded a
+missing progress bar for a window that no longer knows whether anything is being
+recorded. A recorder without the feature exports exactly as it always did and
+says nothing while it does, which is neither failure nor completion: the reply
+is still the thing that says the copy finished.
 
 `settings` says the build has all three of [`get_settings`](#the-settings),
 `apply_settings` and [`get_audio_devices`](#get_audio_devices) — one build has
@@ -538,6 +550,25 @@ subscription that was accepted and then never delivered anything would be a UI
 showing an empty panel with no explanation. The difference is that a stream is
 something a client *asks for* and can be told about, while an event and a detail
 arrive unannounced.
+
+**That refusal takes the whole events connection with it, and it is the sharp
+edge in this policy.** A `hello` naming three streams is one handshake with one
+answer, so a recorder that has never heard of one of the three refuses all of
+them — including the ones it does have — and closes. A client that asked an
+older recorder for a stream added last month is therefore not left without that
+stream; it is left without `status` and `errors` as well, having traded a panel
+it could have done without for a window that no longer knows whether anything is
+being recorded.
+
+So **a new stream is only additive if it is paired with a feature name, and the
+client checks that name before it asks**. Adding a stream is on the additive
+list above and costs no version bump, but what makes that harmless is a client
+reading [`welcome.features`](#the-handshake) rather than subscribing hopefully.
+`exports` and `export_progress` are that pair
+([#446](https://github.com/wildware-uk/clipped/issues/446)), and
+`clipped-ipc`'s own link is where the check is made — `subscription` in
+`crates/ipc/src/supervisor/link.rs` asks for `status` and `errors`
+unconditionally and for `exports` only when the recorder named the feature.
 
 ## Commands
 
@@ -1139,6 +1170,37 @@ says what, in words. It is never a picture or a sound track: a container that
 cannot carry one of those is a refusal, because a file missing one of its audio
 tracks looks exactly like a file that never had it.
 
+**How far the copy has got arrives as events while it runs**, on the
+[`exports`](#events) stream, because the reply is in no position to say it: the
+reply arrives when the index has been written, which is the moment there is
+nothing left to report
+([#446](https://github.com/wildware-uk/clipped/issues/446)). A four-second
+recording copies in milliseconds and needs none of this; a two-hour one is
+gigabytes, and a window with nothing on screen reads as a hang and invites
+somebody to kill the recorder mid-write. A client asks for that stream only when
+the recorder advertises `export_progress` — see
+[the handshake](#the-handshake) for what asking without checking costs — and a
+recorder that does not advertise it copies exactly as it always did and says
+nothing meanwhile.
+
+**The progress and the reply travel on different connections**, which is the
+[roles](#connections-and-roles) split showing through, and it means a connection
+going away part-way through has two different answers:
+
+- **the events connection drops.** Progress stops arriving and the export
+  carries on: nothing about the copy was being driven by a subscriber, and the
+  reply still lands on the control connection.
+- **the control connection drops.** The request fails — the desktop host reports
+  it as `recorder_unreachable`, deliberately not one of the protocol's own codes,
+  so that "there was no recorder" cannot be read as "the recorder said no"
+  (`docs/desktop-ui.md`) — but the copy on the recorder's side runs to
+  completion regardless, so the MP4 may very well be sitting there. What was lost
+  is the answer, not the file.
+
+**Silence is never completion**, on either path. The reply is the only thing
+that says an export finished, and the last progress event before a gap is no
+promise that there was not another.
+
 ### `open_playback`
 
 Opens a finished recording so that the desktop window can play it, on one of its
@@ -1690,10 +1752,19 @@ Sent on an `events` connection, unprompted:
  "error":{"code":"recording_failed","message":"the encoder stopped accepting frames"}}
 ```
 
+```json
+{"type":"event","event":"export_progress",
+ "export":{"source":"D:\\clips\\cs2-20260811-201400-1.mkv",
+           "destination":"D:\\clips\\cs2-20260811-201400-1.mp4",
+           "written_ms":2616000,"total_ms":6540000,
+           "packets":235248,"bytes":3924481644}}
+```
+
 | Stream | Events | This build |
 | --- | --- | --- |
 | `status` | `status_changed`, `session_ended` | yes |
 | `errors` | `recording_failed` | yes |
+| `exports` | `export_progress` | yes |
 | `metrics` | live throughput, dropped frames, encoder load | no — M14, [#100](https://github.com/wildware-uk/clipped/issues/100) |
 
 **A `status` subscription opens with the current state**, before anything
@@ -1723,6 +1794,49 @@ with the two fields only an ended sitting has: `ended_at`, and `end_reason` when
 there is one to give. Whether a sitting is over is therefore the presence of
 `ended_at` rather than a separate type, which is the answer `library_sessions`
 had already settled on for the same question.
+
+**`export_progress` is how far a running [`export_recording`](#export_recording)
+has got**, which the reply cannot say because it arrives when the MP4's index
+has been written — the moment there is nothing left to report
+([#446](https://github.com/wildware-uk/clipped/issues/446)). It is a stream of
+its own rather than more traffic on `status`, and the bounded queue above is the
+reason: a copy of a two-hour recording sharing one 64-deep queue with
+`status_changed` would mean a slow reader losing *status* — whether anything is
+being recorded, which is what the window is for — to make room for percentages.
+A stream is also something a client can decline, which an event on a stream it
+already wanted is not.
+
+**The rate is chosen so that a bar moves rather than flickers.** The muxer
+reports once per second of the *recording* copied — media time rather than wall
+clock, so the copying thread never reads a clock — which for a two-hour
+recording is 7,200 reports. The recorder then thins those to one event per whole
+percentage point, at most 101 for a copy of any length, and every one of them
+moves a bar by an amount somebody can see. Where there is no total to divide by
+it sends one per ten seconds of recording copied instead
+(`apps/recorder/src/export.rs`).
+
+**`total_ms` is absent when the recording's container declares no duration.**
+That is not a rare case: an interrupted recording keeps every packet it wrote
+and no total, which is the property
+[ADR 0001](adr/0001-mkv-archival-container.md) chose Matroska for. A client shows
+an unbounded indication then, moving on `bytes`, rather than inventing a
+denominator. It is also why these are measurements rather than a `percent`
+field: a single number could only have spelled "no idea" as zero, and a bar
+sitting at 0 % for the length of a copy is exactly the control that does nothing
+AGENTS.md section 27 forbids. Whoever draws the bar divides, and decides what to
+draw when there is nothing to divide by.
+
+**`destination` is what identifies the export**, and there is nothing else it
+could be: an event carries no request identifier, because a `CommandHandler` is
+never shown the `Request`. The destination is enough, because a destination that
+already exists is refused — so two exports cannot be writing the same file at
+once.
+
+A client asks for `exports` only when the recorder advertises `export_progress`
+in [`welcome.features`](#the-handshake); asking one that does not costs it every
+other stream it asked for in the same handshake, which
+[the compatibility policy](#an-unknown-error-code-error-detail-end-reason-or-event-kept)
+sets out.
 
 ## Errors
 
