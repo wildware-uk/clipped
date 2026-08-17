@@ -42,6 +42,11 @@
 //! packets on one of them, and the reason a recording's sources cannot end up
 //! sharing a track by accident (AGENTS.md section 21).
 //!
+//! [`remux_to_mp4_carrying`] is the same copy taking one named sound track, and
+//! it exists because a `<video>` cannot choose one: hearing the microphone track
+//! of a recording on its own means being handed a file that holds that track and
+//! no other ([`AudioTracks`], issue #304).
+//!
 //! [`remux_to_mp4`] copies a finished recording into MP4 without decoding it, so
 //! that a recording can be uploaded somewhere that will not take Matroska
 //! without waiting for a re-encode or losing quality to one (ADR 0001).
@@ -104,7 +109,8 @@ pub use crate::audio::{AudioSource, AudioTrackWriter, RECORDING_AUDIO_CODEC};
 pub use crate::error::{AvError, MuxError};
 pub use crate::packet::{EncodedPacket, PacketTimestamp};
 pub use crate::remux::{
-    remux_to_mp4, Carriage, Mp4Plan, PlannedTrack, RemuxError, RemuxSummary, TrackKind,
+    remux_to_mp4, remux_to_mp4_carrying, AudioTracks, Carriage, Mp4Plan, PlannedTrack, RemuxError,
+    RemuxSummary, TrackKind,
 };
 pub use crate::track::{
     AudioCodec, AudioTrack, FrameRate, InvalidLanguage, Language, RecordingLayout, TrackId,

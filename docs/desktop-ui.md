@@ -189,11 +189,12 @@ something creating one (#91, #76), favourites on anything being favouritable
 [Issue #399](https://github.com/wildware-uk/clipped/issues/399). The Library
 listed what had been recorded and nothing could be done with it: the core loop of
 a recorder is record, find, watch, share, and two of the four were missing. Each
-recording in the Library now carries three controls, and the answer to "where
+recording in the Library now carries four controls, and the answer to "where
 does this actually happen" is different for each.
 
 | Control | Where it happens | What the window is allowed |
 | --- | --- | --- |
+| **Play** | Here, on the playback screen: it opens `/clip/:recordingId` with the row it was drawn for ([#304](https://github.com/wildware-uk/clipped/issues/304), and the playback screen below) | Nothing new. The media reaches the window over the `clip` scheme this process registers |
 | **Open** | `open_recording` in `src-tauri/src/main.rs`, through `tauri-plugin-opener`. Windows opens the file with whatever the user opens video with | Nothing new. It is a `#[tauri::command]` |
 | **Show in Explorer** | `reveal_recording`, the same way, with the file selected | Nothing new |
 | **Export MP4** | The **recorder**: `export_recording` over the control protocol, answered by `clipped_muxer::remux_to_mp4` ([ipc.md](ipc.md), [muxing.md](muxing.md)) | `dialog:allow-save`, so the interface can ask the operating system where the MP4 should go |
@@ -233,12 +234,11 @@ with the reason on each, rather than hidden: a control that would fail must not
 be offered as one that would work, and a row with nothing on it explains nothing
 (AGENTS.md sections 27 and 45).
 
-**Playing a recording inside this window is still not offered**, and Open is why
-that is acceptable rather than a gap: watching your own footage works today, in
-the player you already have. The window's own playback is
-[#304](https://github.com/wildware-uk/clipped/issues/304), blocked on four
-things including WebView2 being unable to decode the uncompressed sound the
-archival file carries ([#392](https://github.com/wildware-uk/clipped/issues/392)).
+**Open is still here now that Play exists**, and deliberately: the window plays
+one sound track at a time and offers the media element's own transport, and
+somebody who wants frame stepping, a second monitor or the player they have
+configured should have the file. Watching in Clipped and watching in VLC are
+different requests.
 
 ### What is being recorded right now, and the button that changes it
 
@@ -863,154 +863,141 @@ a report with no logs in it would be an export in name only
 ## The playback screen
 
 SPEC.md section 42 and [issue #52](https://github.com/wildware-uk/clipped/issues/52).
-The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx` and
-everything it decides is in `clipPlayback.ts`, which is pure and therefore the
-part with tests.
+The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx`,
+everything it decides is in `clipPlayback.ts`, and the round trip that gets it
+media is `playback.ts`.
 
 The ticket asks for playback with transport controls, keyboard shortcuts,
-frame-accurate seeking and an audio-track selector. **None of it is drawn,
-because this window cannot play a Clipped recording at all.** That is not a
-scheduling remark; it is four independent facts, and the design that follows from
-them is below.
+frame-accurate seeking and an audio-track selector. **A recording plays, with
+sound, and any of its tracks can be chosen**
+([#304](https://github.com/wildware-uk/clipped/issues/304)). What is not built is
+at the end of this section.
 
-### Why a `<video>` cannot be pointed at a recording
+### What was believed, and what was measured
 
-Each of these is enough on its own, so fixing any single one changes nothing.
-They are on the screen itself, with the evidence beside each, in the same
-contract the unbuilt screens keep.
+This screen used to carry a table of four facts explaining why a `<video>` could
+not be pointed at a recording. Two of them were wrong, and they were the two
+that had never been measured: that WebView2's Matroska support is the WebM
+subset, and that no browser decodes PCM. **It plays a Clipped recording as it
+stands** — Matroska, AV1 picture, uncompressed PCM sound — and decodes both.
+[ADR 0011](adr/0011-what-the-webview-plays.md) is the measurement, the method and
+what it means; it is worth reading before anything here is changed, because it
+also says how the reasoning failed. `canPlayType` and `MediaSource` do answer as
+the two facts predicted; the `src=` path does not, because it goes to Chromium's
+bundled FFmpeg demuxer rather than to a codec allow-list.
 
-| What stops it | Where it can be checked |
+The two facts that stood:
+
+| What is true | What follows |
 | --- | --- |
-| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, and none of the four reaches the file system — a Save As dialog returns a path a person typed, not a handle to anything; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
-| **A recording is Matroska, and WebView2 does not demux it.** | [ADR 0001](adr/0001-mkv-archival-container.md) writes recordings into MKV so a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video. |
-| **The audio is uncompressed PCM, and nothing in Clipped encodes audio.** | [muxing.md](muxing.md): every track is 16-bit PCM because no crate in the workspace encodes audio ([#28](https://github.com/wildware-uk/clipped/issues/28)). No browser decodes PCM in MP4. |
-| **A media element cannot choose an audio track.** | `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. |
+| **This window cannot load a file from the disk.** No asset protocol, no file-system permission, and a content-security policy that permits media from the bundle and from one origin | The media is served *to* the window, by this process, over a scheme that serves only what the recorder has opened |
+| **A media element cannot choose a sound track.** `HTMLMediaElement.audioTracks` is not implemented in Chromium, and the demuxer takes the *first* track — Matroska's default-track flag is ignored | Choosing a track means being handed a file that carries it, so the choice happens on the way out of the recorder |
 
-`apps/desktop/src/playbackReach.test.ts` reads the first of those out of the
-three files rather than asserting it in prose: the day somebody enables the asset
-protocol, grants a file-system permission or widens the policy, that test fails
-and brings them here. A claim in a comment is true on the day it is written; a
-claim a test resolves is true whenever it passes.
+`apps/desktop/src/playbackReach.test.ts` reads the first of those out of
+`tauri.conf.json`, `capabilities/default.json` and `src-tauri/src/playback.rs`
+rather than asserting it in prose, and it describes the boundary as it now is:
+the day somebody enables the asset protocol, grants a file-system permission or
+widens the policy beyond that one origin, it fails and brings them here.
 
-The fourth row is the one that decides the shape of the answer. **No arrangement
-that hands a whole multi-track file to a media element can satisfy #52's first
-acceptance criterion**, however the container question is settled, because the
-element has no way to switch tracks. Track selection has to happen on the way
-*out* of the recorder.
+### How a recording reaches the element
 
-### The decision, and what it costs
+Three hops, and each is where it is for a reason:
 
-**The recorder serves the media; the window plays a stream, one track at a time.**
-[Issue #304](https://github.com/wildware-uk/clipped/issues/304) builds it.
+1. **The screen asks the Tauri host** — `open_playback`, with the recording's
+   path and, when somebody has chosen one, a sound track.
+2. **The host asks the recorder**, over the control protocol
+   ([ipc.md](ipc.md)). It has to: `workspace_layering.rs` permits `src-tauri`
+   exactly one crate of this workspace, `clipped-ipc`, so the window's process
+   links no demuxer and cannot so much as list a recording's tracks.
+3. **The recorder answers with a file**, and the host serves it.
 
-Concretely: a protocol command opens a recording for playback and reports its
-duration, its dimensions and its track list; the recorder remuxes the source into
-fragmented MP4, copying the video without re-encoding it and encoding the chosen
-audio track to AAC; and it answers byte ranges, so a seek is a range request
-rather than a re-read. The Tauri host registers a URI scheme that relays those
-ranges and the screen points a `<video>` at it. The compatibility mix is the
-default, which is what the container already flags ([muxing.md](muxing.md)), and
-choosing another track is a new URL at the current time.
+What the recorder answers with is the decision this screen turns on:
 
-The recorder rather than the window, because
-`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
-permits `src-tauri` exactly one crate of the workspace, `clipped-ipc`. The window
-may not link `clipped-muxer`, so it cannot remux or encode anything in its own
-process, and it should not: that is the boundary
-[ADR 0002](adr/0002-separate-recorder-process.md) exists to keep.
+| The track asked for | What is served | What it costs |
+| --- | --- | --- |
+| the recording's first sound track — for a Clipped recording, the compatibility mix, which leads the file ([muxing.md](muxing.md)) | **the recording itself** | one `Mp4Plan::inspect`: opened, described, closed |
+| any other | a copy carrying the picture and that track alone, in `%LOCALAPPDATA%\Clipped\playback` | one pass over the file, and a copy of it on disk until it is swept |
 
-What it costs, stated rather than glossed:
+The copy is still a **stream copy** — `clipped_muxer::remux_to_mp4_carrying`,
+nothing decoded and nothing encoded, PCM carried into MP4 as `ipcm`. There is no
+audio encoder anywhere in this path, which is what
+[#392](https://github.com/wildware-uk/clipped/issues/392) was about.
 
-- **A live remux and an audio encode for every recording watched**, and again for
-  every track switched to. Video is copied, so the cost is the audio encode and
-  the container work, not a transcode — but it is not free, and it happens beside
-  a game.
-- **An audio encoder Clipped does not have.** Measured on this machine: the
-  pinned LGPL FFmpeg build carries FFmpeg's native `aac` encoder
-  (`third-party/ffmpeg/current/bin/ffmpeg -encoders`), so this is wiring rather
-  than a new dependency or a fresh licence question — but it is still a subsystem
-  that does not exist.
-- **Seek accuracy is the video's keyframe interval** unless the served stream
-  carries an index. "Frame-accurate seeking where practical" is the ticket's own
-  wording, and this is where the practical limit sits.
-- **Privilege.** The window gains a way to receive bytes it could not before.
-  #304's last criterion is that whatever it gains is the smallest thing that
-  works, and that `playbackReach.test.ts` is rewritten to describe the new
-  boundary rather than deleted.
+### What the window gains, and why it is the smallest thing that works
 
-The alternatives, and why not:
+A URI scheme, `clip`, registered by this process in `src-tauri/src/playback.rs`.
+It serves **nothing at all** until `open_playback` has answered for a recording;
+the window is handed `http://clip.localhost/3` and never a path; and a number
+nothing has registered is a 404. So the reach the interface gains is exactly
+"the recordings you have opened for playback in this session", and it is a
+consequence of the recorder's answer rather than something the window can ask
+for. `capabilities/default.json` gains **nothing**: a scheme this process
+registers is not a permission the interface holds.
 
-| Instead | Why not |
-| --- | --- |
-| Point a `<video>` at the MKV through Tauri's asset protocol | Rows two, three and four above. It is the cheapest thing to write and it plays nothing. |
-| Remux the whole file to MP4 first ([#92](https://github.com/wildware-uk/clipped/issues/92)) and play that | #92 copies streams without re-encoding, so the video arrives and **the sound does not** — PCM has nowhere to go in an MP4 a browser will decode. It also writes a second full-size copy of every recording somebody watches, and makes playback wait for a pass over the whole file. Even with the audio encoded it still cannot answer #52's track selector: one file, one track a media element can reach. |
-| Convert on the fly to WebM instead | The video would have to be re-encoded, because WebM cannot carry H.264 or HEVC. That is the one thing worth avoiding: a transcode of gameplay footage beside a running game. |
-| A native video surface behind the webview | No transport, no keyboard handling and no layout that the rest of the interface shares, and Tauri offers nothing for it. It is the answer if the stream above proves too expensive, and it is a much larger change. |
+The alternative was Tauri's asset protocol, and it was rejected on privilege
+rather than on playback — it serves any path inside a scope, and the only scope
+that covers a recordings directory that is a *setting* is every path on the
+machine. That is the same objection `open_recording` and `reveal_recording`
+exist for.
 
-### What it does show
+The scheme answers **byte ranges**, so a seek is a range request rather than a
+re-read, and each answer is bounded rather than being the rest of the file: a
+protocol handler answers with bytes in memory, and a recording is measured in
+gigabytes.
 
-The one thing that is real: **what the recorder link says about this recording.**
-The window follows a single recorder, so it learns of exactly two recordings —
-the one being written now, and the one a recorder died in the middle of, whose
-file [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md) says naming is the
-whole of recovery. `resolveClip` has one answer for each, and one for everything
-else.
+### The track selector
 
-That third answer is the careful one. It reads **"Not known to this window"** and
-explains that the library index is where a recording would be looked up and that
-this screen has not looked in it
-([#52](https://github.com/wildware-uk/clipped/issues/52)). Since #301 the index
-*can* be read — the Library screen does — but the identifier in the address bar
-is the recorder's `recording_id` for a live recording and the index keys
-recordings by its own integer, so reconciling the two is work of its own.
-It does **not** say the recording is missing. This window has not been to the
-disk and cannot; `missing_since` in the library index is the only thing that has
-looked ([#56](https://github.com/wildware-uk/clipped/issues/56)), and reporting a
-file as gone because *this* window could not find it is exactly the invented
-state AGENTS.md section 27 is about. `clipPlayback.test.ts` asserts the wording
-carries none of "missing", "gone" or "deleted", so the distinction cannot be lost
-to an edit that reads better.
+Buttons rather than a `<select>`, one per sound track, with `aria-pressed` on
+the one playing. Pressing one asks the recorder for that track and points the
+element at what comes back — and the position is carried across, because
+somebody four minutes into a match who wants to hear the microphone asked for
+the microphone, not to start again.
 
-Where a recording *is* known, the screen shows the four fields the protocol
-carries and no more: the file in full, the capture target, and how long the
-recorder had been recording when it last said so — labelled as a lower bound
-rather than a duration, because nothing has opened the file, and a recording a
-killed recorder left may have no Matroska trailer at all
-([#283](https://github.com/wildware-uk/clipped/issues/283)). **There is no
-duration, no thumbnail and no waveform**, because there is nothing to get them
-from.
+A track the recording did not name is shown by its position — "Audio 2" — rather
+than given a name here. What is on it is a fact about the file, and this window
+has not heard it.
 
-### Why it is reachable from the sidebar, and nowhere else
+### What is drawn only when it is true
 
-A screen nothing links to is a screen nobody finds. The one recording this window
-can name is the one a recorder died writing, and the sidebar notice that names
-the file it left now carries a link to that recording's screen.
+- **A recording still being written gets no player.** Its container has no
+  trailer yet, so there is nothing whose length a transport could describe, and
+  another process is appending to it. The screen says so.
+- **A recording whose file has gone gets the recorder's own sentence** — it
+  names the file and says what probably happened to it — with no transport above
+  it (AGENTS.md sections 27 and 45).
+- **The length, the position and the picture size are the element's own
+  measurements** of the file it was handed. Nothing in this window computes a
+  duration or counts a clock, which is the same rule the record control keeps.
 
-That link is a destination and not a control: it does not claim the recording
-will play, and the screen it leads to says so in its first paragraph. It is the
-same bargain the tray's Open Library keeps — "a thing that happens, rather than a
-control that does nothing". Everything else waits on this screen looking a
-recording up in the library index (#52); Home and Library (#60), which now list
-what the index holds, are what will open this screen properly.
+### Which recording it plays
+
+Three sources, in order: the row handed over by the screen somebody came from —
+the Library's Play — then the recording the link says is being written now, then
+the one a recorder died in the middle of
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
+
+The row is handed over rather than looked up because the Library has it in its
+hand when the button is pressed, and this screen would otherwise read the whole
+library back to find one file. A **reload** has no row, and the screen says it
+has not been told which file this recording is rather than inventing one:
+looking a recording up cold, by the identifier in the address bar, is
+[#52](https://github.com/wildware-uk/clipped/issues/52). It does **not** say the
+recording is missing — this window has not been to the disk, and reporting a file
+as gone because *this* screen could not find it is exactly the invented state
+AGENTS.md section 27 is about.
 
 ### What is not built
 
-Every row of the screen's second table, each naming the work that supplies it:
-playing anything at all and choosing a track (#304); opening a recording somebody
-picked, and saying a file has gone (#52 — the read that carries both landed with
-#301, and this screen does not yet use it); a poster frame, which is the thing
-[#57](https://github.com/wildware-uk/clipped/issues/57) has been waiting for —
-thumbnails are generated, cached and tested, and *nothing has ever drawn one*, so
-on a real machine none is produced; a waveform
-([#66](https://github.com/wildware-uk/clipped/issues/66)); and bookmarks and
-events on a timeline ([#64](https://github.com/wildware-uk/clipped/issues/64) and
-[#65](https://github.com/wildware-uk/clipped/issues/65)).
-
-The alternative to that table was a transport bar, a scrubber and a track
-selector drawn over a black rectangle. That is AGENTS.md section 27 broken twice
-in one screen — controls that do nothing, above a picture Clipped never made —
-and the scrubber is the worst of the three, because a scrubber implies a duration
-and nothing in this window has measured one.
+Frame-accurate seeking and keyboard shortcuts of Clipped's own: what is drawn is
+the media element's transport, which seeks to a keyframe (SPEC.md section 42,
+[#52](https://github.com/wildware-uk/clipped/issues/52)). A poster frame, which
+is the thing [#57](https://github.com/wildware-uk/clipped/issues/57) has been
+waiting for — thumbnails are generated, cached and tested, and *nothing has ever
+drawn one*. A waveform ([#66](https://github.com/wildware-uk/clipped/issues/66)),
+and bookmarks and events on a timeline
+([#64](https://github.com/wildware-uk/clipped/issues/64) and
+[#65](https://github.com/wildware-uk/clipped/issues/65)). Each is a row on the
+screen naming the work, which is the contract every unbuilt row keeps.
 
 ## The tray
 
