@@ -39,7 +39,7 @@
 //! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
 //! | [`start_at_login`] | The `start-at-login` subcommand: the opt-in registry value |
-//! | [`watch`] | The `watch` subcommand: recording games automatically |
+//! | [`watch`] | Recording games automatically: the `watch` subcommand, and the same loop inside `serve --watch-for-games` |
 //! | [`recover`] | The `recover` subcommand: the footage a killed recorder left |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 

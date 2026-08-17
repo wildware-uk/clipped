@@ -56,6 +56,7 @@ import type {
   LibraryEventLane,
   RestoredItem,
   TrashEmptied,
+  FavouriteMark,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
@@ -78,6 +79,8 @@ import type {
   ReplaySummary,
   ScreenshotSummary,
   ServerMessage,
+  SessionRecording,
+  SessionSummary,
   Welcome,
 } from './protocol';
 
@@ -370,6 +373,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'restored', restored: readRestoredItem(reply['restored']) };
     case 'trash_emptied':
       return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
+    case 'favourited':
+      return { reply: 'favourited', mark: readFavouriteMark(reply['mark']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -408,6 +413,7 @@ function readReply(value: JsonValue | undefined): Reply {
 function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
   const recording = object(value, 'a recording');
   const replay = optionalNumberField(recording, 'replay_seconds', 'a recording');
+  const session = recording['session'];
   return {
     recording_id: stringField(recording, 'recording_id', 'a recording'),
     output: stringField(recording, 'output', 'a recording'),
@@ -417,6 +423,53 @@ function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
     // rather than a gap: the recorder skips the field entirely for one that
     // was started without one.
     ...(replay === undefined ? {} : { replay_seconds: replay }),
+    // Absent is "this recording belongs to no sitting", which is also an
+    // answer: it is what a recorder driving `record` on its own reports.
+    ...(session === undefined || session === null ? {} : { session: readSession(session) }),
+  };
+}
+
+/**
+ * One sitting, open or ended.
+ *
+ * The same reader for both, because they are the same object: `ended_at` and
+ * `end_reason` are what an ended one has and an open one has not.
+ */
+function readSession(value: JsonValue | undefined): SessionSummary {
+  const session = object(value, 'a sitting');
+  const what = 'a sitting';
+  const gameId = optionalStringField(session, 'game_id', what);
+  const gameName = optionalStringField(session, 'game_name', what);
+  const endedAt = optionalStringField(session, 'ended_at', what);
+  const endReason = optionalStringField(session, 'end_reason', what);
+  return {
+    session_id: stringField(session, 'session_id', what),
+    // Absent is a sitting the catalogue would not attribute, which is a sitting
+    // with no game rather than a sitting whose game is unknown.
+    ...(gameId === undefined ? {} : { game_id: gameId }),
+    ...(gameName === undefined ? {} : { game_name: gameName }),
+    started_at: stringField(session, 'started_at', what),
+    ...(endedAt === undefined ? {} : { ended_at: endedAt }),
+    // Kept as it arrived, including a reason invented after this build: there
+    // is nothing here that branches on it, and losing it would lose the only
+    // explanation the interface has to show.
+    ...(endReason === undefined ? {} : { end_reason: endReason }),
+    recordings: arrayField(session['recordings'], what, readSessionRecording),
+  };
+}
+
+function readSessionRecording(value: JsonValue | undefined): SessionRecording {
+  const recording = object(value, 'a recording of a sitting');
+  const what = 'a recording of a sitting';
+  const outcome = optionalStringField(recording, 'outcome', what);
+  const duration = optionalNumberField(recording, 'duration_ms', what);
+  return {
+    session_index: numberField(recording, 'session_index', what),
+    output: stringField(recording, 'output', what),
+    // Absent is "still running", which is what the last entry of an open
+    // sitting reports.
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(duration === undefined ? {} : { duration_ms: duration }),
   };
 }
 
@@ -506,6 +559,15 @@ function readStatus(value: JsonValue | undefined): RecorderStatus {
   switch (state) {
     case 'idle':
       return { state: 'idle' };
+    case 'watching': {
+      const session = status['session'];
+      return {
+        state: 'watching',
+        // Absent is "watching for anything at all" rather than for the return of
+        // a game that just exited, and the two are different things to show.
+        ...(session === undefined || session === null ? {} : { session: readSession(session) }),
+      };
+    }
     case 'recording':
       return { state: 'recording', ...readActiveRecording(status) };
     default:
@@ -800,6 +862,19 @@ function readTrashEmptied(value: JsonValue | undefined): TrashEmptied {
   };
 }
 
+/** What a favourite mark is now. */
+function readFavouriteMark(value: JsonValue | undefined): FavouriteMark {
+  const mark = object(value, 'a favourite mark');
+  const what = 'a favourite mark';
+  return {
+    kind: stringField(mark, 'kind', what),
+    session_id: stringField(mark, 'session_id', what),
+    id: numberField(mark, 'id', what),
+    favourite: booleanField(mark, 'favourite', what),
+    changed: booleanField(mark, 'changed', what),
+  };
+}
+
 /** What is in the trash, and what emptying it would take. */
 function readTrashListing(value: JsonValue | undefined): TrashListing {
   const listing = object(value, 'a trash listing');
@@ -923,6 +998,8 @@ function readEvent(frame: JsonObject): RecorderEvent {
     switch (frame['event']) {
       case 'status_changed':
         return { event: 'status_changed', status: readStatus(frame['status']) };
+      case 'session_ended':
+        return { event: 'session_ended', session: readSession(frame['session']) };
       case 'recording_failed':
         return {
           event: 'recording_failed',

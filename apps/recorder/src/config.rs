@@ -278,19 +278,19 @@ impl RecordingConfig {
     /// not the default recordings directory, which is created with the first
     /// recording rather than by validating a command that may never make one.
     ///
-    /// `recordings` is where recordings go when `--output` does not say: the
+    /// `configured` is where recordings go when `--output` does not say: the
     /// user's configured recording directory, where they have set one
     /// (`clipped_session::config`'s `storage` section, issue #307). It is
     /// passed in rather than read here, so that validating a command never
     /// depends on the settings file of whoever is running the tests (AGENTS.md
     /// section 25) — and so that `record`, which takes everything from its
     /// command line, can pass nothing.
-    pub fn resolve(args: &RecordArgs, recordings: Option<&Path>) -> Result<Self, ConfigError> {
+    pub fn resolve(args: &RecordArgs, configured: Option<&Path>) -> Result<Self, ConfigError> {
         let target = resolve_target(args)?;
         let output = resolve_output(
             args.output.as_deref(),
+            configured,
             OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc()),
-            recordings,
         )?;
         check_output_is_free(&output, args.overwrite)?;
 
@@ -348,9 +348,9 @@ impl ReplayConfig {
     pub fn resolve(
         args: &crate::cli::ReplayArgs,
         configured: std::time::Duration,
-        recordings: Option<&Path>,
+        configured_directory: Option<&Path>,
     ) -> Result<Self, ConfigError> {
-        let recording = RecordingConfig::resolve(&args.record, recordings)?;
+        let recording = RecordingConfig::resolve(&args.record, configured_directory)?;
         let window = args.duration.map_or(configured, ReplayWindow::duration);
         // Nothing said means the whole window: SPEC.md section 42's example is
         // `replay --duration 60` and a hotkey that saves the previous sixty
@@ -448,8 +448,8 @@ pub(crate) fn target_from(
 /// waiting for the clock to move.
 fn resolve_output(
     requested: Option<&Path>,
+    configured: Option<&Path>,
     now: OffsetDateTime,
-    recordings: Option<&Path>,
 ) -> Result<PathBuf, ConfigError> {
     match requested {
         Some(path) => {
@@ -462,14 +462,21 @@ fn resolve_output(
             Ok(path)
         }
         None => {
-            // What the user configured, then what Clipped ships with. A
-            // configured directory that has gone — an unplugged drive — is
+            // Three layers, and the flag is the top one: `--output` beats the
+            // settings file, which beats the videos folder this build would
+            // pick on its own. That is the order `docs/configuration.md` gives
+            // for every other setting, and step 3 of SPEC.md section 45 is the
+            // reason the middle one exists at all — a directory chosen once in
+            // the settings screen has to survive the window being closed
+            // (issue #307).
+            //
+            // A configured directory that has gone — an unplugged drive — is
             // reported against this recording by the check below, rather than
             // being quietly replaced by the videos folder: a recording somebody
             // cannot find is worse than one that did not start (AGENTS.md
             // section 45).
-            let directory = match recordings {
-                Some(configured) => configured.to_path_buf(),
+            let directory = match configured {
+                Some(chosen) => chosen.to_path_buf(),
                 None => default_output_directory().ok_or(ConfigError::NoDefaultOutputDirectory)?,
             };
             // The recordings directory is Clipped's own, so it is created
@@ -701,6 +708,46 @@ mod tests {
         }
     }
 
+    /// Step 3 of the MVP definition: a directory chosen once in the settings
+    /// screen is where recordings land, without anybody passing a flag
+    /// (issue #307).
+    #[test]
+    fn the_settings_file_decides_where_a_recording_goes_when_no_flag_does() {
+        let configured = TestDirectory::new("configured-recordings");
+
+        let resolved = resolve_output(
+            None,
+            Some(configured.path()),
+            datetime!(2026-08-10 14:32:05 UTC),
+        )
+        .expect("the configured directory exists and is writable");
+
+        assert_eq!(
+            resolved.parent(),
+            Some(configured.path()),
+            "a recording went to {resolved:?} rather than to the configured directory"
+        );
+    }
+
+    /// And the flag still wins, because a run somebody typed a path into is a
+    /// run they meant to put somewhere else.
+    #[test]
+    fn an_output_flag_beats_the_settings_file() {
+        let configured = TestDirectory::new("configured-loser");
+        let asked_for = TestDirectory::new("asked-for");
+        let file = asked_for.path().join("one.mkv");
+
+        let resolved = resolve_output(
+            Some(&file),
+            Some(configured.path()),
+            datetime!(2026-08-10 14:32:05 UTC),
+        )
+        .expect("the named file is in a usable directory");
+
+        assert_eq!(resolved, file);
+        assert_ne!(resolved.parent(), Some(configured.path()));
+    }
+
     fn args_for(window: &str) -> RecordArgs {
         RecordArgs {
             window: Some(window.to_owned()),
@@ -884,7 +931,7 @@ mod tests {
         let directory = TestDirectory::new("usable-output");
         let requested = directory.path().join("session.mkv");
 
-        let resolved = resolve_output(Some(&requested), datetime!(2026-08-10 14:32:05 UTC), None)
+        let resolved = resolve_output(Some(&requested), None, datetime!(2026-08-10 14:32:05 UTC))
             .expect("the directory exists and is writable");
 
         assert_eq!(resolved, requested);
@@ -896,7 +943,7 @@ mod tests {
         let directory = TestDirectory::new("probe-cleanup");
         let requested = directory.path().join("session.mkv");
 
-        resolve_output(Some(&requested), datetime!(2026-08-10 14:32:05 UTC), None)
+        resolve_output(Some(&requested), None, datetime!(2026-08-10 14:32:05 UTC))
             .expect("the directory exists and is writable");
 
         let left_behind: Vec<_> = fs::read_dir(directory.path())
@@ -946,7 +993,7 @@ mod tests {
         let requested = missing.join("session.mkv");
 
         let error =
-            resolve_output(Some(&requested), datetime!(2026-08-10 14:32:05 UTC), None).unwrap_err();
+            resolve_output(Some(&requested), None, datetime!(2026-08-10 14:32:05 UTC)).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -966,7 +1013,7 @@ mod tests {
         let requested = not_a_directory.join("session.mkv");
 
         let error =
-            resolve_output(Some(&requested), datetime!(2026-08-10 14:32:05 UTC), None).unwrap_err();
+            resolve_output(Some(&requested), None, datetime!(2026-08-10 14:32:05 UTC)).unwrap_err();
 
         assert!(
             error
@@ -982,7 +1029,7 @@ mod tests {
         let requested = directory.path().join("session.mp4");
 
         let error =
-            resolve_output(Some(&requested), datetime!(2026-08-10 14:32:05 UTC), None).unwrap_err();
+            resolve_output(Some(&requested), None, datetime!(2026-08-10 14:32:05 UTC)).unwrap_err();
 
         assert_eq!(
             error.to_string(),

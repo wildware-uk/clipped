@@ -120,9 +120,7 @@ pub use preferences::{
     MAXIMUM_DEVICE_NAME, MAXIMUM_DIMENSION, MAXIMUM_FRAMERATE, MINIMUM_DIMENSION,
     MINIMUM_FRAMERATE,
 };
-pub use storage::{
-    trash_beside, RecordingPathError, StorageProblem, StorageSettings, TrashPathError,
-};
+pub use storage::{trash_beside, DirectoryPathError, StorageProblem, StorageSettings};
 pub use store::ConfigurationStore;
 pub use value::{Resolved, Scope, SettingKey, SettingSource};
 

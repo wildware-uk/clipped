@@ -30,7 +30,7 @@
 //! Producing events (see `clipped-plugins`), persisting them (see
 //! `clipped-storage`) or acting on them (see `clipped-session`).
 //!
-//! # Three decisions worth knowing before reading the code
+//! # Four decisions worth knowing before reading the code
 //!
 //! **Where an event goes on the timeline.** [`EventTime`] is a moment on the
 //! recording's own timeline — the same quantity as `clipped_capture::MediaTime`
@@ -58,6 +58,24 @@
 //! `docs/ipc.md` sets out for the wire protocol, with the one difference that
 //! reading stored data never refuses.
 //!
+//! **Where a user's own label lives.** Neither of the above is the right home
+//! for something a *person* named — an input binding they called "my
+//! ultimate", a fingerprint match they typed a name for. It is not a game
+//! concept the closed vocabulary should learn, and it is not a plugin's word,
+//! so it is not namespaced the way [`CustomName`] is: [`EventKind::UserLabelled`]
+//! carries a [`UserLabel`], marked on the wire with [`USER_LABEL_PREFIX`]
+//! rather than a namespace, so that the exact text a person typed survives
+//! being stored and read back. [`EventSource::application_component`] is the
+//! matching decision for *who* reported it: `clipped.input` and
+//! `clipped.fingerprint` are two different, plugin-proof sources, so a mark
+//! from one host subsystem is distinguishable on a timeline from a mark from
+//! another (issue #345). **This crate does not yet produce either** — nothing
+//! here calls these constructors — because deciding a producer boundary for a
+//! plugin's report (`crates/plugins/src/report.rs::ReportedEvent::into_event`
+//! must refuse a `UserLabelled` kind exactly as it refuses `Unrecognised`) and
+//! wiring an actual input-binding or fingerprint subsystem are both work for
+//! the crates that own those layers.
+//!
 //! # Position in the architecture
 //!
 //! A leaf crate of shared types. It depends on no other `clipped-*` crate so
@@ -76,7 +94,8 @@ pub use event::{
     PayloadTooLarge, MAX_PAYLOAD_BYTES,
 };
 pub use kind::{
-    CustomName, EventKind, InvalidCustomName, MAX_IDENTIFIER_BYTES, RESERVED_NAMESPACE,
+    CustomName, EventKind, InvalidCustomName, InvalidUserLabel, UserLabel, MAX_IDENTIFIER_BYTES,
+    MAX_USER_LABEL_BYTES, RESERVED_NAMESPACE, USER_LABEL_PREFIX,
 };
 pub use schema::{SchemaVersion, StoredEvent};
 pub use time::{EventTime, EventTiming, RecordedSpan};

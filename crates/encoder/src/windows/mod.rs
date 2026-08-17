@@ -27,6 +27,8 @@
 mod amf;
 mod device;
 mod dxgi;
+#[cfg(test)]
+pub(in crate::windows) mod hardware_test;
 mod media_foundation;
 mod nvenc;
 mod quicksync;

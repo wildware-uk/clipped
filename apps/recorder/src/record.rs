@@ -140,11 +140,14 @@ impl From<SessionError> for RecordError {
 /// and [`RecordError::Session`] if the recording itself failed. A session
 /// failure after recording started still leaves a finalised, playable file.
 pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
-    // Nothing configured: `record` is the subcommand that does exactly what its
-    // command line says, and it applies no setting from the settings file —
-    // including where recordings go (`docs/recorder-cli.md`). `watch` and the
-    // window are what read the user's settings.
-    let config = RecordingConfig::resolve(args, None)?;
+    // Read once, here, for the reason `replay` reads it once: nothing may
+    // re-read a settings file underneath a running encoder (issue #61). All
+    // `record` wants from it is where recordings go when `--output` says
+    // nothing, which is step 3 of SPEC.md section 45 (issue #307).
+    let configuration = crate::watch::load_configuration(
+        clipped_session::config::ConfigurationStore::default_path().as_deref(),
+    );
+    let config = RecordingConfig::resolve(args, configuration.storage().recording_directory())?;
     log_configuration(&config);
 
     // Before anything is measured. Without it every size below is the

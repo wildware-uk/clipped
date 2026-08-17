@@ -44,3 +44,8 @@ Thumbs.db
 # Local agent worktrees. These are real git checkouts of this repository, so
 # committing them would embed a repository inside itself.
 /.claude/worktrees/
+
+# One developer's own agent settings and scratch space. `settings.json` beside
+# them is shared and is committed; these two are not.
+/.claude/settings.local.json
+/.claude/scratch/

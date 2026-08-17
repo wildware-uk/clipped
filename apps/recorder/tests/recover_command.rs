@@ -48,15 +48,88 @@ impl TestDirectory {
     fn path(&self) -> &Path {
         &self.0
     }
+
+    /// A `LOCALAPPDATA` of this test's own.
+    ///
+    /// `--discard` now indexes the recording it moves (issue #451), which
+    /// means it opens a library database — `%LOCALAPPDATA%\Clipped\library.db`
+    /// unless told otherwise, and nothing here tells it otherwise except the
+    /// child process's own environment. Without this, every discard test
+    /// would read and write whichever machine happened to run the suite,
+    /// which is the same reason `apps/recorder/tests/automatic_sessions.rs`
+    /// points every recorder it starts at a `LOCALAPPDATA` of its own
+    /// (AGENTS.md section 25).
+    fn local_app_data(&self) -> PathBuf {
+        self.0.join("appdata")
+    }
 }
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+        // The trash is a *sibling* of the recordings directory, not a child of
+        // it, so removing the directory does not take it. Without this, every
+        // run of the discard test leaves a copy of its fixture in the
+        // machine's temporary directory for good.
+        let _ = fs::remove_dir_all(trash_beside(&self.0));
     }
 }
 
-fn recorder(arguments: &[&str]) -> Output {
+/// Where the trash goes when the settings file names no directory: beside the
+/// recordings, same name with `.trash` appended.
+///
+/// Restated here rather than imported from `clipped_session::config`, for the
+/// reason [`EXIT_USAGE`] is: this test should fail if that rule changes, not
+/// quietly follow it somewhere else.
+fn trash_beside(recordings: &Path) -> PathBuf {
+    let mut name = recordings.as_os_str().to_os_string();
+    name.push(".trash");
+    PathBuf::from(name)
+}
+
+/// The one file anywhere under `root`, or [`None`] if `root` holds none.
+///
+/// # Panics
+///
+/// If there is more than one, which would mean a discard left something behind
+/// as well as what it moved.
+fn only_file_under(root: &Path) -> Option<PathBuf> {
+    fn collect(directory: &Path, into: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, into);
+            } else {
+                into.push(path);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(root, &mut found);
+    assert!(
+        found.len() <= 1,
+        "expected at most one file under {}, found {found:?}",
+        root.display()
+    );
+    found.pop()
+}
+
+/// Runs `clipped-recorder` against `directory`'s own `LOCALAPPDATA`, so a
+/// `--discard` in this file never touches the machine's real library.
+fn recorder(directory: &TestDirectory, arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_clipped-recorder"))
+        .args(arguments)
+        .env("LOCALAPPDATA", directory.local_app_data())
+        .output()
+        .expect("the recorder binary can be run")
+}
+
+/// The same, for the one test that names no directory at all.
+fn recorder_without_a_directory(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_clipped-recorder"))
         .args(arguments)
         .output()
@@ -115,11 +188,14 @@ fn recover_names_the_footage_and_where_it_is() {
     let directory = TestDirectory::new("list");
     let recording = interrupted(directory.path());
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+        ],
+    );
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let said = stderr(&output);
@@ -145,11 +221,14 @@ fn listing_changes_nothing_at_all() {
     let recording = interrupted(directory.path());
     let before = record(directory.path());
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+        ],
+    );
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 
     assert!(recording.exists(), "listing must not touch the footage");
@@ -165,12 +244,15 @@ fn adopting_keeps_the_footage_and_stops_it_being_offered_again() {
     let directory = TestDirectory::new("adopt");
     let recording = interrupted(directory.path());
 
-    let adopted = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-        "--adopt",
-    ]);
+    let adopted = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+            "--adopt",
+        ],
+    );
     assert_eq!(adopted.status.code(), Some(0), "{}", stderr(&adopted));
     assert!(stderr(&adopted).contains("Kept"), "{}", stderr(&adopted));
     assert!(recording.exists(), "adopting must never touch the footage");
@@ -179,11 +261,14 @@ fn adopting_keeps_the_footage_and_stops_it_being_offered_again() {
         Value::from("interrupted")
     );
 
-    let again = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-    ]);
+    let again = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+        ],
+    );
     assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
     assert!(
         stderr(&again).contains("Nothing to recover"),
@@ -200,12 +285,15 @@ fn discarding_without_naming_a_session_is_refused_before_anything_is_deleted() {
     let directory = TestDirectory::new("bulk-discard");
     let recording = interrupted(directory.path());
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-        "--discard",
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+            "--discard",
+        ],
+    );
 
     assert_eq!(
         output.status.code(),
@@ -221,26 +309,63 @@ fn discarding_without_naming_a_session_is_refused_before_anything_is_deleted() {
     assert!(recording.exists(), "nothing should have been deleted");
 }
 
+/// `--discard` used to unlink the file, and this test used to assert that the
+/// space came back ("8.0 KiB freed"). Issue #451 changed it to indexing the
+/// recording and sending it to `clipped_library`'s trash, which means the
+/// bytes are still on the disk and that promise would now be a lie — so what
+/// is asserted here is the thing the change was made for: the footage is
+/// recoverable, byte for byte, by somebody who typed `--discard` and then
+/// wished they had not (AGENTS.md section 56) — and it is recoverable the
+/// same way as everything else deleted from the library, with a real row in
+/// the same database the trash screen reads, not merely a file sitting in a
+/// folder.
 #[test]
-fn discarding_a_named_recording_deletes_it_and_records_that_it_did() {
+fn discarding_a_named_recording_moves_it_to_the_trash_and_records_that_it_did() {
     let directory = TestDirectory::new("discard");
     let recording = interrupted(directory.path());
+    let original = fs::read(&recording).expect("the fixture was just written");
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-        "--discard",
-        "--session",
-        SESSION,
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+            "--discard",
+            "--session",
+            SESSION,
+        ],
+    );
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!recording.exists(), "the file should be gone");
     assert!(
-        stderr(&output).contains("8.0 KiB freed"),
-        "{}",
-        stderr(&output)
+        !recording.exists(),
+        "the file should be gone from the recording directory"
+    );
+
+    // Gone from where it was, and still there to be had back.
+    let stowed = only_file_under(&trash_beside(directory.path())).unwrap_or_else(|| {
+        panic!(
+            "--discard should have left the recording in the trash: {}",
+            stderr(&output)
+        )
+    });
+    assert_eq!(
+        fs::read(&stowed).expect("the trashed file can be read"),
+        original,
+        "the trashed file is not the recording that was discarded",
+    );
+
+    // The message names where it went regardless — a person who typed
+    // `--discard` should not have to go and open the trash screen to find out.
+    let message = stderr(&output);
+    assert!(
+        message.contains(&stowed.display().to_string()),
+        "the message should say where the file is now: {message}",
+    );
+    assert!(
+        !message.contains("freed"),
+        "nothing was freed - the bytes are still on the disk: {message}",
     );
 
     // The entry stays, saying what happened. A gap is not a record.
@@ -255,17 +380,44 @@ fn discarding_a_named_recording_deletes_it_and_records_that_it_did() {
         Value::from(recording.display().to_string()),
         "{after}"
     );
+
+    // The part issue #451's second acceptance criterion is about: a real row
+    // in the same database the trash screen and `clipped-recorder storage`
+    // read, not a file that only `recover`'s own output can find. Opened
+    // read-only, the same way a screen reading the trash would.
+    let library = directory
+        .local_app_data()
+        .join("Clipped")
+        .join("library.db");
+    let database =
+        clipped_storage::Database::open_read_only(&library).expect("the library can be opened");
+    let listed = clipped_library::trash::Trash::new(trash_beside(directory.path()))
+        .list(&database)
+        .expect("the trash can be listed");
+    assert_eq!(
+        listed.len(),
+        1,
+        "the discarded recording should be a real trash entry, not just a moved file: {listed:?}"
+    );
+    assert!(
+        listed[0].path.starts_with(trash_beside(directory.path())),
+        "the listed entry should point at the file inside the trash: {:?}",
+        listed[0].path
+    );
 }
 
 #[test]
 fn a_directory_with_nothing_to_recover_says_so_and_succeeds() {
     let directory = TestDirectory::new("empty");
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+        ],
+    );
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
@@ -280,13 +432,16 @@ fn a_session_that_is_not_waiting_to_be_recovered_is_a_command_line_to_fix() {
     let directory = TestDirectory::new("no-such-session");
     interrupted(directory.path());
 
-    let output = recorder(&[
-        "recover",
-        "--directory",
-        &directory.path().display().to_string(),
-        "--session",
-        "half-life-3-20260811-143205",
-    ]);
+    let output = recorder(
+        &directory,
+        &[
+            "recover",
+            "--directory",
+            &directory.path().display().to_string(),
+            "--session",
+            "half-life-3-20260811-143205",
+        ],
+    );
 
     assert_eq!(
         output.status.code(),
@@ -303,7 +458,7 @@ fn a_session_that_is_not_waiting_to_be_recovered_is_a_command_line_to_fix() {
 
 #[test]
 fn recover_is_offered_in_the_help() {
-    let output = recorder(&["--help"]);
+    let output = recorder_without_a_directory(&["--help"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("recover"), "{}", stdout(&output));
 }

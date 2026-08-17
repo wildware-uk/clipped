@@ -294,9 +294,14 @@ and the honest answer today is that this build cannot be in that state.
   a game for.
 - **Hotkey.** `Ctrl`+`F9` is bound by default and the recorder registers it
   (`docs/hotkeys.md`). A press sends the same `add_bookmark` the tray sends, so
-  the two cannot differ. It reaches a recording `serve` is making; an
-  automatically started one is
-  [issue #421](https://github.com/wildware-uk/clipped/issues/421).
+  the two cannot differ. It reaches whatever `serve` is recording, including a
+  session a game launching started: `serve --watch-for-games` is one process
+  with the launch watcher, the protocol and the hotkeys in it, and an automatic
+  recording is handed to the same recording state a `start_recording` puts one
+  in ([issue #421](https://github.com/wildware-uk/clipped/issues/421),
+  `docs/sessions.md`). A recording made by `clipped-recorder watch` is the one
+  exception, and it is not reachable by anything: that command serves no
+  protocol.
 - **Overlay and toast.** SPEC.md section 25 asks for feedback that does not
   interrupt gameplay. The overlay is M5,
   [issue #53](https://github.com/wildware-uk/clipped/issues/53); a "bookmark

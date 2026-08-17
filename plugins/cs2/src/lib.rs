@@ -75,7 +75,19 @@ mod manifest_tests {
     fn the_manifest_is_one_the_host_accepts() {
         let manifest = PluginManifest::parse(MANIFEST).expect("plugin.json is a valid manifest");
 
-        assert_eq!(manifest.contract(), CONTRACT);
+        // That the host *accepts* it, which is what this test is called, and
+        // not that it is on the newest contract. Those stopped being the same
+        // question when the contract gained a second version (#343): a manifest
+        // declaring an older one is still accepted, deliberately, so that a
+        // plugin using none of the later vocabulary never has to be reissued.
+        // Asserting equality with `CONTRACT` would make every future bump
+        // require editing every bundled manifest to say a number none of them
+        // use.
+        assert!(
+            manifest.contract().is_supported(),
+            "this build supports up to contract {CONTRACT}, and plugin.json declares {}",
+            manifest.contract()
+        );
         assert_eq!(manifest.id().as_str(), "counter-strike-2");
         assert_eq!(manifest.executable(), "clipped-cs2-plugin.exe");
         assert!(manifest.supports().matches(&ObservedProcess::new(

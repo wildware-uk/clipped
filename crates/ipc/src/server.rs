@@ -793,7 +793,9 @@ fn accept_shutdown<H: CommandHandler + ?Sized>(
     shutdown.begin();
 
     let recording = match handler.status() {
-        RecorderStatus::Idle => None,
+        // A watching recorder has nothing to finalise: it is between recordings,
+        // which is what makes it watching rather than recording.
+        RecorderStatus::Idle | RecorderStatus::Watching(_) => None,
         RecorderStatus::Recording(active) => Some(active),
     };
 
@@ -946,6 +948,7 @@ mod tests {
                     target: "process `cs2.exe`".to_owned(),
                     elapsed_ms: 4_200,
                     replay_seconds: None,
+                    session: None,
                 }),
             }
         }
@@ -1047,6 +1050,40 @@ mod tests {
                         supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
                         recorder_version: "0.1.0".to_owned(),
                     })
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_from_before_the_watching_state_is_refused_rather_than_half_understood() {
+        // Protocol 1 has no `watching` state and `RecorderStatus` has no
+        // catch-all to put one in, so a client speaking it would fail to read
+        // the first status this recorder sent it — several messages after being
+        // told everything was fine (issue #241, `docs/ipc.md`). It is refused at
+        // the handshake instead, and told which side is behind.
+        let mut script = Scripted::new(&[hello(1, ConnectionRole::Control, Vec::new())]);
+        run(&mut script);
+
+        let replies = script.replies();
+        assert_eq!(
+            replies.len(),
+            1,
+            "the connection should end there: {replies:?}"
+        );
+        match &replies[0] {
+            ServerMessage::Refused(error) => {
+                assert_eq!(error.code, ErrorCode::UnsupportedProtocolVersion);
+                assert_eq!(
+                    error.detail,
+                    Some(ErrorDetail::UnsupportedProtocolVersion {
+                        requested: 1,
+                        supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+                        recorder_version: "0.1.0".to_owned(),
+                    }),
+                    "a refusal that does not name what this recorder speaks leaves the client \
+                     unable to say which side needs updating"
                 );
             }
             other => panic!("expected a refusal, got {other:?}"),

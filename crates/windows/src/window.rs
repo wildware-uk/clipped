@@ -633,6 +633,27 @@ fn window_title(window: WindowHandle) -> String {
     String::from_utf16_lossy(&buffer[..written])
 }
 
+/// The process that created `window`, or [`None`] if the window has gone.
+///
+/// The identifier of the process that *created* the window, which is not always
+/// the process a user would name: a game whose launcher owns the window reports
+/// the launcher. That is the right answer for scoping audio all the same, because
+/// [`ProcessTree`](crate::ProcessTree) is rooted here and takes in the children,
+/// and because the alternative — guessing which of a tree's processes is "the
+/// game" — is a guess a recording would act on.
+///
+/// Zero is folded into [`None`]. Windows returns it for a handle that has
+/// stopped naming a window, and a caller that scoped a capture to process 0
+/// would be scoping it to the System Idle Process
+/// ([issue #26](https://github.com/wildware-uk/clipped/issues/26)).
+#[must_use]
+pub fn window_process(window: WindowHandle) -> Option<u32> {
+    match window_process_id(window) {
+        0 => None,
+        process_id => Some(process_id),
+    }
+}
+
 /// The identifier of the process that created the window, or 0 if it has gone.
 fn window_process_id(window: WindowHandle) -> u32 {
     let mut process_id = 0_u32;

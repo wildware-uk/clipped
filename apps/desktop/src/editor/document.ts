@@ -40,7 +40,7 @@
  */
 
 /** The format version this build reads: `SCHEMA_VERSION` in `crates/edit`. */
-export const EDIT_SCHEMA_VERSION = 1;
+export const EDIT_SCHEMA_VERSION = 2;
 
 /** A ratio of two whole numbers of nanoseconds per nanosecond. */
 export interface Speed {
@@ -98,13 +98,21 @@ export interface TrackInput {
   readonly stream: number;
 }
 
-/** An audio track of the exported clip. */
+/**
+ * An audio track of the exported clip.
+ *
+ * Every field here is saved and reaches the export. Solo is deliberately not
+ * one of them: [issue #85](https://github.com/wildware-uk/clipped/issues/85)
+ * moved it out of `crates/edit`'s model and into `Solo`, a value the editor
+ * holds beside the document and never inside it — `timeline.ts`'s `Solo` is
+ * this window's mirror of that. Format 1 carried `soloed` here; format 2 does
+ * not, and this build reads format 2.
+ */
 export interface AudioTrack {
   readonly name: string;
   readonly inputs: readonly TrackInput[];
   readonly gain_db: number;
   readonly muted: boolean;
-  readonly soloed: boolean;
   /** Nanoseconds of output time at the start of the clip. */
   readonly fade_in: number;
   /** Nanoseconds of output time at the end of the clip. */
@@ -303,17 +311,12 @@ function readTrackInput(value: unknown, path: string): TrackInput {
 
 function readAudioTrack(value: unknown, path: string): AudioTrack {
   const track = object(value, path);
-  noUnknownFields(
-    track,
-    ['name', 'inputs', 'gain_db', 'muted', 'soloed', 'fade_in', 'fade_out'],
-    path,
-  );
+  noUnknownFields(track, ['name', 'inputs', 'gain_db', 'muted', 'fade_in', 'fade_out'], path);
   return {
     name: text(track.name, `${path}.name`),
     inputs: list(track.inputs, `${path}.inputs`, readTrackInput),
     gain_db: track.gain_db === undefined ? 0 : real(track.gain_db, `${path}.gain_db`),
     muted: flag(track.muted, `${path}.muted`, false),
-    soloed: flag(track.soloed, `${path}.soloed`, false),
     fade_in: track.fade_in === undefined ? 0 : nanos(track.fade_in, `${path}.fade_in`),
     fade_out: track.fade_out === undefined ? 0 : nanos(track.fade_out, `${path}.fade_out`),
   };

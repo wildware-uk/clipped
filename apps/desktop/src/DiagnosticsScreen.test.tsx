@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
@@ -352,7 +353,10 @@ describe('the support report', () => {
     ['when the window last heard from the recorder', /Status observed\s+2026-08-12T09:13:58/],
     ['the failure code, which is stable across versions', /code\s+recording_failed/],
     ['the failure message, which is not', /message\s+the muxer could not write to/],
-    ['the protocol version the two ends agreed on', /Protocol version\s+1/],
+    [
+      'the protocol version the two ends agreed on',
+      new RegExp(String.raw`Protocol version\s+` + String(PROTOCOL_VERSION)),
+    ],
     ['which build of the interface wrote it', /Interface\s+@clipped\/desktop \d/],
     ['the webview and the Windows build under it', /Webview\s+Mozilla\/5\.0 \(Windows NT/],
     ['the notice nothing else remembers', /Notice\s+the recorder was not found/],

@@ -581,6 +581,46 @@ Four interlocks, each in one place so that each can be reviewed:
   two filesystem failures in a row, so the file could not be put back either — is
   reported as an error naming both paths rather than logged and forgotten.
 
+### Getting a row before there is one: `clipped-recorder recover --discard`
+
+Everything above assumes a row to key off — that is what lets an item be
+listed, restored and swept by retention. `recover --discard`
+([issue #451](https://github.com/wildware-uk/clipped/issues/451)) hands the
+trash a fragment an interrupted recorder left, and an interrupted fragment has
+no row yet: the library only indexes a recording once its session record
+exists, and `recover` is what writes that record. So `--discard` indexes the
+recordings directory first — the ordinary reconciliation
+([`index::reconcile`](../crates/library/src/index/mod.rs)), not a shortcut of
+its own — and only then calls [`Trash::send`] on the row that gives it, the
+same call a deletion from the library makes. Nothing here is a second way into
+the trash: by the time `Trash::send` runs, the fragment is an ordinary
+recording with an ordinary row.
+
+That ordering is also what keeps a failure partway through from stranding
+anything. Indexing runs before the file moves, so a failure there leaves every
+sidecar open and every file untouched — the next `recover` offers exactly what
+this one did. Closing the sidecar's record runs *after* `Trash::send`, so a
+failure there leaves a recording that is already genuinely in the trash —
+listed, restorable, under retention — with a session record that still calls
+it open; recovering the same directory again offers it, and discarding it a
+second time finishes the one step that did not complete rather than moving
+the file twice. `docs/recorder-cli.md`'s `recover` section has the exit codes
+and the full account of what each step's failure means for someone reading a
+message on a screen.
+
+The one thing this adds to `recover`'s reach that is worth naming: two words
+recovery writes into a session's outcome — `interrupted` and `discarded` —
+are now in `recordings.outcome`'s own vocabulary
+(`crates/storage/migrations/0006_recovered_recording_outcomes.sql`), so that
+a recording closed this way survives being reconciled again rather than
+degrading to `NULL` with a logged `IndexProblem`
+([issue #278](https://github.com/wildware-uk/clipped/issues/278) is the
+tracker for the two words this did not touch — `disk-space-low` and
+`output-unavailable`, on `end_reason` rather than `outcome`, and unrelated to
+`recover`).
+
+[`Trash::send`]: ../crates/library/src/trash/mod.rs
+
 ### Where the trash runs
 
 Synchronously, on a thread the caller owns, and **never a capture thread**: a

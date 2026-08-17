@@ -77,7 +77,10 @@ use crate::message::{
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
-use crate::status::{ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary};
+use crate::status::{
+    ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
+    SessionSummary, Watching,
+};
 
 /// The shape of the schema document itself.
 ///
@@ -463,6 +466,14 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_active_recording(), &[]),
         ),
         (
+            "session_summary".to_owned(),
+            structure_of(&exemplar_ended_session(), &[]),
+        ),
+        (
+            "session_recording".to_owned(),
+            structure_of(&exemplar_session_recording(), &[]),
+        ),
+        (
             "library_sessions".to_owned(),
             structure_of(&exemplar_library_sessions(), &[]),
         ),
@@ -578,6 +589,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
+                Command::SetFavourite(_) => Some("set_favourite".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::ApplySettings(_) => Some("apply_settings".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
@@ -603,6 +615,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("reply.library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
+                Command::SetFavourite(_) => Some("reply.favourited".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
@@ -725,10 +738,10 @@ fn samples() -> Vec<Sample> {
             ServerMessage::Refused(
                 ProtocolError::new(
                     ErrorCode::UnsupportedProtocolVersion,
-                    "this recorder speaks protocol version 1, and 2 was asked for",
+                    "this recorder speaks protocol version 2, and 3 was asked for",
                 )
                 .with_detail(ErrorDetail::UnsupportedProtocolVersion {
-                    requested: 2,
+                    requested: 3,
                     supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
                     recorder_version: "0.1.0".to_owned(),
                 }),
@@ -751,11 +764,41 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "the status of a recorder watching for a game to start",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: RecorderStatus::Watching(Watching::default()),
+                }),
+            }),
+        ),
+        (
+            "the status of a recorder watching for a game that just exited to come back",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: exemplar_watching(),
+                }),
+            }),
+        ),
+        (
             "the status of a recorder that is recording",
             ServerMessage::Response(Response {
                 id: 7,
                 outcome: Outcome::Ok(Reply::Status {
                     status: exemplar_recording(),
+                }),
+            }),
+        ),
+        (
+            "the status of a recording that belongs to no sitting",
+            ServerMessage::Response(Response {
+                id: 7,
+                outcome: Outcome::Ok(Reply::Status {
+                    status: RecorderStatus::Recording(ActiveRecording {
+                        session: None,
+                        ..exemplar_active_recording()
+                    }),
                 }),
             }),
         ),
@@ -939,6 +982,24 @@ fn samples() -> Vec<Sample> {
                             r"D:\\Clips.trash\\locked.mkv: the file is open in another program"
                                 .to_owned(),
                         ],
+                    },
+                }),
+            }),
+        ),
+        (
+            "a sitting marked a favourite, which is what cleanup then protects",
+            ServerMessage::Response(Response {
+                id: 17,
+                outcome: Outcome::Ok(Reply::Favourited {
+                    mark: crate::library::FavouriteMark {
+                        // The kind that is addressed by text rather than by an
+                        // integer, so a sample carries the awkward half of the
+                        // target rather than only the easy one.
+                        kind: "session".to_owned(),
+                        session_id: "counter-strike-2-20260814-201500".to_owned(),
+                        id: 0,
+                        favourite: true,
+                        changed: true,
                     },
                 }),
             }),
@@ -1195,6 +1256,30 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a recorder settling back to watching after a game exited",
+            ServerMessage::Event(Event::StatusChanged {
+                status: exemplar_watching(),
+            }),
+        ),
+        (
+            "a sitting ending, with the files it produced",
+            ServerMessage::Event(Event::SessionEnded {
+                session: exemplar_ended_session(),
+            }),
+        ),
+        (
+            "a sitting of a game the catalogue would not attribute ending",
+            ServerMessage::Event(Event::SessionEnded {
+                session: SessionSummary {
+                    session_id: "unattributed-20260811-201400".to_owned(),
+                    game_id: None,
+                    game_name: None,
+                    end_reason: Some("recorder-stopping".to_owned()),
+                    ..exemplar_ended_session()
+                },
+            }),
+        ),
+        (
             "a recording that ended by itself",
             ServerMessage::Event(Event::RecordingFailed {
                 recording_id: "r-1".to_owned(),
@@ -1247,6 +1332,19 @@ fn samples() -> Vec<Sample> {
     samples.push(server_sample(
         "an event invented later",
         json!({"type": "event", "event": "disk_filling_up", "free_bytes": 1024}),
+    ));
+    samples.push(server_sample(
+        "a reason for a sitting to end invented later",
+        json!({"type": "event", "event": "session_ended",
+               "session": {"session_id": "cs2-20260811-201400", "game_id": "cs2",
+                           "game_name": "Counter-Strike 2",
+                           "started_at": "2026-08-11T20:14:00+01:00",
+                           "ended_at": "2026-08-11T22:03:00+01:00",
+                           "end_reason": "disk_full",
+                           "recordings": [{"session_index": 1,
+                                           "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                                           "outcome": "recorded",
+                                           "duration_ms": 1800000}]}}),
     ));
     samples.push(server_sample(
         "a feature invented later",
@@ -1390,6 +1488,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
+        Reply::Favourited { .. } => "favourited".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
@@ -1428,6 +1527,14 @@ fn reply_discriminant(reply: &Reply) -> String {
 fn event_discriminant(event: &Event) -> String {
     match event {
         Event::StatusChanged { status } => format!("status_changed.{}", state_tag(status)),
+        // The reason a sitting ended is part of the path, because it is the one
+        // thing this event says that a window shows differently — and a mirror
+        // that dropped a reason it did not recognise would otherwise reach the
+        // same answer as one that kept it.
+        Event::SessionEnded { session } => format!(
+            "session_ended.{}",
+            session.end_reason.as_deref().unwrap_or("unstated")
+        ),
         Event::RecordingFailed { .. } => "recording_failed".to_owned(),
         // Deliberately not the tag it arrived with: this build cannot know
         // whether two events it has never heard of are the same kind of thing.
@@ -1516,7 +1623,9 @@ fn outcome_tag(outcome: &Outcome) -> String {
 /// The `event` of an event, or [`None`] for one this build did not recognise.
 fn event_tag(event: &Event) -> Option<String> {
     match event {
-        Event::StatusChanged { .. } | Event::RecordingFailed { .. } => Some(tag_of(event, "event")),
+        Event::StatusChanged { .. }
+        | Event::SessionEnded { .. }
+        | Event::RecordingFailed { .. } => Some(tag_of(event, "event")),
         Event::Other(_) => None,
     }
 }
@@ -1687,14 +1796,80 @@ fn exemplar_recording() -> RecorderStatus {
     RecorderStatus::Recording(exemplar_active_recording())
 }
 
+/// A recorder watching for a game, in a sitting waiting out its restart grace.
+///
+/// The sitting is present so that [`structure_of`] sees the field at all: an
+/// exemplar with nothing in it would describe a `watching` status as having no
+/// fields, and the TypeScript mirror would be checked against that.
+fn exemplar_watching() -> RecorderStatus {
+    RecorderStatus::Watching(Watching {
+        session: Some(Box::new(exemplar_session())),
+    })
+}
+
 /// The recording itself, without the state tag around it.
 fn exemplar_active_recording() -> ActiveRecording {
     ActiveRecording {
         recording_id: "r-1".to_owned(),
-        output: r"D:\clips\session.mkv".to_owned(),
+        output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
         target: "process `cs2.exe`".to_owned(),
         elapsed_ms: 4_200,
         replay_seconds: Some(60),
+        session: Some(Box::new(exemplar_session())),
+    }
+}
+
+/// A sitting that is still going, with one file finished and one being written.
+fn exemplar_session() -> SessionSummary {
+    SessionSummary {
+        session_id: "cs2-20260811-201400".to_owned(),
+        game_id: Some("cs2".to_owned()),
+        game_name: Some("Counter-Strike 2".to_owned()),
+        started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+        ended_at: None,
+        end_reason: None,
+        recordings: vec![
+            exemplar_session_recording(),
+            SessionRecording {
+                session_index: 2,
+                output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+                outcome: None,
+                duration_ms: None,
+            },
+        ],
+    }
+}
+
+/// The same sitting, after it ended.
+///
+/// This is the one the `session_summary` structure is derived from, because it
+/// is the one carrying every field: `ended_at` and `end_reason` are absent from
+/// a sitting that is still going, and a structure derived from that one would
+/// not mention them.
+fn exemplar_ended_session() -> SessionSummary {
+    SessionSummary {
+        ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+        end_reason: Some("game-exited".to_owned()),
+        recordings: vec![
+            exemplar_session_recording(),
+            SessionRecording {
+                session_index: 2,
+                output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
+                outcome: Some("recorded".to_owned()),
+                duration_ms: Some(1_140_000),
+            },
+        ],
+        ..exemplar_session()
+    }
+}
+
+/// One finished file of a sitting, with everything one can carry.
+fn exemplar_session_recording() -> SessionRecording {
+    SessionRecording {
+        session_index: 1,
+        output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
+        outcome: Some("recorded".to_owned()),
+        duration_ms: Some(1_800_000),
     }
 }
 
@@ -2016,6 +2191,12 @@ fn every_built_command() -> Vec<Command> {
             items: 1,
             bytes: 2_147_483_648,
         }),
+        Command::SetFavourite(crate::library::SetFavourite {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            favourite: true,
+        }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
@@ -2039,6 +2220,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibraryTrash(_)
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
+            | Command::SetFavourite(_)
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
@@ -2144,6 +2326,9 @@ fn every_event() -> Vec<Event> {
         Event::StatusChanged {
             status: RecorderStatus::Idle,
         },
+        Event::SessionEnded {
+            session: exemplar_ended_session(),
+        },
         Event::RecordingFailed {
             recording_id: "r-1".to_owned(),
             error: ProtocolError::new(
@@ -2154,7 +2339,10 @@ fn every_event() -> Vec<Event> {
     ];
     for event in &events {
         match event {
-            Event::StatusChanged { .. } | Event::RecordingFailed { .. } | Event::Other(_) => {}
+            Event::StatusChanged { .. }
+            | Event::SessionEnded { .. }
+            | Event::RecordingFailed { .. }
+            | Event::Other(_) => {}
         }
     }
     events
@@ -2274,6 +2462,15 @@ fn every_reply() -> Vec<Reply> {
                 ],
             },
         },
+        Reply::Favourited {
+            mark: crate::library::FavouriteMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                favourite: true,
+                changed: true,
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2297,6 +2494,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibraryTrash { .. }
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }
+            | Reply::Favourited { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::Settings { .. }
@@ -2371,10 +2569,14 @@ fn hotkey_state_tag(state: &HotkeyState) -> String {
 
 /// Every state a recorder reports.
 fn every_recorder_status() -> Vec<RecorderStatus> {
-    let states = vec![RecorderStatus::Idle, exemplar_recording()];
+    let states = vec![
+        RecorderStatus::Idle,
+        exemplar_watching(),
+        exemplar_recording(),
+    ];
     for state in &states {
         match state {
-            RecorderStatus::Idle | RecorderStatus::Recording(_) => {}
+            RecorderStatus::Idle | RecorderStatus::Watching(_) | RecorderStatus::Recording(_) => {}
         }
     }
     states
@@ -2418,9 +2620,13 @@ mod tests {
             "reply.recording_stopped",
             "reply.shutting_down",
             "event.status_changed",
+            "event.session_ended",
             "event.recording_failed",
             "recorder_status.idle",
+            "recorder_status.watching",
             "recorder_status.recording",
+            "session_summary",
+            "session_recording",
             "library_sessions",
             "library_session_page",
             "library_session",

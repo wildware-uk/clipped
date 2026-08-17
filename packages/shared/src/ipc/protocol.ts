@@ -57,8 +57,16 @@ export interface JsonObject {
  */
 export type Extensible<Known extends string> = Known | (string & Record<never, never>);
 
-/** The protocol version this build of the interface speaks. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * The protocol version this build of the interface speaks.
+ *
+ * Version 2 added the `watching` recorder state (issue #241). A state is the one
+ * addition that cannot be additive, because {@link RecorderStatus} has no
+ * catch-all: a build compiled against version 1 would fail to read
+ * `{"state":"watching"}` rather than guess at it, which is the wanted behaviour
+ * and is why the version moved instead.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /**
  * Every protocol version this build can hold a conversation in.
@@ -66,7 +74,7 @@ export const PROTOCOL_VERSION = 1;
  * A recorder may speak more than one at once; the interface speaks exactly one
  * and is told, in the refusal, what the recorder speaks instead.
  */
-export const SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [2] as const;
 
 /** How many connections one recorder serves before refusing more. */
 export const MAX_CONCURRENT_CONNECTIONS = 8;
@@ -117,6 +125,7 @@ export const FEATURES = [
   'hotkeys',
   'replay',
   'settings',
+  'automatic',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -147,6 +156,7 @@ export const COMMANDS = [
   'library_trash',
   'restore_from_trash',
   'empty_trash',
+  'set_favourite',
   'plugins',
   'export_recording',
   'get_hotkeys',
@@ -211,7 +221,7 @@ export type KnownEndReason = (typeof END_REASONS)[number];
 export type EndReason = Extensible<KnownEndReason>;
 
 /** The states a recorder reports. Closed, deliberately: see the file header. */
-export const RECORDER_STATES = ['idle', 'recording'] as const;
+export const RECORDER_STATES = ['idle', 'watching', 'recording'] as const;
 
 /** What the recorder is doing. There is no unrecognised state. */
 export type RecorderState = (typeof RECORDER_STATES)[number];
@@ -234,6 +244,7 @@ export const REPLIES = [
   'library_trash',
   'restored',
   'trash_emptied',
+  'favourited',
   'plugins',
   'recording_exported',
   'hotkeys',
@@ -246,7 +257,7 @@ export const REPLIES = [
 export type ReplyName = (typeof REPLIES)[number];
 
 /** The events this build knows. */
-export const EVENTS = ['status_changed', 'recording_failed'] as const;
+export const EVENTS = ['status_changed', 'session_ended', 'recording_failed'] as const;
 
 /** The name of an event this build knows. */
 export type KnownEventName = (typeof EVENTS)[number];
@@ -971,6 +982,58 @@ export interface TrashEmptiedReply {
   readonly emptied: TrashEmptied;
 }
 
+/**
+ * Marking one thing a favourite, or clearing the mark.
+ *
+ * The target takes two fields because the schema does: a sitting is addressed by
+ * the identifier the recorder generated, which is text, and a recording or a
+ * clip by the integer key the index gave it. `kind` says which of the two to
+ * read, and the recorder refuses a request that filled in neither rather than
+ * marking whatever row is at zero.
+ */
+export interface SetFavourite {
+  /** `session`, `recording` or `clip`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /**
+   * Whether it should be a favourite afterwards.
+   *
+   * The state to be in, not a toggle: two windows open on one library would
+   * disagree about what a toggle means.
+   */
+  readonly favourite: boolean;
+}
+
+/** What the mark is now. */
+export interface FavouriteMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /** Whether it is a favourite now, which is what a screen draws. */
+  readonly favourite: boolean;
+  /**
+   * Whether this request is what changed it.
+   *
+   * `false` for a star that was already full: the difference between "you did
+   * that" and "that was already so".
+   */
+  readonly changed: boolean;
+}
+
+/** A favourite mark was set or cleared. */
+export interface FavouritedReply {
+  /** The tag. */
+  readonly reply: 'favourited';
+  /** Which thing, and what its mark is now. */
+  readonly mark: FavouriteMark;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1242,6 +1305,7 @@ export type Reply =
   | LibraryTrashReply
   | RestoredReply
   | TrashEmptiedReply
+  | FavouritedReply
   | PluginsReply
   | RecordingExportedReply
   | HotkeysReply
@@ -1249,10 +1313,102 @@ export type Reply =
   | AudioDevicesReply
   | ShuttingDownReply;
 
-/** Nothing is being recorded. */
+/** Nothing is being recorded, and nothing will be until something asks. */
 export interface IdleStatus {
   /** The tag. */
   readonly state: 'idle';
+}
+
+/**
+ * Nothing is being recorded, and the next game to start will be.
+ *
+ * A different answer from {@link IdleStatus}, which is the whole point of it: a
+ * recorder watching for games with no game running used to be reported as idle,
+ * which is what a recorder that will never record anything also reports.
+ */
+export interface WatchingStatus {
+  /** The tag. */
+  readonly state: 'watching';
+  /**
+   * The sitting that is still open, when one is.
+   *
+   * A game that exits keeps its sitting open for a grace period so that the same
+   * game launching again rejoins it. During that period the recorder is watching
+   * and in a sitting at once, and an interface that dropped the game's name for
+   * those few seconds would flicker.
+   */
+  readonly session?: SessionSummary;
+}
+
+/**
+ * One sitting, as the recorder currently holds it.
+ *
+ * The live counterpart of {@link LibrarySession}, carrying the same field names
+ * for the same facts. What it leaves out is everything the library adds
+ * afterwards — a row identifier, a favourite, a tag, a size on disk — none of
+ * which is known while the file is still being written.
+ *
+ * Whether the sitting is over is {@link ended_at}. There is no separate finished
+ * shape: the sitting on a status is one the recorder is still in, and the one on
+ * a {@link SessionEndedEvent} is the same object with the two fields only an
+ * ended sitting has.
+ */
+export interface SessionSummary {
+  /** The recorder's identifier for it, shared with the library once indexed. */
+  readonly session_id: string;
+  /**
+   * The catalogue's identifier for the game.
+   *
+   * Absent for a sitting the catalogue would not attribute: it reported a tie,
+   * or claimed nothing, and the sitting is filed under no game rather than under
+   * a guess.
+   */
+  readonly game_id?: string;
+  /** The game's name as the catalogue knows it. Absent for the same reason. */
+  readonly game_name?: string;
+  /** When the sitting started, RFC 3339 with the offset it was recorded in. */
+  readonly started_at: string;
+  /** When it ended, RFC 3339. Absent while it is still open. */
+  readonly ended_at?: string;
+  /**
+   * Why it ended: `game-exited`, `system-resumed`, `recorder-stopping` or
+   * `recording-ended`. Absent while it is still open.
+   *
+   * The vocabulary of `LibrarySession.end_reason`, and open for the same reason:
+   * a reason invented later is kept and shown rather than failing the frame.
+   */
+  readonly end_reason?: string;
+  /**
+   * The files it has produced, in the order they were recorded.
+   *
+   * Includes the one being written, which is what makes "the second file of this
+   * sitting" sayable while it is still being recorded.
+   */
+  readonly recordings: readonly SessionRecording[];
+}
+
+/**
+ * One recording within a sitting.
+ *
+ * Deliberately smaller than {@link LibraryRecording}: this is a file the
+ * recorder has just written, with no row identifier, no tags and no measured
+ * size, because nothing has indexed it yet.
+ */
+export interface SessionRecording {
+  /** Which recording of the sitting this is, counting from one. */
+  readonly session_index: number;
+  /** The file that was written, or is being written. */
+  readonly output: string;
+  /**
+   * What became of it: `recorded`, `no-window` or `failed`.
+   *
+   * Absent while it is still running. The two that produced no playable file are
+   * listed anyway: a sitting whose recording failed is not a sitting with one
+   * fewer recording.
+   */
+  readonly outcome?: string;
+  /** How long it runs for. Absent while running, and for one with no file. */
+  readonly duration_ms?: number;
 }
 
 /**
@@ -1285,6 +1441,17 @@ export interface ActiveRecording {
    * bounds what may be asked for.
    */
   readonly replay_seconds?: number;
+  /**
+   * The sitting this recording belongs to, when it belongs to one.
+   *
+   * This is where the game is. {@link target} is a capture selector —
+   * `process 4242` — and an interface cannot turn one into "Counter-Strike 2"
+   * without the catalogue, which lives in the recorder. It is also how the
+   * second file of one sitting stops looking like an unrelated recording.
+   *
+   * Absent for a recording that is not part of a sitting.
+   */
+  readonly session?: SessionSummary;
 }
 
 /** A recording is in progress. */
@@ -1298,7 +1465,7 @@ export interface RecordingStatus extends ActiveRecording {
  *
  * The one union here with no catch-all. See the file header.
  */
-export type RecorderStatus = IdleStatus | RecordingStatus;
+export type RecorderStatus = IdleStatus | WatchingStatus | RecordingStatus;
 
 /** What a finished recording turned out to be. Every field is measured. */
 export interface RecordingSummary {
@@ -1495,6 +1662,22 @@ export interface StatusChangedEvent {
   readonly status: RecorderStatus;
 }
 
+/**
+ * A sitting ended, and this is what it produced.
+ *
+ * On the `status` stream rather than one of its own, because it is the end of
+ * the thing {@link StatusChangedEvent} has been describing. It carries the
+ * sitting rather than only its identifier because the files are the point: the
+ * recorder is the only side that knows what it wrote, and the library has not
+ * necessarily indexed any of it yet.
+ */
+export interface SessionEndedEvent {
+  /** The tag. */
+  readonly event: 'session_ended';
+  /** The sitting, with `ended_at` and `end_reason` filled in. */
+  readonly session: SessionSummary;
+}
+
 /** A recording ended because something failed, rather than because it was asked to. */
 export interface RecordingFailedEvent {
   /** The tag. */
@@ -1520,7 +1703,8 @@ export interface UnrecognisedEvent {
 }
 
 /** Something the recorder decided to say without being asked. */
-export type RecorderEvent = StatusChangedEvent | RecordingFailedEvent | UnrecognisedEvent;
+export type RecorderEvent =
+  StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent | UnrecognisedEvent;
 
 /** The handshake, on the wire. */
 export type HelloMessage = { readonly type: 'hello' } & Hello;
@@ -1566,6 +1750,6 @@ export function isRecognisedErrorDetail(
 /** Whether an event is one this build knows what to do with. */
 export function isRecognisedEvent(
   event: RecorderEvent,
-): event is StatusChangedEvent | RecordingFailedEvent {
+): event is StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent {
   return event.event !== undefined;
 }

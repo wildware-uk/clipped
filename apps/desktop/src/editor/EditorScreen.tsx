@@ -64,7 +64,7 @@ const MISSING: readonly Missing[] = [
       'The operations exist in crates/edit with undo and redo (issue #84). The controls need the same path to the document as opening one. Issues #84 and #306',
   },
   {
-    does: 'Track volume, mute, solo and fades; crop, rotate and speed; text overlays; combining recordings',
+    does: 'Track volume, mute and fades; crop, rotate and speed; text overlays; combining recordings',
     needs: 'Issues #85, #86, #87 and #88, each of which owns its own control',
   },
   {

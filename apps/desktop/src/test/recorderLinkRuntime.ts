@@ -60,6 +60,14 @@ export interface CommandAnswers {
   readonly restoreFromTrash?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `empty_trash` answers, given the confirmation it was sent. */
   readonly emptyTrash?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `set_favourite` answers, given the target and the state asked for.
+   *
+   * The default is a rejection, like the reads: a stub that quietly answered
+   * would let a screen test watch a star fill in while the recorder was never
+   * asked, which is the whole thing issue #58 was missing.
+   */
+  readonly setFavourite?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
@@ -245,6 +253,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'empty_trash') {
         return commands.emptyTrash?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'set_favourite') {
+        return commands.setFavourite?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);

@@ -11,7 +11,7 @@ at start-up and apply what it holds to each recording they start: `watch` since
 [issue #402](https://github.com/wildware-uk/clipped/issues/402), through the same
 call (["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
 below). `clipped-recorder record` takes its settings from its command line and
-always will; that is what a command line is for. Nothing yet *writes* a
+always will; that is what a command line is for. Nothing yet _writes_ a
 settings file: the screen that edits all of this is
 [issue #51](https://github.com/wildware-uk/clipped/issues/51), and until it
 exists the file is one somebody writes by hand.
@@ -46,21 +46,21 @@ nothing — records at 60.
 This is the distinction the whole design turns on, and the one thing to
 understand before changing anything here.
 
-| | Minecraft, frame rate unset | Counter-Strike 2, frame rate set to 60 |
-| --- | --- | --- |
-| Resolves to today | 60 | 60 |
-| Source | `global` | `game` |
-| Reset offered | no | yes |
-| Global changes to 90 | now records at 90 | still records at 60 |
+|                      | Minecraft, frame rate unset | Counter-Strike 2, frame rate set to 60 |
+| -------------------- | --------------------------- | -------------------------------------- |
+| Resolves to today    | 60                          | 60                                     |
+| Source               | `global`                    | `game`                                 |
+| Reset offered        | no                          | yes                                    |
+| Global changes to 90 | now records at 90           | still records at 60                    |
 
-A per-game layer that stored the *effective* value could not tell those two
+A per-game layer that stored the _effective_ value could not tell those two
 apart, and the first change to the global settings would silently stop reaching
 the games that were meant to follow it. So every field in a layer is an
 `Option<T>`, `None` means "this layer says nothing", and the fold reports which
 layer supplied the answer.
 
-The same three-state model applies to hotkeys, where the states are *unset*
-(follow the default), *bound to a combination*, and *deliberately unbound* — see
+The same three-state model applies to hotkeys, where the states are _unset_
+(follow the default), _bound to a combination_, and _deliberately unbound_ — see
 [Hotkeys](#hotkeys).
 
 ## The API
@@ -90,14 +90,14 @@ assert_eq!(resolved.framerate().source(), SettingSource::Global);
 assert!(!resolved.framerate().is_overridden());
 ```
 
-| Type | What it is |
-| --- | --- |
-| `Preferences` | One layer: the global settings, or one game's. Every field optional, every setter validating. |
-| `Configuration` | The global layer, the per-game layers, and the hotkey layer. Valid by construction. |
-| `ConfigurationStore` | A `Configuration` with `settings.json` behind it. Loads, migrates, saves atomically. |
-| `ResolvedSettings` | The answer for one scope: every setting, with its source. |
-| `Resolved<T>` | One answer: `value()`, `source()`, `is_overridden()`. |
-| `Scope` | Which layer a resolution was for — `Global`, or `Game(GameKey)`. |
+| Type                 | What it is                                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `Preferences`        | One layer: the global settings, or one game's. Every field optional, every setter validating. |
+| `Configuration`      | The global layer, the per-game layers, and the hotkey layer. Valid by construction.           |
+| `ConfigurationStore` | A `Configuration` with `settings.json` behind it. Loads, migrates, saves atomically.          |
+| `ResolvedSettings`   | The answer for one scope: every setting, with its source.                                     |
+| `Resolved<T>`        | One answer: `value()`, `source()`, `is_overridden()`.                                         |
+| `Scope`              | Which layer a resolution was for — `Global`, or `Game(GameKey)`.                              |
 
 ### What a settings screen needs, and where it comes from
 
@@ -106,7 +106,7 @@ assert!(!resolved.framerate().is_overridden());
 - `value()` is what to show in the control.
 - `source()` is `Default`, `Global` or `Game`, which is the "inherited from
   global" badge.
-- `is_overridden()` is whether *this scope* set it, which is what enables Reset.
+- `is_overridden()` is whether _this scope_ set it, which is what enables Reset.
 
 `is_overridden` is asked against the scope, not against a fixed layer. On the
 per-game page it means "this game set it"; on the global page it means "the
@@ -142,30 +142,31 @@ storage behaviour, HDR — and each of them arrives with the subsystem that read
 it. A setting for a subsystem that does not exist is a control that silently
 does nothing (AGENTS.md section 27).
 
-| Key | Type | Default | Accepts |
-| --- | --- | --- | --- |
-| `capture_target` | text | `game-window` | `game-window`, `display` |
-| `resolution` | text | `source` | `source`, or a size such as `1920x1080`; both sides even, 128–7680 |
-| `framerate` | number | `60` | 1–480 |
-| `codec` | text | `auto` | `auto`, `h264`, `hevc`, `av1` |
-| `encoder` | text | `auto` | `auto`, `nvenc`, `amf`, `quicksync`, `software` |
-| `microphone` | text | `default` | `default`, `none`, or a device name of 1–256 characters |
-| `system_audio` | text | `default` | `default`, `none`, or a device name of 1–256 characters |
-| `replay_window_seconds` | number | `300` | 30–1800, whole seconds |
+| Key                     | Type   | Default       | Accepts                                                            |
+| ----------------------- | ------ | ------------- | ------------------------------------------------------------------ |
+| `capture_target`        | text   | `game-window` | `game-window`, `display`                                           |
+| `resolution`            | text   | `source`      | `source`, or a size such as `1920x1080`; both sides even, 128–7680 |
+| `framerate`             | number | `60`          | 1–480                                                              |
+| `codec`                 | text   | `auto`        | `auto`, `h264`, `hevc`, `av1`                                      |
+| `encoder`               | text   | `auto`        | `auto`, `nvenc`, `amf`, `quicksync`, `software`                    |
+| `microphone`            | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
+| `system_audio`          | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
+| `replay_window_seconds` | number | `300`         | 30–1800, whole seconds                                             |
 
-Storage limits are **not** in that table, and not per game: they live in a
-`storage` section of their own, because a library is one thing however many
-games are in it. Nothing is limited unless one is set, which is what Clipped
+Where the library lives and what it may occupy are **not** in that table, and
+not per game: they live in a `storage` section of their own, because a library
+is one thing however many games are in it, and because SPEC.md section 31 —
+which lists what a game may override — has neither on it. Nothing is limited unless one is set, which is what Clipped
 ships with and why automatic cleanup deletes nothing on a machine nobody has
 configured ([#111]).
 
-| Key in `storage` | Type | Default | Accepted |
-| --- | --- | --- | --- |
-| `recording_directory` | text | the Clipped folder of your videos directory | an absolute path |
-| `maximum_usage_bytes` | number | none | a gigabyte or more |
-| `minimum_free_space_bytes` | number | none | any number of bytes |
-| `maximum_age_days` | number | none | one day or more, whole days |
-| `trash_directory` | text | beside the recordings | an absolute path, on the recordings' volume and not inside them |
+| Key in `storage`           | Type   | Default                                             | Accepted                                                        |
+| -------------------------- | ------ | --------------------------------------------------- | --------------------------------------------------------------- |
+| `maximum_usage_bytes`      | number | none                                                | a gigabyte or more                                              |
+| `minimum_free_space_bytes` | number | none                                                | any number of bytes                                             |
+| `maximum_age_days`         | number | none                                                | one day or more, whole days                                     |
+| `trash_directory`          | text   | beside the recordings                               | an absolute path, on the recordings' volume and not inside them |
+| `recording_directory`      | text   | the `Clipped` folder of the user's videos directory | an absolute path                                                |
 
 A limit outside those bounds is **refused**, and the file does not load: a quota
 under a gigabyte can only be satisfied by a library with nothing in it, and a
@@ -174,26 +175,28 @@ maximum age under a day deletes footage recorded this afternoon. Both floors are
 inside `storage` that this build does not understand is kept and written back,
 like every other unknown key.
 
-`recording_directory` is where recordings and their session records are
-written. It is in `storage` rather than in the per-game table for the reason the
-limits are: a per-game directory would put one game's sittings outside the root
-the library indexes, storage accounting measures and cleanup sweeps. The
-directory is not checked when it is set — a removable drive that is not plugged
-in at the moment somebody opens the settings screen is not a reason to refuse
-the setting — and a recording that cannot be written to it reports that against
-the recording ([#307]).
+`recording_directory` is where recordings are written, and it is **step 3 of the
+MVP definition** (SPEC.md section 45): a fresh user picks a microphone and a
+directory once, closes the window, and never configures capture again. Three
+layers decide it, top down — the `--output`/`--output-directory` flag, then this
+setting, then the videos folder Clipped would pick on its own — so a run somebody
+typed a path into still goes where they said, and everything else goes where the
+settings screen said ([#307]).
 
-Three things read it, in this order of precedence: `clipped-recorder watch`
-falls back to it when `--output-directory` is not given, a recording started
-from the window is written under it, and the trash defaults to sitting beside
-it. `clipped-recorder record` and `clipped-recorder replay` deliberately do
-**not**: those two do exactly what their command line says, and apply no setting
-from this file at all.
+It must be absolute, and it must not be blank. The recorder is started by the
+shell's `Run` key, with a working directory nobody chose, so a relative path
+names somewhere different every time it starts; blank is refused separately,
+because `""` is not a path anybody can be told to make absolute and because
+clearing the setting is removing the key rather than writing an empty string.
+Whether the directory exists, is writable, or has room is
+**not** checked when the file is read: a settings file is read at start-up and a
+drive can be unplugged after it, so the answer that matters is the one at the
+moment a recording starts, and that is where it is reported.
 
 `trash_directory` defaults to the recordings folder's path with `.trash`
 appended — `D:\Clips` becomes `D:\Clips.trash`. Beside rather than inside,
 because deletion is a rename and so must stay on the volume, and because a trash
-*inside* the recordings root would be counted as recordings by storage
+_inside_ the recordings root would be counted as recordings by storage
 accounting — which `StorageRoots` refuses outright.
 
 ### Seeing what a limit would do before you set one
@@ -254,7 +257,7 @@ in range, and a `Configuration` that exists is valid. That is what makes "the
 previous valid configuration is retained" a property of the type rather than a
 discipline every caller has to keep.
 
-"In range" means *the file can carry it and give it back unchanged*, not merely
+"In range" means _the file can carry it and give it back unchanged_, not merely
 that the Rust type can hold it. Two of the settings are wider than the file, and
 the setters are where that is caught:
 
@@ -290,14 +293,14 @@ hotkeys either.
 
 Three states, for the same reason the recording settings have them:
 
-| In the file | Means |
-| --- | --- |
-| key absent | follow the default (`Ctrl+F10` for Save Replay, `Ctrl+F9` for Add Bookmark) |
-| `"save_replay": "Ctrl+F10"` | pinned to that combination, whatever the default becomes |
-| `"save_replay": null` | deliberately unbound |
+| In the file                 | Means                                                                       |
+| --------------------------- | --------------------------------------------------------------------------- |
+| key absent                  | follow the default (`Ctrl+F10` for Save Replay, `Ctrl+F9` for Add Bookmark) |
+| `"save_replay": "Ctrl+F10"` | pinned to that combination, whatever the default becomes                    |
+| `"save_replay": null`       | deliberately unbound                                                        |
 
 Two actions on one combination is refused when it is set, naming both actions —
-including when the combination is one another action holds *by default*, because
+including when the combination is one another action holds _by default_, because
 that is the binding the user would find had stopped working. The other half of
 conflict detection, a combination another application already owns, can only be
 discovered by asking Windows and belongs to `clipped_hotkeys::HotkeyService`
@@ -355,7 +358,7 @@ sorted so that reordering a manifest does not lapse consent and any real change
 does. It is legible on purpose — a person reading their own settings can see
 what they agreed to without running anything, which a hash could not give them.
 
-It is compared with what the plugin declares *now*, every time one is started.
+It is compared with what the plugin declares _now_, every time one is started.
 A plugin that updates and asks for a new endpoint no longer matches, so it is
 not started and the reason is reported; the user is asked again rather than the
 new access being granted on the strength of the old answer.
@@ -384,7 +387,7 @@ previous settings or the new ones and never half of each (AGENTS.md section 17).
 The directory is created if it is not there. Nothing else writes the file.
 
 **Saving looks at the file before it replaces it, and refuses if this build
-could not read it.** Refusing to *read* a newer build's file preserves nothing on
+could not read it.** Refusing to _read_ a newer build's file preserves nothing on
 its own: the user whose other machine is a version ahead opens the settings here,
 sees the defaults, changes one thing, and the save is what destroys their file —
 the same loss, arrived at one step later. So `ConfigurationStore::store` parses
@@ -418,11 +421,11 @@ it through to a successful save.
 
 `version` is the format, and this build writes version 1.
 
-| The file says | What happens |
-| --- | --- |
-| no `version` key | version 0: migrated in memory, reported as `Loaded::Migrated { from: 0 }` |
-| `1` | read as written |
-| `2` or higher | **refused**, and the file is left exactly as it was — by the next save as well as by the read |
+| The file says    | What happens                                                                                  |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| no `version` key | version 0: migrated in memory, reported as `Loaded::Migrated { from: 0 }`                     |
+| `1`              | read as written                                                                               |
+| `2` or higher    | **refused**, and the file is left exactly as it was — by the next save as well as by the read |
 
 A migration runs **in memory**. The file on disk is not touched until the user
 next saves something, because rewriting a file for somebody who only wanted to
@@ -450,7 +453,7 @@ frame rate `fps`. Version 1 spells it `framerate`, the name `--framerate` and
 It is a small migration on purpose. What it is really for is that the mechanism
 — detect a version, migrate one step at a time, refuse to go backwards, keep
 what is not understood — is written and tested before there is a user's file
-depending on it being right. A document that sets *both* spellings is refused
+depending on it being right. A document that sets _both_ spellings is refused
 rather than guessed: choosing wrongly would record at the wrong rate for every
 session that followed.
 
@@ -470,18 +473,18 @@ it cannot, because it has never heard of them — so `set_global`, `set_game` an
 ## Failure, and what survives it
 
 `ConfigurationStore` holds the last configuration it knows to be good. Every
-failure leaves it standing and leaves the file alone — reading *and* saving:
+failure leaves it standing and leaves the file alone — reading _and_ saving:
 
-| Went wrong | Configuration in force | The file | The next save |
-| --- | --- | --- | --- |
-| file absent | the defaults | not created | writes it |
-| not JSON | unchanged | untouched | **refused**, `WouldOverwrite` |
-| a value out of range | unchanged | untouched | **refused**, `WouldOverwrite` |
-| two actions on one hotkey | unchanged | untouched | **refused**, `WouldOverwrite` |
-| version newer than this build | unchanged | untouched | **refused**, `WouldOverwrite` |
-| both `fps` and `framerate` at version 0 | unchanged | untouched | **refused**, `WouldOverwrite` |
-| the file cannot be read at all (permissions) | unchanged | untouched | **refused**, `Read` |
-| the save itself failed | unchanged | previous contents intact | writes it, if the disk lets it |
+| Went wrong                                   | Configuration in force | The file                 | The next save                  |
+| -------------------------------------------- | ---------------------- | ------------------------ | ------------------------------ |
+| file absent                                  | the defaults           | not created              | writes it                      |
+| not JSON                                     | unchanged              | untouched                | **refused**, `WouldOverwrite`  |
+| a value out of range                         | unchanged              | untouched                | **refused**, `WouldOverwrite`  |
+| two actions on one hotkey                    | unchanged              | untouched                | **refused**, `WouldOverwrite`  |
+| version newer than this build                | unchanged              | untouched                | **refused**, `WouldOverwrite`  |
+| both `fps` and `framerate` at version 0      | unchanged              | untouched                | **refused**, `WouldOverwrite`  |
+| the file cannot be read at all (permissions) | unchanged              | untouched                | **refused**, `Read`            |
+| the save itself failed                       | unchanged              | previous contents intact | writes it, if the disk lets it |
 
 A user who hand-edits their settings into nonsense while Clipped is running keeps
 recording with the settings they had, and their file stays as they left it until
@@ -489,9 +492,9 @@ they move it aside themselves. The last column is the half that matters: a
 refusal to read that was followed by a save which overwrote anyway would preserve
 nothing at all.
 
-Note the deliberate asymmetry in the last two rows. A *content* the reader cannot
+Note the deliberate asymmetry in the last two rows. A _content_ the reader cannot
 understand means the file belongs to somebody — a newer build, or the user's own
-hand — and this build does not get to replace it. A *write* that failed says
+hand — and this build does not get to replace it. A _write_ that failed says
 nothing about what is in the file, so the next save simply tries again.
 
 ## Applying a setting to a recording
@@ -528,11 +531,11 @@ settings, which is why each recording's own record carries its own answer
 `RecordingRequest::game` is a `GameIdentity`, and `GameIdentity::slug()` is the
 catalogue's `game_id` for a `Known` game.
 
-| What the catalogue said | Resolved against |
-| --- | --- |
-| one entry, whose `game_id` is a valid game key | that game, inheriting from global |
+| What the catalogue said                            | Resolved against                                 |
+| -------------------------------------------------- | ------------------------------------------------ |
+| one entry, whose `game_id` is a valid game key     | that game, inheriting from global                |
 | one entry, whose `game_id` is not a valid game key | the global settings, and the log says which game |
-| several entries tied | the global settings |
+| several entries tied                               | the global settings                              |
 
 A tie is filed under `unattributed` precisely because the catalogue would not
 choose between the candidates, so resolving one candidate's settings would be
@@ -556,23 +559,23 @@ nobody watching. So a recording built from settings is given
 `UnavailableChoice::Substitute`, and one built from a command line keeps
 `UnavailableChoice::Refuse`:
 
-| The setting names | `--encoder nvenc`, typed now | `"encoder": "nvenc"`, configured |
-| --- | --- | --- |
-| an encoder this machine will not open | the recording fails, naming it | the ranked encoders are tried after it, and the substitution is logged at `warn` |
-| a size the capture is not producing | `SessionError::ScalingNotSupported` | recorded at the source size, and the substitution is logged at `warn` |
+| The setting names                     | `--encoder nvenc`, typed now        | `"encoder": "nvenc"`, configured                                                 |
+| ------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
+| an encoder this machine will not open | the recording fails, naming it      | the ranked encoders are tried after it, and the substitution is logged at `warn` |
+| a size the capture is not producing   | `SessionError::ScalingNotSupported` | recorded at the source size, and the substitution is logged at `warn`            |
 
 In both configured cases the footage exists and the log says what was done
 instead (AGENTS.md sections 16, 17 and 45). The configured encoder is still
-tried *first*, so a machine that does have it uses it.
+tried _first_, so a machine that does have it uses it.
 
-An invalid *value* cannot reach a recording at all: every setter validates, so a
+An invalid _value_ cannot reach a recording at all: every setter validates, so a
 `Configuration` that exists is valid, and a file this build cannot read leaves
 the previous configuration standing (["Failure, and what
 survives it"](#failure-and-what-survives-it)).
 
 ### What `apply_to` does not carry
 
-- **`capture_target`** decides which handle the *caller* resolves — the game's
+- **`capture_target`** decides which handle the _caller_ resolves — the game's
   window, or the display it is on via `clipped_windows::monitor_for_window` — so
   it is read before a recording's target exists.
 - **`replay_window_seconds`** becomes a `clipped_replay::ReplayConfig` when a
@@ -584,10 +587,10 @@ survives it"](#failure-and-what-survives-it)).
 A driver reaches a recording with a `RecordingSettings` that either carries
 answers of its own or does not, and that decides which method it wants:
 
-| The caller | The base recording | Method | A setting nobody configured |
-| --- | --- | --- | --- |
-| had nothing but a target and an output | `RecordingSettings::new(target, output)` | `apply_to` | becomes the value Clipped ships with |
-| was already told what to record with | built from a command line, as `watch` builds it from `settings_for` | `apply_configured_to` | stays as the caller asked for it |
+| The caller                             | The base recording                                                  | Method                | A setting nobody configured          |
+| -------------------------------------- | ------------------------------------------------------------------- | --------------------- | ------------------------------------ |
+| had nothing but a target and an output | `RecordingSettings::new(target, output)`                            | `apply_to`            | becomes the value Clipped ships with |
+| was already told what to record with   | built from a command line, as `watch` builds it from `settings_for` | `apply_configured_to` | stays as the caller asked for it     |
 
 `apps/recorder/src/watch.rs` is the second row: its command line names a
 resolution, a frame rate, a codec, an encoder and two audio selections before
@@ -616,19 +619,19 @@ to record. `apply_configured_to` applies only settings whose `SettingSource` is
 not `Default`, which is exactly "what a user configured".
 
 The unavailable-encoder question follows the same rule: `apply_configured_to`
-gives the recording `UnavailableChoice::Substitute` when the *configuration*
+gives the recording `UnavailableChoice::Substitute` when the _configuration_
 supplied the encoder or the resolution, and leaves a command line's `Refuse`
 standing when it did not — the two rows of the table above.
 
 ## Where the code is
 
-| File | What is in it |
-| --- | --- |
-| `crates/session/src/config/mod.rs` | `Configuration`: the layers, and resolution |
+| File                                       | What is in it                                                |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| `crates/session/src/config/mod.rs`         | `Configuration`: the layers, and resolution                  |
 | `crates/session/src/config/preferences.rs` | One layer, the settings themselves, validation, and the fold |
-| `crates/session/src/config/value.rs` | `Resolved`, `SettingSource`, `Scope`, `SettingKey` |
-| `crates/session/src/config/hotkeys.rs` | The hotkey layer and its three states |
-| `crates/session/src/config/game.rs` | How a settings file names a game |
-| `crates/session/src/config/document.rs` | The file format, versions and migration |
-| `crates/session/src/config/store.rs` | Reading, saving, and what survives a bad file |
-| `crates/session/src/config/tests.rs` | Inheritance, validation, migration and the file |
+| `crates/session/src/config/value.rs`       | `Resolved`, `SettingSource`, `Scope`, `SettingKey`           |
+| `crates/session/src/config/hotkeys.rs`     | The hotkey layer and its three states                        |
+| `crates/session/src/config/game.rs`        | How a settings file names a game                             |
+| `crates/session/src/config/document.rs`    | The file format, versions and migration                      |
+| `crates/session/src/config/store.rs`       | Reading, saving, and what survives a bad file                |
+| `crates/session/src/config/tests.rs`       | Inheritance, validation, migration and the file              |
