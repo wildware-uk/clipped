@@ -92,12 +92,7 @@ export interface SessionListProps {
 }
 
 /** The sittings, one row each, and their recordings under them. */
-export function SessionList({
-  sessions,
-  label,
-  actions,
-  favourites,
-}: SessionListProps): ReactNode {
+export function SessionList({ sessions, label, actions, favourites }: SessionListProps): ReactNode {
   const table = useRef<HTMLTableElement>(null);
   const showsRecordings = actions !== undefined;
   const window_ = useSessionWindow(table, sessions, showsRecordings);
