@@ -83,13 +83,15 @@
 //! saved from the Settings screen reaches the *next* recording without a
 //! restart ([issue #51](https://github.com/wildware-uk/clipped/issues/51)).
 //!
-//! Two settings are still carried and read by nothing when a recording starts,
+//! One setting is still carried and read by nothing when a recording starts,
 //! and the recorder says so rather than leaving it to be discovered
 //! (`apps/recorder/src/settings.rs`, AGENTS.md section 54):
 //! [`SettingKey::CaptureTarget`], which decides which handle the caller
-//! resolves before a recording exists, and [`SettingKey::ReplayWindow`], which
-//! `clipped-recorder replay` reads and nothing that starts a recording
-//! automatically does.
+//! resolves before a recording exists.
+//! [`SettingKey::ReplayWindow`] joined the others when
+//! [issue #427](https://github.com/wildware-uk/clipped/issues/427) gave a
+//! recording the window started a buffer: the request carries `replay` with no
+//! length, and the recorder resolves the length from here.
 //!
 //! Per-game defaults from the game catalogue are a fourth layer that does not
 //! exist yet either: `clipped_game_detection::catalogue::Entry::default_settings`

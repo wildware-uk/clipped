@@ -119,6 +119,7 @@ pub mod frame;
 pub mod hotkeys;
 pub mod library;
 pub mod message;
+pub mod playback;
 mod plugins;
 pub mod schema;
 pub mod server;
@@ -138,13 +139,14 @@ pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
     EmptyTrash, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
     LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
-    LibraryTrash, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied, TrashListing,
-    TrashedItem,
+    LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
+    TrashListing, TrashedItem,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+pub use playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 pub use plugins::{PluginDeclaration, PluginState, RefusedPlugin};
 pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,

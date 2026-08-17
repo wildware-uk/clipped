@@ -112,6 +112,7 @@ windows = "0.62"
 windows-core = "0.62"
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
+clipped-background = { path = "crates/background", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
 clipped-edit = { path = "crates/edit", version = "0.1.0" }
 clipped-encoder = { path = "crates/encoder", version = "0.1.0" }

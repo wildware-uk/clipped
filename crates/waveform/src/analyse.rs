@@ -38,12 +38,12 @@ use core::time::Duration;
 use std::ffi::CString;
 use std::path::Path;
 
+use clipped_background::{Continue, Pace, SourceIdentity, Unpaced};
 use rusty_ffmpeg::ffi;
 use tracing::{debug, warn};
 
 use crate::peaks::{PeakAccumulator, BASE_BUCKET, MAX_BASE_BUCKETS};
 use crate::samples::{SampleKind, SampleLayout};
-use crate::source::SourceIdentity;
 use crate::waveform::{TrackDescriptor, TrackWaveform, Waveform};
 use crate::WaveformError;
 
@@ -135,38 +135,6 @@ fn offer_packet(
 /// a hostile or broken file from turning into hundreds of open decoders.
 const MAX_TRACKS: usize = 64;
 
-/// Whether the analyser should carry on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Continue {
-    /// Carry on reading.
-    Yes,
-    /// Stop and report [`WaveformError::Cancelled`].
-    Stop,
-}
-
-/// What the analyser asks, periodically, before reading more of the file.
-///
-/// This is the hook that keeps waveform generation out of a game's way. An
-/// implementation may block — that is the point: [`crate::WaveformService`]'s
-/// blocks for as long as a recording is running, so a library scan that started
-/// before a game launched stops inside a few milliseconds of audio and resumes
-/// when the recording ends, rather than being abandoned or running through it.
-pub trait Pace: Send + Sync {
-    /// Called every so often while reading. May block; may ask for a stop.
-    fn checkpoint(&self) -> Continue;
-}
-
-/// The pace of a caller with nothing better to do, which never waits and never
-/// stops.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Unpaced;
-
-impl Pace for Unpaced {
-    fn checkpoint(&self) -> Continue {
-        Continue::Yes
-    }
-}
-
 /// Summarises every audio track of the recording at `path`.
 ///
 /// Reads the file to the end. For a long recording that is seconds of work, so
@@ -202,7 +170,7 @@ pub fn analyse_paced(path: impl AsRef<Path>, pace: &dyn Pace) -> Result<Waveform
     let mut tracks = demuxer.open_audio_tracks(path)?;
     if tracks.is_empty() {
         debug!(
-            recording = %identity.redacted(),
+            recording = %clipped_logging::RedactedPath::new(identity.path()),
             "the recording has no audio track, so its waveform has none either"
         );
         return Ok(Waveform::new(identity, Vec::new()));

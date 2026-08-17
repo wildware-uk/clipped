@@ -57,9 +57,12 @@ import type {
   RestoredItem,
   TrashEmptied,
   FavouriteMark,
+  LockMark,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
+  PlaybackStream,
+  PlaybackTrack,
   PluginDeclaration,
   SettingEntry,
   SettingsView,
@@ -169,6 +172,27 @@ function optionalNumberField(source: JsonObject, name: string, what: string): nu
 function booleanField(source: JsonObject, name: string, what: string): boolean {
   const value = source[name];
   return typeof value === 'boolean' ? value : unreadable(`${what} has no \`${name}\` boolean`);
+}
+
+/**
+ * A boolean a build older than the field simply does not send.
+ *
+ * Absent is not the same as `false` to a reader, but it is the same to a
+ * caller: a recorder with no lock column has nothing locked. Spread into the
+ * object so the field stays absent rather than becoming an explicit
+ * `undefined`, which `exactOptionalPropertyTypes` refuses.
+ */
+function optionalBoolean(source: JsonObject, name: string): { [key: string]: boolean } {
+  const value = source[name];
+  return typeof value === 'boolean' ? { [name]: value } : {};
+}
+
+function optionalBooleanField(source: JsonObject, name: string, what: string): boolean | undefined {
+  const value = source[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return typeof value === 'boolean' ? value : unreadable(`${what}'s \`${name}\` is not a boolean`);
 }
 
 function optionalStringField(source: JsonObject, name: string, what: string): string | undefined {
@@ -375,6 +399,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
     case 'favourited':
       return { reply: 'favourited', mark: readFavouriteMark(reply['mark']) };
+    case 'locked':
+      return { reply: 'locked', lock: readLockMark(reply['lock']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -383,6 +409,8 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
+    case 'playback_opened':
+      return { reply: 'playback_opened', playback: readPlayback(reply['playback']) };
     case 'hotkeys':
       return {
         reply: 'hotkeys',
@@ -673,6 +701,41 @@ function readExport(value: JsonValue | undefined): ExportSummary {
   };
 }
 
+function readPlayback(value: JsonValue | undefined): PlaybackStream {
+  const playback = object(value, 'a playback stream');
+  const what = 'a playback stream';
+  const track = optionalNumberField(playback, 'audio_track', what);
+  const tracks = playback['audio_tracks'];
+  const prepared = optionalBooleanField(playback, 'prepared', what);
+  return {
+    path: stringField(playback, 'path', what),
+    // Absent is "this recording has no sound", which is an answer rather than a
+    // gap - and one a window says out loud, because a silent player somebody
+    // was not warned about reads as a broken one.
+    ...(track === undefined ? {} : { audio_track: track }),
+    ...(tracks === undefined || tracks === null
+      ? {}
+      : { audio_tracks: arrayField(tracks, 'a playback track list', readPlaybackTrack) }),
+    ...(prepared === undefined ? {} : { prepared }),
+  };
+}
+
+function readPlaybackTrack(value: JsonValue | undefined): PlaybackTrack {
+  const track = object(value, 'a playback track');
+  const what = 'a playback track';
+  const name = optionalStringField(track, 'name', what);
+  const language = optionalStringField(track, 'language', what);
+  const chosen = optionalBooleanField(track, 'default', what);
+  return {
+    index: numberField(track, 'index', what),
+    // A track a recording did not name is shown by its position rather than
+    // given one here (`clipPlayback.ts`).
+    ...(name === undefined ? {} : { name }),
+    ...(language === undefined ? {} : { language }),
+    ...(chosen === undefined ? {} : { default: chosen }),
+  };
+}
+
 function readSessionPage(value: JsonValue | undefined): LibrarySessionPage {
   const page = object(value, 'a library page');
   const cursor = optionalStringField(page, 'next_cursor', 'a library page');
@@ -698,6 +761,7 @@ function readLibrarySession(value: JsonValue | undefined): LibrarySession {
     ...(endedAt === undefined ? {} : { ended_at: endedAt }),
     ...(endReason === undefined ? {} : { end_reason: endReason }),
     favourite: booleanField(session, 'favourite', what),
+    ...optionalBoolean(session, 'locked'),
     recordings: arrayField(session['recordings'], what, readLibraryRecording),
     clips: arrayField(session['clips'], what, readLibraryClip),
   };
@@ -730,6 +794,8 @@ function readLibraryRecording(value: JsonValue | undefined): LibraryRecording {
     // present means the screen has to say it has gone.
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(recording, 'favourite', what),
+    ...optionalBoolean(recording, 'locked'),
+    ...optionalBoolean(recording, 'protected'),
     tags: stringArrayField(recording, 'tags', what),
   };
 }
@@ -872,6 +938,20 @@ function readFavouriteMark(value: JsonValue | undefined): FavouriteMark {
     id: numberField(mark, 'id', what),
     favourite: booleanField(mark, 'favourite', what),
     changed: booleanField(mark, 'changed', what),
+  };
+}
+
+/** What a lock is now, and whether cleanup will leave the thing alone. */
+function readLockMark(value: JsonValue | undefined): LockMark {
+  const lock = object(value, 'a lock');
+  const what = 'a lock';
+  return {
+    kind: stringField(lock, 'kind', what),
+    session_id: stringField(lock, 'session_id', what),
+    id: numberField(lock, 'id', what),
+    locked: booleanField(lock, 'locked', what),
+    protected: booleanField(lock, 'protected', what),
+    changed: booleanField(lock, 'changed', what),
   };
 }
 

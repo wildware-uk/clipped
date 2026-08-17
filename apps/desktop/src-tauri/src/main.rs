@@ -26,15 +26,16 @@
 //!
 //! # What the window can ask this process to do
 //!
-//! Eleven `#[tauri::command]`s, and no other way in. Two are about this
-//! process — [`recorder_link_state`] and [`startup_notice`]; two read the
-//! recording library through the recorder — [`library_sessions`] and
-//! [`library_games`] (issue #301); four are the record control —
-//! [`record_target`] says what would be recorded, [`recorder_status`] asks the
-//! recorder what it is doing, and [`start_recording`] and [`stop_recording`] do
-//! the two things the button does (issue #389); and three act on a recording
-//! the library listed — [`export_recording`], [`open_recording`] and
-//! [`reveal_recording`] (issue #399).
+//! `#[tauri::command]`s, and no other way in. Two are about this process —
+//! [`recorder_link_state`] and [`startup_notice`]; two read the recording
+//! library through the recorder — [`library_sessions`] and [`library_games`]
+//! (issue #301); four are the record control — [`record_target`] says what
+//! would be recorded, [`recorder_status`] asks the recorder what it is doing,
+//! and [`start_recording`] and [`stop_recording`] do the two things the button
+//! does (issue #389); three act on a recording the library listed —
+//! [`export_recording`], [`open_recording`] and [`reveal_recording`]
+//! (issue #399); and [`open_playback`] is what puts a recording on the screen
+//! (issue #304).
 //!
 //! All but `record_target`, `open_recording` and `reveal_recording` are a round
 //! trip over the control protocol, and each returns either the recorder's own
@@ -46,12 +47,19 @@
 //!
 //! # Why opening and revealing are commands rather than a permission
 //!
-//! `capabilities/default.json` is the whole of the window's privilege, and two
-//! lines of it are dialogs: `dialog:allow-save`, so that the interface can ask
-//! the operating system where an export should go, and `dialog:allow-open`, so
-//! that it can ask which folder to record into (issue #51). Both answer with a
-//! path a person chose and neither reaches a file: `tauri-plugin-fs` is not
-//! registered, so none of its commands exists to be permitted.
+//! `capabilities/default.json` is the whole of the window's privilege, and
+//! playing a recording adds **nothing** to it: the `clip` URI scheme is
+//! registered by this process rather than granted to the interface, and it
+//! serves only what the recorder has already answered `open_playback` with
+//! ([`playback`], issue #304).
+//!
+//! Two lines of it are dialogs: `dialog:allow-save`, which the export added so
+//! that the interface can ask the operating system where an export should go,
+//! and `dialog:allow-open`, which the settings screen added so that it can ask
+//! which folder to record into (issue #51). Both answer with a path a person
+//! chose and neither reaches a file: `tauri-plugin-fs` is present as a
+//! dependency of the dialog plugin and is **not registered**, so none of its
+//! commands exists to be permitted.
 //!
 //! Opening a recording and revealing it in Explorer could have been the same
 //! shape — `tauri-plugin-opener` has commands the interface can call — and are
@@ -100,6 +108,7 @@
 mod foreground;
 mod notification_policy;
 mod notifications;
+mod playback;
 mod this_application;
 mod toast;
 mod tray;
@@ -196,6 +205,7 @@ fn main() {
             restore_from_trash,
             empty_trash,
             set_favourite,
+            set_lock,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -205,9 +215,27 @@ fn main() {
             start_recording,
             stop_recording,
             export_recording,
+            open_playback,
             open_recording,
             reveal_recording
         ])
+        // The one thing this window may receive bytes over, and it serves
+        // nothing until the recorder has answered `open_playback` for a
+        // recording (`playback`). Asynchronous because reading four mebibytes
+        // off a disk may not happen on the thread drawing the window, and
+        // because a media element has several of these in flight at once.
+        .register_asynchronous_uri_scheme_protocol(
+            playback::SCHEME,
+            |_context, request, responder| {
+                std::thread::Builder::new()
+                    .name("clipped-playback".to_owned())
+                    .spawn(move || responder.respond(playback::handle(&request)))
+                    .map_or_else(
+                        |error| eprintln!("a recording could not be served to the window: {error}"),
+                        |_| (),
+                    );
+            },
+        )
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -502,6 +530,29 @@ fn set_favourite(
     }
 }
 
+/// Locks one thing against automatic cleanup, or unlocks it (issue #472).
+///
+/// A lock protects against automatic cleanup and nothing else: a locked
+/// recording is deleted by a manual delete exactly as an unlocked one is.
+#[tauri::command(async)]
+fn set_lock(
+    link: tauri::State<'_, RecorderLink>,
+    kind: String,
+    session_id: String,
+    id: i64,
+    locked: bool,
+) -> Result<clipped_ipc::LockMark, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::SetLock(clipped_ipc::SetLock {
+        kind,
+        session_id,
+        id,
+        locked,
+    }))? {
+        clipped_ipc::Reply::Locked { lock } => Ok(lock),
+        _ => Err(wrong_reply("set_lock")),
+    }
+}
+
 /// What the library holds per game (SPEC.md section 17).
 #[tauri::command(async)]
 fn library_games(
@@ -696,19 +747,44 @@ struct StartedRecording {
     output: String,
 }
 
+/// What this application asks the recorder to record, wherever it is asked
+/// from.
+///
+/// One function because there are two controls — the window's Record button and
+/// the tray's Start Recording — and they must not drift. Issue #427 is what
+/// drift here looks like: the tray's Save Replay item was correct, enabled
+/// exactly when the running recording had a buffer, and dark for ever, because
+/// the two places that started a recording both forgot to ask for one.
+///
+/// **`pid` rather than "whatever is in front now"** deliberately, and it is the
+/// same reasoning `StopRecording::recording_id` carries: the control names what
+/// it will record, and the foreground can change between the label being drawn
+/// and the button being pressed. Sending the identifier that was on screen means
+/// a press cannot record an application the user was never offered.
+///
+/// **`replay` rather than `replay_seconds`.** A recording started here keeps a
+/// replay buffer, so Save Replay is a control rather than a label, and how long
+/// it keeps is `replay_window_seconds` — a setting, resolved by the recorder for
+/// the game it turns out to be recording. This process cannot read it and should
+/// not: it may link `clipped-ipc` and nothing else of the workspace
+/// (`tests/integration/tests/workspace_layering.rs`), and a length invented here
+/// would be a duration nobody chose (AGENTS.md sections 30 and 55).
+///
+/// **Nothing else is sent.** Resolution, frame rate, codec, encoder and the
+/// audio devices are the recorder's own settings for the same reason; the output
+/// path is likewise the recorder's timestamped default, which is what
+/// `clipped-recorder record` writes with no `--output`.
+pub(crate) fn recording_request(process_id: u32) -> clipped_ipc::StartRecording {
+    clipped_ipc::StartRecording {
+        pid: Some(process_id),
+        replay: true,
+        ..clipped_ipc::StartRecording::default()
+    }
+}
+
 /// Records the process the window named.
 ///
-/// `process_id` rather than "whatever is in front now" deliberately, and it is
-/// the same reasoning `StopRecording::recording_id` carries: the control names
-/// what it will record, and the foreground can change between the label being
-/// drawn and the button being pressed. Sending the identifier the window had on
-/// screen means a press cannot record an application the user was never offered.
-///
-/// Nothing else is sent. Resolution, frame rate, codec, encoder and the audio
-/// devices are the recorder's own settings, and a window that sent its own
-/// values would be a second place those are decided (AGENTS.md section 30); the
-/// output path is likewise the recorder's timestamped default, which is what
-/// `clipped-recorder record` writes with no `--output`.
+/// The request is [`recording_request`], which is also what the tray sends.
 ///
 /// `async` for the reason [`recorder_status`] is, and more so: this one waits
 /// for a capture target to be resolved and an encoder session to be opened.
@@ -717,12 +793,9 @@ fn start_recording(
     link: tauri::State<'_, RecorderLink>,
     process_id: u32,
 ) -> Result<StartedRecording, RecorderProblem> {
-    let reply = link.call(&clipped_ipc::Command::StartRecording(
-        clipped_ipc::StartRecording {
-            pid: Some(process_id),
-            ..clipped_ipc::StartRecording::default()
-        },
-    ))?;
+    let reply = link.call(&clipped_ipc::Command::StartRecording(recording_request(
+        process_id,
+    )))?;
 
     match reply {
         clipped_ipc::Reply::RecordingStarted {
@@ -812,6 +885,64 @@ fn export_recording(
     }
 }
 
+/// A recording the recorder has opened for playback, as the window needs it.
+///
+/// The **address** rather than the path: what the recorder answered with is
+/// registered with the `clip` scheme and the window is handed a number that
+/// stands for it, so the interface never holds a file name it could ask for
+/// something else with (`playback`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct OpenedPlayback {
+    /// Where to point a `<video>`.
+    url: String,
+    /// The source stream index whose sound is in it, if it has any.
+    audio_track: Option<usize>,
+    /// Every sound track of the recording, for the selector.
+    audio_tracks: Vec<clipped_ipc::PlaybackTrack>,
+    /// Whether a copy had to be made to carry the chosen track.
+    prepared: bool,
+}
+
+/// Opens a recording for playback, and registers what came back.
+///
+/// Two things happen here and both matter. The **recorder** decides what may be
+/// played: it opens the recording, lists its sound tracks and answers with a
+/// file — the recording itself when a media element would already play the
+/// chosen track, and a copy carrying that track alone when it would not, which
+/// is the whole reason this is a round trip rather than a path the window
+/// already has (`clipped_ipc::playback`, issue #304). Then **this process**
+/// registers that file with the `clip` scheme and hands back an address.
+///
+/// The window is never given a path and can never name one: a number nothing
+/// has registered is a 404, so the reach it gains is exactly the recordings the
+/// recorder has vouched for in this session (`playback`).
+///
+/// `async` for the reason [`export_recording`] is: preparing a track is a pass
+/// over the recording, and the thread drawing the window may not wait on one.
+#[tauri::command(async)]
+fn open_playback(
+    link: tauri::State<'_, RecorderLink>,
+    source: String,
+    audio_track: Option<usize>,
+) -> Result<OpenedPlayback, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::OpenPlayback(
+        clipped_ipc::OpenPlayback {
+            source,
+            audio_track,
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::PlaybackOpened { playback } => Ok(OpenedPlayback {
+            url: playback::url_for(std::path::Path::new(&playback.path)),
+            audio_track: playback.audio_track,
+            audio_tracks: playback.audio_tracks,
+            prepared: playback.prepared,
+        }),
+        _ => Err(wrong_reply("open_playback")),
+    }
+}
+
 /// Something this process was asked to do with a file, and could not.
 ///
 /// A shape of its own rather than a [`RecorderProblem`], because no recorder was
@@ -864,13 +995,12 @@ fn still_there(path: &str) -> Result<PathBuf, FileProblem> {
 
 /// Opens a recording in whatever application the user opens video with.
 ///
-/// The honest answer to "let me watch it" until Clipped can play one itself:
-/// playing a recording *inside* the window is
-/// [issue #304](https://github.com/wildware-uk/clipped/issues/304) and is
-/// blocked on four separate things, including that WebView2 cannot decode the
-/// uncompressed sound the archival file carries
-/// ([issue #392](https://github.com/wildware-uk/clipped/issues/392)). Handing
-/// the file to the player somebody already has works today and loses nothing.
+/// Still here now that the window plays a recording itself
+/// ([`open_playback`], issue #304), and deliberately: the window plays one
+/// track at a time and offers no scrubbing beyond what a `<video>` gives, and
+/// somebody who wants their own player, frame stepping or a second monitor
+/// should have the file. Watching in Clipped and watching in VLC are different
+/// requests.
 ///
 /// No default application is named, so this is whatever the user chose for
 /// `.mkv`. A machine with nothing associated is Windows's "how do you want to
@@ -1008,7 +1138,7 @@ fn recorder_executable() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1058,7 +1188,7 @@ mod tests {
     /// A recorder that answers the two library commands and remembers exactly
     /// what it was asked.
     #[derive(Debug, Default)]
-    struct AskedRecorder {
+    pub(crate) struct AskedRecorder {
         /// Every command it was sent, in order.
         asked: std::sync::Mutex<Vec<clipped_ipc::Command>>,
         /// What to answer every command with instead of a reply.
@@ -1075,7 +1205,7 @@ mod tests {
         }
 
         /// What it has been asked so far.
-        fn asked(&self) -> Vec<clipped_ipc::Command> {
+        pub(crate) fn asked(&self) -> Vec<clipped_ipc::Command> {
             self.asked
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1194,9 +1324,10 @@ mod tests {
             output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 754_000,
-            // The window does not ask for a replay buffer, so a recording it
-            // started keeps none (#427).
-            replay_seconds: None,
+            // A recording this application started keeps a buffer, at the
+            // window the recorder's settings resolved (#427), so the status it
+            // reports one from carries the length rather than nothing.
+            replay_seconds: Some(300),
             session: None,
         })
     }
@@ -1290,16 +1421,16 @@ mod tests {
     /// is the point of these tests — the TypeScript suite stubs `invoke` and so
     /// stops at the window's edge, and the recorder's own tests start at its
     /// dispatch, leaving the two commands that join them covered by nothing.
-    struct FakeRecorder {
+    pub(crate) struct FakeRecorder {
         endpoint: Endpoint,
-        handler: std::sync::Arc<AskedRecorder>,
+        pub(crate) handler: std::sync::Arc<AskedRecorder>,
         events: clipped_ipc::EventPublisher,
         serving: Option<std::thread::JoinHandle<()>>,
     }
 
     impl FakeRecorder {
         /// Starts one on a pipe named after `test`, serving on a thread.
-        fn listening(test: &str, handler: AskedRecorder) -> Self {
+        pub(crate) fn listening(test: &str, handler: AskedRecorder) -> Self {
             let endpoint = Endpoint::named(&format!("clipped-{test}.{}", std::process::id()))
                 .expect("the generated name is valid");
             let mut listener = clipped_ipc::transport::Listener::bind(&endpoint)
@@ -1337,7 +1468,7 @@ mod tests {
         /// supervisor attaches rather than starting one. `RestartPolicy::NEVER`
         /// makes sure a test cannot leave something trying again in the
         /// background.
-        fn window(&self) -> tauri::App<tauri::test::MockRuntime> {
+        pub(crate) fn window(&self) -> tauri::App<tauri::test::MockRuntime> {
             let settings = SupervisorSettings {
                 restart: clipped_ipc::RestartPolicy::NEVER,
                 ..SupervisorSettings::new(
@@ -1508,6 +1639,12 @@ mod tests {
         // nothing — while the window said it had started, and every TypeScript
         // test in the repository would still be green, because they stub
         // `invoke` (issue #389).
+        //
+        // `replay: true` is on the wire for the same kind of reason (issue
+        // #427). A recording started here that did not ask for a buffer is one
+        // the tray's Save Replay item can never be enabled against, and nothing
+        // about that failure is visible: the item is correctly disabled, the
+        // recording is fine, and the control is dead for ever.
         let recorder = FakeRecorder::listening("record-start", AskedRecorder::default());
         let window = recorder.window();
 
@@ -1519,11 +1656,18 @@ mod tests {
             vec![clipped_ipc::Command::StartRecording(
                 clipped_ipc::StartRecording {
                     pid: Some(4_242),
+                    replay: true,
                     ..clipped_ipc::StartRecording::default()
                 }
             )],
             "the command the recorder received has to be `start_recording` for the process the \
-             window named, and nothing else"
+             window named, keeping a replay buffer, and nothing else"
+        );
+        assert_eq!(
+            recording_request(4_242).replay_seconds,
+            None,
+            "and it must not name a length: how long a buffer keeps is a setting, and this \
+             process cannot read one"
         );
         assert_eq!(
             started,

@@ -122,6 +122,7 @@ export const FEATURES = [
   'shutdown',
   'library',
   'export',
+  'playback',
   'hotkeys',
   'replay',
   'settings',
@@ -157,8 +158,10 @@ export const COMMANDS = [
   'restore_from_trash',
   'empty_trash',
   'set_favourite',
+  'set_lock',
   'plugins',
   'export_recording',
+  'open_playback',
   'get_hotkeys',
   'get_settings',
   'apply_settings',
@@ -195,6 +198,7 @@ export const ERROR_CODES = [
   'shutting_down',
   'destination_exists',
   'export_failed',
+  'playback_failed',
   'library_unavailable',
   'internal',
 ] as const;
@@ -245,8 +249,10 @@ export const REPLIES = [
   'restored',
   'trash_emptied',
   'favourited',
+  'locked',
   'plugins',
   'recording_exported',
+  'playback_opened',
   'hotkeys',
   'settings',
   'audio_devices',
@@ -350,14 +356,27 @@ export type StartRecordingParams = {
   /** `default`, `none`, or part of a device name. */
   readonly system_audio?: string;
   /**
-   * Keep the last this many seconds in memory, so that `save_replay` has
-   * something to save.
+   * Keep the last this many seconds, so that `save_replay` has something to
+   * save.
    *
-   * Absent means no buffer, which is what an ordinary recording is. It belongs
-   * to the recording rather than to the save, because a buffer has to have been
-   * filling since before the thing somebody wants to keep happened.
+   * Absent means no buffer unless {@link StartRecordingParams.replay} asks for
+   * one, which is what an ordinary recording is. It belongs to the recording
+   * rather than to the save, because a buffer has to have been filling since
+   * before the thing somebody wants to keep happened.
    */
   readonly replay_seconds?: number;
+  /**
+   * Keep a replay buffer, at the length the recorder has configured.
+   *
+   * `replay_seconds` names a length; this asks for one without naming it, and
+   * the recorder answers with `replay_window_seconds` resolved for the game it
+   * turns out to be recording. A caller that resolved a length itself would be
+   * a second place that setting is decided, and one that made a length up would
+   * be recording to a duration nobody chose.
+   *
+   * Absent is `false`, and `false` with no `replay_seconds` is no buffer.
+   */
+  readonly replay?: boolean;
 };
 
 /**
@@ -584,6 +603,82 @@ export interface ExportSummary {
   readonly losses?: readonly string[];
 }
 
+/**
+ * Which recording to open for playback, and which of its tracks to hear.
+ *
+ * The track is a **stream index of the file**, as {@link PlaybackTrack.index}
+ * carries it, rather than an ordinal among the sound tracks: the two differ by
+ * however many picture tracks come first. Absent means the one a player should
+ * choose on its own, which the recorder decides — for a Clipped recording, the
+ * compatibility mix.
+ */
+export type OpenPlaybackParams = {
+  /** The recording to play, as {@link LibraryRecording.path} reported it. */
+  readonly source: string;
+  /** Which sound track to hear. Absent means the recorder's own choice. */
+  readonly audio_track?: number;
+};
+
+/**
+ * A recording, ready to be played, and what could be heard instead.
+ *
+ * The window plays {@link PlaybackStream.path} and offers
+ * {@link PlaybackStream.audio_tracks} beside it. There is deliberately **no
+ * duration and no picture size** here: the media element measures both from the
+ * file it is given, and a figure sent from the recorder would be a second
+ * answer to the same question.
+ */
+export interface PlaybackStream {
+  /** The file to play. */
+  readonly path: string;
+  /**
+   * The source stream index whose sound this carries.
+   *
+   * Absent only for a recording with no sound at all, which a window has to be
+   * able to tell from a track that would not play.
+   */
+  readonly audio_track?: number;
+  /**
+   * Every sound track of the **recording**, in the order the container declares
+   * them — not of the file being played, which may hold one of them.
+   *
+   * Absent rather than an empty array for a recording with no sound, because
+   * that is what the recorder puts on the wire.
+   */
+  readonly audio_tracks?: readonly PlaybackTrack[];
+  /**
+   * Whether {@link PlaybackStream.path} is a copy made for this choice rather
+   * than the recording itself.
+   *
+   * A prepared copy is a cache entry: it is not in anybody's library and must
+   * not be presented to a user as their recording.
+   */
+  readonly prepared?: boolean;
+}
+
+/** One sound track of a recording, as a window offers it. */
+export interface PlaybackTrack {
+  /** The stream index the container declares it at. */
+  readonly index: number;
+  /**
+   * What the track is called, where the recording named it.
+   *
+   * Absent for a file that named none. A window shows the position rather than
+   * inventing a name.
+   */
+  readonly name?: string;
+  /** The track's language tag, where the recording carried one. */
+  readonly language?: string;
+  /**
+   * Whether the container flags this as the track a player should choose on its
+   * own.
+   *
+   * Not a promise about what a media element will play: Chromium ignores the
+   * flag, which is why `open_playback` decides what is served.
+   */
+  readonly default?: boolean;
+}
+
 /** One media file a sitting produced. */
 export interface LibraryRecording {
   /** The index's own identifier for it. */
@@ -629,6 +724,21 @@ export interface LibraryRecording {
   readonly missing_since?: string;
   /** Whether the user favourited it. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked this recording itself.
+   *
+   * Its own lock only, which is what a *control* is drawn from: a recording
+   * inside a locked sitting has nothing of its own to release.
+   */
+  readonly locked?: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * `locked`, or its sitting's lock, worked out by the recorder so the
+   * cascade has one expression rather than one per window. This is what a
+   * padlock is drawn from.
+   */
+  readonly protected?: boolean;
   /** The tags on it, alphabetically. */
   readonly tags: readonly string[];
 }
@@ -681,6 +791,14 @@ export interface LibrarySession {
   readonly end_reason?: string;
   /** Whether the user favourited the sitting itself. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked the sitting against automatic cleanup.
+   *
+   * A locked sitting protects every recording in it, so a padlock against a
+   * *recording* is drawn from that recording's `protected` rather than from
+   * this. Absent from a recorder older than locks — that build has none.
+   */
+  readonly locked?: boolean;
   /** The files it recorded, in the order they were recorded. */
   readonly recordings: readonly LibraryRecording[];
   /** The clips cut from it. */
@@ -1034,6 +1152,58 @@ export interface FavouritedReply {
   readonly mark: FavouriteMark;
 }
 
+/**
+ * Locking one thing against automatic cleanup, or unlocking it.
+ *
+ * The same target shape as {@link SetFavourite} over a shorter vocabulary: a
+ * clip cannot be locked, because automatic cleanup deletes recordings and a
+ * mark nothing consults is worse than no mark at all.
+ *
+ * A lock protects against automatic cleanup and nothing else. A locked
+ * recording is deleted by a manual delete exactly as an unlocked one is, and a
+ * window must not imply otherwise.
+ */
+export interface SetLock {
+  /** `session` or `recording`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it should be locked afterwards. */
+  readonly locked: boolean;
+}
+
+/** What the lock is now. */
+export interface LockMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it has a lock of its own now. */
+  readonly locked: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * Not the same question as {@link locked}, and this is the one a padlock is
+   * drawn from: a recording inside a locked sitting is protected without
+   * having a lock of its own.
+   */
+  readonly protected: boolean;
+  /** Whether this request is what changed it. */
+  readonly changed: boolean;
+}
+
+/** A lock was set or cleared. */
+export interface LockedReply {
+  /** The tag. */
+  readonly reply: 'locked';
+  /** Which thing, what its lock is now, and whether cleanup will leave it alone. */
+  readonly lock: LockMark;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1114,6 +1284,14 @@ export interface RecordingExportedReply {
   readonly reply: 'recording_exported';
   /** The copy, and what it turned out to hold. */
   readonly export: ExportSummary;
+}
+
+/** A recording is ready to be played, and here is what to play. */
+export interface PlaybackOpenedReply {
+  /** The tag. */
+  readonly reply: 'playback_opened';
+  /** The file to play, the track it carries, and the tracks beside it. */
+  readonly playback: PlaybackStream;
 }
 
 /**
@@ -1306,8 +1484,10 @@ export type Reply =
   | RestoredReply
   | TrashEmptiedReply
   | FavouritedReply
+  | LockedReply
   | PluginsReply
   | RecordingExportedReply
+  | PlaybackOpenedReply
   | HotkeysReply
   | SettingsReply
   | AudioDevicesReply

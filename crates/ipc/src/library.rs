@@ -185,6 +185,19 @@ pub struct LibrarySession {
     pub end_reason: Option<String>,
     /// Whether the user favourited the sitting itself (SPEC.md section 29).
     pub favourite: bool,
+    /// Whether the user locked the sitting against automatic cleanup.
+    ///
+    /// A locked sitting protects every recording in it, so a screen drawing a
+    /// padlock against a recording reads that recording's
+    /// [`LibraryRecording::protected`] rather than working the cascade out from
+    /// this (issue #472).
+    ///
+    /// Defaulted, so a page from a recorder older than the lock column parses
+    /// as "nothing is locked" rather than failing: that build has no locks, and
+    /// a window refusing its library would be a worse answer than an open
+    /// padlock.
+    #[serde(default)]
+    pub locked: bool,
     /// The files it recorded, in the order they were recorded.
     pub recordings: Vec<LibraryRecording>,
     /// The clips cut from it.
@@ -237,6 +250,19 @@ pub struct LibraryRecording {
     pub missing_since: Option<String>,
     /// Whether the user favourited it.
     pub favourite: bool,
+    /// Whether the user locked this recording itself.
+    ///
+    /// Its own lock only, which is what a *control* is drawn from: a recording
+    /// inside a locked sitting has nothing of its own to release (issue #472).
+    #[serde(default)]
+    pub locked: bool,
+    /// Whether automatic cleanup will leave it alone.
+    ///
+    /// [`Self::locked`] or its sitting's lock, worked out by the recorder so
+    /// that the cascade has one expression rather than one here and one in
+    /// every window. This is what a padlock is drawn from.
+    #[serde(default)]
+    pub protected: bool,
     /// The tags on it, alphabetically.
     pub tags: Vec<String>,
 }
@@ -263,6 +289,10 @@ pub struct LibraryClip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_since: Option<String>,
     /// Whether the user favourited it.
+    ///
+    /// There is no `locked` beside it, deliberately: automatic cleanup deletes
+    /// recordings and never clips, so a lock here would be a mark nothing
+    /// consults (`clipped_library::locks`).
     pub favourite: bool,
     /// The tags on it, alphabetically.
     pub tags: Vec<String>,
@@ -391,6 +421,7 @@ mod tests {
                 ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
                 end_reason: Some("game-exited".to_owned()),
                 favourite: true,
+                locked: false,
                 recordings: vec![LibraryRecording {
                     recording_id: 12,
                     session_index: 1,
@@ -405,6 +436,8 @@ mod tests {
                     size_bytes: Some(9_812_009_112),
                     missing_since: None,
                     favourite: false,
+                    locked: true,
+                    protected: true,
                     tags: vec!["clutch".to_owned()],
                 }],
                 clips: vec![LibraryClip {
@@ -630,6 +663,63 @@ pub struct SetFavourite {
     /// would disagree about what a toggle means, and a screen that has just
     /// drawn a star already knows which way it points.
     pub favourite: bool,
+}
+
+/// Locking one thing against automatic cleanup, or unlocking it.
+///
+/// [Issue #472](https://github.com/wildware-uk/clipped/issues/472). The same
+/// target shape as [`SetFavourite`], and for the same reason — a sitting is
+/// addressed by text and a recording by an integer — but a shorter vocabulary:
+/// a clip cannot be locked, because automatic cleanup deletes recordings and a
+/// mark nothing consults is worse than no mark at all
+/// (`clipped_library::locks`).
+///
+/// # What it protects against
+///
+/// Automatic cleanup, and nothing else. A locked recording is deleted by a
+/// manual delete exactly as an unlocked one is. That is the decision recorded on
+/// the issue, and a window must not imply otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SetLock {
+    /// `session` or `recording`.
+    pub kind: String,
+    /// The sitting's own identifier, for `session`.
+    pub session_id: String,
+    /// The library's integer identifier, for `recording`.
+    pub id: i64,
+    /// Whether it should be locked afterwards.
+    ///
+    /// The state to be in rather than a toggle, for the reason
+    /// [`SetFavourite::favourite`] is.
+    pub locked: bool,
+}
+
+/// What the lock is now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LockMark {
+    /// Which thing it was, echoed so a window can match the reply to the row.
+    pub kind: String,
+    /// The sitting's identifier, for `session`.
+    pub session_id: String,
+    /// The integer identifier, for `recording`.
+    pub id: i64,
+    /// Whether it has a lock **of its own** now.
+    ///
+    /// Read back after the write, so a request against a row that has gone
+    /// comes back `false` rather than as an acknowledgement.
+    pub locked: bool,
+    /// Whether automatic cleanup will leave it alone.
+    ///
+    /// Not the same question as [`Self::locked`], and this is the one a padlock
+    /// on a screen should be drawn from: a recording inside a locked sitting is
+    /// protected without having a lock of its own. Always `true` when
+    /// [`Self::locked`] is; also `true` for a recording whose sitting is
+    /// locked. For a `session` target the two are the same.
+    pub protected: bool,
+    /// Whether this request is what changed it.
+    pub changed: bool,
 }
 
 /// What the mark is now.

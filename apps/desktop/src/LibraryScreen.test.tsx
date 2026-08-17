@@ -2,6 +2,7 @@ import type { LibrarySession, LibrarySessionPage } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -56,6 +57,21 @@ function renderApp(): void {
     <StrictMode>
       <App />
     </StrictMode>,
+  );
+}
+
+/**
+ * Mounts the screen by itself, inside a router.
+ *
+ * The router is not decoration: the Play control on every row navigates to that
+ * recording's playback screen (issue #304), so a screen rendered without one is
+ * a screen whose rows cannot be drawn at all.
+ */
+function renderScreen(): void {
+  render(
+    <MemoryRouter>
+      <LibraryScreen />
+    </MemoryRouter>,
   );
 }
 
@@ -321,8 +337,11 @@ describe('the Library screen', () => {
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
     ['filtering by favourite', /^filtering the list down to favourites/i, [60]],
     ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
-    ['playing in this window', /^playing a recording inside this window/i, [392, 304]],
-    ['playing a clip', /^playing a clip/i, [52]],
+    // Playing a *recording* is no longer on this list: Play is a control on
+    // every row since issue #304, and a row promising what the screen already
+    // does is worse than no row. Playing a **clip** is still waiting, and on
+    // clips existing rather than on a player.
+    ['playing a clip', /^playing a clip/i, [74, 91]],
   ];
 
   it('names each part it still owes, and the issue that lands it', async () => {
@@ -366,6 +385,39 @@ describe('the Library screen', () => {
    * suggestion instead of what the person chose, a Show in Explorer that sent
    * `open_recording`.
    */
+  it('plays a recording in this window, on the screen that draws a player', async () => {
+    // Issue #304's way in. The row is handed over rather than looked up again:
+    // this screen has it, and the playback screen would otherwise have to read
+    // the whole library back to find one file (issue #52).
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      openPlayback: () => ({
+        url: 'http://clip.localhost/1',
+        audio_track: 1,
+        audio_tracks: [{ index: 1, name: 'Compatibility Mix', default: true }],
+        prepared: false,
+      }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const play = await screen.findByRole('button', { name: /^Play / });
+    await user.click(play);
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Playback');
+    const main = screen.getByRole('main');
+    await waitFor(() => {
+      expect(main.querySelector('video')?.getAttribute('src')).toBe('http://clip.localhost/1');
+    });
+    // The file the row was drawn for, and no track named: which one plays by
+    // default is the recorder's answer, not this window's.
+    expect(runtime.invocations).toContainEqual({
+      command: 'open_playback',
+      args: { source: 'D:\\clips\\cs2-20260811-201400-1.mkv', audioTrack: undefined },
+    });
+  });
+
   it('opens a recording in the system player, naming the file the row was drawn for', async () => {
     const user = userEvent.setup();
     const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
@@ -674,7 +726,7 @@ describe('the Library screen', () => {
       sessions: () => Promise.resolve(page([])),
       trash: () => Promise.resolve(emptyTrash()),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Library');
     await waitFor(() => {
@@ -702,7 +754,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       restoreFromTrash: restored,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
 
@@ -728,7 +780,7 @@ describe('the Library screen', () => {
           renamed: false,
         }),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Restore' }));
 
@@ -747,7 +799,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       emptyTrash: emptied,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     expect(emptied).not.toHaveBeenCalled();
@@ -767,7 +819,7 @@ describe('the Library screen', () => {
       trash: () => Promise.resolve(fullTrash()),
       emptyTrash: emptied,
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     await user.click(screen.getByRole('button', { name: 'Keep them' }));
@@ -793,7 +845,7 @@ describe('the Library screen', () => {
           }),
         ),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
     await user.click(screen.getByRole('button', { name: 'Empty the trash' }));
@@ -824,7 +876,7 @@ describe('the Library screen', () => {
           directory: 'D:/Clips.trash',
         }),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     const trash = await screen.findByRole('region', { name: 'Trash' });
     // The path it *had*: a file inside the trash is named for the trash, and
@@ -842,7 +894,7 @@ describe('the Library screen', () => {
       sessions: () => Promise.resolve(page([])),
       trash: () => Promise.resolve(emptyTrash()),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     const trash = await screen.findByRole('region', { name: 'Trash' });
     expect(trash).toHaveTextContent('Nothing has been deleted');
@@ -865,7 +917,7 @@ describe('the Library screen', () => {
           }),
         ),
     });
-    render(<LibraryScreen />);
+    renderScreen();
 
     expect(
       await screen.findByRole('heading', { name: 'The trash could not be read' }),
@@ -1049,5 +1101,135 @@ describe('the Library screen', () => {
       'That could not be kept. the recording library could not be opened: the drive is not there Nothing was changed.',
     );
     expect(star).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  /*
+   * Keeping a recording out of automatic cleanup's reach (issue #472).
+   *
+   * The column existed nowhere before this: `cleanup::Protection` named locked
+   * recordings among the things it would not take, and there was no lock. These
+   * are the tests that the padlock reaches the recorder, and that it tells
+   * "you locked this" from "cleanup will not take this" — which are different
+   * for every recording inside a locked sitting.
+   */
+  it('protects a recording from automatic cleanup, and says so as a pressed control', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: args['locked'],
+          protected: args['locked'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(runtime.invocations.filter((invocation) => invocation.command === 'set_lock')).toEqual(
+        [{ command: 'set_lock', args: { kind: 'recording', sessionId: '', id: 12, locked: true } }],
+      );
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('says a recording inside a protected sitting is protected by it, and offers no control', async () => {
+    // The case that separates `locked` from `protected`. A padlock drawn from
+    // `locked` alone would show this recording as one cleanup may take, and
+    // cleanup would not take it. A *control* drawn from `protected` would offer
+    // to unlock something that has no lock to release.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () =>
+        Promise.resolve(
+          page([
+            {
+              ...session(),
+              locked: true,
+              recordings: [{ ...session().recordings[0]!, locked: false, protected: true }],
+            },
+          ]),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const bySitting = await screen.findByRole('button', {
+      name: 'cs2-20260811-201400-1.mkv, Counter-Strike 2 is protected from automatic cleanup because its sitting is',
+    });
+    expect(bySitting).toBeDisabled();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('draws the lock the library holds rather than the one that was asked for', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: false,
+          protected: false,
+          changed: false,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  it('says a lock that would not go on did not, rather than drawing it anyway', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: () =>
+        Promise.reject(
+          Object.assign(new Error('the library could not be written'), {
+            code: 'library_unavailable',
+            message: 'the recording library could not be opened: the drive is not there',
+          }),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'That could not be kept from cleanup. the recording library could not be opened: the drive is not there Nothing was changed.',
+    );
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
   });
 });

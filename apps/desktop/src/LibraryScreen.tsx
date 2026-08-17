@@ -1,6 +1,8 @@
-import type { TrashListing, TrashedItem } from '@clipped/shared';
+import type { LibraryRecording, TrashListing, TrashedItem } from '@clipped/shared';
 import { type ReactNode, useState } from 'react';
+import { useNavigate } from 'react-router';
 
+import { clipPath } from './clipPlayback';
 import {
   asProblem,
   describeProblem,
@@ -17,6 +19,7 @@ import {
   useRecordingActions,
 } from './recordingActions';
 import { describeFavouriteProblem, useFavourites } from './favourites';
+import { describeLockProblem, useLocks } from './locks';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -81,13 +84,9 @@ const WAITING: readonly Waiting[] = [
       'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission, and how the bytes should reach it is issue #301',
   },
   {
-    shows: 'Playing a recording inside this window, rather than in your own player',
-    needs:
-      'WebView2 cannot decode the uncompressed sound the archival file carries (#392), and three other blockers. Issue #304. Open plays it in whatever you already use',
-  },
-  {
     shows: 'Playing a clip, from the list',
-    needs: 'The playback screen. Issue #52',
+    needs:
+      'Clips themselves: the virtual clip model (#74) and clip creation (#91). A recording plays from here already (#304)',
   },
 ];
 
@@ -307,6 +306,21 @@ export function LibraryScreen(): ReactNode {
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
   const actions = useRecordingActions();
   const favourites = useFavourites();
+  const locks = useLocks();
+  const navigate = useNavigate();
+
+  /**
+   * Opens a recording on the playback screen, handing over the row.
+   *
+   * The address carries the index's own identifier, and the row goes with it:
+   * this screen has it in its hand, and the playback screen would otherwise
+   * have to read the whole library back to find the one file it needs. A
+   * reload has no row, and that screen says so rather than inventing one —
+   * looking one up cold is issue #52.
+   */
+  const play = (recording: LibraryRecording): void => {
+    void navigate(clipPath(String(recording.recording_id)), { state: { recording } });
+  };
 
   return (
     <>
@@ -391,7 +405,10 @@ export function LibraryScreen(): ReactNode {
             label="Sessions"
             actions={actions}
             favourites={favourites}
+            locks={locks}
+            onPlay={play}
           />
+
           {/*
            * One region for the outcome of the last thing somebody asked for,
            * announced rather than only drawn: opening a recording and showing
@@ -402,6 +419,8 @@ export function LibraryScreen(): ReactNode {
           <p role="status" className="clipped-panel__body">
             {favourites.outcome.state === 'failed' &&
               `That could not be kept. ${describeFavouriteProblem(favourites.outcome.problem)}`}
+            {locks.outcome.state === 'failed' &&
+              `That could not be kept from cleanup. ${describeLockProblem(locks.outcome.problem)}`}
             {favourites.outcome.state === 'idle' &&
               actions.outcome.state === 'working' &&
               `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}

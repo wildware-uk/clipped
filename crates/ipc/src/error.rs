@@ -170,6 +170,17 @@ pub enum ErrorCode {
     /// a different container, and the recording it was made from is untouched
     /// on every path that produces it (`clipped_muxer::remux`).
     ExportFailed,
+    /// `playback_failed` — a recording could not be opened for playback, and
+    /// the message says why.
+    ///
+    /// Distinct from [`ExportFailed`](Self::ExportFailed), which is about a
+    /// copy somebody asked to keep. This is about the file the window was
+    /// about to draw a player over, and the two most common causes are ones a
+    /// person can act on: the recording's file has gone, or the sound track
+    /// that was asked for is not in it. A window branches on this to say so
+    /// instead of drawing a player that does nothing (AGENTS.md section 27,
+    /// [issue #304](https://github.com/wildware-uk/clipped/issues/304)).
+    PlaybackFailed,
     /// `library_unavailable` — the recording library could not be read, and the
     /// message says why.
     ///
@@ -210,6 +221,7 @@ impl ErrorCode {
             Self::ShuttingDown => "shutting_down",
             Self::DestinationExists => "destination_exists",
             Self::ExportFailed => "export_failed",
+            Self::PlaybackFailed => "playback_failed",
             Self::LibraryUnavailable => "library_unavailable",
             Self::Internal => "internal",
             Self::Other(code) => code,
@@ -241,6 +253,7 @@ impl From<String> for ErrorCode {
             "shutting_down" => Self::ShuttingDown,
             "destination_exists" => Self::DestinationExists,
             "export_failed" => Self::ExportFailed,
+            "playback_failed" => Self::PlaybackFailed,
             "library_unavailable" => Self::LibraryUnavailable,
             "internal" => Self::Internal,
             _ => Self::Other(code),
@@ -327,6 +340,7 @@ mod tests {
             ErrorCode::ShuttingDown,
             ErrorCode::DestinationExists,
             ErrorCode::ExportFailed,
+            ErrorCode::PlaybackFailed,
             ErrorCode::LibraryUnavailable,
             ErrorCode::Internal,
         ];

@@ -6,7 +6,7 @@ import {
   formatElapsed,
   isClipPath,
   MISSING,
-  PLAYBACK_BLOCKERS,
+  playbackSource,
   recordingOf,
   resolveClip,
 } from './clipPlayback';
@@ -120,7 +120,11 @@ describe('resolving a recording', () => {
     const { state, detail } = describeClip(resolveClip('r-3', recording('r-3')));
 
     expect(state).toBe('Being recorded now');
-    expect(detail).toMatch(/#304/);
+    expect(detail).toMatch(/still writing/i);
+    // And the screen has nothing to point a player at while that is true: the
+    // container has no trailer yet, so a transport would be drawn over a length
+    // nothing has measured.
+    expect(playbackSource(resolveClip('r-3', recording('r-3')), null).file).toBeNull();
   });
 
   it('reads nothing out of a link that is not attached', () => {
@@ -171,15 +175,50 @@ describe('an elapsed time', () => {
   });
 });
 
-describe('the tables the screen draws', () => {
-  it('gives every blocker somewhere the reader can check it', () => {
-    expect(PLAYBACK_BLOCKERS.length).toBeGreaterThan(0);
-    for (const blocker of PLAYBACK_BLOCKERS) {
-      expect(blocker.fact.length).toBeGreaterThan(0);
-      expect(blocker.evidence.length).toBeGreaterThan(0);
-    }
+describe('what the screen plays', () => {
+  it('plays the recording the screen it was opened from handed over', () => {
+    // The ordinary way in: the Library has the row in its hand when Play is
+    // pressed. Nothing here reads it back out of the index.
+    const source = playbackSource(resolveClip('12', NOTHING), {
+      path: 'D:\\clips\\match.mkv',
+    });
+
+    expect(source.file).toBe('D:\\clips\\match.mkv');
   });
 
+  it('says a file the library could not find has gone, rather than opening it', () => {
+    // The library looked at the disk and did not find it (issue #56). Asking
+    // the recorder to open it anyway would end in the same answer one round
+    // trip later, over a player that had already been drawn.
+    const source = playbackSource(resolveClip('12', NOTHING), {
+      path: 'D:\\clips\\match.mkv',
+      missing_since: '2026-08-14T09:51:00+01:00',
+    });
+
+    expect(source.file).toBeNull();
+    expect(source.why).toMatch(/could not find/i);
+  });
+
+  it('plays the file a killed recorder left', () => {
+    const source = playbackSource(
+      resolveClip('r-7', { ...NOTHING, interrupted: INTERRUPTED }),
+      null,
+    );
+
+    expect(source.file).toBe('D:\\clips\\2026-08-11 cs2.mkv');
+  });
+
+  it('has nothing to play for a recording this window was never told about', () => {
+    const source = playbackSource(resolveClip('r-99', NOTHING), null);
+
+    expect(source.file).toBeNull();
+    // And says so without claiming the recording is missing: nothing here has
+    // been to the disk (AGENTS.md section 27).
+    expect(source.why).not.toMatch(/missing|deleted|gone/i);
+  });
+});
+
+describe('the tables the screen draws', () => {
   it('names an issue against everything the screen cannot do', () => {
     // The contract the unbuilt screens keep: a row that says what is missing
     // has to say where the work is, or it is just an apology.

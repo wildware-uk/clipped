@@ -580,7 +580,12 @@ survives it"](#failure-and-what-survives-it)).
   it is read before a recording's target exists.
 - **`replay_window_seconds`** becomes a `clipped_replay::ReplayConfig` when a
   recording opens a replay buffer, which needs the bitrate the encoder session
-  was opened with; `record_with_replay` is where that meets.
+  was opened with; `record_with_replay` is where that meets. Who reads it:
+  `clipped-recorder replay` with no `--duration`, and any `start_recording` that
+  sent `replay` without a length — which is every recording the desktop starts,
+  because that window cannot read a setting and the answer inherits per game
+  anyway ([`docs/ipc.md`](ipc.md), issue
+  [#427](https://github.com/wildware-uk/clipped/issues/427)).
 
 ### The two ways a caller applies them, and which one to use
 

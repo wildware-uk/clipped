@@ -42,10 +42,11 @@ use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
     EmptyTrash, FavouriteMark, LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage,
-    LibrarySessions, LibraryTrash, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied,
-    TrashListing,
+    LibrarySessions, LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock,
+    TrashEmptied, TrashListing,
 };
 use crate::message::Request;
+use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::settings::{ApplySettings, AudioDevices, SettingsView};
 use crate::status::{
@@ -100,11 +101,20 @@ pub enum Command {
     EmptyTrash(EmptyTrash),
     /// Mark one thing a favourite, or clear the mark.
     SetFavourite(SetFavourite),
+    /// Lock one thing against automatic cleanup, or unlock it.
+    SetLock(SetLock),
 
     /// What plugins are installed, what each declares, and what will start.
     Plugins,
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
+    /// Open a finished recording so that the desktop window can play it, with
+    /// one of its sound tracks.
+    ///
+    /// Asked of the recorder rather than done in the window for two reasons
+    /// that are both hard: the window links no demuxer, and a media element
+    /// cannot choose an audio track (`crate::playback`, issue #304).
+    OpenPlayback(OpenPlayback),
     /// What every global hotkey is bound to, and whether it works.
     ///
     /// Asked rather than pushed because registration happens when the recorder
@@ -158,8 +168,10 @@ impl Command {
             Self::RestoreFromTrash(_) => "restore_from_trash",
             Self::EmptyTrash(_) => "empty_trash",
             Self::SetFavourite(_) => "set_favourite",
+            Self::SetLock(_) => "set_lock",
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
+            Self::OpenPlayback(_) => "open_playback",
             Self::GetHotkeys => "get_hotkeys",
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
@@ -192,8 +204,10 @@ impl Command {
             "restore_from_trash" => Ok(Self::RestoreFromTrash(parse_params(request)?)),
             "empty_trash" => Ok(Self::EmptyTrash(parse_params(request)?)),
             "set_favourite" => Ok(Self::SetFavourite(parse_params(request)?)),
+            "set_lock" => Ok(Self::SetLock(parse_params(request)?)),
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
+            "open_playback" => Ok(Self::OpenPlayback(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
@@ -230,12 +244,14 @@ impl Command {
             Self::RestoreFromTrash(request) => serde_json::to_value(request),
             Self::EmptyTrash(request) => serde_json::to_value(request),
             Self::SetFavourite(request) => serde_json::to_value(request),
+            Self::SetLock(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
             Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
             Self::SaveReplay(replay) => serde_json::to_value(replay),
             Self::ExportRecording(export) => serde_json::to_value(export),
+            Self::OpenPlayback(playback) => serde_json::to_value(playback),
             Self::ApplySettings(settings) => serde_json::to_value(settings),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
         }
@@ -319,15 +335,16 @@ pub struct StartRecording {
     /// `default`, `none`, or part of a device name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_audio: Option<String>,
-    /// Keep the last this many seconds of the recording in memory, so that
-    /// `save_replay` has something to save.
+    /// Keep the last this many seconds of the recording, so that `save_replay`
+    /// has something to save.
     ///
-    /// Absent means no buffer, which is what an ordinary recording is: a buffer
-    /// costs memory in proportion to its duration — about 140 MiB a minute at
-    /// 1080p60 (`docs/replay-buffer.md`) — so it is kept only when somebody
-    /// asked for one. The supported range is `clipped-replay`'s, 30 to 1800
-    /// seconds, and a value outside it is refused with that crate's own message
-    /// rather than a second opinion about it.
+    /// Absent means no buffer *unless* [`replay`](Self::replay) asks for one,
+    /// which is what it has always meant: a buffer costs a recording a spill
+    /// directory and the newest few seconds in memory
+    /// (`docs/replay-buffer.md`), so it is kept only when somebody asked for
+    /// one. The supported range is `clipped-replay`'s, 30 to 1800 seconds, and
+    /// a value outside it is refused with that crate's own message rather than
+    /// a second opinion about it.
     ///
     /// It is on `start_recording` rather than on `save_replay` because it is
     /// a property of the *recording*: a buffer has to have been filling since
@@ -335,6 +352,23 @@ pub struct StartRecording {
     /// afterwards can conjure the history it did not keep.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_seconds: Option<u32>,
+    /// Keep a replay buffer, at the length this recorder has configured.
+    ///
+    /// [`replay_seconds`](Self::replay_seconds) *names* a length; this asks for
+    /// a buffer without naming one, and the recorder answers with
+    /// `replay_window_seconds` resolved for whatever game the target turns out
+    /// to be. That is a question only the recorder can answer: the setting
+    /// inherits per game (AGENTS.md section 30), and the game is what the
+    /// catalogue makes of the window this request is still only a process
+    /// identifier for. A caller that resolved a length itself would be a second
+    /// place that setting is decided, and a caller that made one up would be
+    /// recording to a duration nobody chose.
+    ///
+    /// `false` with no `replay_seconds` is no buffer, so a client written
+    /// before this field keeps the recordings it always had. Both at once keeps
+    /// the length that was named: a request that says a number has already
+    /// answered the question this asks.
+    pub replay: bool,
 }
 
 /// Which recording to stop.
@@ -656,6 +690,12 @@ pub enum Reply {
         /// Which thing, and what its mark is now.
         mark: FavouriteMark,
     },
+    /// A lock was set or cleared.
+    Locked {
+        /// Which thing, what its lock is now, and whether cleanup will leave
+        /// it alone.
+        lock: LockMark,
+    },
     /// What the library holds per game.
     LibraryGames {
         /// One row per game, and one for the sittings nothing was attributed
@@ -670,6 +710,16 @@ pub enum Reply {
     RecordingExported {
         /// The copy, and what it turned out to hold.
         export: ExportSummary,
+    },
+    /// A recording is ready to be played, and here is what to play.
+    ///
+    /// Sent after any copy it needed has been finished, for the reason
+    /// [`Self::RecordingExported`] is: a window pointed at a file that is still
+    /// being written would draw a player over a truncated recording.
+    PlaybackOpened {
+        /// The file to play, the track it carries, and the tracks that could be
+        /// chosen instead.
+        playback: PlaybackStream,
     },
     /// Every action a global hotkey can perform, and where each one stands.
     Hotkeys {
@@ -801,8 +851,10 @@ mod tests {
             "restore_from_trash",
             "empty_trash",
             "set_favourite",
+            "set_lock",
             "plugins",
             "export_recording",
+            "open_playback",
             "get_hotkeys",
             "get_settings",
             "apply_settings",
@@ -881,6 +933,39 @@ mod tests {
 
         let back: Request = serde_json::from_str(&json).expect("and deserialises");
         assert_eq!(Command::from_request(&back).expect("it parses"), start);
+    }
+
+    #[test]
+    fn a_start_that_says_nothing_about_a_replay_asks_for_no_buffer() {
+        // The compatibility half of issue #427. `replay` was added so that a
+        // caller with no way to read a setting can still ask for the buffer the
+        // user configured; a client written before it sends neither field, and
+        // must go on getting the ordinary recording it always got rather than
+        // acquiring a spill directory and a buffer nobody asked for. A default
+        // of `true`, or a `#[serde(default)]` lost from the struct, would give
+        // every third-party client one silently.
+        let request = request(
+            "start_recording",
+            serde_json::json!({ "pid": 4242, "framerate": 60 }),
+        );
+        let Ok(Command::StartRecording(start)) = Command::from_request(&request) else {
+            panic!("a start with no replay field is still a start");
+        };
+
+        assert!(
+            !start.replay,
+            "a request that says nothing about a replay is asking for no buffer"
+        );
+        assert_eq!(start.replay_seconds, None);
+        assert_eq!(
+            start,
+            StartRecording {
+                pid: Some(4_242),
+                framerate: Some(60),
+                ..StartRecording::default()
+            },
+            "and the default has to be the same silence"
+        );
     }
 
     #[test]
@@ -1122,6 +1207,63 @@ mod tests {
 
         assert_eq!(parsed.source, r"D:\clips\cs2-20260811-201400-1.mkv");
         assert_eq!(parsed.destination, r"E:\share\ace on mirage.mp4");
+    }
+
+    #[test]
+    fn a_playback_request_carries_the_track_it_asked_for_and_not_only_the_recording() {
+        // The field that is easy to drop and impossible to notice: a window
+        // that asked for the microphone and was answered with the compatibility
+        // mix would play *something*, with sound, and look like it worked. So
+        // the track is asserted on the far side of a real serialise-and-parse
+        // rather than on the value that was constructed.
+        let open = Command::OpenPlayback(crate::playback::OpenPlayback {
+            source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+            audio_track: Some(3),
+        });
+
+        let request = open.to_request(13).expect("it can be represented");
+        assert_eq!(request.command, "open_playback");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        let Command::OpenPlayback(parsed) = Command::from_request(&back).expect("it parses") else {
+            panic!("an open_playback request parsed as something else");
+        };
+
+        assert_eq!(parsed.source, r"D:\clips\cs2-20260811-201400-1.mkv");
+        assert_eq!(parsed.audio_track, Some(3));
+    }
+
+    #[test]
+    fn a_playback_request_that_names_no_track_asks_for_the_default_rather_than_track_zero() {
+        // Absent means "whichever track a player should choose on its own",
+        // which is the recorder's answer to make. A `serde` default of `0`
+        // would silently make it stream zero — the picture, in a Clipped
+        // recording — and the difference between the two is invisible in a
+        // request that omits the field.
+        let parsed = Command::from_request(&request(
+            "open_playback",
+            serde_json::json!({"source": r"D:\clips\match.mkv"}),
+        ))
+        .expect("a playback request may leave the track out");
+
+        let Command::OpenPlayback(open) = parsed else {
+            panic!("an open_playback request parsed as something else");
+        };
+        assert_eq!(open.audio_track, None);
+    }
+
+    #[test]
+    fn a_playback_request_that_names_no_recording_is_refused_naming_the_field() {
+        let error = Command::from_request(&request("open_playback", serde_json::Value::Null))
+            .expect_err("a playback request has to say what to play");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(
+            error.message.contains("open_playback") && error.message.contains("source"),
+            "the refusal should name the command and the field: {}",
+            error.message
+        );
     }
 
     #[test]

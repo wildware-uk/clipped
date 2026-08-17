@@ -56,6 +56,10 @@ import type {
   ErrorOutcome,
   EventStream,
   ExportRecordingParams,
+  OpenPlaybackParams,
+  PlaybackOpenedReply,
+  PlaybackStream,
+  PlaybackTrack,
   ExportSummary,
   ConflictingHotkey,
   Feature,
@@ -74,6 +78,7 @@ import type {
   RestoredReply,
   TrashEmptiedReply,
   FavouritedReply,
+  LockedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -289,6 +294,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     microphone: 'optional',
     system_audio: 'optional',
     replay_seconds: 'optional',
+    replay: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
   add_bookmark: fields<AddBookmarkParams>({
@@ -396,6 +402,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     ended_at: 'optional',
     end_reason: 'optional',
     favourite: 'required',
+    locked: 'optional',
     recordings: 'required',
     clips: 'required',
   }),
@@ -413,6 +420,8 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     size_bytes: 'optional',
     missing_since: 'optional',
     favourite: 'required',
+    locked: 'optional',
+    protected: 'optional',
     tags: 'required',
   }),
   library_clip: fields<LibraryClip>({
@@ -437,6 +446,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     favourites: 'required',
     bytes: 'required',
     missing: 'required',
+  }),
+  open_playback: fields<OpenPlaybackParams>({
+    source: 'required',
+    audio_track: 'optional',
+  }),
+  playback_stream: fields<PlaybackStream>({
+    path: 'required',
+    audio_track: 'optional',
+    audio_tracks: 'optional',
+    prepared: 'optional',
+  }),
+  playback_track: fields<PlaybackTrack>({
+    index: 'required',
+    name: 'optional',
+    language: 'optional',
+    default: 'optional',
   }),
   export_recording: fields<ExportRecordingParams>({
     source: 'required',
@@ -505,6 +530,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     mark: 'required',
   }),
+  'reply.locked': fields<LockedReply>({
+    reply: 'required',
+    lock: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -513,6 +542,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
     export: 'required',
+  }),
+  'reply.playback_opened': fields<PlaybackOpenedReply>({
+    reply: 'required',
+    playback: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -673,6 +706,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'set_lock',
+    params: 'set_lock',
+    reply: 'reply.locked',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -682,6 +721,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     name: 'export_recording',
     params: 'export_recording',
     reply: 'reply.recording_exported',
+    available_in_this_build: true,
+  },
+  {
+    name: 'open_playback',
+    params: 'open_playback',
+    reply: 'reply.playback_opened',
     available_in_this_build: true,
   },
   {
@@ -770,6 +815,10 @@ function replyDiscriminant(reply: Reply): string {
       // One discriminant: a refusal list that is empty is the same shape
       // carrying nothing, and it is always present.
       return 'trash_emptied';
+    case 'locked':
+      // One discriminant: whether the lock changed, and whether the sweep will
+      // leave the thing alone, are both fields rather than shapes.
+      return 'locked';
     case 'favourited':
       // One discriminant: whether the mark changed is a field, not a shape, and
       // a session and a recording differ only in which half of the target is
@@ -795,6 +844,12 @@ function replyDiscriminant(reply: Reply): string {
       // `lossless` would reach the same discriminant for an MP4 that holds the
       // whole recording and one that quietly does not.
       return reply.export.lossless ? 'recording_exported' : 'recording_exported.lossy';
+    case 'playback_opened':
+      // Whether a copy had to be made is part of the path: it is the difference
+      // between an answer that cost nothing and one that read the whole
+      // recording, and a mirror that dropped `prepared` would reach the same
+      // discriminant for both.
+      return `playback_opened.${reply.playback.prepared === true ? 'prepared' : 'as_recorded'}`;
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise

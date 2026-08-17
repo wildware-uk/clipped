@@ -76,6 +76,7 @@ use crate::message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+use crate::playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
 use crate::status::{
     ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
@@ -506,6 +507,18 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_export(), &[]),
         ),
         (
+            "open_playback".to_owned(),
+            structure_of(&exemplar_open_playback(), &[]),
+        ),
+        (
+            "playback_stream".to_owned(),
+            structure_of(&exemplar_playback(), &[]),
+        ),
+        (
+            "playback_track".to_owned(),
+            structure_of(&exemplar_playback_track(), &[]),
+        ),
+        (
             "apply_settings".to_owned(),
             structure_of(&exemplar_apply_settings(), &[]),
         ),
@@ -590,7 +603,9 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::SetFavourite(_) => Some("set_favourite".to_owned()),
+                Command::SetLock(_) => Some("set_lock".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
+                Command::OpenPlayback(_) => Some("open_playback".to_owned()),
                 Command::ApplySettings(_) => Some("apply_settings".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -616,8 +631,10 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
                 Command::SetFavourite(_) => Some("reply.favourited".to_owned()),
+                Command::SetLock(_) => Some("reply.locked".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
+                Command::OpenPlayback(_) => Some("reply.playback_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 // Both settings commands answer with the same reply: what a
                 // change produced is the settings as they now stand
@@ -699,6 +716,15 @@ fn samples() -> Vec<Sample> {
                 command: "export_recording".to_owned(),
                 params: serde_json::to_value(exemplar_export_recording())
                     .expect("the export options serialise"),
+            }),
+        ),
+        (
+            "asking for a recording to be opened for playback, on one of its tracks",
+            ClientMessage::Request(Request {
+                id: 13,
+                command: "open_playback".to_owned(),
+                params: serde_json::to_value(exemplar_open_playback())
+                    .expect("the playback options serialise"),
             }),
         ),
         (
@@ -1005,6 +1031,25 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a recording locked against automatic cleanup, and nothing else",
+            ServerMessage::Response(Response {
+                id: 18,
+                outcome: Outcome::Ok(Reply::Locked {
+                    lock: crate::library::LockMark {
+                        kind: "recording".to_owned(),
+                        session_id: String::new(),
+                        id: 1,
+                        // Its own lock, so both are true. The pair exists for
+                        // the other case: a recording inside a locked sitting
+                        // is protected without having one.
+                        locked: true,
+                        protected: true,
+                        changed: true,
+                    },
+                }),
+            }),
+        ),
+        (
             "what is installed, and what each plugin asks for",
             ServerMessage::Response(Response {
                 id: 12,
@@ -1082,6 +1127,40 @@ fn samples() -> Vec<Sample> {
                 outcome: Outcome::Ok(Reply::RecordingExported {
                     export: exemplar_export(),
                 }),
+            }),
+        ),
+        (
+            "a recording opened for playback on the track a player would have taken anyway",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: PlaybackStream {
+                        path: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+                        audio_track: Some(1),
+                        prepared: false,
+                        ..exemplar_playback()
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording opened for playback on a track that needed a copy of its own",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: exemplar_playback(),
+                }),
+            }),
+        ),
+        (
+            "playback refused because the recording's file has gone",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::PlaybackFailed,
+                    "cs2-20260811-201400-1.mkv is not there any more. It may have been moved or \
+                     deleted, or the drive it is on may not be connected",
+                )),
             }),
         ),
         (
@@ -1489,9 +1568,22 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
         Reply::Favourited { .. } => "favourited".to_owned(),
+        Reply::Locked { .. } => "locked".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
+        // Whether a copy had to be made is part of the path: it is the
+        // difference between an answer that cost nothing and one that read the
+        // whole recording, and a mirror that dropped `prepared` would otherwise
+        // reach the same discriminant for both.
+        Reply::PlaybackOpened { playback } => format!(
+            "playback_opened.{}",
+            if playback.prepared {
+                "prepared"
+            } else {
+                "as_recorded"
+            }
+        ),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1788,6 +1880,7 @@ fn exemplar_start_recording() -> StartRecording {
         microphone: Some("none".to_owned()),
         system_audio: Some("none".to_owned()),
         replay_seconds: Some(60),
+        replay: true,
     }
 }
 
@@ -1979,6 +2072,7 @@ fn exemplar_library_session() -> LibrarySession {
         ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
         end_reason: Some("game-exited".to_owned()),
         favourite: true,
+        locked: true,
         recordings: vec![exemplar_library_recording()],
         clips: vec![exemplar_library_clip()],
     }
@@ -2004,6 +2098,11 @@ fn exemplar_library_recording() -> LibraryRecording {
         size_bytes: Some(9_812_009_112),
         missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
         favourite: false,
+        // Not locked itself, and protected anyway: the exemplar carries the
+        // case that separates the two fields, because a pair that always
+        // agreed would not need to be a pair.
+        locked: false,
+        protected: true,
         tags: vec!["clutch".to_owned()],
     }
 }
@@ -2044,6 +2143,35 @@ fn exemplar_export_recording() -> ExportRecording {
     ExportRecording {
         source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
         destination: r"D:\clips\cs2-20260811-201400-1.mp4".to_owned(),
+    }
+}
+
+/// Every `open_playback` parameter at once.
+fn exemplar_open_playback() -> OpenPlayback {
+    OpenPlayback {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        audio_track: Some(3),
+    }
+}
+
+/// A recording opened for playback, with every optional field present so the
+/// schema sees them.
+fn exemplar_playback() -> PlaybackStream {
+    PlaybackStream {
+        path: r"C:\Users\sam\AppData\Local\Clipped\playback\cs2-20260811-201400-1-3.mp4".to_owned(),
+        audio_track: Some(3),
+        audio_tracks: vec![exemplar_playback_track()],
+        prepared: true,
+    }
+}
+
+/// One sound track a window can offer, with every optional field present.
+fn exemplar_playback_track() -> PlaybackTrack {
+    PlaybackTrack {
+        index: 3,
+        name: Some("Microphone".to_owned()),
+        language: Some("eng".to_owned()),
+        default: false,
     }
 }
 
@@ -2197,8 +2325,15 @@ fn every_built_command() -> Vec<Command> {
             id: 1,
             favourite: true,
         }),
+        Command::SetLock(crate::library::SetLock {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            locked: true,
+        }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
+        Command::OpenPlayback(exemplar_open_playback()),
         Command::GetHotkeys,
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
@@ -2221,8 +2356,10 @@ fn every_built_command() -> Vec<Command> {
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
             | Command::SetFavourite(_)
+            | Command::SetLock(_)
             | Command::Plugins
             | Command::ExportRecording(_)
+            | Command::OpenPlayback(_)
             | Command::GetHotkeys
             | Command::GetSettings
             | Command::ApplySettings(_)
@@ -2251,6 +2388,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::ShuttingDown,
         ErrorCode::DestinationExists,
         ErrorCode::ExportFailed,
+        ErrorCode::PlaybackFailed,
         ErrorCode::LibraryUnavailable,
         ErrorCode::Internal,
     ];
@@ -2271,6 +2409,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::ShuttingDown
             | ErrorCode::DestinationExists
             | ErrorCode::ExportFailed
+            | ErrorCode::PlaybackFailed
             | ErrorCode::LibraryUnavailable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
@@ -2394,6 +2533,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingExported {
             export: exemplar_export(),
         },
+        Reply::PlaybackOpened {
+            playback: exemplar_playback(),
+        },
         Reply::Hotkeys {
             hotkeys: every_hotkey_state()
                 .into_iter()
@@ -2471,6 +2613,16 @@ fn every_reply() -> Vec<Reply> {
                 changed: true,
             },
         },
+        Reply::Locked {
+            lock: crate::library::LockMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                locked: true,
+                protected: true,
+                changed: true,
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2495,11 +2647,13 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }
             | Reply::Favourited { .. }
+            | Reply::Locked { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::Settings { .. }
             | Reply::AudioDevices { .. }
             | Reply::RecordingExported { .. }
+            | Reply::PlaybackOpened { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }

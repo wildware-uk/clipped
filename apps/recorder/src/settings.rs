@@ -61,6 +61,14 @@ fn applies(key: SettingKey) -> Result<(), &'static str> {
         | SettingKey::Encoder
         | SettingKey::Microphone
         | SettingKey::SystemAudio => Ok(()),
+        // Read when a recording that asked for a buffer without naming a length
+        // starts: the window sends `replay` with no seconds and this recorder
+        // resolves the length from here (`crate::serve`, `ReplayAsked::
+        // Configured`, issue #427). `clipped-recorder replay --duration` is the
+        // other reader. It was not in force when the settings screen was
+        // written; it is now, so the screen draws it as a control rather than
+        // as a sentence.
+        SettingKey::ReplayWindow => Ok(()),
         // Not applied: a recording still captures the game's own window,
         // because the capture target decides which handle the caller resolves
         // before a recording exists to be configured
@@ -68,13 +76,6 @@ fn applies(key: SettingKey) -> Result<(), &'static str> {
         SettingKey::CaptureTarget => Err(
             "every recording captures the game's own window. Reading this setting when a \
              recording starts is issue #61",
-        ),
-        // Read by `clipped-recorder replay`, and by nothing that starts a
-        // recording automatically or from the window: a window's recording is
-        // given its buffer per recording instead.
-        SettingKey::ReplayWindow => Err(
-            "`clipped-recorder replay` reads this. A recording started from this window keeps a \
-             buffer only when it was asked for one, which is issue #427",
         ),
     }
 }
