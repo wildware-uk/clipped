@@ -36,9 +36,12 @@ https://github.com/wildware-uk/clipped/issues
 - **The acceptance criteria are the ticket.** They define what "finished" means.
   If they turn out to be wrong or incomplete, say so on the issue and change
   them deliberately, rather than quietly building something different.
-- **Milestones `M0` to `M14`** group issues and follow the milestone order in
+- **Milestones `M0` to `M15`** group issues and follow the milestone order in
   `SPEC.md` section 42, from project foundations through the recording engine to
-  performance hardening. Do not implement later-milestone work to satisfy an
+  performance hardening. More may be added — `M15` was, after the others were
+  numbered — which is one reason a milestone number is not a version number
+  ([ADR 0014](docs/adr/0014-a-milestone-is-not-a-version.md)). Do not implement
+  later-milestone work to satisfy an
   earlier ticket; capture compatibility work does not belong in the ticket that
   first opens a capture session.
 - **`SPEC.md` is a reference document, not a task list.** It describes the
@@ -222,9 +225,12 @@ will be `v1.0.0`. A milestone number is not a version number: `M9` complete does
 not mean `0.9.0`, and no milestone implies a version at all. The `0.1.0` in the
 manifests is a placeholder for "unreleased".
 
-[docs/releasing.md](docs/releasing.md) is the rule in full — what a version is,
-who may decide a milestone is finished (a maintainer, by closing it on GitHub),
-what an agent may and may not do, and the five gates a tag has to pass before
+[ADR 0014](docs/adr/0014-a-milestone-is-not-a-version.md) is the decision and
+the argument for it, including the alternatives that lost and the one most
+likely to win later. [docs/releasing.md](docs/releasing.md) is the rule in full
+— what a version is, who may decide a milestone is finished (a maintainer, by
+closing it on GitHub), what an agent may and may not do, and the five gates a
+tag has to pass before
 [`.github/workflows/release.yml`](.github/workflows/release.yml) will build
 anything. Read it before tagging.
 
@@ -235,9 +241,12 @@ Two things worth knowing even if you never make a release:
   naming every one that does not, rather than editing them to match.
 - **The workflow cannot publish while the licence obligations in
   [docs/licensing.md](docs/licensing.md) are unmet.** The installer carries a
-  pinned LGPL v3 FFmpeg, and until it also carries the notices and licence texts
-  that conveying it owes ([#123](https://github.com/wildware-uk/clipped/issues/123)),
-  a release built from this tree may not be distributed.
+  pinned LGPL v3 FFmpeg, so conveying it owes the notices and licence texts
+  ([#123](https://github.com/wildware-uk/clipped/issues/123)). Those now ship in
+  the bundle and the gate passes — it checks the artefact rather than the issue,
+  so anything that drops them from `bundle.resources` re-closes it. Two
+  obligations remain manual, and are on whoever publishes the draft: attaching
+  the corresponding FFmpeg source, and testing the relinking permission.
 
 ## Licensing and dependencies
 
