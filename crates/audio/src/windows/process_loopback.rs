@@ -915,6 +915,58 @@ fn mask_for(format: AudioFormat) -> u32 {
 pub struct ProcessLoopbackCapture {
     capture: EndpointCapture,
     root: u32,
+    /// The cell this capture agrees its scope through, held here as well as in
+    /// the [`ProcessLoopbackSource`] inside `capture` so that a caller can ask
+    /// **which** agreement it is without the engine lending out its source.
+    ///
+    /// The same `Arc`, not a second one: [`Self::open_scoped`] clones the one it
+    /// hands to the source. Its identity is the whole of what
+    /// [`Self::scope_agreement`] reports, and the value in it belongs to
+    /// `decide_scope` on the capture thread.
+    scoping: Arc<AtomicU32>,
+}
+
+/// Which agreement a process-scoped capture follows.
+///
+/// The two sides of one [`ProcessLoopbackCapture::open_pair`] return the same
+/// one; captures opened separately do not, however alike they look otherwise.
+/// That is the whole of what it says, and it is what lets a caller assert it
+/// opened the pair rather than two captures that happen to name the same
+/// process ([issue #581](https://github.com/wildware-uk/clipped/issues/581)).
+///
+/// It deliberately does not expose the process the pair is scoped to: that is
+/// [`ProcessLoopbackCapture::scoped_to`], it changes on the capture thread, and
+/// a second route to it would be a second answer to the same question
+/// (AGENTS.md section 55).
+#[derive(Clone)]
+pub struct ScopeAgreement(Arc<AtomicU32>);
+
+impl PartialEq for ScopeAgreement {
+    /// Whether these are the same agreement, not whether they say the same
+    /// thing.
+    ///
+    /// Two captures opened separately hold two cells, and a moment after either
+    /// is opened both cells say the same process — which is exactly the
+    /// arrangement this type exists to tell apart. So it is the identity of the
+    /// cell that is compared and never its contents.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ScopeAgreement {}
+
+impl core::fmt::Debug for ScopeAgreement {
+    /// The cell's address, because that is what equality is over. Printing only
+    /// the process it names would make two distinct agreements look identical
+    /// in the message of the assertion that just told them apart.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ScopeAgreement")
+            .field("cell", &Arc::as_ptr(&self.0))
+            .field("scoped_to", &self.0.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl ProcessLoopbackCapture {
@@ -985,7 +1037,12 @@ impl ProcessLoopbackCapture {
 
     /// Both sides of one tree, opened together and kept scoped to one process.
     ///
-    /// **This is what a recording opens.** `open` and `open_excluding` on their
+    /// **This is what a recording opens** — `clipped_session::audio::open`,
+    /// which is the only caller in the workspace that opens both sides, and
+    /// which for a week opened them separately while this documentation said
+    /// otherwise ([issue
+    /// #581](https://github.com/wildware-uk/clipped/issues/581)).
+    /// `open` and `open_excluding` on their
     /// own are two independent captures, and a recording that opens both of
     /// them separately has a defect that only appears when a game's launcher
     /// exits partway through: each capture then resolves the surviving tree
@@ -1034,7 +1091,7 @@ impl ProcessLoopbackCapture {
         scope: TreeScope,
         scoping: Arc<AtomicU32>,
     ) -> Result<Self, AudioError> {
-        let source = ProcessLoopbackSource::new(root_process, scope, scoping)?;
+        let source = ProcessLoopbackSource::new(root_process, scope, Arc::clone(&scoping))?;
         let capture = EndpointCapture::open(CaptureSource::ProcessTree(source))?
             // The tree was built a moment ago and had a member in it, so there
             // is only one way to be here: every process of the game exited
@@ -1046,7 +1103,26 @@ impl ProcessLoopbackCapture {
         Ok(Self {
             capture,
             root: root_process,
+            scoping,
         })
+    }
+
+    /// Which agreement this capture follows.
+    ///
+    /// Equal for the two sides of one [`open_pair`](Self::open_pair) and for
+    /// nothing else, so it is how a caller checks it opened the pair rather
+    /// than two captures that merely name the same process — a distinction
+    /// nothing can make from the outside otherwise, because two captures opened
+    /// separately are identical in every other observable way until a game's
+    /// launcher exits partway through a recording and they disagree about which
+    /// process to follow ([issue
+    /// #581](https://github.com/wildware-uk/clipped/issues/581)).
+    ///
+    /// Reading it is free and takes no lock; it is [`Clone`] so that a caller
+    /// holding one capture at a time can compare the two.
+    #[must_use]
+    pub fn scope_agreement(&self) -> ScopeAgreement {
+        ScopeAgreement(Arc::clone(&self.scoping))
     }
 
     /// The shape of every buffer this capture produces.
@@ -2091,6 +2167,49 @@ mod tests {
         let mut including = including;
         including.close();
         excluding.close();
+    }
+
+    #[test]
+    fn a_pair_agrees_through_one_cell_and_two_captures_opened_separately_do_not() {
+        // What `ScopeAgreement` claims, measured on real captures rather than
+        // assumed from reading `open_pair`. It is what a caller checks it
+        // opened the pair with — `clipped_session::audio::open` does, because
+        // for a week it did not open the pair at all and every test in this
+        // file passed regardless (issue #581) — so an agreement that reported
+        // "same" for two independent captures would make that check useless
+        // and this one is what stops it.
+        let root = std::process::id();
+
+        let (game, other) = match ProcessLoopbackCapture::open_pair(root) {
+            Ok(pair) => pair,
+            Err(error) => {
+                skipped(&format!("this machine will not scope a capture: {error}"));
+                return;
+            }
+        };
+        assert_eq!(
+            game.scope_agreement(),
+            other.scope_agreement(),
+            "the two sides of one pair re-scope through one cell, which is the whole of what \
+             `open_pair` adds over opening them separately"
+        );
+
+        let alone = ProcessLoopbackCapture::open(root)
+            .expect("a machine that scoped a pair scopes one side of it");
+        assert_ne!(
+            alone.scope_agreement(),
+            game.scope_agreement(),
+            "a capture opened on its own owns its cell. An agreement that compared equal here \
+             would say every capture is paired with every other, and the session's check that a \
+             recording opened the pair would pass on the code that did not"
+        );
+
+        let mut game = game;
+        let mut other = other;
+        let mut alone = alone;
+        game.close();
+        other.close();
+        alone.close();
     }
 
     #[test]

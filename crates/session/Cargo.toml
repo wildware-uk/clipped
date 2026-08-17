@@ -216,6 +216,13 @@ features = [
     # `DXGI_FORMAT_B8G8R8A8_UNORM` and `DXGI_SAMPLE_DESC`, which the texture is
     # described in — the format `PixelFormat::Bgra8Unorm` names.
     "Win32_Graphics_Dxgi_Common",
+    # `CreateWindowExW` and `DestroyWindow`, for one off-screen window of the
+    # `STATIC` class that is never shown. `src/audio/tests.rs` needs a window
+    # this process really owns, because which audio sources a recording opens
+    # depends on `CaptureTargetSettings::game_process`, and that is
+    # `GetWindowThreadProcessId` of a real handle — a fabricated one plans a
+    # whole-endpoint recording and measures nothing (issue #581).
+    "Win32_UI_WindowsAndMessaging",
 ]
 
 [dev-dependencies]

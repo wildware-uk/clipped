@@ -62,6 +62,14 @@
 //! [`plan_system_audio`] is that decision, and it is separate from opening
 //! anything so that it can be tested without a machine.
 //!
+//! The two scoped captures are opened by **one** call to
+//! `ProcessLoopbackCapture::open_pair`, so that they share one cell naming the
+//! process both are scoped to and cannot end up on different survivors of a
+//! game whose launcher exited partway through. Opening them separately was a
+//! defect that produced no error and no log line, only a track with the game
+//! twice on it or not at all
+//! ([issue #581](https://github.com/wildware-uk/clipped/issues/581)).
+//!
 //! Routing a *named* application to a track of its own is still
 //! [issue #33](https://github.com/wildware-uk/clipped/issues/33).
 
@@ -73,6 +81,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(test)]
+use clipped_audio::windows::ScopeAgreement;
 use clipped_audio::{AudioError, AudioFormat, Capture};
 use clipped_capture::{
     CaptureClock, DriftEstimator, SyncState, SyncTolerance, DEFAULT_DISCONTINUITY_STEP,
@@ -124,6 +134,28 @@ pub(crate) trait AudioCapture: Send {
     /// exposing it on the two captures a session opens; this trait grows a
     /// `finish` when it exists.
     fn close(&mut self);
+
+    /// Which agreement this capture scopes itself through, for the
+    /// process-scoped captures that have one.
+    ///
+    /// [`None`] for the endpoint and microphone captures, which are pointed at
+    /// a device rather than at a process tree and have nothing to agree about.
+    /// The two sides of one `ProcessLoopbackCapture::open_pair` return the same
+    /// one, and that is the only thing that distinguishes a recording which
+    /// opened the pair from one which opened `open` and `open_excluding`
+    /// separately — the arrangement that made issue #27's fix ineffective
+    /// everywhere a user could reach it
+    /// ([issue #581](https://github.com/wildware-uk/clipped/issues/581)).
+    ///
+    /// Not shipped (AGENTS.md section 37). Nothing a recording *does* depends
+    /// on knowing which agreement a capture follows — the captures themselves
+    /// use it, on their own threads — but everything depends on there being one
+    /// shared between the two of them, and this is the only way to ask from
+    /// out here.
+    #[cfg(test)]
+    fn scope_agreement(&self) -> Option<ScopeAgreement> {
+        None
+    }
 }
 
 impl AudioCapture for clipped_audio::windows::SystemAudioCapture {
@@ -163,6 +195,11 @@ impl AudioCapture for clipped_audio::windows::ProcessLoopbackCapture {
     fn close(&mut self) {
         Self::finish(self);
         Self::close(self);
+    }
+
+    #[cfg(test)]
+    fn scope_agreement(&self) -> Option<ScopeAgreement> {
+        Some(Self::scope_agreement(self))
     }
 }
 
@@ -226,12 +263,22 @@ pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, Sess
                     capture: Box::new(capture),
                 });
             }
-            PlannedSource::GameTree(root) => {
-                let capture =
-                    ProcessLoopbackCapture::open(root).map_err(|source| SessionError::Audio {
+            PlannedSource::ScopedPair(root) => {
+                // One call, and one agreement between the two captures it
+                // returns. `open` and `open_excluding` are the same two
+                // activations without it, and a recording that made them
+                // separately would put a process that is in one side's tree and
+                // not the other's onto both tracks or onto neither, whenever a
+                // game's launcher exits partway through (issues #27 and #581).
+                let (game, other) = ProcessLoopbackCapture::open_pair(root).map_err(|source| {
+                    SessionError::Audio {
+                        // Named for the track a user would notice missing.
+                        // Either side failing means neither capture exists,
+                        // so there is one failure here rather than two.
                         track: AudioSource::Game.track_name(),
                         source,
-                    })?;
+                    }
+                })?;
                 sources.push(OpenSource {
                     source: AudioSource::Game,
                     // A process-scoped capture is not opened against an endpoint
@@ -239,22 +286,14 @@ pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, Sess
                     // field says which device somebody would go and unplug, and
                     // for this source the answer is "none of them".
                     device: None,
-                    format: capture.format(),
-                    capture: Box::new(capture),
+                    format: game.format(),
+                    capture: Box::new(game),
                 });
-            }
-            PlannedSource::EverythingExceptGameTree(root) => {
-                let capture = ProcessLoopbackCapture::open_excluding(root).map_err(|source| {
-                    SessionError::Audio {
-                        track: AudioSource::OtherSystemAudio.track_name(),
-                        source,
-                    }
-                })?;
                 sources.push(OpenSource {
                     source: AudioSource::OtherSystemAudio,
                     device: None,
-                    format: capture.format(),
-                    capture: Box::new(capture),
+                    format: other.format(),
+                    capture: Box::new(other),
                 });
             }
         }
@@ -289,25 +328,38 @@ pub(crate) enum PlannedSource {
     /// Not [`AudioSource::Game`]: calling the whole machine's output the game's
     /// track would be a label a downstream editor acts on.
     WholeEndpoint,
-    /// The named process and its children, filed as [`AudioSource::Game`].
-    GameTree(u32),
-    /// Everything the machine played *except* that process tree, filed as
+    /// Both sides of one process tree: the tree itself as
+    /// [`AudioSource::Game`], and everything the machine played except it as
     /// [`AudioSource::OtherSystemAudio`].
-    EverythingExceptGameTree(u32),
+    ///
+    /// **One variant rather than two**, because the two sides are not two
+    /// decisions. They are opened by one call to
+    /// `ProcessLoopbackCapture::open_pair` and they share one cell naming the
+    /// process both are scoped to, which is what keeps them on the same tree
+    /// after a game's launcher exits (issue #27). A plan that could name one
+    /// side without the other is the shape that let a recording open them
+    /// separately for a week while every document said it did not
+    /// ([issue #581](https://github.com/wildware-uk/clipped/issues/581)), so
+    /// the type no longer has that shape.
+    ScopedPair(u32),
 }
 
 /// Which system-audio captures to open, decided before anything is opened.
 ///
 /// The pair is the whole point. Windows' process loopback has an include mode
 /// and an exclude mode against the same process tree
-/// (`clipped_audio::windows::ProcessLoopbackCapture::open` and `open_excluding`,
-/// issues [#26](https://github.com/wildware-uk/clipped/issues/26) and
+/// (`clipped_audio::windows::ProcessLoopbackCapture::open_pair`, issues
+/// [#26](https://github.com/wildware-uk/clipped/issues/26) and
 /// [#27](https://github.com/wildware-uk/clipped/issues/27)), and a recording has
 /// to open **both or neither**: one alone leaves either the game or everything
 /// else unrecorded, and opening a scoped capture beside a whole-endpoint one
 /// would put the game's audio on two tracks — which is the failure SPEC.md
 /// section 11 exists to prevent, and the one a user only discovers in an editor
 /// when muting the game does not silence it.
+///
+/// It says which captures, not how many entries: [`PlannedSource::ScopedPair`]
+/// is one plan item that opens two captures, because they are opened together
+/// or not at all.
 ///
 /// A recording with no process to scope to — a monitor capture, or a window
 /// whose process has already gone — gets the unscoped endpoint instead. That is
@@ -329,10 +381,9 @@ pub(crate) fn plan_system_audio(
     match (setting, game_process) {
         (AudioSourceSetting::Off, _) => Ok(Vec::new()),
         (AudioSourceSetting::Named(_), _) => Err(SessionError::AudioDeviceNotSelectable),
-        (AudioSourceSetting::SystemDefault, Some(root)) => Ok(vec![
-            PlannedSource::GameTree(root),
-            PlannedSource::EverythingExceptGameTree(root),
-        ]),
+        (AudioSourceSetting::SystemDefault, Some(root)) => {
+            Ok(vec![PlannedSource::ScopedPair(root)])
+        }
         (AudioSourceSetting::SystemDefault, None) => Ok(vec![PlannedSource::WholeEndpoint]),
     }
 }
