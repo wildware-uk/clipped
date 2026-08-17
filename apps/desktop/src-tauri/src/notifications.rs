@@ -443,13 +443,15 @@ fn read_legacy_switches(json: &str) -> Result<LegacySwitches, String> {
 fn migrate_legacy_switches(app: &AppHandle, link: &RecorderLink) -> Option<SettingsView> {
     let path = legacy_settings_path(app)?;
 
-    migrate_switches_at(&path, |request| {
-        match link.call(&clipped_ipc::Command::ApplySettings(request)) {
+    migrate_switches_at(
+        &path,
+        |request| match link.call(&clipped_ipc::Command::ApplySettings(request)) {
             Ok(clipped_ipc::Reply::Settings { settings }) => Ok(settings),
             Ok(_) => Err("the recorder answered `apply_settings` with something else".to_owned()),
             Err(error) => Err(error.to_string()),
-        }
-    })
+        },
+        crate::set_startup_notice,
+    )
 }
 
 /// The migration itself, with saving left to the caller.
@@ -462,6 +464,7 @@ fn migrate_legacy_switches(app: &AppHandle, link: &RecorderLink) -> Option<Setti
 fn migrate_switches_at(
     path: &Path,
     save: impl FnOnce(clipped_ipc::ApplySettings) -> Result<SettingsView, String>,
+    notice: impl FnOnce(&str),
 ) -> Option<SettingsView> {
     let json = match std::fs::read_to_string(path) {
         Ok(json) => json,
@@ -479,7 +482,7 @@ fn migrate_switches_at(
     let switches = match read_legacy_switches(&json) {
         Ok(switches) => switches,
         Err(reason) => {
-            crate::set_startup_notice(&unmigrated_switches(&path.display().to_string(), &reason));
+            notice(&unmigrated_switches(&path.display().to_string(), &reason));
             return None;
         }
     };
@@ -741,10 +744,14 @@ mod tests {
         );
         let mut sent = None;
 
-        let view = migrate_switches_at(&directory.file(), |request| {
-            sent = Some(request);
-            Ok(saved())
-        });
+        let view = migrate_switches_at(
+            &directory.file(),
+            |request| {
+                sent = Some(request);
+                Ok(saved())
+            },
+            |_| {},
+        );
 
         assert!(view.is_some(), "the settings as they now stand come back");
         let values = sent.expect("the switches were saved").values;
@@ -775,9 +782,11 @@ mod tests {
         let directory =
             TestDirectory::holding("unsaved", r#"{"version":1,"recording_failed":false}"#);
 
-        let view = migrate_switches_at(&directory.file(), |_| {
-            Err("there was no recorder listening".to_owned())
-        });
+        let view = migrate_switches_at(
+            &directory.file(),
+            |_| Err("there was no recorder listening".to_owned()),
+            |_| {},
+        );
 
         assert!(
             view.is_none(),
@@ -797,11 +806,28 @@ mod tests {
         let directory =
             TestDirectory::holding("newer", r#"{"version":2,"recording_failed":false}"#);
         let mut asked = false;
+        let mut told = None;
 
-        let view = migrate_switches_at(&directory.file(), |_| {
-            asked = true;
-            Ok(saved())
-        });
+        let view = migrate_switches_at(
+            &directory.file(),
+            |_| {
+                asked = true;
+                Ok(saved())
+            },
+            |notice| told = Some(notice.to_owned()),
+        );
+
+        // The notice is the whole of what a user gets out of this case, so it
+        // is asserted here rather than left to the process-wide one — which is
+        // what this used to write, and what made an unrelated test fail when
+        // the two ran at once.
+        let told = told.expect("a file this build cannot read has to be said out loud");
+        assert!(told.contains("version 2"), "{told}");
+        assert!(told.contains("understands version 1"), "{told}");
+        assert!(
+            told.contains("left exactly as it is"),
+            "the notice has to say the file was not touched: {told}"
+        );
 
         assert!(view.is_none());
         assert!(
@@ -818,10 +844,14 @@ mod tests {
         std::fs::remove_file(directory.file()).expect("the file can be removed");
         let mut asked = false;
 
-        let view = migrate_switches_at(&directory.file(), |_| {
-            asked = true;
-            Ok(saved())
-        });
+        let view = migrate_switches_at(
+            &directory.file(),
+            |_| {
+                asked = true;
+                Ok(saved())
+            },
+            |_| {},
+        );
 
         assert!(view.is_none());
         assert!(!asked, "nothing was migrated, so nothing should be saved");
