@@ -72,6 +72,17 @@ pub(super) enum SourceKind {
     /// Everything one process tree plays, recorded through process loopback
     /// rather than from an endpoint at all (`process_loopback.rs`).
     GameAudio,
+    /// Everything the machine played **except** one process tree, recorded
+    /// through the other side of the same process loopback activation.
+    ///
+    /// Its own kind rather than [`Self::SystemAudio`] because it is not a
+    /// capture of an endpoint, and its own kind rather than
+    /// [`Self::GameAudio`] because a recording runs both at once and a log
+    /// where both say `game` is a log that cannot answer the one question
+    /// somebody opens it with — which track the audio went to
+    /// ([issue #27](https://github.com/wildware-uk/clipped/issues/27),
+    /// AGENTS.md section 35).
+    OtherSystemAudio,
 }
 
 impl SourceKind {
@@ -83,7 +94,7 @@ impl SourceKind {
     /// is interested in none of them (`process_loopback.rs`).
     pub(super) fn flow(self) -> EDataFlow {
         match self {
-            Self::SystemAudio | Self::GameAudio => eRender,
+            Self::SystemAudio | Self::GameAudio | Self::OtherSystemAudio => eRender,
             Self::Microphone => eCapture,
         }
     }
@@ -97,7 +108,9 @@ impl SourceKind {
     /// fails.
     pub(super) fn stream_flags(self) -> u32 {
         match self {
-            Self::SystemAudio | Self::GameAudio => AUDCLNT_STREAMFLAGS_LOOPBACK,
+            Self::SystemAudio | Self::GameAudio | Self::OtherSystemAudio => {
+                AUDCLNT_STREAMFLAGS_LOOPBACK
+            }
             Self::Microphone => 0,
         }
     }
@@ -116,6 +129,7 @@ impl SourceKind {
             Self::SystemAudio => AudioSource::SystemAudio,
             Self::Microphone => AudioSource::Microphone,
             Self::GameAudio => AudioSource::Game,
+            Self::OtherSystemAudio => AudioSource::OtherSystem,
         }
     }
 }
@@ -202,9 +216,9 @@ impl EndpointSource {
         match (&self.selection, self.kind) {
             (DeviceSelection::Device { name, .. }, _) => name,
             (DeviceSelection::Default, SourceKind::Microphone) => "the default microphone",
-            // Every other endpoint source is on the render side. A
-            // [`SourceKind::GameAudio`] source is not an endpoint at all and
-            // never reaches here (`process_loopback.rs`).
+            // Every other endpoint source is on the render side. The
+            // process-scoped kinds are not endpoints at all and never reach
+            // here (`process_loopback.rs`).
             (DeviceSelection::Default, _) => "the default output device",
         }
     }
