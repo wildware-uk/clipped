@@ -55,7 +55,7 @@ import { Waveform } from './Waveform';
  * from a `data:` URI, which the content security policy already permits; the
  * `clip` scheme this screen plays through still serves recordings and only
  * recordings (`src-tauri/src/playback.rs`,
- * `docs/adr/0015-derived-pictures-cross-the-control-protocol.md`).
+ * `docs/adr/0016-derived-pictures-cross-the-control-protocol.md`).
  *
  * # What is drawn only when it is true
  *

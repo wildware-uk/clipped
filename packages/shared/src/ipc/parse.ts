@@ -46,6 +46,7 @@ import type {
   BookmarkSummary,
   ClientMessage,
   ErrorDetail,
+  ExportProgress,
   ExportSummary,
   Hello,
   HotkeyBinding,
@@ -755,6 +756,25 @@ function readExport(value: JsonValue | undefined): ExportSummary {
   };
 }
 
+/** How far a running export has got. */
+function readExportProgress(value: JsonValue | undefined): ExportProgress {
+  const progress = object(value, 'an export in progress');
+  const what = 'an export in progress';
+  const total = optionalNumberField(progress, 'total_ms', what);
+  return {
+    source: stringField(progress, 'source', what),
+    destination: stringField(progress, 'destination', what),
+    written_ms: numberField(progress, 'written_ms', what),
+    packets: numberField(progress, 'packets', what),
+    bytes: numberField(progress, 'bytes', what),
+    // Absent is "this recording never said how long it was", which is an
+    // answer rather than a gap: it is the difference between an unbounded
+    // indication and a percentage, and reading it as zero would draw the
+    // second over the first.
+    ...(total === undefined ? {} : { total_ms: total }),
+  };
+}
+
 function readPlayback(value: JsonValue | undefined): PlaybackStream {
   const playback = object(value, 'a playback stream');
   const what = 'a playback stream';
@@ -1236,6 +1256,8 @@ function readEvent(frame: JsonObject): RecorderEvent {
           recording_id: stringField(frame, 'recording_id', 'a failed recording'),
           error: readProtocolError(frame['error'], 'a failed recording'),
         };
+      case 'export_progress':
+        return { event: 'export_progress', export: readExportProgress(frame['export']) };
       default:
         break;
     }

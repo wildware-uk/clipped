@@ -49,7 +49,7 @@ use crate::command::{Command, Reply, Shutdown};
 use crate::error::ProtocolError;
 use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::message::{Event, EventStream};
-use crate::status::{ActiveRecording, RecorderStatus};
+use crate::status::{ActiveRecording, ExportProgress, RecorderStatus};
 
 /// How long a subscription is given to be accepted.
 ///
@@ -192,6 +192,21 @@ pub enum RecorderLinkEvent {
         /// nothing to report sends no event at all.
         conflicts: Vec<HotkeyBinding>,
     },
+    /// A running export has got this far.
+    ///
+    /// Forwarded rather than folded into the state, because it is not a
+    /// property of the link: the export is a request the window made on a
+    /// connection of its own, and the link is only the side that hears about it
+    /// while it runs ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+    ///
+    /// Only ever sent by a link attached to a recorder advertising
+    /// [`features::EXPORT_PROGRESS`](crate::features::EXPORT_PROGRESS) — see
+    /// `follow`. **Its absence means nothing**: an older recorder copies the
+    /// file exactly as it always did and says nothing while it does, so a
+    /// consumer must not read silence as either failure or completion. The
+    /// reply to `export_recording` remains the only thing that says an export
+    /// finished.
+    ExportProgress(ExportProgress),
 }
 
 /// What asking the recorder to exit produced.
@@ -714,6 +729,31 @@ fn supervise(
     }
 }
 
+/// The streams to ask a recorder advertising `features` for.
+///
+/// `status` and `errors` unconditionally: every recorder that has ever spoken
+/// this protocol has both, and the link cannot do its job without them.
+///
+/// `exports` **only** when the recorder says it has it. This is not politeness.
+/// A stream a recorder does not have is refused by name, and that refusal takes
+/// the whole events connection with it (`crate::server::accepted_streams`) — so
+/// asking a recorder built before
+/// [issue #446](https://github.com/wildware-uk/clipped/issues/446) for progress
+/// would cost the window its status subscription as well, and trade a missing
+/// progress bar for a window that no longer knows whether anything is
+/// recording. Silence is the correct behaviour against such a recorder, and the
+/// reply to `export_recording` still says when the copy finished.
+fn subscription(features: &[String]) -> Vec<EventStream> {
+    let mut streams = vec![EventStream::Status, EventStream::Errors];
+    if features
+        .iter()
+        .any(|feature| feature == crate::features::EXPORT_PROGRESS)
+    {
+        streams.push(EventStream::Exports);
+    }
+    streams
+}
+
 /// Subscribes and reads events until the subscription ends, returning why.
 ///
 /// The last status seen is what makes [`RecorderLinkEvent::RecordingInterrupted`]
@@ -729,7 +769,7 @@ fn follow(
         &settings.endpoint,
         &settings.client.name,
         &settings.client.version,
-        vec![EventStream::Status, EventStream::Errors],
+        subscription(&attachment.features),
         SUBSCRIBE_TIMEOUT,
     ) {
         Ok(events) => events,
@@ -795,6 +835,16 @@ fn follow(
             // recorder that produces it,
             // [issue #421](https://github.com/wildware-uk/clipped/issues/421).
             Ok(Event::SessionEnded { .. }) => {}
+            // How far a running export has got. Forwarded as it arrived: this
+            // link has no idea which window asked for the export, and the
+            // event names the file it is writing, which is what a window
+            // matches it against.
+            //
+            // Only reachable when `subscription` asked for the stream, because
+            // a recorder that does not have it never sends one.
+            Ok(Event::ExportProgress { export }) => {
+                send(sender, RecorderLinkEvent::ExportProgress(export));
+            }
             // An event invented after this build was compiled. Ignored rather
             // than treated as a fault, which is what `docs/ipc.md`'s
             // compatibility policy requires of a reader.

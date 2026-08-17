@@ -635,7 +635,7 @@ fn accepted_streams(requested: &[EventStream]) -> Result<Vec<EventStream>, Proto
     let mut accepted = Vec::with_capacity(requested.len());
     for stream in requested {
         match stream {
-            EventStream::Status | EventStream::Errors => {
+            EventStream::Status | EventStream::Errors | EventStream::Exports => {
                 if !accepted.contains(stream) {
                     accepted.push(stream.clone());
                 }

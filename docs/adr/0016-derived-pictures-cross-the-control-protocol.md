@@ -1,4 +1,4 @@
-# 0015. A recording's thumbnail and its waveform cross the control protocol, and the window gains no file-system reach
+# 0016. A recording's thumbnail and its waveform cross the control protocol, and the window gains no file-system reach
 
 - Status: Accepted
 - Date: 2026-08-17

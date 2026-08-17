@@ -12,7 +12,7 @@
 //!
 //! # Why the bytes are on this protocol
 //!
-//! [ADR 0015](../../../docs/adr/0015-derived-pictures-cross-the-control-protocol.md)
+//! [ADR 0016](../../../docs/adr/0016-derived-pictures-cross-the-control-protocol.md)
 //! is the record. The alternative was a Tauri asset scope over the cache
 //! directory, letting the webview load a thumbnail as a file. It was not taken,
 //! for three reasons in this order:

@@ -198,7 +198,7 @@ thumbnail does, and where they belong is under a track on the playback screen
 Not off the disk. The window still has no file-system permission and no asset
 scope; the picture is base64 in the recorder's own `preview_opened` reply and is
 drawn from a `data:` URI, which the content security policy already permitted
-([ADR 0015](adr/0015-derived-pictures-cross-the-control-protocol.md),
+([ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
 [thumbnails.md](thumbnails.md)). `capabilities/default.json` and the policy are
 both unchanged by it, which `playbackReach.test.ts` is what holds.
 
@@ -1013,7 +1013,7 @@ gigabytes.
 **A picture does not come this way, and that is deliberate.** The poster frame
 below is a thumbnail, and a thumbnail arrives as base64 in a `preview_opened`
 reply rather than as a file this scheme serves
-([ADR 0015](adr/0015-derived-pictures-cross-the-control-protocol.md),
+([ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
 [#448](https://github.com/wildware-uk/clipped/issues/448)). The short reason is
 the *waveform*: peaks are a `.cwf`, a binary sidecar neither this process nor
 the window links a reader for, so serving them as files would mean a second

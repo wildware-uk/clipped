@@ -409,7 +409,7 @@ wrong.
 
 So the peaks cross as **numbers**, on the same `open_preview` command that
 carries a thumbnail ([ipc.md](ipc.md),
-[ADR 0015](adr/0015-derived-pictures-cross-the-control-protocol.md),
+[ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md),
 [#448](https://github.com/wildware-uk/clipped/issues/448)). One command, one
 reply and one set of three states for both, because a picture of a recording and
 a picture of its sound are the same problem — derived, cached outside the index,

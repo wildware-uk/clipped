@@ -277,7 +277,7 @@ either. The recorder does both, and answers `open_preview` with the picture
 itself, base64 in the reply ([ipc.md](ipc.md)).
 
 **Bytes on the protocol, and not an asset scope.**
-[ADR 0015](adr/0015-derived-pictures-cross-the-control-protocol.md) is the
+[ADR 0016](adr/0016-derived-pictures-cross-the-control-protocol.md) is the
 record. The alternative was a narrow Tauri file-system scope over the cache
 directory, letting the webview load each picture as a file. Three things decided
 it:

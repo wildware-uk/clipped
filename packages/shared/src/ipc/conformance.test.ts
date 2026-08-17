@@ -67,6 +67,8 @@ import type {
   PlaybackOpenedReply,
   PlaybackStream,
   PlaybackTrack,
+  ExportProgress,
+  ExportProgressEvent,
   Preview,
   PreviewKind,
   PreviewOpenedReply,
@@ -522,6 +524,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     lossless: 'required',
     losses: 'optional',
   }),
+  export_progress: fields<ExportProgress>({
+    source: 'required',
+    destination: 'required',
+    written_ms: 'required',
+    total_ms: 'optional',
+    packets: 'required',
+    bytes: 'required',
+  }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
   'reply.pong': fields<PongReply>({ reply: 'required' }),
@@ -662,6 +672,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   }),
   'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
   'event.session_ended': fields<SessionEndedEvent>({ event: 'required', session: 'required' }),
+  'event.export_progress': fields<ExportProgressEvent>({
+    event: 'required',
+    export: 'required',
+  }),
   'event.recording_failed': fields<RecordingFailedEvent>({
     event: 'required',
     recording_id: 'required',
@@ -984,6 +998,13 @@ function eventDiscriminant(event: RecorderEvent): string {
       return `session_ended.${event.session.end_reason ?? 'unstated'}`;
     case 'recording_failed':
       return 'recording_failed';
+    case 'export_progress':
+      // Whether the recording said how long it was is part of the path, because
+      // it is the one thing a window draws differently: a total is a percentage
+      // and no total is an unbounded indication. A mirror that read a missing
+      // `total_ms` as zero would otherwise reach the same answer as one that
+      // kept it absent.
+      return `export_progress.${event.export.total_ms === undefined ? 'unmeasured' : 'measured'}`;
     case undefined:
       return 'unrecognised';
   }

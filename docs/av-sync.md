@@ -668,7 +668,10 @@ within seconds, and gives up on the video side. That is the failure to expect
 from starting a long run and walking away, and the fix is to keep the machine
 awake for the length of it — `SetThreadExecutionState` with
 `ES_DISPLAY_REQUIRED`, which is what any recorder does while it records — rather
-than anything in the test.
+than anything in the test. Clipped itself now does exactly that for the length of
+a capture ([ADR 0015](adr/0015-capture-holds-the-display-awake.md)); these runs
+still have to do it for themselves, because the hold belongs to a recording and
+the harness is up for a long time either side of one.
 
 Half an hour is long enough for the machine to be used, and the subject is a
 topmost window on somebody's display: it can be closed, and the session can lock.

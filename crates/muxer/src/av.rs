@@ -11,6 +11,7 @@
 //! by returning rather than by remembering to (AGENTS.md section 58).
 
 use core::ptr::{self, NonNull};
+use core::time::Duration;
 use std::ffi::{c_int, CString};
 
 use rusty_ffmpeg::ffi;
@@ -246,6 +247,26 @@ impl InputContext {
     pub(crate) fn chapter_count(&self) -> usize {
         // SAFETY: as for `stream_count`.
         unsafe { (*self.as_ptr()).nb_chapters as usize }
+    }
+
+    /// How long the file says it is, where it says at all.
+    ///
+    /// [`None`] rather than zero for a file whose container declares no
+    /// duration, which is a real case and not a corrupt one: a recording that
+    /// was interrupted keeps every packet it wrote and no total, which is the
+    /// property ADR 0001 chose Matroska for. The distinction matters to the one
+    /// caller — a remux reporting progress needs "how far through" and a total
+    /// it invented would be a percentage that lied.
+    pub(crate) fn duration(&self) -> Option<Duration> {
+        // SAFETY: the context is live and `duration` is a plain integer field
+        // filled in by `avformat_find_stream_info`. It is measured in
+        // `AV_TIME_BASE` units, and holds `AV_NOPTS_VALUE` when the container
+        // declared none.
+        let microseconds = unsafe { (*self.as_ptr()).duration };
+        if microseconds == ffi::AV_NOPTS_VALUE || microseconds <= 0 {
+            return None;
+        }
+        Some(Duration::from_micros(microseconds.unsigned_abs()))
     }
 }
 

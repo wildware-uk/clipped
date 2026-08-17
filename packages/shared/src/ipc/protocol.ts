@@ -98,7 +98,7 @@ export type ConnectionRole = Extensible<KnownConnectionRole>;
 export const DEFAULT_CONNECTION_ROLE = 'control';
 
 /** The streams of events the protocol defines. */
-export const EVENT_STREAMS = ['status', 'errors', 'metrics'] as const;
+export const EVENT_STREAMS = ['status', 'errors', 'metrics', 'exports'] as const;
 
 /** A stream this build knows. `metrics` is defined and refused; see below. */
 export type KnownEventStream = (typeof EVENT_STREAMS)[number];
@@ -110,6 +110,12 @@ export type KnownEventStream = (typeof EVENT_STREAMS)[number];
  * accepted and left silent, so a client that asked for one is told. `metrics`
  * is refused by this recorder with `not_implemented`: nothing measures those
  * figures during a recording yet (issue #100).
+ *
+ * **The refusal takes the whole events connection with it.** So a stream added
+ * later is asked for only when the recorder's welcome advertises it: `exports`
+ * is paired with the `export_progress` feature for exactly that reason, and a
+ * client that asked an older recorder for it would lose its `status`
+ * subscription too (issue #446).
  */
 export type EventStream = Extensible<KnownEventStream>;
 
@@ -125,6 +131,7 @@ export const FEATURES = [
   'playback',
   'hotkeys',
   'replay',
+  'export_progress',
   'settings',
   'microphone_level',
   'startup',
@@ -273,7 +280,12 @@ export const REPLIES = [
 export type ReplyName = (typeof REPLIES)[number];
 
 /** The events this build knows. */
-export const EVENTS = ['status_changed', 'session_ended', 'recording_failed'] as const;
+export const EVENTS = [
+  'status_changed',
+  'session_ended',
+  'recording_failed',
+  'export_progress',
+] as const;
 
 /** The name of an event this build knows. */
 export type KnownEventName = (typeof EVENTS)[number];
@@ -625,6 +637,67 @@ export interface ExportSummary {
    * what the recorder puts on the wire.
    */
   readonly losses?: readonly string[];
+}
+
+/**
+ * How far a running export has got.
+ *
+ * The payload of {@link ExportProgressEvent}, and the answer to a copy of a
+ * two-hour recording looking like a hang (issue #446). It has to be an event
+ * and not a field on the reply, because the reply arrives when the MP4's index
+ * has been written — the moment there is nothing left to report.
+ *
+ * {@link ExportProgress.destination} is what identifies the export: there is no
+ * request identifier on the event path, and a destination that already exists
+ * is refused, so two exports cannot be writing the same file at once.
+ */
+export interface ExportProgress {
+  /** The recording being copied, unchanged by the copy. */
+  readonly source: string;
+  /** The file being written. This is what identifies the export. */
+  readonly destination: string;
+  /**
+   * How much of the recording's own timeline has been copied so far.
+   *
+   * The same measurement {@link ExportSummary.duration_ms} carries, so the last
+   * progress event of a copy and the reply that follows it agree.
+   */
+  readonly written_ms: number;
+  /**
+   * How long the recording says it is, where it says at all.
+   *
+   * **Absent, not zero**, when the container declares no duration — an
+   * interrupted recording keeps every packet it wrote and no total. Draw an
+   * unbounded indication from {@link ExportProgress.bytes} then rather than a
+   * percentage: "nought per cent" and "no idea" are different things to show.
+   */
+  readonly total_ms?: number;
+  /** How many coded packets have been copied, across every carried track. */
+  readonly packets: number;
+  /**
+   * How many bytes of coded media have been copied, before container overhead.
+   *
+   * The one figure that still advances when {@link ExportProgress.total_ms} is
+   * absent.
+   */
+  readonly bytes: number;
+}
+
+/**
+ * How far through an export is, between 0 and 1, or `null` if the recording
+ * never said how long it was.
+ *
+ * Clamped, because a source's declared duration and the end of its last packet
+ * need not agree to the millisecond and a progress bar that reads 101 % is a
+ * bug report. It mirrors `ExportProgress::fraction` in `crates/ipc` so that
+ * both ends of the protocol agree about what "no total" means.
+ */
+export function exportFraction(progress: ExportProgress): number | null {
+  const total = progress.total_ms;
+  if (total === undefined || total === 0) {
+    return null;
+  }
+  return Math.min(1, Math.max(0, progress.written_ms / total));
 }
 
 /**
@@ -2196,6 +2269,23 @@ export interface RecordingFailedEvent {
 }
 
 /**
+ * A running export has got this far.
+ *
+ * On the `exports` stream, which a client asks for only when the recorder
+ * advertises the `export_progress` feature. **Its absence means nothing**: a
+ * recorder without it copies the file exactly as it always did and says nothing
+ * while it does, so silence is neither failure nor completion. The reply to
+ * `export_recording` remains the only thing that says an export finished
+ * (issue #446).
+ */
+export interface ExportProgressEvent {
+  /** The tag. */
+  readonly event: 'export_progress';
+  /** How far it has got, and which export it is. */
+  readonly export: ExportProgress;
+}
+
+/**
  * An event this build has never heard of, kept exactly as it arrived.
  *
  * Adding an event costs no protocol version, so an older interface meeting a
@@ -2211,7 +2301,11 @@ export interface UnrecognisedEvent {
 
 /** Something the recorder decided to say without being asked. */
 export type RecorderEvent =
-  StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent | UnrecognisedEvent;
+  | StatusChangedEvent
+  | SessionEndedEvent
+  | RecordingFailedEvent
+  | ExportProgressEvent
+  | UnrecognisedEvent;
 
 /** The handshake, on the wire. */
 export type HelloMessage = { readonly type: 'hello' } & Hello;
@@ -2257,6 +2351,6 @@ export function isRecognisedErrorDetail(
 /** Whether an event is one this build knows what to do with. */
 export function isRecognisedEvent(
   event: RecorderEvent,
-): event is StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent {
+): event is StatusChangedEvent | SessionEndedEvent | RecordingFailedEvent | ExportProgressEvent {
   return event.event !== undefined;
 }

@@ -109,8 +109,9 @@ pub use crate::audio::{AudioSource, AudioTrackWriter, RECORDING_AUDIO_CODEC};
 pub use crate::error::{AvError, MuxError};
 pub use crate::packet::{EncodedPacket, PacketTimestamp};
 pub use crate::remux::{
-    remux_to_mp4, remux_to_mp4_carrying, AudioTracks, Carriage, Mp4Plan, PlannedTrack, RemuxError,
-    RemuxSummary, TrackKind,
+    remux_to_mp4, remux_to_mp4_carrying, remux_to_mp4_with, AudioTracks, Carriage, Mp4Plan,
+    PlannedTrack, RemuxError, RemuxOptions, RemuxProgress, RemuxSummary, TrackKind,
+    DEFAULT_PROGRESS_INTERVAL,
 };
 pub use crate::track::{
     AudioCodec, AudioTrack, FrameRate, InvalidLanguage, Language, RecordingLayout, TrackId,

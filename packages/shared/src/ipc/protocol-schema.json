@@ -112,7 +112,8 @@
       "values": [
         "status_changed",
         "session_ended",
-        "recording_failed"
+        "recording_failed",
+        "export_progress"
       ],
       "tolerates_unrecognised": true
     },
@@ -120,7 +121,8 @@
       "values": [
         "status",
         "errors",
-        "metrics"
+        "metrics",
+        "exports"
       ],
       "tolerates_unrecognised": true
     },
@@ -136,6 +138,7 @@
         "playback",
         "hotkeys",
         "replay",
+        "export_progress",
         "settings",
         "microphone_level",
         "startup",
@@ -297,6 +300,13 @@
       ],
       "optional": []
     },
+    "event.export_progress": {
+      "required": [
+        "event",
+        "export"
+      ],
+      "optional": []
+    },
     "event.recording_failed": {
       "required": [
         "error",
@@ -318,6 +328,18 @@
         "status"
       ],
       "optional": []
+    },
+    "export_progress": {
+      "required": [
+        "bytes",
+        "destination",
+        "packets",
+        "source",
+        "written_ms"
+      ],
+      "optional": [
+        "total_ms"
+      ]
     },
     "export_recording": {
       "required": [
@@ -1337,6 +1359,7 @@
           "playback",
           "hotkeys",
           "replay",
+          "export_progress",
           "settings",
           "microphone_level",
           "startup",
@@ -2873,6 +2896,41 @@
       },
       "parses": true,
       "discriminant": "event.recording_failed"
+    },
+    {
+      "name": "an export part-way through a recording that said how long it was",
+      "direction": "server",
+      "frame": {
+        "event": "export_progress",
+        "export": {
+          "bytes": 3924481644,
+          "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+          "packets": 235248,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv",
+          "total_ms": 6540000,
+          "written_ms": 2616000
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.export_progress.measured"
+    },
+    {
+      "name": "an export of a recording that never said how long it was",
+      "direction": "server",
+      "frame": {
+        "event": "export_progress",
+        "export": {
+          "bytes": 3924481644,
+          "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+          "packets": 235248,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv",
+          "written_ms": 2616000
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.export_progress.unmeasured"
     },
     {
       "name": "an error code invented later",

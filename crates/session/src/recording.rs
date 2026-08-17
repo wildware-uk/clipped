@@ -59,7 +59,7 @@ use std::time::Instant;
 
 use clipped_capture::{
     registered_backends, Acquisition, CaptureBackend, CaptureClock, CaptureConfig, CaptureError,
-    CaptureFallback, CaptureMethod, CaptureMethodSetting, CapturedFrame, FrameFormat,
+    CaptureFallback, CaptureMethod, CaptureMethodSetting, CapturedFrame, DisplayAwake, FrameFormat,
 };
 use clipped_encoder::{Codec, Resolution, SourceFrame, SourceTexture, SurfaceKind, VideoEncoder};
 use clipped_logging::{RedactedPath, SessionContext, SessionId};
@@ -94,6 +94,27 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(100);
 /// diagnosis rather than a wait.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a source may produce nothing before the recording says so.
+///
+/// A source only produces a frame when its content changes, so a paused game, a
+/// static menu or a desktop nobody is touching produces none, and none of that
+/// is a fault — which is exactly why this cannot be an error and why the
+/// threshold has to be long. Half a minute is far beyond a loading screen and
+/// well past the ten seconds
+/// [`BlackFrameWatch`](clipped_capture::BlackFrameWatch) tolerates a capture
+/// being entirely black, and it is the same half-minute
+/// `CaptureFallback::note_silence` already uses for the same judgement.
+///
+/// What makes it worth stating at all is that the recorder cannot tell "nothing
+/// is happening on screen" from "this screen has stopped existing as far as I am
+/// concerned" — a display Windows has powered down produces the identical
+/// timeout, from a source that is not idle at all
+/// ([issue #461](https://github.com/wildware-uk/clipped/issues/461)).
+/// Shared with [`RecordingReport`]'s summary sentence rather than written twice:
+/// a log line that fires at half a minute and a sentence that fires at a minute
+/// would disagree about the same recording.
+pub(crate) const SILENT_SOURCE_THRESHOLD: Duration = Duration::from_secs(30);
+
 /// Records `settings.target` until `stop` is raised, feeding `outputs` as well
 /// as the file.
 pub(crate) fn record(
@@ -120,11 +141,32 @@ pub(crate) fn record(
 
     let (fallback, mut backend, format) = started.into_parts();
     let method = fallback.current_method();
+
+    // Held here, on this thread, for exactly as long as capture is open —
+    // through the first frame, the whole loop and the finalisation. A display
+    // the operating system has powered down is not a dark source, it is no
+    // source: Desktop Duplication delivers nothing from it even while a window
+    // on it repaints, and the compositor Windows Graphics Capture reads drops to
+    // about 4 Hz. Neither reports anything wrong, because from the API's side
+    // nothing is (ADR 0015, issue #461).
+    //
+    // `DisplayAwake` is deliberately not `Send`: the requirement belongs to the
+    // thread that took it and Windows drops it when that thread ends, so binding
+    // it to this scope is what makes "held for the length of the capture" true
+    // rather than intended.
+    let awake = DisplayAwake::hold();
+
     tracing::info!(
         capture_backend = method.log_value(),
         width = format.size().width(),
         height = format.size().height(),
         pixel_format = %format.pixel_format(),
+        // Recorded beside the backend because it is the first thing to check
+        // when a recording turns out to contain a long stretch of nothing:
+        // `false` here and a `longest_source_silence` of minutes is a screen
+        // that went to sleep, which looks identical to an idle source in every
+        // other figure a recording produces (issue #461).
+        display_held = awake.is_held(),
         "capture started"
     );
 
@@ -309,7 +351,29 @@ fn record_frames(
                     screenshots.consider(&frame, clock);
                 }
             }
-            Ok(Acquisition::Timeout) => {}
+            Ok(Acquisition::Timeout) => {
+                // **Not an error, and not a reason to stop.** A source that has
+                // nothing new is the ordinary case, and a recording of a still
+                // screen is a recording of a still screen.
+                //
+                // What it must not be is *unrecorded*. Before issue #461 this
+                // arm was empty, so a recording whose source went quiet for an
+                // hour said nothing about the hour: the file's timestamps
+                // simply jump, because a gap in a source is filled rather than
+                // closed and the video timeline has no frame in it
+                // (`docs/av-sync.md`). That is the right thing to write and the
+                // wrong thing to keep quiet about, and the case that made it
+                // matter is a display Windows powered down, which is not an
+                // idle source at all.
+                //
+                // The wait is counted rather than clocked: `ACQUIRE_TIMEOUT` is
+                // how long the acquisition just spent, and reading `Instant` a
+                // few times a second on the capture thread to learn the same
+                // thing would be a clock read that buys nothing (AGENTS.md
+                // section 20). It also makes the figure exactly reproducible in
+                // a test, which a wall clock would not.
+                counters.note_idle(ACQUIRE_TIMEOUT);
+            }
             Ok(Acquisition::TargetMinimised) => {
                 // **The recording continues.** Alt-tabbing out of an exclusive
                 // fullscreen game minimises it, so ending the session here would
@@ -407,6 +471,7 @@ fn record_frames(
         frames_dropped_writer_behind: counters.dropped_writer_behind,
         frames_missed_by_source: counters.missed_by_source,
         times_target_minimised: counters.minimised_stretches,
+        longest_source_silence: counters.longest_silence,
         packets_written: summary.packets,
         timestamps_corrected: summary.timestamps_corrected(),
         duration: summary.duration,
@@ -434,6 +499,7 @@ fn record_frames(
         frames_dropped_writer_behind = report.frames_dropped_writer_behind(),
         frames_missed_by_source = report.frames_missed_by_source(),
         times_target_minimised = report.times_target_minimised(),
+        longest_source_silence_seconds = report.longest_source_silence().as_secs_f64(),
         packets = report.packets_written(),
         timestamps_corrected = report.timestamps_corrected(),
         duration_ms = report.duration().as_millis(),
@@ -513,6 +579,7 @@ fn conclude(
             output = %RedactedPath::new(output),
             end_reason = report.end_reason().token(),
             times_target_minimised = report.times_target_minimised(),
+            longest_source_silence_seconds = report.longest_source_silence().as_secs_f64(),
             "no video reached the recording, so the empty file was removed rather than left \
              to be indexed as a recording"
         ),
@@ -750,6 +817,20 @@ struct Counters {
     /// Whether the current stretch is still running, so that one stretch is
     /// counted and logged once rather than ten times a second.
     minimised_now: bool,
+    /// How long the source has produced nothing for, in the run happening now.
+    ///
+    /// The sum of the acquisition timeouts that have gone by without a frame,
+    /// not a clock reading — see the `Acquisition::Timeout` arm for why.
+    silence: Duration,
+    /// The longest such run in the whole recording, which is the number worth
+    /// reporting: a recording that lost four minutes in one stretch is a
+    /// different thing from one that lost four minutes a tenth of a second at a
+    /// time across an afternoon of a mostly-still screen.
+    longest_silence: Duration,
+    /// Whether the run happening now has already been mentioned, so that a
+    /// source quiet for an hour produces one line rather than thirty-six
+    /// thousand (AGENTS.md section 35).
+    silence_reported: bool,
 }
 
 impl Counters {
@@ -771,8 +852,46 @@ impl Counters {
         );
     }
 
+    /// Records an acquisition that produced no frame.
+    ///
+    /// Kept apart from [`note_minimised`](Self::note_minimised) even though both
+    /// mean "no frame arrived", for the reason `Acquisition` splits them: a
+    /// timeout means the source had nothing new, and a minimised window means
+    /// the source has stopped existing until somebody acts. Counting a minimised
+    /// window's stretches as silence as well would say the same thing twice in
+    /// two vocabularies and make both numbers harder to read.
+    fn note_idle(&mut self, waited: Duration) {
+        self.silence = self.silence.saturating_add(waited);
+        self.longest_silence = self.longest_silence.max(self.silence);
+
+        if self.silence_reported || self.silence < SILENT_SOURCE_THRESHOLD {
+            return;
+        }
+        self.silence_reported = true;
+        // At `warn` and once per stretch. This is a recording that is
+        // accumulating nothing, and the sessions it happens to are the ones
+        // nobody is watching a console for.
+        tracing::warn!(
+            frames_captured = self.captured,
+            silent_seconds = self.silence.as_secs_f64(),
+            "the capture source has produced no frames for a long stretch, so the recording \
+             has nothing in it for that time; a still screen does this legitimately, and so \
+             does a display the operating system has powered down"
+        );
+    }
+
     /// Records a frame arriving, which ends any stretch that was running.
     fn note_drawing(&mut self) {
+        if self.silence_reported {
+            tracing::info!(
+                frames_captured = self.captured,
+                silent_seconds = self.silence.as_secs_f64(),
+                "the capture source is producing frames again"
+            );
+        }
+        self.silence = Duration::ZERO;
+        self.silence_reported = false;
+
         if !self.minimised_now {
             return;
         }
@@ -1498,6 +1617,7 @@ mod tests {
             frames_dropped_writer_behind: 0,
             frames_missed_by_source: 0,
             times_target_minimised: u64::from(frames_encoded == 0),
+            longest_source_silence: Duration::ZERO,
             packets_written: frames_encoded,
             timestamps_corrected: 0,
             duration: Duration::ZERO,
@@ -2273,6 +2393,147 @@ mod tests {
         assert!(
             report.frames_encoded() > 0,
             "the frames either side of the minimise were captured and never encoded"
+        );
+    }
+
+    #[test]
+    fn a_source_that_goes_quiet_mid_recording_has_the_length_of_the_stretch_on_its_report() {
+        // Issue #461. This arm of the loop was empty, so a recording whose
+        // source produced nothing for an hour said nothing about the hour: the
+        // file's timestamps simply jump, which is the right thing to write
+        // (`docs/av-sync.md`) and the wrong thing to keep quiet about.
+        //
+        // Thirty steps of silence is 3.0 s at `ACQUIRE_TIMEOUT`, which is
+        // deliberately longer than the trailing stretch `StopAfter` leaves after
+        // the script runs out — so the number asserted is the *scripted* stretch
+        // and not an artefact of when the test stopped.
+        const QUIET_ACQUISITIONS: u32 = 30;
+
+        let mut steps = vec![Step::Drew];
+        steps.extend(std::iter::repeat_n(
+            Step::Nothing,
+            QUIET_ACQUISITIONS as usize,
+        ));
+        steps.push(Step::Drew);
+
+        let report = recording_of("source-went-quiet", steps);
+
+        assert_eq!(
+            report.longest_source_silence(),
+            ACQUIRE_TIMEOUT * QUIET_ACQUISITIONS,
+            "the stretch in which capture produced nothing reached nothing the user can see"
+        );
+        assert_eq!(
+            report.times_target_minimised(),
+            0,
+            "a source with nothing new is not a minimised target, and the two must not be \
+             reported as each other"
+        );
+        assert_eq!(
+            report.end_reason(),
+            EndReason::Stopped,
+            "a quiet source must not end the recording; a still screen is a thing people record"
+        );
+    }
+
+    #[test]
+    fn quiet_is_measured_a_stretch_at_a_time_and_the_longest_one_is_kept() {
+        // The policy, away from the loop: a frame ends a stretch rather than
+        // pausing it, and what survives to the report is the longest single
+        // stretch rather than the total. Four minutes lost in one go is a hole
+        // somebody will notice; four minutes lost a tenth of a second at a time
+        // is a screen that was not changing much, and reporting them as the same
+        // number would make the report useless for both.
+        let mut counters = Counters::default();
+
+        for _ in 0..5 {
+            counters.note_idle(Duration::from_secs(1));
+        }
+        assert_eq!(counters.longest_silence, Duration::from_secs(5));
+
+        counters.note_drawing();
+        assert_eq!(
+            counters.silence,
+            Duration::ZERO,
+            "a frame ends the stretch rather than pausing it"
+        );
+        assert_eq!(
+            counters.longest_silence,
+            Duration::from_secs(5),
+            "the stretch that ended is still the longest one this recording had"
+        );
+
+        for _ in 0..3 {
+            counters.note_idle(Duration::from_secs(1));
+        }
+        assert_eq!(
+            counters.longest_silence,
+            Duration::from_secs(5),
+            "a shorter second stretch must not overwrite the longest, and the two must not be \
+             added together either"
+        );
+
+        for _ in 0..4 {
+            counters.note_idle(Duration::from_secs(1));
+        }
+        assert_eq!(
+            counters.longest_silence,
+            Duration::from_secs(7),
+            "the second stretch has now outrun the first and is the one worth reporting"
+        );
+    }
+
+    #[test]
+    fn a_minimised_window_is_not_also_counted_as_a_quiet_source() {
+        // Both mean "no frame arrived", and the report says each of them in its
+        // own words: `times_target_minimised` for a window that cannot draw
+        // until somebody restores it, `longest_source_silence` for a source with
+        // nothing new. Feeding one into the other would say the same thing twice
+        // in two vocabularies and leave a reader unable to tell which happened.
+        let mut counters = Counters::default();
+
+        for _ in 0..100 {
+            counters.note_minimised();
+        }
+
+        assert_eq!(
+            counters.minimised_stretches, 1,
+            "one stretch, not a hundred"
+        );
+        assert_eq!(
+            counters.longest_silence,
+            Duration::ZERO,
+            "a minimised window has its own count and must not appear as a quiet source too"
+        );
+    }
+
+    #[test]
+    fn a_source_that_is_quiet_for_longer_than_the_threshold_is_only_said_once() {
+        // AGENTS.md section 35: the sessions this happens to are the ones nobody
+        // is watching a console for, so an hour of quiet has to be one line
+        // rather than thirty-six thousand. `silence_reported` is what does it,
+        // and it has to be cleared when frames come back or the *second* stretch
+        // of a long recording is never mentioned.
+        let mut counters = Counters::default();
+
+        while counters.silence < SILENT_SOURCE_THRESHOLD {
+            assert!(
+                !counters.silence_reported,
+                "nothing is worth saying before the threshold: a still menu does this constantly"
+            );
+            counters.note_idle(ACQUIRE_TIMEOUT);
+        }
+        assert!(
+            counters.silence_reported,
+            "reaching the threshold has to be said out loud; this is a recording that is \
+             accumulating nothing"
+        );
+
+        counters.note_drawing();
+        assert!(
+            !counters.silence_reported,
+            "the next quiet stretch must be reportable, or a recording says this once and then \
+             never again however long it goes dark for"
         );
     }
 

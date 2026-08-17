@@ -53,12 +53,33 @@
 //! is a property of the protocol's one-request-at-a-time control connection
 //! rather than of this module, and the desktop application opens a connection
 //! per call.
+//!
+//! # Saying so while it happens
+//!
+//! Which is why this says how far it has got, on the `exports` event stream and
+//! not in the reply ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+//! The reply arrives when the MP4's index has been written, which is the moment
+//! there is nothing left to report; a copy of a 2.2 GB recording is not instant,
+//! and a window with nothing on screen reads as a hang and invites somebody to
+//! kill the recorder mid-write.
+//!
+//! Nothing about it is allowed to slow the copy down (AGENTS.md section 20).
+//! `clipped_muxer` calls the callback on the copying thread, so [`Reporter`] does
+//! exactly two things per call: compare one integer, and — rarely —
+//! `EventPublisher::publish`, which is a `try_send` on a bounded queue that
+//! drops rather than waiting for a window that has stopped reading. There is no
+//! lock, no allocation on the common path and no clock read.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use clipped_ipc::{ErrorCode, ExportRecording, ExportSummary, ProtocolError};
+use clipped_ipc::{
+    ErrorCode, Event, EventPublisher, ExportProgress, ExportRecording, ExportSummary, ProtocolError,
+};
 use clipped_logging::RedactedPath;
-use clipped_muxer::{remux_to_mp4, MuxError, RemuxError, RemuxSummary};
+use clipped_muxer::{
+    remux_to_mp4_with, MuxError, RemuxError, RemuxOptions, RemuxProgress, RemuxSummary,
+};
 
 /// Copies the recording the request names into the MP4 the request names.
 ///
@@ -76,7 +97,10 @@ use clipped_muxer::{remux_to_mp4, MuxError, RemuxError, RemuxSummary};
 ///   than the request's — the linked FFmpeg having no MP4 muxer in it, which
 ///   means the DLLs beside the executable are not the pinned build
 ///   (`docs/ffmpeg.md`).
-pub fn export(request: &ExportRecording) -> Result<ExportSummary, ProtocolError> {
+pub fn export(
+    request: &ExportRecording,
+    events: &EventPublisher,
+) -> Result<ExportSummary, ProtocolError> {
     let source = named(&request.source, "source")?;
     let destination = named(&request.destination, "destination")?;
 
@@ -97,9 +121,120 @@ pub fn export(request: &ExportRecording) -> Result<ExportSummary, ProtocolError>
         "copying a recording into MP4 because the desktop application asked for one"
     );
 
-    remux_to_mp4(source, destination)
-        .map(|summary| summarise(source, destination, &summary))
-        .map_err(refusal)
+    let reporter = Reporter::new(events, &request.source, &request.destination);
+    let report = |progress: RemuxProgress| reporter.report(progress);
+
+    remux_to_mp4_with(
+        source,
+        destination,
+        &RemuxOptions::new()
+            .reporting_to(&report)
+            .every(REPORT_EVERY_MEDIA),
+    )
+    .map(|summary| summarise(source, destination, &summary))
+    .map_err(refusal)
+}
+
+/// How much of the recording the muxer copies between calls to [`Reporter`].
+///
+/// One second of the *recording*, not of wall clock. It is the muxer's floor
+/// and not the event rate: [`Reporter`] thins it further, and this only bounds
+/// how often the thinning has to run. A whole second of media is thousands of
+/// packets, so the branch is nowhere near the copy's cost.
+const REPORT_EVERY_MEDIA: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Turns the muxer's reports into events, and throws most of them away.
+///
+/// Most of them, because the two rates are wrong for each other. The muxer
+/// reports per second of recording copied, which for the two-hour recording
+/// this exists for is 7,200 reports — down a bounded 64-deep queue whose other
+/// traffic is the window's view of whether anything is recording. A window
+/// needs a bar that moves, not one that is repainted seven thousand times.
+///
+/// So an event is published only when what a person would *see* changes:
+///
+/// - the whole percentage, when the recording said how long it was. That is at
+///   most 101 events for a copy of any length, and every one of them moves the
+///   bar by a visible amount.
+/// - every ten seconds of recording copied, when it did not. There is no
+///   percentage to draw then and [`ExportProgress::bytes`] is what advances, so
+///   the rate is chosen rather than derived — at most 720 events for two hours.
+///
+/// # Threads
+///
+/// [`Self::report`] runs on the copying thread, so it holds no lock and
+/// allocates nothing except the two paths inside an event it has already
+/// decided to publish. `last_step` is one relaxed atomic because it is read and
+/// written only from that one thread — an `AtomicU64` rather than a `Cell` so
+/// that the closure can be `Sync`, which is what `RemuxOptions::reporting_to`
+/// requires of it.
+struct Reporter<'a> {
+    events: &'a EventPublisher,
+    source: &'a str,
+    destination: &'a str,
+    /// The step last published, or [`u64::MAX`] for "nothing yet".
+    ///
+    /// `MAX` rather than zero because zero is a real step: the first report of
+    /// a copy is at 0 %, and it is the one that tells a window the copy has
+    /// begun.
+    last_step: AtomicU64,
+}
+
+/// How much recording is copied between reports when there is no total to
+/// measure against.
+const UNMEASURED_STEP_MS: u64 = 10_000;
+
+impl<'a> Reporter<'a> {
+    fn new(events: &'a EventPublisher, source: &'a str, destination: &'a str) -> Self {
+        Self {
+            events,
+            source,
+            destination,
+            last_step: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Publishes this report, if it says anything the last one did not.
+    fn report(&self, progress: RemuxProgress) {
+        if let Some(export) = self.considered(progress) {
+            self.events.publish(&Event::ExportProgress { export });
+        }
+    }
+
+    /// This report as an event, or [`None`] if it says nothing new.
+    ///
+    /// Separated from the publishing so that the thinning can be measured over
+    /// a copy far longer than any test may write a file for: the decision is
+    /// arithmetic on two integers, and driving it with a two-hour recording's
+    /// figures is the same decision the recorder makes (AGENTS.md section 25).
+    fn considered(&self, progress: RemuxProgress) -> Option<ExportProgress> {
+        let written_ms = progress.written_nanos / 1_000_000;
+        // Clamped away from zero because it is about to be divided by. A total
+        // under a millisecond is a recording that copies before anything could
+        // be drawn, and one report of it is right.
+        let total_ms = progress.total_nanos.map(|total| (total / 1_000_000).max(1));
+
+        // Whole percent where there is a total, whole ten seconds of recording
+        // where there is not. Integer arithmetic on purpose: this comparison is
+        // what decides whether anything is sent at all, and a float would make
+        // "the same percentage" depend on rounding.
+        let step = match total_ms {
+            Some(total) => written_ms.saturating_mul(100) / total,
+            None => written_ms / UNMEASURED_STEP_MS,
+        };
+        if self.last_step.swap(step, Ordering::Relaxed) == step {
+            return None;
+        }
+
+        Some(ExportProgress {
+            source: self.source.to_owned(),
+            destination: self.destination.to_owned(),
+            written_ms,
+            total_ms,
+            packets: progress.packets,
+            bytes: progress.bytes,
+        })
+    }
 }
 
 /// One of the request's two paths, or a refusal naming the one that was missing.
@@ -187,7 +322,8 @@ fn summarise(source: &Path, destination: &Path, summary: &RemuxSummary) -> Expor
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
+    use std::time::Duration;
 
     use super::*;
 
@@ -218,10 +354,13 @@ mod tests {
         std::fs::write(&source, b"not really a recording").expect("the source is written");
         std::fs::write(&destination, b"somebody else's footage").expect("the file is written");
 
-        let refusal = export(&ExportRecording {
-            source: source.to_string_lossy().into_owned(),
-            destination: destination.to_string_lossy().into_owned(),
-        })
+        let refusal = export(
+            &ExportRecording {
+                source: source.to_string_lossy().into_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+            },
+            &EventPublisher::new(),
+        )
         .expect_err("a destination that exists is refused");
 
         assert_eq!(
@@ -266,7 +405,8 @@ mod tests {
                 "destination",
             ),
         ] {
-            let refusal = export(&request).expect_err("a request naming no file is refused");
+            let refusal = export(&request, &EventPublisher::new())
+                .expect_err("a request naming no file is refused");
             assert_eq!(refusal.code, ErrorCode::InvalidParameters, "{request:?}");
             assert!(
                 refusal.message.contains(expected),
@@ -287,13 +427,16 @@ mod tests {
         let source = directory.join("not-a-recording.mkv");
         std::fs::write(&source, b"this is not media").expect("the source is written");
 
-        let refusal = export(&ExportRecording {
-            source: source.to_string_lossy().into_owned(),
-            destination: directory
-                .join("not-a-recording.mp4")
-                .to_string_lossy()
-                .into_owned(),
-        })
+        let refusal = export(
+            &ExportRecording {
+                source: source.to_string_lossy().into_owned(),
+                destination: directory
+                    .join("not-a-recording.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            &EventPublisher::new(),
+        )
         .expect_err("a file that is not media cannot be remuxed");
 
         assert_eq!(refusal.code, ErrorCode::ExportFailed);
@@ -309,5 +452,156 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every report a copy of `total` would make, at the muxer's own rate.
+    ///
+    /// The rate `export` asks the muxer for — one report per second of the
+    /// recording copied — replayed over a recording of any length without
+    /// writing one. What comes back is what a window would have been sent.
+    fn thinned(total: Option<Duration>, of: Duration) -> Vec<ExportProgress> {
+        let events = EventPublisher::new();
+        let reporter = Reporter::new(&events, r"D:\clips\match.mkv", r"D:\clips\match.mp4");
+
+        let mut published = Vec::new();
+        let mut written = Duration::ZERO;
+        let mut packets = 0;
+        while written <= of {
+            packets += 1;
+            if let Some(export) = reporter.considered(RemuxProgress {
+                written_nanos: u64::try_from(written.as_nanos()).expect("a plausible recording"),
+                total_nanos: total
+                    .map(|total| u64::try_from(total.as_nanos()).expect("a plausible recording")),
+                packets,
+                // A rate in the region of a 2.2 GB recording of two hours.
+                bytes: packets * 300_000,
+            }) {
+                published.push(export);
+            }
+            written = written.saturating_add(REPORT_EVERY_MEDIA);
+        }
+        published
+    }
+
+    #[test]
+    fn a_two_hour_export_reports_often_enough_to_watch_and_rarely_enough_not_to_flood() {
+        // The recording issue #446 is about: the two-hour sitting recorded
+        // while verifying issue #47, which is 2.2 GB. Driven through the
+        // thinning rather than written to disk — the decision is the same one
+        // either way, and it is the decision that has to hold at this length.
+        let two_hours = Duration::from_secs(2 * 60 * 60);
+        let published = thinned(Some(two_hours), two_hours);
+
+        // The muxer offered 7,200 reports over that copy. Every one of them
+        // published would be a bounded 64-deep queue, shared with the window's
+        // view of whether anything is recording, taking two orders of magnitude
+        // more traffic than a bar can show.
+        assert!(
+            published.len() <= 101,
+            "a two-hour export published {} events; the queue it shares with `status_changed` is \
+             64 deep, so this is how a window loses track of a recording",
+            published.len()
+        );
+        // And it has to be a bar somebody can watch. Ten events over two hours
+        // is a bar that moves once every twelve minutes, which is not far from
+        // the silence this replaced.
+        assert!(
+            published.len() >= 90,
+            "a two-hour export published {} events, so the bar would sit still for minutes at a \
+             time",
+            published.len()
+        );
+
+        // Every one of them moves it, and moves it forwards.
+        for pair in published.windows(2) {
+            assert!(
+                pair[1].written_ms > pair[0].written_ms,
+                "two published events carried the same position, so one of them repainted \
+                 nothing: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+            let (before, after) = (
+                pair[0]
+                    .fraction()
+                    .expect("a measured export has a fraction"),
+                pair[1]
+                    .fraction()
+                    .expect("a measured export has a fraction"),
+            );
+            assert!(
+                after > before,
+                "the fraction did not advance between two published events: {before} then {after}"
+            );
+        }
+
+        let first = published.first().expect("a two-hour export reports");
+        let last = published.last().expect("a two-hour export reports");
+        assert_eq!(
+            first.fraction().map(|fraction| (fraction * 100.0) as u32),
+            Some(0),
+            "the first event is what tells a window the copy has begun: {first:?}"
+        );
+        assert_eq!(
+            last.fraction().map(|fraction| (fraction * 100.0) as u32),
+            Some(100),
+            "the last event of a finished copy did not read as finished: {last:?}"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_never_said_how_long_it_was_still_reports_something_that_advances() {
+        // An interrupted recording keeps every packet it wrote and no total,
+        // which is the property ADR 0001 chose Matroska for. There is no
+        // percentage to draw for one, and a denominator invented here would be
+        // a bar that lied — so the events carry no total, and what advances is
+        // the bytes.
+        let two_hours = Duration::from_secs(2 * 60 * 60);
+        let published = thinned(None, two_hours);
+
+        assert!(
+            (100..=800).contains(&published.len()),
+            "a two-hour export of a recording with no declared length published {} events",
+            published.len()
+        );
+        for progress in &published {
+            assert_eq!(
+                progress.total_ms, None,
+                "a total was invented for a recording that declared none: {progress:?}"
+            );
+            assert_eq!(
+                progress.fraction(),
+                None,
+                "a fraction was offered with nothing to divide by: {progress:?}"
+            );
+        }
+        for pair in published.windows(2) {
+            assert!(
+                pair[1].bytes > pair[0].bytes && pair[1].written_ms > pair[0].written_ms,
+                "the one figure an unbounded indication can show did not advance: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn a_four_second_export_is_not_drowned_in_events_either() {
+        // The case that exists today and needs none of this. It must not
+        // suddenly produce a hundred events for a copy that finishes in
+        // milliseconds: the muxer offers four reports over four seconds of
+        // recording, and thinning cannot manufacture more than it was given.
+        let published = thinned(Some(Duration::from_secs(4)), Duration::from_secs(4));
+
+        assert!(
+            published.len() <= 5,
+            "a four-second export published {} events for a copy that finishes in milliseconds",
+            published.len()
+        );
+        assert!(
+            !published.is_empty(),
+            "a four-second export published nothing at all, so a window could not tell a fast \
+             copy from a stalled one"
+        );
     }
 }
