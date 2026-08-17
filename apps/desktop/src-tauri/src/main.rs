@@ -221,6 +221,7 @@ fn main() {
             stop_recording,
             export_recording,
             open_playback,
+            recording_preview,
             open_recording,
             reveal_recording
         ])
@@ -1032,6 +1033,43 @@ fn open_playback(
             prepared: playback.prepared,
         }),
         _ => Err(wrong_reply("open_playback")),
+    }
+}
+
+/// One recording's thumbnail, or the peaks of its sound.
+///
+/// The **picture itself**, base64 in the reply, rather than an address like
+/// [`open_playback`]'s. That is the whole of issue #448's design question and
+/// the answer is in `clipped_ipc::preview`: a `.cwf` of peaks could not be
+/// served as a file to a window that links no reader for it, so a scope would
+/// have carried the thumbnail and left the waveform needing a second mechanism.
+/// A picture arriving as base64 goes into a `data:` URI, which
+/// `tauri.conf.json`'s `img-src` already permits — so this process registers
+/// nothing, `capabilities/default.json` grows by nothing, and the content
+/// security policy is untouched (`src/playbackReach.test.ts` holds all three).
+///
+/// Asked once per recording, as a row is drawn, and never for a page at once:
+/// what crosses is one 20 kB picture rather than twenty-five.
+///
+/// `async` for the reason [`library_sessions`] is.
+#[tauri::command(async)]
+fn recording_preview(
+    link: tauri::State<'_, RecorderLink>,
+    source: String,
+    kind: clipped_ipc::PreviewKind,
+    buckets: Option<u32>,
+) -> Result<clipped_ipc::Preview, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::OpenPreview(
+        clipped_ipc::OpenPreview {
+            source,
+            kind,
+            buckets,
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::PreviewOpened { preview } => Ok(preview),
+        _ => Err(wrong_reply("open_preview")),
     }
 }
 

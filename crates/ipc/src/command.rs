@@ -48,6 +48,7 @@ use crate::library::{
 use crate::message::Request;
 use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
+use crate::preview::{OpenPreview, Preview};
 use crate::settings::{
     ApplySettings, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest, SettingsView,
 };
@@ -118,6 +119,13 @@ pub enum Command {
     /// that are both hard: the window links no demuxer, and a media element
     /// cannot choose an audio track (`crate::playback`, issue #304).
     OpenPlayback(OpenPlayback),
+    /// The picture for a finished recording, or the peaks of its sound.
+    ///
+    /// Asked of the recorder for the reason the library commands are: both are
+    /// generated beside the recording, in the recorder's process, and the
+    /// window can neither read a file nor link the crates that made them
+    /// (`crate::preview`, issue #448).
+    OpenPreview(OpenPreview),
     /// What every global hotkey is bound to, and whether it works.
     ///
     /// Asked rather than pushed because registration happens when the recorder
@@ -198,6 +206,7 @@ impl Command {
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::OpenPlayback(_) => "open_playback",
+            Self::OpenPreview(_) => "open_preview",
             Self::GetHotkeys => "get_hotkeys",
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
@@ -237,6 +246,7 @@ impl Command {
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "open_playback" => Ok(Self::OpenPlayback(parse_params(request)?)),
+            "open_preview" => Ok(Self::OpenPreview(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
@@ -286,6 +296,7 @@ impl Command {
             Self::SaveReplay(replay) => serde_json::to_value(replay),
             Self::ExportRecording(export) => serde_json::to_value(export),
             Self::OpenPlayback(playback) => serde_json::to_value(playback),
+            Self::OpenPreview(preview) => serde_json::to_value(preview),
             Self::ApplySettings(settings) => serde_json::to_value(settings),
             Self::SetStartAtLogin(request) => serde_json::to_value(request),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
@@ -756,6 +767,18 @@ pub enum Reply {
         /// chosen instead.
         playback: PlaybackStream,
     },
+    /// A recording's thumbnail or the peaks of its sound, as far as either
+    /// exists.
+    ///
+    /// One reply for both, because the transport is the point: a picture and a
+    /// set of peaks are both derived from a finished recording, both cached
+    /// outside the library index, and both unreachable from a window that has
+    /// no file-system permission. Two mechanisms for that would be two things
+    /// to keep in step (`crate::preview`, issue #448).
+    PreviewOpened {
+        /// Where it stands, and — when it is here — the picture or the peaks.
+        preview: Preview,
+    },
     /// Every action a global hotkey can perform, and where each one stands.
     Hotkeys {
         /// One row per action, in the order a configuration screen lists them.
@@ -906,6 +929,7 @@ mod tests {
             "plugins",
             "export_recording",
             "open_playback",
+            "open_preview",
             "get_hotkeys",
             "get_settings",
             "apply_settings",

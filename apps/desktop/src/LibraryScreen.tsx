@@ -22,7 +22,9 @@ import {
 } from './recordingActions';
 import { describeFavouriteProblem, useFavourites } from './favourites';
 import { describeLockProblem, useLocks } from './locks';
+import { PREVIEWS } from './preview';
 import { SessionList } from './SessionList';
+import { recorderCanDo, type RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
 /**
@@ -42,11 +44,14 @@ import { WaitingOn, type Waiting } from './WaitingOn';
  *
  * # What it still does not draw, and why
  *
- * Clips and highlights (nothing creates one yet), favourites (nothing can
- * favourite anything yet), thumbnails and waveforms (they are files beside the
- * recordings and this window has no permission to load one), playback and the
- * trash. Each is a row in the table below, against the work that lands it —
- * the same contract the Games screen keeps.
+ * Clips and highlights (nothing creates one yet), filtering down to favourites
+ * with a control rather than a query, and a waveform under each of a recording's
+ * sound tracks — which has a transport now (#448) and no surface on this screen
+ * to be drawn on. Each is a row in the table below, against the work that lands
+ * it — the same contract the Games screen keeps.
+ *
+ * A thumbnail is no longer among them: every recording draws one, or says which
+ * of the two reasons there is not one (#448).
  *
  * # And why there is still no tab strip
  *
@@ -68,6 +73,13 @@ const PAGE = 25;
  * #301 for the session list, the search and a missing file are gone, because
  * those three are on the screen now, and so is the one for favouriting: every
  * sitting and every recording has a Keep control, which is issue #58.
+ *
+ * The row that named thumbnails and waveforms together has been split, because
+ * they are no longer waiting on the same thing. Issue #448 built the transport
+ * and a thumbnail is drawn against every recording here; peaks come back over
+ * that same command, and what they are still waiting for is a place to be drawn
+ * — under a track on the playback screen, which is issue #66 and is not this
+ * screen.
  */
 const WAITING: readonly Waiting[] = [
   {
@@ -81,9 +93,9 @@ const WAITING: readonly Waiting[] = [
       'A control on this screen (#60). Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`)',
   },
   {
-    shows: 'A thumbnail against each recording, and a waveform under each track',
+    shows: 'A waveform under each of a recording’s sound tracks',
     needs:
-      'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission, and how the bytes should reach it is issue #301',
+      'Peaks reach this window already, by the same command a thumbnail arrives on (#448). What is missing is the surface that draws them: a waveform belongs under a track on the playback screen rather than in a row of this table, which is issue #66',
   },
   {
     shows: 'Playing a clip, from the list',
@@ -294,6 +306,20 @@ function Trash(): ReactNode {
   );
 }
 
+/** What the Library screen is given. */
+export interface LibraryScreenProps {
+  /**
+   * Where the recorder link stands, or `null` outside the Clipped window.
+   *
+   * Passed in rather than taken from `useRecorderLink` here, so that the shell
+   * holds one subscription rather than two — the same bargain Home and Games
+   * keep. This screen wants one thing from it: whether the recorder can serve a
+   * thumbnail, which decides whether the list asks for one per row or draws
+   * none at all (issue #448).
+   */
+  readonly link: RecorderLinkState | null;
+}
+
 /** The Library screen. */
 /**
  * How far a running export has got, as a bar.
@@ -322,7 +348,7 @@ function ExportBar({ of }: { readonly of: ExportProgress }): ReactNode {
   );
 }
 
-export function LibraryScreen(): ReactNode {
+export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
   /**
    * What has been typed, and what has been searched for.
    *
@@ -436,6 +462,14 @@ export function LibraryScreen(): ReactNode {
             favourites={favourites}
             locks={locks}
             onPlay={play}
+            /*
+             * Asked of the recorder that is attached rather than assumed of the
+             * one this window shipped with. A recorder from before issue #448
+             * has no `open_preview` and would refuse one round trip per row —
+             * the refusal-after-the-fact issue #447 is about, arriving twenty-
+             * five times at once.
+             */
+            thumbnails={recorderCanDo(link, PREVIEWS)}
           />
 
           {/*
