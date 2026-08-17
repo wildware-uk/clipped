@@ -1221,6 +1221,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn the_features_a_recorder_advertised_reach_the_state_a_window_reads() {
+        // Issue #447. `RecorderLinkState::Attached` is the whole of what a
+        // window knows about the recorder it is attached to, so a control that
+        // has to ask "can this one export" has nowhere else to look. The
+        // recorder here advertises `hotkeys` and nothing else of its own —
+        // `shutdown` is the server's rather than the handler's — so a link that
+        // published `features::ALL`, or an empty list, or anything derived from
+        // *this* build instead of from the welcome, fails here rather than in
+        // front of somebody with a Save As dialog open.
+        let reported = what_the_link_reports("features", Vec::new());
+
+        let features = reported
+            .iter()
+            .find_map(|event| match event {
+                RecorderLinkEvent::State(RecorderLinkState::Attached { features, .. }) => {
+                    Some(features.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the link never published an attachment: {reported:#?}"));
+
+        assert_eq!(
+            features,
+            vec![
+                crate::features::HOTKEYS.to_owned(),
+                crate::features::SHUTDOWN.to_owned(),
+            ],
+            "the state carries the welcome's own list and nothing else"
+        );
+        // Named on purpose, because it is the capability issue #447 is about
+        // and the one whose absence costs a user a file name.
+        assert!(
+            !features.iter().any(|name| name == crate::features::EXPORT),
+            "this recorder never advertised `export`, so nothing may tell a window that it did: \
+             {features:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_link_that_gave_up_says_so_and_tries_again_when_asked() {
         // The state a window shows when the recorder cannot be started, and the
         // way out of it. Nothing external is needed: the endpoint is a name

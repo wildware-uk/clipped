@@ -131,9 +131,17 @@ function renderWindowed(
  */
 const MOUNTING_TEN_THOUSAND = 30_000;
 
-/** No recording controls exercised here; only their absence from the DOM matters. */
+/**
+ * No recording controls exercised here; only their absence from the DOM matters.
+ *
+ * `canExport` is the offered answer because these cases are about how many rows
+ * are mounted, and a recorder that could not export would draw a differently
+ * worded control on every one of them — a difference this file has no business
+ * being sensitive to.
+ */
 const ACTIONS = {
   outcome: { state: 'idle' } as const,
+  canExport: { offered: true } as const,
   open: () => undefined,
   reveal: () => undefined,
   exportToMp4: () => undefined,

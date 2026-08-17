@@ -313,9 +313,12 @@ export interface LibraryScreenProps {
    *
    * Passed in rather than taken from `useRecorderLink` here, so that the shell
    * holds one subscription rather than two — the same bargain Home and Games
-   * keep. This screen wants one thing from it: whether the recorder can serve a
-   * thumbnail, which decides whether the list asks for one per row or draws
-   * none at all (issue #448).
+   * keep. This screen wants two things from it, and both are questions about
+   * what the attached recorder can do: whether it can serve a thumbnail, which
+   * decides whether the list asks for one per row or draws none at all (issue
+   * #448); and whether it can export, which decides whether the Export control
+   * is offered at all rather than refused after a file name has been chosen
+   * (issue #447).
    */
   readonly link: RecorderLinkState | null;
 }
@@ -359,7 +362,7 @@ export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
   const [typed, setTyped] = useState('');
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
-  const actions = useRecordingActions();
+  const actions = useRecordingActions(link);
   const favourites = useFavourites();
   const locks = useLocks();
   const navigate = useNavigate();

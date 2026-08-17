@@ -369,7 +369,12 @@ those commands are shaped to avoid.
 before [`export_recording`](#export_recording) refuses it with
 `unknown_command`, and the cost of finding that out late is worse than for a
 library: the person has already chosen a file name for a file that was never
-going to be written.
+going to be written. The desktop window makes that check in `exportOffer`
+(`apps/desktop/src/recordingActions.ts`), against the features the supervisor's
+`RecorderLinkState::Attached` carried out of the welcome; the control is
+disabled with the reason in its own label rather than hidden, which is the
+arrangement the tray's menu already uses for `bookmarks` and `replay`
+([#447](https://github.com/wildware-uk/clipped/issues/447)).
 
 `playback` is the check in front of a player. A recorder built before
 [`open_playback`](#open_playback) has no way to open a recording for playback and
