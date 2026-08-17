@@ -67,6 +67,17 @@
 //! the driver, and its `serve` subcommand answers `save_replay` with the same
 //! call.
 //!
+//! **And it can keep the buffer and write no recording at all.**
+//! [`RecordingSettings::buffered`] names a directory instead of a file, and
+//! [`record_into`] then opens no container, starts no muxing thread and arms no
+//! disk guard — SPEC.md section 4's Manual/Replay capture mode
+//! ([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+//! `docs/adr/0018-a-capture-that-writes-no-recording.md`). It is one branch
+//! rather than a second capture loop: everything from the backend to the frame
+//! gate to the silence reporting is the same code in the same order, and
+//! [`RecordingReport::output`] answering [`None`] is what says which mode ran.
+//! `clipped-recorder replay --no-recording` is the driver.
+//!
 //! And the marks a person puts on a recording while it is being made:
 //! [`bookmarks`] is the bookmark store
 //! ([issue #64](https://github.com/wildware-uk/clipped/issues/64),
@@ -283,6 +294,11 @@ pub use stop::StopSignal;
 /// (AGENTS.md section 17). Only a failure before the first packet leaves no
 /// file at all.
 ///
+/// Settings built with [`RecordingSettings::buffered`] write no file, so there
+/// is nothing to finalise and nothing keeps what was captured: this call is then
+/// a capture that throws every packet away. [`record_with_replay`] is what that
+/// mode is for.
+///
 /// # Errors
 ///
 /// [`SessionError`], which names which stage refused and what it was asked
@@ -305,6 +321,12 @@ pub fn record(
 /// encoder**: a rolling replay buffer alongside a recording costs one memcpy
 /// per packet and the memory the buffer's own configuration bounds, not a
 /// second encode (SPEC.md section 16, `docs/replay-buffer.md`).
+///
+/// Given settings built with [`RecordingSettings::buffered`] this is SPEC.md
+/// section 4's Manual/Replay capture mode: the buffer is the only thing the
+/// packets reach, and the sitting's only files are the clips
+/// [`ReplayRecording::save_last`] writes
+/// (`docs/adr/0018-a-capture-that-writes-no-recording.md`).
 ///
 /// The handle is owned by the caller rather than by the session, because the
 /// caller is what saves from it: [`ReplayRecording::save_last`] runs on another

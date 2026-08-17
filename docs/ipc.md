@@ -886,7 +886,13 @@ names how long it keeps — exactly as the subcommand asks for one and
 | both | the length that was named |
 
 Neither, meaning no buffer, is what every client that predates `replay` sends
-and what an ordinary recording is. `replay` exists because the length is a
+and what an ordinary recording is. **A recording started here always writes a
+file**: SPEC.md section 4's Manual/Replay capture mode — a buffer and no
+continuous recording — is `clipped-recorder replay --no-recording` and has no
+parameter here, because `recording_started` and `recording_stopped` both name an
+`output` and a sitting with no file has none to name
+([#423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md)). `replay` exists because the length is a
 *setting*, and a caller cannot resolve it: `replay_window_seconds` inherits per
 game (`docs/configuration.md`), and which game a `pid` is, is what the recorder
 asks its catalogue once the window is resolved. The desktop window sends

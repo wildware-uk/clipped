@@ -322,6 +322,14 @@ pub struct ReplayConfig {
     pub window: std::time::Duration,
     /// How much of it one save keeps.
     pub save: std::time::Duration,
+    /// Whether a continuous recording is written beside the clips.
+    ///
+    /// False is `--no-recording`, SPEC.md section 4's Manual/Replay capture
+    /// mode: the same capture and the same encoder, and no file
+    /// (`clipped_session::RecordingSettings::buffered`, ADR 0018). The recording
+    /// configuration above is still resolved in full, because everything in it
+    /// except the output file still applies.
+    pub writes_a_recording: bool,
 }
 
 impl ReplayConfig {
@@ -368,6 +376,7 @@ impl ReplayConfig {
             recording,
             window,
             save,
+            writes_a_recording: !args.no_recording,
         })
     }
 }
@@ -764,6 +773,7 @@ mod tests {
             },
             duration: None,
             save_duration: None,
+            no_recording: false,
         }
     }
 
@@ -803,6 +813,35 @@ mod tests {
             config.save,
             std::time::Duration::from_secs(90),
             "a save with nothing said still means the whole buffer, and the buffer moved"
+        );
+    }
+
+    #[test]
+    fn a_replay_writes_a_recording_unless_the_command_line_says_not_to() {
+        // The wire `--no-recording` reaches the session down. It is the whole of
+        // SPEC.md section 4's Manual/Replay capture mode, and a `resolve` that
+        // dropped it would parse the flag, accept it, and write the ordinary
+        // recording anyway — the exact shape of failure AGENTS.md section 54 is
+        // about, and one nothing else would notice until somebody looked in
+        // their clips folder (issue #423, ADR 0018).
+        let directory = TestDirectory::new("replay-no-recording");
+        let args = replay_args_in(directory.path(), "Counter-Strike 2");
+
+        assert!(
+            ReplayConfig::resolve(&args, configured_window(), None)
+                .expect("a window and an output are enough")
+                .writes_a_recording,
+            "saying nothing must still write the recording, because that is what \
+             `replay` has always done"
+        );
+
+        let mut asked = replay_args_in(directory.path(), "Counter-Strike 2");
+        asked.no_recording = true;
+
+        assert!(
+            !ReplayConfig::resolve(&asked, configured_window(), None)
+                .expect("a window and an output are enough")
+                .writes_a_recording,
         );
     }
 

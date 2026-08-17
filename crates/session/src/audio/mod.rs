@@ -715,7 +715,7 @@ impl AudioThreads {
         sources: Vec<OpenSource>,
         layout: &RecordingLayout,
         clock: CaptureClock,
-        muxing: &MuxingThread,
+        muxing: Option<&MuxingThread>,
         replay: Option<&Arc<ReplayBuffer>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -731,14 +731,24 @@ impl AudioThreads {
                 continue;
             };
 
-            let queue = muxing.audio_queue();
+            // No queue at all for a capture that writes no file: there is no
+            // writer thread and no container, so every buffer this source reads
+            // goes to the replay buffer and nowhere else
+            // (`crate::settings::RecordingSettings::buffered`, ADR 0018).
+            let queue = muxing.map(MuxingThread::audio_queue);
             let buffered = replay.map(Arc::clone);
             let stopping = Arc::clone(&stop);
             let name = format!("clipped-audio-{}", track_thread_name(&open.source));
-            match thread::Builder::new()
-                .name(name)
-                .spawn(move || pump(open, track, clock, &queue, buffered.as_deref(), &stopping))
-            {
+            match thread::Builder::new().name(name).spawn(move || {
+                pump(
+                    open,
+                    track,
+                    clock,
+                    queue.as_ref(),
+                    buffered.as_deref(),
+                    &stopping,
+                )
+            }) {
                 Ok(handle) => workers.push(handle),
                 // A recording without one of its audio tracks is worth far more
                 // than no recording (AGENTS.md section 17), so a machine that
@@ -817,7 +827,7 @@ fn pump(
     mut open: OpenSource,
     track: TrackId,
     clock: CaptureClock,
-    queue: &AudioQueue,
+    queue: Option<&AudioQueue>,
     replay: Option<&ReplayBuffer>,
     stop: &AtomicBool,
 ) -> AudioTrackReport {
@@ -932,6 +942,14 @@ fn pump(
             let at = Duration::from_nanos(placed.at.as_nanos().max(0).unsigned_abs());
             let _ = buffer.push_audio(track, at, placed_samples);
         }
+
+        // Nothing to write to when there is no file. The buffer above has
+        // already had these samples, which is the whole of what a buffered
+        // capture's audio is for, and this thread carries on reading its
+        // endpoint until it is stopped.
+        let Some(queue) = queue else {
+            continue;
+        };
 
         match queue.write(track, placed.at, placed_samples) {
             AudioQueued::Written => {}

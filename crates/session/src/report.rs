@@ -352,7 +352,7 @@ impl fmt::Display for AudioTrackReport {
 /// What one recording contained, and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingReport {
-    pub(crate) output: PathBuf,
+    pub(crate) output: Option<PathBuf>,
     pub(crate) capture_method: CaptureMethod,
     pub(crate) encoder: EncoderKind,
     pub(crate) codec: Codec,
@@ -374,10 +374,18 @@ pub struct RecordingReport {
 }
 
 impl RecordingReport {
-    /// The file that was written.
+    /// The file that was written, or [`None`] for a capture that wrote none.
+    ///
+    /// [`None`] is SPEC.md section 4's Manual/Replay mode: the capture ran, the
+    /// encoder produced everything below, and the packets went to the replay
+    /// buffer instead of into a container
+    /// ([`RecordingSettings::buffered`](crate::RecordingSettings::buffered),
+    /// ADR 0018). It is an [`Option`] rather than an empty path so that nothing
+    /// downstream can hand a user a file name for a file that was never going
+    /// to exist (AGENTS.md section 54).
     #[must_use]
-    pub fn output(&self) -> &Path {
-        &self.output
+    pub fn output(&self) -> Option<&Path> {
+        self.output.as_deref()
     }
 
     /// Which capture backend produced the frames.
@@ -504,6 +512,12 @@ impl RecordingReport {
     }
 
     /// Packets the muxer wrote.
+    ///
+    /// For a capture with no [`output`](Self::output) there is no muxer, and
+    /// this is what the encoder produced instead — the packets that went to the
+    /// replay buffer. The same number for the same capture, counted one step
+    /// earlier, which is as close to "written" as a sitting that wrote no file
+    /// gets.
     #[must_use]
     pub const fn packets_written(&self) -> u64 {
         self.packets_written
@@ -569,14 +583,22 @@ impl fmt::Display for RecordingReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "Recorded {frames} frames of {width}x{height} {codec} in {seconds:.2}s to {path} \
+            "Recorded {frames} frames of {width}x{height} {codec} in {seconds:.2}s {path}\
              ({encoder}, {method}, {rate} sustained; {dropped} frames dropped). {reason}",
             frames = self.frames_encoded,
             width = self.width,
             height = self.height,
             codec = self.codec,
             seconds = self.duration.as_secs_f64(),
-            path = self.output.display(),
+            // "to <path>" when there is a file, and nothing at all when there is
+            // not. A capture with no continuous recording says so in the line
+            // the command that ran it prints beside this one; what this must not
+            // do is name a path, because the only paths such a sitting produced
+            // are its clips (ADR 0018).
+            path = self
+                .output
+                .as_ref()
+                .map_or_else(String::new, |output| format!("to {} ", output.display())),
             encoder = self.encoder,
             method = self.capture_method,
             rate = self
@@ -627,7 +649,7 @@ mod tests {
 
     fn report() -> RecordingReport {
         RecordingReport {
-            output: PathBuf::from(r"D:\clips\session.mkv"),
+            output: Some(PathBuf::from(r"D:\clips\session.mkv")),
             capture_method: CaptureMethod::WindowsGraphicsCapture,
             encoder: EncoderKind::Nvenc,
             codec: Codec::H264,

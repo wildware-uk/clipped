@@ -128,6 +128,18 @@ pub struct ManualSession {
     directory: PathBuf,
     session: Session,
     settings: ResolvedSettings,
+    /// The recording this session holds, or [`None`] when it holds none.
+    ///
+    /// [`None`] is [`Self::start_buffered`]: SPEC.md section 4's Manual/Replay
+    /// mode captures into a replay buffer and writes no continuous file, so the
+    /// session has no `recordings` entry, its clips point at nothing, and there
+    /// is no recording to end when it ends
+    /// (`docs/adr/0018-a-capture-that-writes-no-recording.md`).
+    ///
+    /// Held rather than derived from `session.recordings()` so that the three
+    /// places that need the answer — the clip's source, the end, and the
+    /// sidecar — cannot disagree about it.
+    recording: Option<u32>,
 }
 
 impl ManualSession {
@@ -172,6 +184,70 @@ impl ManualSession {
         process: RecordedProcess<'_>,
         now: SystemTime,
     ) -> Self {
+        Self::open(
+            directory,
+            Some(output),
+            configuration,
+            catalogue,
+            launchers,
+            process,
+            now,
+        )
+    }
+
+    /// Opens a session for a capture that writes **no continuous recording**.
+    ///
+    /// SPEC.md section 4's Manual/Replay mode: the capture fills a replay buffer
+    /// and the only files the sitting produces are the clips somebody asked for
+    /// ([`RecordingSettings::buffered`](crate::RecordingSettings::buffered),
+    /// ADR 0018).
+    ///
+    /// Everything else is [`Self::start`]'s, through the same call: the same
+    /// catalogue lookup, the same settings fold, the same sidecar, the same clip
+    /// naming. What differs is one thing and it is the honest one — the session
+    /// has **no `recordings` entry**, because a recording in that list is a file
+    /// (`clipped-storage`'s `recordings.path` is `NOT NULL UNIQUE`) and this
+    /// sitting wrote none. Its clips carry no `source_recording` accordingly,
+    /// which is the case
+    /// `crates/storage/migrations/0004_clips_without_a_file.sql` reserved
+    /// `clips.source_recording_id` as nullable for, in as many words.
+    ///
+    /// The sidecar is still written the moment the capture opens, for the reason
+    /// [`Self::start`]'s is: a clip saved thirty seconds in needs a session
+    /// record to be entered in, and a recorder that is killed must leave one
+    /// behind (AGENTS.md section 17).
+    #[must_use]
+    pub fn start_buffered(
+        directory: &Path,
+        configuration: &Configuration,
+        catalogue: &Catalogue,
+        launchers: &Launchers,
+        process: RecordedProcess<'_>,
+        now: SystemTime,
+    ) -> Self {
+        Self::open(
+            directory,
+            None,
+            configuration,
+            catalogue,
+            launchers,
+            process,
+            now,
+        )
+    }
+
+    /// The body both constructors share, so that neither can drift from the
+    /// other in anything but the one thing they differ in.
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        directory: &Path,
+        output: Option<PathBuf>,
+        configuration: &Configuration,
+        catalogue: &Catalogue,
+        launchers: &Launchers,
+        process: RecordedProcess<'_>,
+        now: SystemTime,
+    ) -> Self {
         // The child processes the answer carries are the manager's business and
         // not this session's: they are how a *game* is watched for having
         // exited, and this session ends when its one recording does.
@@ -191,7 +267,15 @@ impl ManualSession {
                 image_name: process.image_name.to_owned(),
             },
         );
-        session.begin_recording(ONLY_RECORDING, output, settings.clone(), now);
+        // No entry at all when there is no file. A `recordings` entry naming a
+        // path nothing was ever going to write would be worse than none: the
+        // library indexes it, marks it `missing_since` and draws a tile that
+        // cannot be played, which is the failure issue #383 removed from the
+        // recording path (`crates/library/src/index/ingest.rs`).
+        let recording = output.map(|output| {
+            session.begin_recording(ONLY_RECORDING, output, settings.clone(), now);
+            ONLY_RECORDING
+        });
 
         let directory = directory.to_path_buf();
         persist(&directory, &session);
@@ -210,6 +294,10 @@ impl ManualSession {
             image_path_known = process.image_path.is_some(),
             scope = %settings.scope(),
             settings = %settings,
+            // The one thing a reader of this line cannot otherwise tell about
+            // the sitting, and the thing that explains an empty `recordings`
+            // list in the sidecar beside it.
+            writes_a_recording = recording.is_some(),
             "a session was opened for a recording that was asked for, with the settings that \
              apply to the game the catalogue made of its window"
         );
@@ -218,6 +306,7 @@ impl ManualSession {
             directory,
             session,
             settings,
+            recording,
         }
     }
 
@@ -289,7 +378,7 @@ impl ManualSession {
         self.session.add_clip(SessionClip {
             path,
             created_at: now,
-            source_index: ONLY_RECORDING,
+            source_index: self.recording,
             source_start,
             source_end,
             requested,
@@ -341,7 +430,12 @@ impl ManualSession {
         let outcome_token = summary.token();
         let produced_a_file = summary.produced_a_file();
 
-        self.session.end_recording(ONLY_RECORDING, summary, now);
+        // Nothing to end when the sitting held no recording. The session still
+        // ends for the reason it always does — its capture stopped — and
+        // `recording-ended` is still the honest word for why.
+        if let Some(index) = self.recording {
+            self.session.end_recording(index, summary, now);
+        }
         self.session.end(SessionEndReason::RecordingEnded, now);
         persist(&self.directory, &self.session);
 

@@ -32,12 +32,21 @@
 //! [`ManualSession::clip_saved`](clipped_session::automatic::ManualSession::clip_saved)
 //! (issue #402, `docs/sessions.md`).
 //!
-//! **It is not a buffer-only capture.** SPEC.md section 4's Manual/Replay mode
-//! keeps the buffer and writes no continuous file; this writes both, because
-//! the buffer is filled from the packets a recording produces and
-//! `clipped-session` has no recording without a file. That is
-//! [issue #423](https://github.com/wildware-uk/clipped/issues/423), and
-//! `--help` says so rather than leaving somebody to discover the disk use.
+//! **It is not two capture paths.** `--no-recording` is SPEC.md section 4's
+//! Manual/Replay mode — keep the buffer, write no continuous file — and it is
+//! the *same* capture, encoder and audio through the same
+//! `clipped_session::record_with_replay`, given settings that name a directory
+//! instead of a file ([issue
+//! #423](https://github.com/wildware-uk/clipped/issues/423), ADR 0018). Nothing
+//! below chooses between two loops; one line chooses between two destinations:
+//!
+//! ```text
+//!  clipped-recorder replay --window "…" --no-recording
+//!
+//!  capture ─▶ encode ────▶ ReplayBuffer           (no recording.mkv at all)
+//!                              │
+//!            Ctrl+F10 ─────────┴──▶ save_last(30 s) ─▶ …-replay-1.mkv
+//! ```
 //!
 //! # Threads
 //!
@@ -72,7 +81,9 @@ use clipped_session::{record_with_replay, ReplayRecording, ReplaySaveError};
 
 use crate::cli::ReplayArgs;
 use crate::config::{ConfigError, ReplayConfig};
-use crate::record::{enable_dpi_awareness, resolve_window, settings_for, RecordError};
+use crate::record::{
+    buffered_settings_for, enable_dpi_awareness, resolve_window, settings_for, RecordError,
+};
 use crate::shutdown::{install_ctrl_c_handler, run_until_shutdown, ShutdownSignal};
 
 /// Why `replay` did not run, or did not finish.
@@ -234,36 +245,61 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
 
     enable_dpi_awareness();
     let window = resolve_window(&config.recording.target)?;
-    let asked_for = settings_for(&config.recording, &window);
+    // The one line the two modes differ in. Everything after it — the session,
+    // the hotkey, the recording call, the save — is the same for both, which is
+    // what keeps a buffered sitting made of the same capture as the recording
+    // somebody would compare it against (AGENTS.md section 55).
+    let asked_for = if config.writes_a_recording {
+        settings_for(&config.recording, &window)
+    } else {
+        buffered_settings_for(&config.recording, &window)
+    };
+    // From the settings rather than from the arguments a second time: the
+    // session's sidecar and its clips belong in the folder the capture belongs
+    // to, and there may not be two answers to where that is (AGENTS.md section
+    // 55).
+    let directory = asked_for.directory().to_path_buf();
+
+    // The image path as well as the name, because most catalogue entries are
+    // qualified by one: Counter-Strike 2 is `cs2.exe` *in the directory Steam
+    // installs it into* (`clipped_game_detection::catalogue`).
+    let image_path = clipped_windows::process_image_path(window.process_id())
+        .map(|path| path.to_string_lossy().into_owned());
+    let process = clipped_session::automatic::RecordedProcess::new(
+        window.process_id(),
+        window.process_name().unwrap_or_default(),
+    )
+    .with_image_path(image_path.as_deref());
 
     // The session opens before the encoder, so that a recorder killed during
     // this recording still leaves something saying what the files beside it are
     // (AGENTS.md section 17) — and so that a clip saved thirty seconds in has a
     // session record to be entered in.
-    let session = Arc::new(Mutex::new(ManualSession::start(
-        config
-            .recording
-            .output
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-        config.recording.output.clone(),
-        &configuration,
-        &catalogue,
-        &launchers,
-        // The image path as well as the name, because most catalogue entries
-        // are qualified by one: Counter-Strike 2 is `cs2.exe` *in the directory
-        // Steam installs it into* (`clipped_game_detection::catalogue`).
-        clipped_session::automatic::RecordedProcess::new(
-            window.process_id(),
-            window.process_name().unwrap_or_default(),
+    //
+    // A sitting that writes no recording opens one with no `recordings` entry,
+    // because there is no file for one to name; its clips carry no
+    // `source_recording` and the library stores that as a null
+    // `source_recording_id` (`docs/sessions.md`, ADR 0018).
+    let session = Arc::new(Mutex::new(if let Some(output) = asked_for.output() {
+        ManualSession::start(
+            &directory,
+            output.to_path_buf(),
+            &configuration,
+            &catalogue,
+            &launchers,
+            process,
+            SystemTime::now(),
         )
-        .with_image_path(
-            clipped_windows::process_image_path(window.process_id())
-                .map(|path| path.to_string_lossy().into_owned())
-                .as_deref(),
-        ),
-        SystemTime::now(),
-    )));
+    } else {
+        ManualSession::start_buffered(
+            &directory,
+            &configuration,
+            &catalogue,
+            &launchers,
+            process,
+            SystemTime::now(),
+        )
+    }));
     let settings = settings.apply_configured_to(asked_for);
 
     let signal = ShutdownSignal::new();
@@ -304,6 +340,17 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
         described(config.window),
         described(config.save),
     );
+    if !settings.writes_a_recording() {
+        // Said plainly, because it is the whole difference and because the
+        // alternative — leaving somebody to notice afterwards that there is no
+        // file — is the failure AGENTS.md section 54 is about. It names the
+        // directory as well, since that is the only place this sitting will put
+        // anything.
+        eprintln!(
+            "No recording will be written; only the clips you save, in {}.",
+            directory.display(),
+        );
+    }
 
     let outcome = run_until_shutdown(
         &signal,
