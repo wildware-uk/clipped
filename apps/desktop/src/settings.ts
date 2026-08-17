@@ -36,8 +36,14 @@ import { asProblem, type LibraryProblem, type LibraryRead } from './library';
  * owns them by `settingsConformance.test.ts`.
  */
 
-/** Where Clipped keeps a value, when anything keeps it. */
-export type SettingsFile = 'settings.json' | 'notifications.json';
+/**
+ * Where Clipped keeps a value, when anything keeps it.
+ *
+ * One file. There were two until issue #252 — the notification switches lived
+ * in a `notifications.json` of this window's own, with a version field and a
+ * reader of their own — and a union of one is what says that is over.
+ */
+export type SettingsFile = 'settings.json';
 
 /** The key a setting has in the file that carries it. */
 export interface SettingLocation {
@@ -93,9 +99,6 @@ export interface SettingsSection {
 /** Clipped's settings file, as a user would find it. */
 export const SETTINGS_FILE = String.raw`%LOCALAPPDATA%\Clipped\settings.json`;
 
-/** The notification switches, which are a second store until issue #252. */
-export const NOTIFICATIONS_FILE = String.raw`%APPDATA%\uk.wildware.clipped\notifications.json`;
-
 /**
  * The one section with something live in it beyond the settings themselves.
  *
@@ -112,8 +115,45 @@ export const HOTKEYS_SECTION = 'hotkeys';
  */
 export const STARTUP_SECTION = 'startup';
 
+/**
+ * The section holding the notification switches.
+ *
+ * Named here for the reason {@link HOTKEYS_SECTION} is, and for one more: these
+ * four are the settings this window itself acts on, so a test about whether a
+ * switch reaches anything has to be able to find them.
+ */
+export const NOTIFICATIONS_SECTION = 'notifications';
+
+/**
+ * The keys the notification switches have in the settings file.
+ *
+ * The same words `clipped_session::config::notifications` writes and the same
+ * words the desktop host matches on when it decides whether to show a toast, so
+ * a rename here would draw a control over a switch nothing reads.
+ * `settingsConformance.test.ts` holds all three lists equal.
+ */
+export const NOTIFICATION_KEYS = [
+  'recording_failed',
+  'recording_interrupted',
+  'recorder_unavailable',
+  'hotkey_unavailable',
+] as const;
+
 /** The key the recording directory has in the settings file. */
 export const RECORDING_DIRECTORY = 'recording_directory';
+
+/**
+ * Whether a setting is a switch rather than a field or a list.
+ *
+ * True exactly when the only values the recorder will accept are `true` and
+ * `false`, which is what a boolean setting is. Asked of the answer rather than
+ * from a list of keys kept here, so that a switch a newer recorder adds is drawn
+ * as one without this window being taught its name (AGENTS.md section 55).
+ */
+export function isSwitch(entry: SettingEntry): boolean {
+  const choices = entry.choices ?? [];
+  return choices.length === 2 && choices.includes('true') && choices.includes('false');
+}
 
 /** The key the microphone has, which is the one control with a device list. */
 export const MICROPHONE = 'microphone';
@@ -593,49 +633,34 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
-    id: 'notifications',
+    id: NOTIFICATIONS_SECTION,
     label: 'Notifications',
     lead:
-      `The one thing on this screen still kept somewhere else: each switch is a key in ` +
-      `${NOTIFICATIONS_FILE}, alongside "version": 1, and it is changed by hand. Every category ` +
-      'is on until that file says otherwise, because all four are failures.',
-    keys: [],
+      'What Clipped interrupts you for, as a Windows notification. All four are failures — ' +
+      'nothing is being recorded, or a recording ended, or a key does nothing — so every one is ' +
+      'on until you switch it off. They are kept in the settings file with everything else, and ' +
+      'a change here reaches the next notification rather than the next launch.',
+    keys: [...NOTIFICATION_KEYS],
     rows: [
       {
-        label: 'A recording failed',
-        key: { name: 'recording_failed', file: 'notifications.json' },
-        today: 'A recording ended because something went wrong and the recorder is still running.',
-        run: '"recording_failed": false',
+        label: 'Replay saved, bookmark added, screenshot taken',
+        today:
+          'Nothing. Only failures interrupt you, because they are the only things the recorder ' +
+          'tells this window about — a toast for a replay that was saved would be a toast for ' +
+          'an event nothing reports.',
         needs:
-          'Issue #252, which moves these four into the settings file and puts their switches on ' +
-          'this screen with the rest.',
+          'Issue #110, which asks for them, and an event from the recorder for each one to be ' +
+          'raised from.',
       },
       {
-        label: 'A recording was interrupted',
-        key: { name: 'recording_interrupted', file: 'notifications.json' },
+        label: 'Quieter notifications while you are playing',
         today:
-          'A recorder stopped mid-recording without being asked. The notification names the ' +
-          'file it left, which nothing else will.',
-        run: '"recording_interrupted": false',
-        needs: 'Issue #252, as above.',
-      },
-      {
-        label: 'The recorder cannot be reached',
-        key: { name: 'recorder_unavailable', file: 'notifications.json' },
-        today:
-          'The link gave up: nothing is being recorded, and nothing further will be tried on ' +
-          'its own.',
-        run: '"recorder_unavailable": false',
-        needs: 'Issue #252, as above.',
-      },
-      {
-        label: 'A hotkey is unavailable',
-        key: { name: 'hotkey_unavailable', file: 'notifications.json' },
-        today:
-          'Windows refused one of Clipped’s combinations, so pressing it does nothing. Said ' +
-          'once when it is first seen, not again every time the recorder reconnects.',
-        run: '"hotkey_unavailable": false',
-        needs: 'Issue #252, as above.',
+          'Not offered, and there is nothing to quieten: every category above is a failure, and ' +
+          'the moment somebody most needs to know that nothing is being recorded is while they ' +
+          'are in a game.',
+        needs:
+          'Nothing. Issue #110 asked for non-critical notifications to be held back during ' +
+          'gameplay, and the set of those is empty.',
       },
     ],
   },

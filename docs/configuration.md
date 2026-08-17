@@ -11,10 +11,10 @@ at start-up and apply what it holds to each recording they start: `watch` since
 [issue #402](https://github.com/wildware-uk/clipped/issues/402), through the same
 call (["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
 below). `clipped-recorder record` takes its settings from its command line and
-always will; that is what a command line is for. Nothing yet _writes_ a
-settings file: the screen that edits all of this is
-[issue #51](https://github.com/wildware-uk/clipped/issues/51), and until it
-exists the file is one somebody writes by hand.
+always will; that is what a command line is for. The Settings screen
+([issue #51](https://github.com/wildware-uk/clipped/issues/51)) writes the file,
+through `apply_settings` — the recorder is what saves it, because the window may
+not open it — so it is no longer a file only a text editor changes.
 
 What #61 still does not have is its evidence: two games recorded at two
 resolutions and checked with `ffprobe`, an encoder substitution seen happening,
@@ -131,8 +131,13 @@ The window itself reaches none of this directly: it may link `clipped-ipc` and
 nothing else of this workspace, so it asks the recorder — `get_settings`,
 `apply_settings` and `get_audio_devices`, in `docs/ipc.md`. The recorder answers
 with one entry per setting carrying exactly the fields above, plus whether
-anything in that build reads the setting when a recording starts, so that a
-screen never draws a control for a key nothing acts on (AGENTS.md section 27).
+anything in that build acts on the setting, so that a screen never draws a
+control for a key nothing acts on (AGENTS.md section 27).
+
+That last field usually means "reads it when a recording starts", because the
+recorder is what acts on a setting. The exception is
+[Notifications](#notifications), whose reader is the window itself — the recorder
+keeps those four and never looks at them.
 
 ## The settings
 
@@ -282,6 +287,57 @@ global settings, framerate is 0; it accepts 1-480 frames per second
 The replay window is checked against `clipped_replay`'s own bounds, so the
 refusal reaches the user when they set it rather than when a game launches.
 
+## Notifications
+
+Which failures interrupt the user, and they are **global only** for a reason of
+their own: the thing being interrupted is a person rather than a recording, so
+"should Counter-Strike's failures interrupt me" is the same question as "should
+failures interrupt me". SPEC.md section 31's list of per-game overrides does not
+mention notifications either.
+
+Four switches, in a `notifications` section beside `hotkeys` and `storage`:
+
+| Key                     | Default | What it is about                                                              |
+| ----------------------- | ------- | ----------------------------------------------------------------------------- |
+| `recording_failed`      | on      | A recording ended because something went wrong; the recorder is still running |
+| `recording_interrupted` | on      | A recorder stopped mid-recording without being asked                          |
+| `recorder_unavailable`  | on      | Nothing is being recorded and nothing further will be tried on its own        |
+| `hotkey_unavailable`    | on      | Windows refused a combination, so pressing it does nothing                    |
+
+```json
+{
+  "notifications": {
+    "recording_failed": false
+  }
+}
+```
+
+Everything is on until somebody says otherwise, because all four are failures. A
+key holding something that is not `true` or `false` is **kept and ignored**,
+leaving that category on — which is the opposite of what the `storage` section
+does with a value it cannot read, and deliberately. A limit that is quietly
+ignored leaves somebody believing their library is capped when it is not, so it
+is refused; a switch that is quietly ignored is a nuisance rather than a loss,
+and refusing would mean a typo in a notification switch stopped the recording
+settings in the same file from loading.
+
+### The recorder keeps these and never reads them
+
+The process that acts on them is the **desktop application**, at the moment it
+decides whether to show a toast (`docs/desktop-ui.md`). It may link
+`clipped-ipc` and nothing else of this workspace, so it cannot open this file —
+it asks, with `get_settings` when its link attaches and `apply_settings` when
+somebody moves a switch, exactly as it does for every other setting.
+
+They are here rather than in a store of the window's own because that store
+existed until [issue #252](https://github.com/wildware-uk/clipped/issues/252): a
+`notifications.json` in `%APPDATA%\uk.wildware.clipped`, with a version field, a
+missing-key policy and a reader of its own. Two files of user preferences in two
+directories is the duplication AGENTS.md section 55 forbids. One of those files
+is migrated into this one and deleted the first time a link attaches; the window
+is what does that, because the window is the only process that knows where its
+own configuration directory is.
+
 ## Hotkeys
 
 Hotkeys are configuration, and they are **global only**. A per-game hotkey could
@@ -327,6 +383,9 @@ one that is not there is `Loaded::Absent` and the defaults, not an error.
   },
   "hotkeys": {
     "save_replay": "Ctrl+F10"
+  },
+  "notifications": {
+    "recording_failed": false
   },
   "plugins": {
     "acme.counter-strike-2": {
@@ -460,8 +519,8 @@ session that followed.
 ### Settings this build has never heard of
 
 They are kept. Every section carries the keys it could not interpret and writes
-them back out unchanged — at the top level, in `global`, in each game's section
-and in `hotkeys`.
+them back out unchanged — at the top level, in `global`, in each game's section,
+in `hotkeys`, in `storage` and in `notifications`.
 
 The failure this prevents: a user configures something on the machine running
 the newer Clipped, opens the settings on the older one, changes anything at all,
@@ -636,6 +695,7 @@ standing when it did not — the two rows of the table above.
 | `crates/session/src/config/preferences.rs` | One layer, the settings themselves, validation, and the fold |
 | `crates/session/src/config/value.rs`       | `Resolved`, `SettingSource`, `Scope`, `SettingKey`           |
 | `crates/session/src/config/hotkeys.rs`     | The hotkey layer and its three states                        |
+| `crates/session/src/config/notifications.rs` | Which failures interrupt the user                          |
 | `crates/session/src/config/game.rs`        | How a settings file names a game                             |
 | `crates/session/src/config/document.rs`    | The file format, versions and migration                      |
 | `crates/session/src/config/store.rs`       | Reading, saving, and what survives a bad file                |

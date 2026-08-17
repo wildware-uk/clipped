@@ -589,6 +589,88 @@ fn a_recorder_that_can_listen_to_a_microphone_says_so_and_answers_about_one() {
 }
 
 #[test]
+fn a_notification_switched_off_in_the_window_is_in_the_one_settings_file() {
+    // Issue #252's first two acceptance criteria, against a real recorder over a
+    // real pipe. The switches were `notifications.json` in the *window's* own
+    // configuration directory — a second store with a second version field and a
+    // second reader — and they are settings now: the window sends the same
+    // `apply_settings` it sends for a frame rate, and what comes back is what a
+    // window opening afterwards is told.
+    //
+    // Nothing in this recorder reads them. That is the point: the process that
+    // acts on them may link one crate of this workspace and so cannot open the
+    // file, so it asks.
+    let home = scratch_home("notifications");
+    let recorder = ServedRecorder::start_under("notifications", Some(&home));
+    let mut client = recorder.client();
+
+    let before = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("a recorder that is serving can be asked for its settings"),
+    );
+    for key in [
+        "recording_failed",
+        "recording_interrupted",
+        "recorder_unavailable",
+        "hotkey_unavailable",
+    ] {
+        let switch = setting(&before, key);
+        assert_eq!(switch.value, "true", "{key} should default to on");
+        assert!(!switch.overridden);
+        assert!(
+            switch.applies,
+            "the window acts on {key}, so it must not be drawn as a dead control",
+        );
+        assert_eq!(
+            switch.choices,
+            vec!["true".to_owned(), "false".to_owned()],
+            "a switch is a closed set of two, which is what makes a window draw one",
+        );
+    }
+
+    let after = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "recorder_unavailable",
+                Some("false"),
+            )))
+            .expect("a switch takes true or false"),
+    );
+    assert_eq!(setting(&after, "recorder_unavailable").value, "false");
+    assert!(setting(&after, "recorder_unavailable").overridden);
+    assert_eq!(
+        setting(&after, "recording_failed").value,
+        "true",
+        "switching one category off must leave the others alone",
+    );
+
+    // One file, which is the whole of the first acceptance criterion: it is the
+    // settings file the recording settings are in, not a second one beside it.
+    let file = std::path::PathBuf::from(&after.file);
+    assert!(file.ends_with("settings.json"), "{}", file.display());
+    let written = std::fs::read_to_string(&file).expect("the settings file was written");
+    assert!(
+        written.contains("\"notifications\"") && written.contains("\"recorder_unavailable\""),
+        "the switch did not reach the settings file: {written}",
+    );
+
+    // And a window opening afterwards is told the same thing, which is how a
+    // switch survives a restart now that nothing keeps a copy of it.
+    let mut second = recorder.client();
+    let again = settings_of(
+        second
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read again"),
+    );
+    assert_eq!(setting(&again, "recorder_unavailable").value, "false");
+
+    drop(second);
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
 fn a_setting_the_file_would_refuse_is_refused_with_what_would_have_been_accepted() {
     // AGENTS.md section 45, over the wire: not "invalid", but the value, the
     // range and the setting — the same sentence the file's own reader gives,

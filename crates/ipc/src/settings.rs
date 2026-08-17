@@ -30,13 +30,29 @@
 //!
 //! # Why [`SettingEntry::applies`] exists
 //!
-//! A settings file can carry a key that nothing reads when a recording starts,
-//! and a screen that drew that key as a working control would be the lie
-//! AGENTS.md section 27 is about. So the recorder says, per setting, whether it
-//! is in force, and — when it is not — the sentence that says what would have to
-//! land. It is the same pair
+//! A settings file can carry a key that nothing acts on, and a screen that drew
+//! that key as a working control would be the lie AGENTS.md section 27 is about.
+//! So the recorder says, per setting, whether it is in force, and — when it is
+//! not — the sentence that says what would have to land. It is the same pair
 //! [`HotkeyBinding`](crate::HotkeyBinding) carries for the same reason: a
 //! registered key nothing performs is still a key that does nothing.
+//!
+//! # A setting the recorder keeps and the window reads
+//!
+//! The four notification switches — `recording_failed`,
+//! `recording_interrupted`, `recorder_unavailable` and `hotkey_unavailable` —
+//! are settings like any other here, and they are the one group whose reader is
+//! the window rather than a recording. They cross as `true` or `false`, which
+//! is what the settings file holds.
+//!
+//! They are on these two commands because of the rule at the top of this file
+//! read the other way round. The window decides whether to show a toast, so the
+//! window needs the switch; the window may not open the settings file, so the
+//! recorder hands it over. Before
+//! [issue #252](https://github.com/wildware-uk/clipped/issues/252) the window
+//! kept them in a file of its own — a second store of user preferences, with a
+//! second version field, a second missing-key policy and a second reader
+//! (AGENTS.md section 55).
 
 use std::collections::BTreeMap;
 
@@ -83,14 +99,23 @@ pub struct SettingEntry {
     /// The hint beside a field, and the same sentence a refused value comes
     /// back with, so the two cannot disagree.
     pub accepted: String,
-    /// Whether anything reads this setting when a recording starts.
+    /// Whether anything in this build acts on this setting.
     ///
-    /// `false` is a setting the file can carry and no recording acts on. The
-    /// value is still real — it is in the file and a later build will read it —
-    /// but a window must not draw it as a control that changes a recording,
-    /// which is what [`unavailable`](Self::unavailable) says instead.
+    /// For almost every setting that means "reads it when a recording starts",
+    /// because the recorder is what acts on them. The exception is the
+    /// notification switches, whose reader is the *window* — it asks for them
+    /// and consults them when it decides whether to show a toast, and the
+    /// recorder keeps them and never reads them at all
+    /// ([issue #252](https://github.com/wildware-uk/clipped/issues/252)). The
+    /// question a screen is asking is the same either way: would changing this
+    /// change anything?
+    ///
+    /// `false` is a setting the file can carry and nothing acts on. The value is
+    /// still real — it is in the file and a later build will read it — but a
+    /// window must not draw it as a working control, which is what
+    /// [`unavailable`](Self::unavailable) says instead.
     pub applies: bool,
-    /// Why changing it would not change a recording, when that is the case.
+    /// Why changing it would change nothing, when that is the case.
     ///
     /// Present exactly when [`applies`](Self::applies) is `false`, and it is
     /// the recorder's own sentence, naming the work that would make the setting

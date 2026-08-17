@@ -10,6 +10,7 @@ import {
   chooseRecordingDirectory,
   describeSettingsProblem,
   HOTKEYS_SECTION,
+  isSwitch,
   MICROPHONE,
   microphoneOptions,
   RECORDING_DIRECTORY,
@@ -83,6 +84,52 @@ function Field({
   const value = edited ?? entry.value;
   const options = entry.key === MICROPHONE ? microphoneOptions(entry, devices) : undefined;
   const choices = entry.choices ?? [];
+
+  /*
+   * A setting whose only two values are `true` and `false` is a switch, and it
+   * is drawn as one. A list of those two words is what the recorder sends —
+   * every value on that protocol is the text the settings file spells it in
+   * (`crates/ipc/src/settings.rs`) — and drawing it as a two-option dropdown
+   * reading "true" and "false" would be the settings file leaking through a
+   * control (AGENTS.md section 29).
+   */
+  if (isSwitch(entry)) {
+    return (
+      <div className="clipped-field">
+        <label className="clipped-field__label" htmlFor={fieldId(entry.key)}>
+          <input
+            id={fieldId(entry.key)}
+            type="checkbox"
+            aria-describedby={hintId(entry.key)}
+            checked={value !== 'false'}
+            onChange={(event) => {
+              onEdit(event.target.checked ? 'true' : 'false');
+            }}
+          />{' '}
+          {entry.label}
+        </label>
+
+        {/*
+         * Reset, on a switch, is "stop saying anything about this" rather than
+         * "turn it on" — the two differ the day the shipped default changes.
+         */}
+        {entry.overridden ? (
+          <button
+            type="button"
+            className="clipped-btn clipped-btn--secondary"
+            onClick={onReset}
+            aria-label={`Reset ${entry.label}`}
+          >
+            Reset
+          </button>
+        ) : null}
+
+        <p className="clipped-muted" id={hintId(entry.key)}>
+          {entry.overridden ? 'You changed this.' : 'Clipped ships with this on.'}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="clipped-field">

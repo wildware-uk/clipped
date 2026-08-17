@@ -123,6 +123,8 @@ use clipped_ipc::{
 };
 use tauri::{Emitter as _, Manager as _, WindowEvent};
 
+use crate::notification_policy::NotificationPreferences;
+
 /// The single-instance name this application claims, before the session
 /// namespace is applied.
 ///
@@ -248,10 +250,22 @@ fn main() {
             // the tray's first menu already knows what to offer to record.
             foreground::follow_the_foreground_window();
 
+            // Which notifications the user wants, shared by the thread that
+            // decides and the `apply_settings` command that changes them. It
+            // starts as "everything on" and is replaced the moment the link
+            // attaches and the recorder can be asked (`notifications::refresh`,
+            // issue #252).
+            let notification_preferences = NotificationPreferences::default();
+            app.manage(notification_preferences.clone());
+
             // Before the tray, because both report a startup failure through the
             // same one-sentence notice and a missing tray is the more important
             // of the two: it changes what closing the window does.
-            let mut notifier = notifications::install(&handle, &app.state::<RecorderLink>());
+            let mut notifier = notifications::install(
+                &handle,
+                &app.state::<RecorderLink>(),
+                notification_preferences,
+            );
 
             if let Err(error) = tray::install(&handle, &app.state::<RecorderLink>()) {
                 // Not fatal. A window that shows the recorder's state is still
@@ -694,9 +708,13 @@ fn recorder_hotkeys(
 #[tauri::command(async)]
 fn recorder_settings(
     link: tauri::State<'_, RecorderLink>,
+    notifications: tauri::State<'_, NotificationPreferences>,
 ) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
     match link.call(&clipped_ipc::Command::GetSettings)? {
-        clipped_ipc::Reply::Settings { settings } => Ok(settings),
+        clipped_ipc::Reply::Settings { settings } => {
+            notifications.adopt(&settings);
+            Ok(settings)
+        }
         _ => Err(wrong_reply("get_settings")),
     }
 }
@@ -710,15 +728,26 @@ fn recorder_settings(
 /// A refusal carries the recorder's own sentence, naming the setting, the value
 /// and what would have been accepted — the same sentence somebody hand-editing
 /// the file would get, because it is the same validation (AGENTS.md section 45).
+///
+/// Four of those settings are this process's to act on rather than the
+/// recorder's — the notification switches — so what comes back is handed to
+/// [`NotificationPreferences`] on the way out. Without that, switching a
+/// category off would save perfectly and go on notifying until Clipped was
+/// restarted, which is the control that silently does nothing of AGENTS.md
+/// section 27 (issue #252).
 #[tauri::command(async)]
 fn apply_recorder_settings(
     link: tauri::State<'_, RecorderLink>,
+    notifications: tauri::State<'_, NotificationPreferences>,
     values: std::collections::BTreeMap<String, Option<String>>,
 ) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
     match link.call(&clipped_ipc::Command::ApplySettings(
         clipped_ipc::ApplySettings { values },
     ))? {
-        clipped_ipc::Reply::Settings { settings } => Ok(settings),
+        clipped_ipc::Reply::Settings { settings } => {
+            notifications.adopt(&settings);
+            Ok(settings)
+        }
         _ => Err(wrong_reply("apply_settings")),
     }
 }
