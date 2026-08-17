@@ -693,67 +693,70 @@ SPEC.md sections 10, 12, 15, 27 and 34, and
 rail of sections and panes of controls: device pickers, a recording directory,
 quality presets, a container choice, hotkey bindings and a row of switches.
 
-**The rail is here and the controls are not, because this window can neither
-read nor write a setting.** That is a fact about what is built rather than about
-what was finished, and it has four parts:
+**The controls are here, because the settings are reachable.** The recorder owns
+`settings.json` — its three layers, its validation, its migrations, and each
+value reported with the layer it came from and whether this scope overrode it
+([configuration.md](configuration.md)) — and the window asks it: `get_settings`,
+`apply_settings` and `get_audio_devices` ([ipc.md](ipc.md)). It reads that file
+itself, and validates a value itself, exactly never: this window may link one
+crate of the repository's workspace, `clipped-ipc`, which
+`tests/integration/tests/workspace_layering.rs` enforces, and a second
+implementation of a settings file's versioning and validation would be one built
+against the file somebody's settings live in (AGENTS.md section 55).
 
-- the settings are `clipped_session::config` — three layers, validation, and
-  each value reported with the layer it came from and whether this scope
-  overrode it ([configuration.md](configuration.md)). It is exactly the shape a
-  settings screen needs, and nothing here can ask it anything;
-- the desktop application may link one crate of the repository's workspace,
-  `clipped-ipc`, and `tests/integration/tests/workspace_layering.rs` enforces
-  it. `clipped-session` sits above capture, audio, encoding and muxing, so
-  naming it here would put the recording engine in the window's process — the
-  separation [ADR 0002](adr/0002-separate-recorder-process.md) exists to make;
-- the control protocol has no command that reads configuration, and the one
-  that would write it, `apply_settings`, is refused as not implemented by every
-  build ([ipc.md](ipc.md));
-- reading `settings.json` from this process instead would be a second
-  implementation of its versioning, migration and validation, against the file
-  the user's own settings live in (AGENTS.md section 55).
+### What decides whether a control is drawn
 
-[Issue #252](https://github.com/wildware-uk/clipped/issues/252) is the fix, by
-either of its two routes, and it says it blocks this screen.
+The recorder does, per setting, and the window has no opinion of its own:
 
-### What each pane carries instead
+| The recorder says | The window draws |
+| --- | --- |
+| `applies: true` | A control: a list of options where `choices` is closed, a field where it is open, and this machine's microphones where the setting is one |
+| `applies: false` | The value, and the recorder's own sentence naming what would have to land — never a control that would change nothing (AGENTS.md section 27) |
+| `overridden: true` | A Reset beside it, which sends `null` rather than today's default: a setting reset follows a later change to the default, and one set to it does not |
+| `accepted` | The hint under the field, which is the same sentence a refused value comes back with, so the two cannot disagree |
+
+A refusal is the recorder's own words — it names the setting, the value and what
+would have been accepted — and what was typed stays on screen to be corrected
+(AGENTS.md section 45). What the screen redraws is the reply, never what it
+sent: a value the recorder refused, or one another window changed a moment
+earlier, must not be drawn as saved.
+
+The microphone list is the machine's, asked for when the screen opens. A device
+that is configured and not in the list is kept on offer as "not connected",
+because dropping it would silently change what is recorded; a list that could
+not be asked for is *said*, rather than drawn as a machine with no microphone.
+
+### What each pane still only accounts for
 
 Three columns: the setting, **how it is set today**, and what has to land before
-this window can hold the control. The middle column is the one that makes this a
-screen rather than an apology — almost every setting *can* be changed today, and
-the screen says how:
+this window can hold the control. What is left there is what has nowhere to be
+saved, or nothing behind it:
 
-| Section | What can be changed today |
+| Section | Still an account rather than a control |
 | --- | --- |
-| Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
-| Audio | The same options. A recording carries its audio tracks (#180); what the settings file cannot yet do is choose the devices per game |
-| Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
-| Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
-| Notifications | **The one thing this window's own behaviour follows**: the four switches in `notifications.json`, named with their keys and their file |
-| Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
-
-Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
-read them, and that is worth the distinction the screen draws: the recording
-directory and the container are #307, and listing this machine's audio devices
-at all is #308. Both were raised while this screen was built, because a row that
-said "not yet" with no issue behind it is a promise nobody has made.
+| Recording | The quality presets and bitrate (#181, #62), and the container (#307) |
+| Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
+| Storage | The limits and the trash directory, which the file carries and the screen SPEC.md section 27 draws is #95; and per-game overrides, which the file carries and #63 draws |
+| Hotkeys | Binding a combination (#54). The section **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
+| Notifications | The four switches in `notifications.json`, which is a second store until [#252](https://github.com/wildware-uk/clipped/issues/252) folds it into the settings file |
+| Startup | `clipped-recorder start-at-login enable`, which is not configuration and which no protocol command reaches — [#308](https://github.com/wildware-uk/clipped/issues/308) |
 
 ### What is checked, and against what
 
 Everything above is a claim about code in another process, and a screen full of
-those goes quietly wrong: a renamed settings key, a subcommand that moved, an
-`apply_settings` that got implemented, and the screen still says what it said in
-August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions out
-of the sources that hold them:
+those goes quietly wrong: a renamed settings key the window then never draws, a
+subcommand that moved, a #252 that landed and a screen still saying what it said
+in August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions
+out of the sources that hold them:
 
 | The screen says | Read from |
 | --- | --- |
-| These are the settings, spelled this way | `SettingKey::name` in `crates/session/src/config/value.rs`, both directions — a setting the API gains and one the screen invented both fail |
+| These are the settings it draws controls for | `SettingKey::name` in `crates/session/src/config/value.rs` and `RECORDING_DIRECTORY` in `apps/recorder/src/settings.rs`, both directions — a setting the API gains and one the screen invented both fail |
 | These are the notification switches | `NotificationCategory::key` in `apps/desktop/src-tauri/src/notification_policy.rs` |
 | The settings file is at this path | `APPLICATION_DIRECTORY` in `clipped-logging` and `FILE_NAME` in `config::document` |
 | The notification file is at this path | The bundle identifier in `tauri.conf.json` and `SETTINGS_FILE` in `notifications.rs` |
-| `apply_settings` is refused | `UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` |
-| Nothing reads settings back | The command names `Command::from_request` parses |
+| The recorder reads and changes settings | The command names `Command::from_request` parses, and that `UNBUILT_COMMANDS` is gone from `crates/ipc/src/command.rs` |
+| A window can tell before it draws | The `settings` feature in `crates/ipc/src/message.rs` |
 | Run this command | The subcommands `apps/recorder/src/cli.rs` declares, and their options |
 
 `SettingKey`'s own documentation asks for the first of those: it exists so that
@@ -1071,8 +1074,8 @@ text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
 - **Save Replay** was a command the protocol defined and the recorder refused,
-  labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
-  day it was built the menu would stop claiming it had not. That day was
+  labelled from the refusal's own subsystem and tracking issue so that the day
+  it was built the menu would stop claiming it had not. That day was
   [#38](https://github.com/wildware-uk/clipped/issues/38). It is live exactly
   when the running recording is keeping a replay buffer, and disabled with the
   true reason otherwise: `— this recorder cannot save replays` when the recorder
@@ -1091,15 +1094,13 @@ explanation" is the failure AGENTS.md section 27 names.
   wrong.
 
   A recording started **from this window** still keeps no buffer, so in practice
-  the reason is usually the third. The window cannot ask for one at a length
-  somebody chose: the duration lives in `replay_window_seconds`, and this window
-  has no way to read a setting — `apply_settings` is unbuilt (#108) and
-  `workspace_layering.rs` allows the Tauri host exactly one crate of the
-  workspace, `clipped-ipc`, so reading `settings.json` here would be a second
-  implementation of the settings file. `clipped-recorder replay --duration`
-  starts a recording that does have one, and against that recording the item is
-  live and works ([#427](https://github.com/wildware-uk/clipped/issues/427) for
-  the rest).
+  the reason is usually the third. The window can now *read* the configured
+  length — `replay_window_seconds`, on the Settings screen — but nothing that
+  starts a recording here asks for a buffer of it, which is why that setting is
+  the one the Settings screen draws as not in force
+  ([#427](https://github.com/wildware-uk/clipped/issues/427)).
+  `clipped-recorder replay --duration` starts a recording that does have one,
+  and against that recording the item is live and works.
 - **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being

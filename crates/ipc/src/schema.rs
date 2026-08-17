@@ -65,9 +65,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::command::{
-    Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand,
-};
+use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use crate::hotkeys::{HotkeyBinding, HotkeyState};
@@ -496,6 +494,26 @@ fn structures() -> BTreeMap<String, Structure> {
             "export_summary".to_owned(),
             structure_of(&exemplar_export(), &[]),
         ),
+        (
+            "apply_settings".to_owned(),
+            structure_of(&exemplar_apply_settings(), &[]),
+        ),
+        (
+            "settings_view".to_owned(),
+            structure_of(&exemplar_settings_view(), &[]),
+        ),
+        (
+            "setting_entry".to_owned(),
+            structure_of(&exemplar_setting_entry(), &[]),
+        ),
+        (
+            "audio_devices".to_owned(),
+            structure_of(&exemplar_audio_devices(), &[]),
+        ),
+        (
+            "audio_device".to_owned(),
+            structure_of(&exemplar_audio_device(), &[]),
+        ),
     ]);
 
     for outcome in every_outcome() {
@@ -545,7 +563,7 @@ fn structures() -> BTreeMap<String, Structure> {
 
 /// The commands, in the order `docs/ipc.md` tables them.
 fn commands() -> Vec<CommandSchema> {
-    let mut commands: Vec<CommandSchema> = every_built_command()
+    let commands: Vec<CommandSchema> = every_built_command()
         .iter()
         .map(|command| CommandSchema {
             name: command.name().to_owned(),
@@ -561,13 +579,15 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
+                Command::ApplySettings(_) => Some("apply_settings".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
                 | Command::Plugins
                 | Command::GetHotkeys
-                | Command::Unbuilt(_) => None,
+                | Command::GetSettings
+                | Command::GetAudioDevices => None,
             },
             reply: match command {
                 Command::Ping => Some("reply.pong".to_owned()),
@@ -586,24 +606,18 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
+                // Both settings commands answer with the same reply: what a
+                // change produced is the settings as they now stand
+                // (`crate::settings`).
+                Command::GetSettings | Command::ApplySettings(_) => {
+                    Some("reply.settings".to_owned())
+                }
+                Command::GetAudioDevices => Some("reply.audio_devices".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
-                Command::Unbuilt(_) => None,
             },
             available_in_this_build: true,
         })
         .collect();
-
-    commands.extend(crate::command::UNBUILT_COMMANDS.iter().map(|unbuilt| {
-        CommandSchema {
-            name: unbuilt.name().to_owned(),
-            // Deliberately no parameter schema: nobody knows yet what
-            // `save_replay` takes, and inventing a shape now would be a public
-            // API designed against a guess (AGENTS.md section 43).
-            params: None,
-            reply: None,
-            available_in_this_build: false,
-        }
-    }));
 
     commands
 }
@@ -1127,10 +1141,35 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
-            "a command this build cannot perform",
+            "a subscription this build cannot serve",
+            ServerMessage::Refused(crate::server::metrics_refusal()),
+        ),
+        (
+            "the settings, one of which nothing reads yet",
             ServerMessage::Response(Response {
-                id: 3,
-                outcome: Outcome::Error(UnbuiltCommand::ApplySettings.refusal()),
+                id: 13,
+                outcome: Outcome::Ok(Reply::Settings {
+                    settings: exemplar_settings_view(),
+                }),
+            }),
+        ),
+        (
+            "the microphones this machine has, with the default one marked",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::AudioDevices {
+                    devices: exemplar_audio_devices(),
+                }),
+            }),
+        ),
+        (
+            "a setting refused with what would have been accepted",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::InvalidParameters,
+                    "`framerate` cannot be 900: 1-480 frames per second",
+                )),
             }),
         ),
         (
@@ -1365,6 +1404,8 @@ fn reply_discriminant(reply: &Reply) -> String {
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
+        Reply::Settings { .. } => "settings".to_owned(),
+        Reply::AudioDevices { .. } => "audio_devices".to_owned(),
         // Whether the copy is complete is part of the path, because it is the
         // one thing a window has to say differently: a mirror that dropped
         // `lossless` would reach the same discriminant for an MP4 that holds
@@ -1543,11 +1584,84 @@ fn exemplar_response() -> Response {
 
 /// A refusal carrying a detail.
 ///
-/// Taken from [`UnbuiltCommand`] rather than typed out, so the example in the
-/// schema is a refusal the recorder really sends and cannot drift from one as
-/// the subsystems behind these commands are built.
+/// Taken from the refusal an `metrics` subscription really gets rather than
+/// typed out, so the example in the schema cannot drift from what the recorder
+/// sends. Every *command* this build defines is one it performs, so the
+/// remaining `not_implemented` in the protocol is a stream rather than a
+/// command (`crate::command`).
 fn exemplar_error() -> ProtocolError {
-    UnbuiltCommand::ApplySettings.refusal()
+    crate::server::metrics_refusal()
+}
+
+/// A settings change: one value set and one reset, which are the two things a
+/// settings screen sends.
+fn exemplar_apply_settings() -> crate::settings::ApplySettings {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("microphone".to_owned(), Some("name:Shure MV7".to_owned()));
+    values.insert("framerate".to_owned(), None);
+    crate::settings::ApplySettings { values }
+}
+
+/// One setting, with every field populated so the schema sees them all.
+fn exemplar_setting_entry() -> crate::settings::SettingEntry {
+    crate::settings::SettingEntry {
+        key: "capture_target".to_owned(),
+        label: "Capture target".to_owned(),
+        value: "game-window".to_owned(),
+        overridden: false,
+        choices: vec!["game-window".to_owned(), "display".to_owned()],
+        accepted: "\"game-window\" or \"display\"".to_owned(),
+        // The row this type exists for: a setting the file carries and no
+        // recording reads, carrying the sentence that says so.
+        applies: false,
+        unavailable: Some(
+            "a recording still captures the game's own window; reading this setting when a \
+             recording starts is issue #61"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The settings a window is sent: one that is in force, and one that is not.
+fn exemplar_settings_view() -> crate::settings::SettingsView {
+    crate::settings::SettingsView {
+        file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+        settings: vec![
+            crate::settings::SettingEntry {
+                key: "microphone".to_owned(),
+                label: "Microphone".to_owned(),
+                value: "name:Shure MV7".to_owned(),
+                overridden: true,
+                choices: Vec::new(),
+                accepted: "\"default\", \"none\" or a device name".to_owned(),
+                applies: true,
+                unavailable: None,
+            },
+            exemplar_setting_entry(),
+        ],
+    }
+}
+
+/// One microphone.
+fn exemplar_audio_device() -> crate::settings::AudioDevice {
+    crate::settings::AudioDevice {
+        name: "Shure MV7".to_owned(),
+        is_default: true,
+    }
+}
+
+/// The microphones a machine has, with one that is not the default alongside
+/// the one that is.
+fn exemplar_audio_devices() -> crate::settings::AudioDevices {
+    crate::settings::AudioDevices {
+        microphones: vec![
+            exemplar_audio_device(),
+            crate::settings::AudioDevice {
+                name: "Line In (Realtek High Definition Audio)".to_owned(),
+                is_default: false,
+            },
+        ],
+    }
 }
 
 /// Every `start_recording` option at once.
@@ -1905,6 +2019,9 @@ fn every_built_command() -> Vec<Command> {
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
+        Command::GetSettings,
+        Command::ApplySettings(exemplar_apply_settings()),
+        Command::GetAudioDevices,
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1925,8 +2042,10 @@ fn every_built_command() -> Vec<Command> {
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
-            | Command::Shutdown(_)
-            | Command::Unbuilt(_) => {}
+            | Command::GetSettings
+            | Command::ApplySettings(_)
+            | Command::GetAudioDevices
+            | Command::Shutdown(_) => {}
         }
     }
     commands
@@ -1986,10 +2105,9 @@ fn every_error_detail() -> Vec<ErrorDetail> {
             supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
             recorder_version: "0.1.0".to_owned(),
         },
-        ErrorDetail::NotImplemented {
-            subsystem: UnbuiltCommand::ApplySettings.subsystem().to_owned(),
-            milestone: UnbuiltCommand::ApplySettings.milestone().to_owned(),
-            tracking_issue: UnbuiltCommand::ApplySettings.tracking_issue(),
+        match crate::server::metrics_refusal().detail {
+            Some(detail) => detail,
+            None => unreachable!("a not_implemented refusal always carries its detail"),
         },
     ];
     for detail in &details {
@@ -2097,6 +2215,12 @@ fn every_reply() -> Vec<Reply> {
                 })
                 .collect(),
         },
+        Reply::Settings {
+            settings: exemplar_settings_view(),
+        },
+        Reply::AudioDevices {
+            devices: exemplar_audio_devices(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -2175,6 +2299,8 @@ fn every_reply() -> Vec<Reply> {
             | Reply::TrashEmptied { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
+            | Reply::Settings { .. }
+            | Reply::AudioDevices { .. }
             | Reply::RecordingExported { .. }
             | Reply::ShuttingDown { .. } => {}
         }
@@ -2303,6 +2429,13 @@ mod tests {
             "library_game",
             "reply.library_sessions",
             "reply.library_games",
+            "reply.settings",
+            "reply.audio_devices",
+            "setting_entry",
+            "settings_view",
+            "apply_settings",
+            "audio_device",
+            "audio_devices",
             "error_detail.unsupported_protocol_version",
             "error_detail.not_implemented",
             "outcome.ok",

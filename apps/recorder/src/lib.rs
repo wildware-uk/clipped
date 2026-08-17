@@ -56,6 +56,7 @@ pub mod record;
 pub mod recover;
 pub mod replay;
 pub mod serve;
+pub mod settings;
 pub mod shutdown;
 pub mod start_at_login;
 pub mod storage;

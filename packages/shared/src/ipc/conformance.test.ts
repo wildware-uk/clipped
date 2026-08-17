@@ -36,6 +36,13 @@ import { parseClientMessage, parseServerMessage } from './parse';
 import type {
   ActiveRecording,
   AddBookmarkParams,
+  ApplySettingsParams,
+  AudioDevice,
+  AudioDevices,
+  AudioDevicesReply,
+  SettingEntry,
+  SettingsReply,
+  SettingsView,
   BookmarkAddedReply,
   ScreenshotSummary,
   ScreenshotTakenReply,
@@ -501,6 +508,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reason: 'required',
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
+  setting_entry: fields<SettingEntry>({
+    key: 'required',
+    label: 'required',
+    value: 'required',
+    overridden: 'required',
+    choices: 'optional',
+    accepted: 'required',
+    applies: 'required',
+    unavailable: 'optional',
+  }),
+  settings_view: fields<SettingsView>({ file: 'required', settings: 'required' }),
+  'reply.settings': fields<SettingsReply>({ reply: 'required', settings: 'required' }),
+  audio_device: fields<AudioDevice>({ name: 'required', is_default: 'required' }),
+  audio_devices: fields<AudioDevices>({ microphones: 'required' }),
+  'reply.audio_devices': fields<AudioDevicesReply>({ reply: 'required', devices: 'required' }),
+  apply_settings: fields<ApplySettingsParams>({ values: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
@@ -634,12 +657,32 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_settings',
+    params: null,
+    reply: 'reply.settings',
+    available_in_this_build: true,
+  },
+  {
+    // The command that used to be the one nobody performed. Both settings
+    // commands answer with the same reply, because what a change produced is
+    // the settings as they now stand (issue #51).
+    name: 'apply_settings',
+    params: 'apply_settings',
+    reply: 'reply.settings',
+    available_in_this_build: true,
+  },
+  {
+    name: 'get_audio_devices',
+    params: null,
+    reply: 'reply.audio_devices',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
-  { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
 ];
 
 /** Which structure each envelope's payload takes, as the types here compose it. */
@@ -699,6 +742,14 @@ function replyDiscriminant(reply: Reply): string {
       return 'library_trash';
     case 'hotkeys':
       return 'hotkeys';
+    case 'settings':
+      // One discriminant: a settings view with nothing in it is the same shape
+      // carrying nothing, and `settings` is always present.
+      return 'settings';
+    case 'audio_devices':
+      // The same. A machine with no microphone is an empty list rather than a
+      // different reply.
+      return 'audio_devices';
     case 'recording_exported':
       // Whether the copy is complete is part of the path, because it is the one
       // thing the window has to say differently: a mirror that dropped

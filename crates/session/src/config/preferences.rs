@@ -399,6 +399,36 @@ impl Preferences {
         Ok(())
     }
 
+    /// Sets `key` from the text the settings file spells it with, or clears it.
+    ///
+    /// The one setter a caller that does not know a setting's type can use —
+    /// a settings screen sending `("framerate", "120")` over the control
+    /// protocol, which is the shape a form has. `None` clears the setting, so
+    /// that Reset and "set to the default" stay different things
+    /// ([`Resolved::is_overridden`](crate::config::Resolved::is_overridden)).
+    ///
+    /// It parses with the file reader's own parsers, so a value refused here is
+    /// exactly a value the same text in [`FILE_NAME`](crate::config::FILE_NAME)
+    /// would be refused for, with the same message.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError`] naming the setting, the value and what would have been
+    /// accepted.
+    pub fn set_written(
+        &mut self,
+        key: SettingKey,
+        value: Option<&str>,
+    ) -> Result<(), SettingError> {
+        match value {
+            None => {
+                self.clear(key);
+                Ok(())
+            }
+            Some(token) => crate::config::document::set_written_setting(self, key, token),
+        }
+    }
+
     /// Whether this layer sets `key` at all.
     ///
     /// The question a Reset control asks, without needing to know the type

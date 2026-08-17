@@ -140,7 +140,11 @@ impl From<SessionError> for RecordError {
 /// and [`RecordError::Session`] if the recording itself failed. A session
 /// failure after recording started still leaves a finalised, playable file.
 pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
-    let config = RecordingConfig::resolve(args)?;
+    // Nothing configured: `record` is the subcommand that does exactly what its
+    // command line says, and it applies no setting from the settings file —
+    // including where recordings go (`docs/recorder-cli.md`). `watch` and the
+    // window are what read the user's settings.
+    let config = RecordingConfig::resolve(args, None)?;
     log_configuration(&config);
 
     // Before anything is measured. Without it every size below is the

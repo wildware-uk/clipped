@@ -196,6 +196,19 @@ pub mod features {
         /// [`ActiveRecording::replay_seconds`](crate::ActiveRecording), because
         /// it is a property of the recording rather than of the build.
         REPLAY = "replay";
+        /// The recorder can read and change the settings, and can list this
+        /// machine's microphones: `get_settings`, `apply_settings` and
+        /// `get_audio_devices`.
+        ///
+        /// A UI asks for this before drawing a settings form, for the reason
+        /// the seven above give — but with a sharper failure than most. A
+        /// recorder built before
+        /// [issue #51](https://github.com/wildware-uk/clipped/issues/51) *has*
+        /// an `apply_settings` command and refuses every call to it with
+        /// [`ErrorCode::NotImplemented`](crate::ErrorCode::NotImplemented), so
+        /// a window that did not check would draw a full form of controls and
+        /// discover that none of them save only when somebody pressed Save.
+        SETTINGS = "settings";
     }
 }
 

@@ -1,4 +1,5 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import type { SettingEntry, SettingsView } from '@clipped/shared';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,35 +7,129 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { SETTINGS_SECTIONS } from './settings';
 import { SettingsScreen } from './SettingsScreen';
-import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
+import { stubRecorderLinkRuntime, type StubbedRuntime } from './test/recorderLinkRuntime';
 
 /**
  * The Settings screen's contract, as tests (issue #51).
  *
- * Three properties, and each of them is one that would rot in silence.
+ * The properties, and each of them is one that would rot in silence.
  *
- * The first is that the screen offers **nothing that would change a setting**.
- * This window cannot read or write one (`settings.ts` says why), so a field, a
- * switch or a Save button here would be the control that silently does nothing
- * of AGENTS.md section 27. The case asserts the absence of anything operable
- * that is not the rail, rather than the presence of an explanation for it, so a
- * later change that adds a control has to come past it.
+ * The first is the **MVP path**: somebody opens this screen, picks a microphone
+ * out of the machine's own list and a folder to record into, and both reach the
+ * recorder as a change to the settings file it owns (SPEC.md section 45, step
+ * 3). It is asserted against what the window sent, because the whole point of
+ * this screen is that something arrives at the other end.
  *
- * The second is that the screen says what a user can do **instead**, per
- * setting. A screen that only listed what is missing would leave somebody who
- * came to pick a microphone with nothing at all (AGENTS.md section 45), and the
- * list of what each row must name is written out here rather than mapped from
- * the screen's own tables — a case that walked the rendered rows and checked
- * their shape is satisfied by rows somebody invented.
+ * The second is that a setting **nothing reads** is not drawn as a control. The
+ * recorder says which those are, and a screen that drew one as a working field
+ * would be the control that silently does nothing of AGENTS.md section 27 — the
+ * exact failure this screen was written twice to avoid.
  *
- * The third is that the rail works from the keyboard alone. It is the only
- * control on the screen, and a rail that needed a pointer would put five of the
- * six sections out of reach (AGENTS.md section 46).
+ * The third is that a **refusal** arrives as the recorder's own sentence, over
+ * the value that was refused, with what was typed still on screen to correct
+ * (AGENTS.md section 45).
+ *
+ * The fourth is that the rail works from the keyboard alone, because it is how
+ * five of the six sections are reached (AGENTS.md section 46).
  *
  * What is *not* here is whether the settings named are the real ones and the
  * commands named are real commands. Neither can be established from TypeScript:
  * both live in Rust, and `settingsConformance.test.ts` reads them there.
  */
+
+/** One setting as the recorder sends it, with the fields a control needs. */
+function entry(overrides: Partial<SettingEntry> & Pick<SettingEntry, 'key'>): SettingEntry {
+  return {
+    label: overrides.key,
+    value: '',
+    overridden: false,
+    accepted: 'something',
+    applies: true,
+    ...overrides,
+  };
+}
+
+/** The settings a recorder with nothing configured sends. */
+const SETTINGS: SettingsView = {
+  file: String.raw`C:\Users\alex\AppData\Local\Clipped\settings.json`,
+  settings: [
+    entry({
+      key: 'capture_target',
+      label: 'Capture target',
+      value: 'game-window',
+      choices: ['game-window', 'display'],
+      accepted: '"game-window" or "display"',
+      // The row this screen has to get right: a key the file carries and no
+      // recording reads.
+      applies: false,
+      unavailable: 'every recording captures the game’s own window (issue #61)',
+    }),
+    entry({
+      key: 'framerate',
+      label: 'Frame rate',
+      value: '60',
+      accepted: '1-480 frames per second',
+    }),
+    entry({
+      key: 'codec',
+      label: 'Codec',
+      value: 'auto',
+      choices: ['auto', 'h264', 'hevc', 'av1'],
+      accepted: '"auto", "h264", "hevc" or "av1"',
+    }),
+    entry({
+      key: 'microphone',
+      label: 'Microphone',
+      value: 'default',
+      accepted: '"default", "none" or a device name',
+    }),
+    entry({
+      key: 'recording_directory',
+      label: 'Recording directory',
+      value: String.raw`C:\Users\alex\Videos\Clipped`,
+      accepted: 'a folder on this machine, such as D:\\Clips',
+    }),
+  ],
+};
+
+/** The same, with one setting answered differently. */
+function settingsWith(key: string, changes: Partial<SettingEntry>): SettingsView {
+  return {
+    ...SETTINGS,
+    settings: SETTINGS.settings.map((candidate) =>
+      candidate.key === key ? { ...candidate, ...changes } : candidate,
+    ),
+  };
+}
+
+/** This machine's microphones, as `get_audio_devices` answers. */
+const MICROPHONES = {
+  microphones: [
+    { name: 'Realtek Line In', is_default: false },
+    { name: 'Shure MV7', is_default: true },
+  ],
+};
+
+/** What the window sent to `apply_recorder_settings`, in order. */
+function saved(runtime: StubbedRuntime): readonly Record<string, unknown>[] {
+  return runtime.invocations
+    .filter((invocation) => invocation.command === 'apply_recorder_settings')
+    .map((invocation) => invocation.args['values'] as Record<string, unknown>);
+}
+
+/** Mounts the screen over a recorder that answers with `SETTINGS`. */
+function renderScreen(
+  overrides: Parameters<typeof stubRecorderLinkRuntime>[2] = {},
+): StubbedRuntime {
+  const runtime = stubRecorderLinkRuntime({ link: 'connecting' }, null, {
+    recorderSettings: () => SETTINGS,
+    audioDevices: () => MICROPHONES,
+    recorderHotkeys: () => [],
+    ...overrides,
+  });
+  render(<SettingsScreen />);
+  return runtime;
+}
 
 /** Mounts the application the way `main.tsx` does, StrictMode and all. */
 function renderApp(): void {
@@ -81,57 +176,179 @@ describe('the Settings screen', () => {
     window.location.hash = '';
   });
 
-  it('says that no setting can be changed here, and why', () => {
-    render(<SettingsScreen />);
+  /*
+   * Step 3 of SPEC.md section 45's MVP definition, from this side of the pipe:
+   * "select microphone and recording directory". The device comes from the
+   * machine's own list rather than from a name somebody has to type, and what
+   * is asserted is the change the window sent — a screen that redrew itself
+   * beautifully and sent nothing would pass every other case here.
+   */
+  it('saves the microphone somebody picked out of this machine’s own list', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      applySettings: () =>
+        settingsWith('microphone', { value: 'name:Shure MV7', overridden: true }),
+    });
 
-    const panel = screen.getByRole('region', { name: 'Why nothing here can be changed' });
+    await openSection(user, 'Audio');
+    const microphone = await screen.findByLabelText('Microphone');
 
-    expect(within(panel).getByRole('heading', { level: 2 })).toHaveTextContent(
-      /^No setting can be changed from this window$/,
+    // The default one is marked, because `default` follows whichever endpoint
+    // Windows is using and somebody choosing has to know which that is.
+    expect(within(microphone).getByRole('option', { name: /Shure MV7/ })).toHaveTextContent(
+      'Shure MV7 (default)',
     );
-    // The mechanism, not an apology: the command that is refused, the file it
-    // would have written, and the issue that makes it reachable.
-    expect(panel).toHaveTextContent(/apply_settings/);
-    expect(panel).toHaveTextContent(/not implemented/);
-    expect(panel).toHaveTextContent(/%LOCALAPPDATA%\\Clipped\\settings\.json/);
-    expect(panel).toHaveTextContent(/#252/);
+
+    await user.selectOptions(microphone, 'name:Shure MV7');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(saved(runtime)).toEqual([{ microphone: 'name:Shure MV7' }]);
+    });
+
+    // And the screen redraws from what came back rather than from what it sent.
+    expect(await screen.findByLabelText('Microphone')).toHaveValue('name:Shure MV7');
+    expect(screen.getByRole('button', { name: 'Reset Microphone' })).toBeVisible();
+  });
+
+  it('saves the recording directory somebody chose from the folder dialog', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      openDialog: () => String.raw`D:\Clips`,
+      applySettings: () =>
+        settingsWith('recording_directory', { value: String.raw`D:\Clips`, overridden: true }),
+    });
+
+    await openSection(user, 'Storage');
+    await screen.findByLabelText('Recording directory');
+    await user.click(screen.getByRole('button', { name: 'Browse…' }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Recording directory')).toHaveValue(String.raw`D:\Clips`);
+    });
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(saved(runtime)).toEqual([{ recording_directory: String.raw`D:\Clips` }]);
+    });
   });
 
   /*
-   * The deck draws device pickers, a directory chooser, quality presets and a
-   * row of switches. None of them has anything behind it in this build, so none
-   * is drawn — not even disabled, because a screen has room to say why and a
-   * disabled control says less than the row that names the issue.
-   *
-   * Asserted as a property rather than as a list of the controls that are
-   * absent: anything operable here would have to do something, and the only
-   * thing that can is the rail.
+   * The recorder says which settings nothing reads when a recording starts, and
+   * a control for one of those is a control that silently does nothing — the
+   * defect this screen has been rewritten around twice (AGENTS.md section 27).
    */
-  it('offers no control that would change a setting', () => {
-    render(<SettingsScreen />);
+  it('draws a setting nothing reads as its value and the reason, never as a control', async () => {
+    const user = userEvent.setup();
+    renderScreen();
 
-    // Not vacuous: the rail is here, and it is what the exclusion below is for.
-    expect(screen.getAllByRole('tab')).toHaveLength(SETTINGS_SECTIONS.length);
+    await openSection(user, 'Recording');
+    await screen.findByLabelText('Frame rate');
 
-    for (const role of [
-      'button',
-      'link',
-      'textbox',
-      'combobox',
-      'checkbox',
-      'radio',
-      'switch',
-      'slider',
-      'spinbutton',
-      'menuitem',
-    ] as const) {
-      expect(screen.queryAllByRole(role), `nothing on this screen is a ${role}`).toHaveLength(0);
-    }
+    expect(screen.queryByLabelText('Capture target')).toBeNull();
+    expect(pane()).toHaveTextContent('every recording captures the game’s own window (issue #61)');
+    expect(pane()).toHaveTextContent('game-window');
+  });
+
+  /*
+   * The refusal is the recorder's, word for word: it names the setting, the
+   * value and what would have been accepted, and this window invents no wording
+   * of its own for a judgement it did not make. What was typed stays, because
+   * somebody has to be able to correct it (AGENTS.md section 45).
+   */
+  it('shows the recorder’s own refusal, and keeps what was typed', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      applySettings: () => {
+        throw {
+          code: 'invalid_parameters',
+          message: '`framerate` cannot be 900: 1-480 frames per second',
+        };
+      },
+    });
+
+    await openSection(user, 'Recording');
+    const framerate = await screen.findByLabelText('Frame rate');
+    await user.clear(framerate);
+    await user.type(framerate, '900');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '`framerate` cannot be 900: 1-480 frames per second',
+    );
+    expect(screen.getByLabelText('Frame rate')).toHaveValue('900');
+    expect(saved(runtime)).toEqual([{ framerate: '900' }]);
+  });
+
+  /*
+   * Reset is `null`, not "write the default in": a setting reset here follows a
+   * later change to the default, and one set to today's default does not
+   * (`docs/configuration.md`). Offered only for a setting the recorder says was
+   * configured, because Reset on a value nobody set does nothing.
+   */
+  it('resets a setting by clearing it, and offers Reset only for one that was set', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      recorderSettings: () => settingsWith('framerate', { value: '120', overridden: true }),
+      applySettings: () => SETTINGS,
+    });
+
+    await openSection(user, 'Recording');
+    await screen.findByLabelText('Frame rate');
+
+    expect(screen.queryByRole('button', { name: 'Reset Codec' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Reset Frame rate' }));
+
+    await waitFor(() => {
+      expect(saved(runtime)).toEqual([{ framerate: null }]);
+    });
+    expect(await screen.findByLabelText('Frame rate')).toHaveValue('60');
+  });
+
+  /*
+   * A machine whose microphones could not be enumerated is a machine that was
+   * asked and could not answer, which is not the same as one with no
+   * microphone — and only one of the two means "plug something in".
+   */
+  it('says the microphones could not be listed rather than showing an empty list', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      audioDevices: () => {
+        throw { code: 'internal', message: 'this machine’s microphones could not be listed' };
+      },
+    });
+
+    await openSection(user, 'Audio');
+    const microphone = await screen.findByLabelText('Microphone');
+
+    expect(within(microphone).getAllByRole('option')).toHaveLength(2);
+    expect(pane()).toHaveTextContent('could not be listed');
+  });
+
+  /*
+   * A recorder that cannot be reached is one whose settings are unknown, and a
+   * screen that drew empty controls over it would be offering to change
+   * something it never read.
+   */
+  it('draws no control at all when the recorder cannot be asked', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      recorderSettings: () => {
+        throw { code: 'recorder_unreachable', message: 'the recorder is not running' };
+      },
+    });
+
+    await openSection(user, 'Recording');
+    await screen.findByText(/the recorder is not running/);
+
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0);
+    expect(screen.queryAllByRole('combobox')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Save changes' })).toBeNull();
   });
 
   it('opens each section from the rail, and says which section a pane is', async () => {
     const user = userEvent.setup();
-    render(<SettingsScreen />);
+    renderScreen();
 
     for (const section of SETTINGS_SECTIONS) {
       await openSection(user, section.label);
@@ -153,7 +370,7 @@ describe('the Settings screen', () => {
    */
   it('is driven by the keyboard alone: one tab stop, then the arrow keys', async () => {
     const user = userEvent.setup();
-    render(<SettingsScreen />);
+    renderScreen();
 
     const [first, second] = SETTINGS_SECTIONS;
     if (first === undefined || second === undefined) {
@@ -173,16 +390,15 @@ describe('the Settings screen', () => {
 
     await user.keyboard('{Home}');
     expect(pane()).toHaveAccessibleName(first.label);
-
-    // And out of the rail in one press, into the pane it opened, rather than
-    // through the five sections it did not.
-    await user.tab();
-    expect(pane()).toHaveFocus();
   });
 
   it('is reached from the sidebar with Tab and Enter', async () => {
     const user = userEvent.setup();
-    stubRecorderLinkRuntime({ link: 'connecting' });
+    stubRecorderLinkRuntime({ link: 'connecting' }, null, {
+      recorderSettings: () => SETTINGS,
+      audioDevices: () => MICROPHONES,
+      recorderHotkeys: () => [],
+    });
     renderApp();
 
     // Skip link, Home, Library, Games, Editor, Settings.
@@ -198,10 +414,12 @@ describe('the Settings screen', () => {
     expect(screen.getByRole('tablist', { name: 'Settings sections' })).toBeVisible();
   });
 
-  it('heads each column with the question the row answers', () => {
-    render(<SettingsScreen />);
+  it('heads each column of the account with the question the row answers', async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await openSection(user, 'Storage');
 
-    const headers = within(screen.getByRole('table'))
+    const headers = within(within(pane()).getByRole('table'))
       .getAllByRole('columnheader')
       .map((header) => header.textContent);
 
@@ -209,106 +427,33 @@ describe('the Settings screen', () => {
   });
 
   /*
-   * What each of these settings is set by today, and the work that has to land
-   * before this window can hold it — written out here rather than read from
-   * `SETTINGS_SECTIONS`.
-   *
-   * That is the whole of the case. A test that walked the screen's own rows and
-   * asserted "the third cell names some issue" is satisfied by a table of rows
-   * somebody made up, which is exactly what a review of the Games screen
-   * demonstrated by replacing every row with `{ shows: 'x', needs: 'Issue #1' }`
-   * and watching the suite stay green. The claim is that *these* settings are
-   * pinned to *these* pieces of work.
-   *
-   * Every entry is one a user might come to this screen for, and the two files
-   * are named in full because a path is the only thing on this screen anybody
-   * can act on directly (AGENTS.md sections 28 and 45).
+   * The settings SPEC.md asks a settings screen for that this window still
+   * cannot offer: what each is set by today, and the work that has to land.
+   * Written out here rather than read from `SETTINGS_SECTIONS`, because a case
+   * that walked the screen's own rows and checked their shape is satisfied by
+   * rows somebody invented — which a review of the Games screen demonstrated by
+   * replacing every row with `{ shows: 'x', needs: 'Issue #1' }` and watching
+   * the suite stay green.
    */
-  const MUST_BE_NAMED: readonly (readonly [
-    section: string,
-    setting: string,
-    today: RegExp,
-    issues: readonly number[],
-  ])[] = [
-    ['Recording', 'Frame rate', /clipped-recorder watch --framerate 60/, [61, 252]],
-    ['Recording', 'Replay window', /no build starts a recording that runs one/, [38, 61, 252]],
-    ['Recording', 'Recording format', /Matroska/, [307]],
-    ['Audio', 'Microphone', /clipped-recorder watch --microphone default/, [180, 308, 252]],
-    ['Audio', 'Audio tracks, enable and level', /nothing produces the tracks/, [180, 81, 33]],
-    ['Storage', 'Recording directory', /--output-directory/, [307]],
-    ['Storage', 'Trash and recovery', /no trash to recover from/, [94]],
-    ['Hotkeys', 'Which combination an action has', /Ctrl\+F9 to bookmark/, [54, 233]],
-    ['Hotkeys', 'A combination another application owns', /a key that does nothing/, [417]],
-    ['Notifications', 'A recording failed', /"recording_failed": false/, [252]],
-    [
-      'Startup',
-      'Start the recorder when I sign in',
-      /clipped-recorder start-at-login enable/,
-      [308],
-    ],
-  ];
-
-  it.each(MUST_BE_NAMED)(
-    'says how %s > %s is set today, and what would bring it here',
-    async (section, setting, today, issues) => {
+  it.each([
+    ['Recording', 'Quality preset and bitrate', /bitrate/, /#181/],
+    ['Recording', 'Recording format', /Matroska/, /#307/],
+    ['Audio', 'Audio tracks, enable and level', /nothing mixes/, /#81/],
+    ['Audio', 'A named playback device', /Windows is playing through/, /#316/],
+    ['Storage', 'Maximum usage, minimum free space, maximum age', /by hand/, /#95/],
+    ['Storage', 'Per-game settings', /section per game/, /#63/],
+    ['Notifications', 'A recording failed', /went wrong/, /#252/],
+    ['Startup', 'Start the recorder when I sign in', /start-at-login/, /#308/],
+  ])(
+    'says, in %s, how "%s" is set today and what it is waiting for',
+    async (section, label, today, needs) => {
       const user = userEvent.setup();
-      render(<SettingsScreen />);
+      renderScreen();
       await openSection(user, section);
 
-      const [, isSetBy, waitsFor] = rowFor(setting);
-
-      expect(isSetBy ?? '').toMatch(today);
-      for (const issue of issues) {
-        expect(waitsFor ?? '', `${setting} waits on #${String(issue)}`).toMatch(
-          new RegExp(`#${String(issue)}\\b`),
-        );
-      }
+      const [, todayCell, needsCell] = rowFor(label);
+      expect(todayCell).toMatch(today);
+      expect(needsCell).toMatch(needs);
     },
   );
-
-  /*
-   * The notification switches are the one thing on this screen somebody can
-   * change today, and the way to change them is a file this window does not
-   * write. Saying so is the difference between a screen that is honest and one
-   * that is merely apologetic.
-   */
-  it('names the file the notification switches are set in, and their keys', async () => {
-    const user = userEvent.setup();
-    render(<SettingsScreen />);
-    await openSection(user, 'Notifications');
-
-    expect(pane()).toHaveTextContent(/%APPDATA%\\uk\.wildware\.clipped\\notifications\.json/);
-    for (const key of [
-      'recording_failed',
-      'recording_interrupted',
-      'recorder_unavailable',
-      'hotkey_unavailable',
-    ]) {
-      expect(pane()).toHaveTextContent(new RegExp(key));
-    }
-    expect(pane()).toHaveTextContent(/Every category is on until that file says otherwise/);
-  });
-
-  /*
-   * Every row, not only the ten above: a row that named no work at all would be
-   * a statement that something is missing with nothing behind it, which is the
-   * shape of a promise nobody has made.
-   */
-  it('pins every setting to the work that would bring it here', () => {
-    for (const section of SETTINGS_SECTIONS) {
-      for (const row of section.rows) {
-        expect(row.needs, `${section.label} > ${row.label}`).toMatch(/#\d+/);
-        expect(row.today.length, `${section.label} > ${row.label}`).toBeGreaterThan(0);
-      }
-    }
-  });
-
-  it('has a heading for the panel and for the section on show', () => {
-    render(<SettingsScreen />);
-
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Settings');
-    expect(
-      screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
-    ).toEqual(['No setting can be changed from this window', 'Recording']);
-  });
 });

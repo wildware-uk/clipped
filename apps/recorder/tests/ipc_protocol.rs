@@ -44,10 +44,11 @@ use std::time::Duration;
 use clipped_ipc::frame::{read_message, write_message};
 use clipped_ipc::transport::connect;
 use clipped_ipc::{
-    features, Client, ClientError, ClientMessage, Command as IpcCommand, ConnectionRole, Endpoint,
-    ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, HotkeyBinding, PeerIdentity,
-    RecorderStatus, Reply, SaveReplay, ServerMessage, StartRecording, StopRecording,
-    MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
+    features, ApplySettings, Client, ClientError, ClientMessage, Command as IpcCommand,
+    ConnectionRole, Endpoint, ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello,
+    HotkeyBinding, PeerIdentity, RecorderStatus, Reply, SaveReplay, ServerMessage, SettingEntry,
+    SettingsView, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
 };
 
 use support::{
@@ -221,16 +222,18 @@ fn a_client_handshakes_with_a_real_recorder_and_gets_answers_to_real_commands() 
 
 #[test]
 fn save_replay_is_a_command_this_recorder_performs_rather_than_one_it_refuses_by_name() {
-    // Issue #38 turned `save_replay` from an `UnbuiltCommand` into a real one,
-    // and this is the difference against a real process: the refusal a recorder
+    // Issue #38 turned `save_replay` from a command that was parsed only so it
+    // could be refused into a real one, and this is the difference against a
+    // real process: the refusal a recorder
     // with nothing recording gives is `not_recording` — a fact about right now,
     // which changes when a recording starts — and **not** `not_implemented`,
     // which is a fact about the build and never changes.
     //
     // The mistake it guards against is the one `add_bookmark` and the library
-    // commands already record: a command left in `UNBUILT_COMMANDS` after its
-    // subsystem landed refuses every request with a plausible sentence about a
-    // milestone, and nobody questions it.
+    // commands already record: a command still refused as unbuilt after its
+    // subsystem landed answers every request with a plausible sentence about a
+    // milestone, and nobody questions it. `apply_settings` was the last of
+    // them, until issue #51.
     let recorder = ServedRecorder::start("save-replay");
     let mut client = recorder.client();
 
@@ -419,42 +422,175 @@ fn a_client_that_disappears_mid_request_leaves_the_recorder_serving() {
     recorder.stop();
 }
 
+/// One setting out of a view, by the key the settings file holds it under.
+fn setting(view: &SettingsView, key: &str) -> SettingEntry {
+    view.settings
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| {
+            panic!(
+                "the recorder sent no `{key}` setting: {:?}",
+                view.settings
+                    .iter()
+                    .map(|entry| &entry.key)
+                    .collect::<Vec<_>>()
+            )
+        })
+        .clone()
+}
+
+/// The settings a `get_settings` or an `apply_settings` answered with.
+fn settings_of(reply: Reply) -> SettingsView {
+    match reply {
+        Reply::Settings { settings } => settings,
+        other => panic!("expected the settings, got {other:?}"),
+    }
+}
+
+/// One change, as a settings screen sends it.
+fn change(key: &str, value: Option<&str>) -> ApplySettings {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert(key.to_owned(), value.map(str::to_owned));
+    ApplySettings { values }
+}
+
 #[test]
-fn every_command_whose_subsystem_is_not_built_is_refused_with_where_it_is_being_built() {
-    // AGENTS.md sections 27 and 54: not silence, and not a success it did not
-    // perform. The UI has to be able to say "not in this build" and point
-    // somewhere.
-    let recorder = ServedRecorder::start("unbuilt");
+fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_records_by() {
+    // Step 3 of SPEC.md section 45's MVP, against a real recorder over a real
+    // pipe: pick a microphone, and it is in the file the recorder reads and in
+    // the answer the next window gets. Until issue #51 the window could not
+    // read or write a setting at all — `apply_settings` was refused by every
+    // build with `not_implemented`.
+    let home = scratch_home("settings");
+    let recorder = ServedRecorder::start_under("settings", Some(&home));
     let mut client = recorder.client();
 
-    for unbuilt in UNBUILT_COMMANDS {
-        let error = client
-            .call_raw(unbuilt.name(), serde_json::json!({}))
-            .expect_err("this build cannot do that");
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::SETTINGS),
+        "a build that can change settings has to say so, or the window never draws the \
+         controls: {:?}",
+        client.welcome()
+    );
 
-        match error {
-            ClientError::Refused(refusal) => {
-                assert_eq!(
-                    refusal.code,
-                    ErrorCode::NotImplemented,
-                    "{}",
-                    unbuilt.name()
-                );
-                match refusal.detail {
-                    Some(ErrorDetail::NotImplemented {
-                        subsystem,
-                        milestone,
-                        tracking_issue,
-                    }) => {
-                        assert!(!subsystem.is_empty());
-                        assert!(!milestone.is_empty());
-                        assert_eq!(tracking_issue, unbuilt.tracking_issue());
-                    }
-                    other => panic!("{} should say where it is built: {other:?}", unbuilt.name()),
-                }
-            }
-            other => panic!("{} should be refused, not {other}", unbuilt.name()),
+    let before = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("a recorder that is serving can be asked for its settings"),
+    );
+    let microphone = setting(&before, "microphone");
+    assert_eq!(microphone.value, "default");
+    assert!(
+        !microphone.overridden,
+        "a machine whose settings file does not exist has configured nothing",
+    );
+    assert!(
+        microphone.applies,
+        "the microphone is read when a recording starts, so it is offered as a control",
+    );
+
+    let after = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "microphone",
+                Some("name:Shure MV7"),
+            )))
+            .expect("a device name is a value the settings file can hold"),
+    );
+    assert_eq!(setting(&after, "microphone").value, "name:Shure MV7");
+    assert!(setting(&after, "microphone").overridden);
+
+    // The file the recorder owns, not this process's idea of it: what makes
+    // "close the window and recording works from then on" true is that the
+    // choice is on disk (SPEC.md section 45).
+    let file = std::path::PathBuf::from(&after.file);
+    assert!(
+        file.starts_with(&home),
+        "the recorder saved to {} rather than under the home this test gave it",
+        file.display(),
+    );
+    let written = std::fs::read_to_string(&file).expect("the settings file was written");
+    assert!(
+        written.contains("Shure MV7"),
+        "the microphone did not reach the file: {written}",
+    );
+
+    // And a window opening afterwards is told the same thing.
+    let mut second = recorder.client();
+    let again = settings_of(
+        second
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read again"),
+    );
+    assert_eq!(setting(&again, "microphone").value, "name:Shure MV7");
+
+    drop(second);
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_setting_the_file_would_refuse_is_refused_with_what_would_have_been_accepted() {
+    // AGENTS.md section 45, over the wire: not "invalid", but the value, the
+    // range and the setting — the same sentence the file's own reader gives,
+    // because it is the same validation (`clipped_session::config`).
+    let home = scratch_home("settings-refused");
+    let recorder = ServedRecorder::start_under("settings-refused", Some(&home));
+    let mut client = recorder.client();
+
+    match client.call(&IpcCommand::ApplySettings(change("framerate", Some("900")))) {
+        Err(ClientError::Refused(refusal)) => {
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+            assert!(
+                refusal.message.contains("900") && refusal.message.contains("480"),
+                "the refusal should name the value and the range: {}",
+                refusal.message,
+            );
         }
+        other => panic!("900 frames per second should be refused, got {other:?}"),
+    }
+
+    // And nothing was saved: a refused change leaves the settings alone.
+    let view = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can still be read"),
+    );
+    assert_eq!(setting(&view, "framerate").value, "60");
+    assert!(!setting(&view, "framerate").overridden);
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn the_recorder_lists_the_microphones_it_would_record_from_or_says_why_it_cannot() {
+    // AGENTS.md section 27: an empty list drawn as though the machine had been
+    // looked at is the failure this reply exists to prevent, so either there is
+    // a list or there is a reason. Which of the two this machine gives depends
+    // on the machine, and both are answers.
+    let recorder = ServedRecorder::start("audio-devices");
+    let mut client = recorder.client();
+
+    match client.call(&IpcCommand::GetAudioDevices) {
+        Ok(Reply::AudioDevices { devices }) => {
+            for device in &devices.microphones {
+                assert!(
+                    !device.name.trim().is_empty(),
+                    "a device somebody is asked to choose has to have a name: {devices:?}",
+                );
+            }
+        }
+        Err(ClientError::Refused(refusal)) => {
+            assert!(
+                !refusal.message.trim().is_empty(),
+                "a recorder that cannot list the devices has to say why",
+            );
+        }
+        other => panic!("expected a device list or a reason, got {other:?}"),
     }
 
     drop(client);

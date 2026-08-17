@@ -213,7 +213,12 @@ impl Error for WatchCommandError {
 /// finalised and written out: the failure paths below all go through the same
 /// shutdown as Ctrl+C.
 pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
-    let directory = output_directory(args)?;
+    // Read before anything else, because where recordings go is one of the
+    // things it says: a directory somebody picked in the settings screen is
+    // where this run writes, without `--output-directory` and without a flag
+    // they would have to remember (issue #307).
+    let configuration = load_configuration(ConfigurationStore::default_path().as_deref());
+    let directory = output_directory(args, &configuration)?;
     let catalogue = load_catalogue()?;
 
     // A property of the process, set once, and before anything measures a
@@ -245,7 +250,7 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
         // installed afterwards costs (issue #522).
         Launchers::discover(),
         AutomaticSettings::new(directory.clone()),
-        ConfigurationStore::default_path().as_deref(),
+        configuration,
         RecordingPlan::from(args),
         installed_plugins(),
     );
@@ -262,12 +267,22 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
 }
 
 /// Where recordings and session records go.
-fn output_directory(args: &WatchArgs) -> Result<PathBuf, WatchCommandError> {
+///
+/// Three answers in order: what this run was told on its command line, what the
+/// user configured, and the Clipped folder of their videos directory. The flag
+/// wins over the setting because it is what somebody typed for this run
+/// (`docs/configuration.md`).
+fn output_directory(
+    args: &WatchArgs,
+    configuration: &Configuration,
+) -> Result<PathBuf, WatchCommandError> {
     let directory = match &args.output_directory {
         Some(named) => named.clone(),
-        None => {
-            crate::config::default_output_directory().ok_or(WatchCommandError::NoOutputDirectory)?
-        }
+        None => match configuration.storage().recording_directory() {
+            Some(configured) => configured.to_path_buf(),
+            None => crate::config::default_output_directory()
+                .ok_or(WatchCommandError::NoOutputDirectory)?,
+        },
     };
 
     // Created here rather than on the first recording, because this command
@@ -394,7 +409,7 @@ pub fn load_configuration(path: Option<&Path>) -> Configuration {
 ///   standard error. No subscriber can see an `eprintln!`, however well the
 ///   first test is written, so until the second existed the line below could be
 ///   deleted with every test on the branch still green.
-fn report_unreadable_settings(error: &ConfigurationError) {
+pub(crate) fn report_unreadable_settings(error: &ConfigurationError) {
     let sentence = unreadable_settings_sentence(error);
     tracing::warn!(
         %error,
@@ -597,11 +612,13 @@ impl Driver {
     /// A driver with nothing running, recording each game at whatever the
     /// user's settings say it should be recorded at.
     ///
-    /// `settings_file` is where those settings are kept — read here rather than
-    /// taken as a [`Configuration`] so that the whole path from a file on disk
-    /// to the settings a recording is started with is one thing a test can
-    /// exercise, including the two cases where there is nothing to read
-    /// ([`load_configuration`]).
+    /// `configuration` is what [`load_configuration`] read from the user's
+    /// settings file — handed in rather than read here because `run` has
+    /// already read it to work out where recordings go, and one process reading
+    /// one file once is what stops the two answers disagreeing. A test that is
+    /// about the whole path from a file on disk to the settings a recording is
+    /// started with calls [`load_configuration`] itself and passes the result,
+    /// including the two cases where there is nothing to read.
     ///
     /// `installed_plugins` is the other half of the same idea and is handed in
     /// rather than discovered here, because [`installed_plugins`] reads a real
@@ -612,14 +629,13 @@ impl Driver {
         catalogue: Catalogue,
         launchers: Launchers,
         settings: AutomaticSettings,
-        settings_file: Option<&Path>,
+        configuration: Configuration,
         plan: RecordingPlan,
         installed_plugins: Vec<InstalledPlugin>,
     ) -> Self {
         // Per-game settings reach a recording through the manager: it resolves
         // them when it asks for one, and `attempt` lays the answer over what
         // the command line asked for (issue #61).
-        let configuration = load_configuration(settings_file);
         // Taken before the configuration moves into the manager. Which plugins
         // the user enabled is not a per-game setting the manager resolves, and
         // `attach_plugins` runs on a path that must not go looking for a
@@ -1207,7 +1223,10 @@ where
 {
     let game = request.game.display_name();
     let args = plan.args_for(request.process_id, &request.output);
-    let config = match RecordingConfig::resolve(&args) {
+    // No configured directory to fall back on: an automatic recording's output
+    // is decided by the session manager, under the directory `run` resolved,
+    // and is always named here (`plan.args_for`).
+    let config = match RecordingConfig::resolve(&args, None) {
         Ok(config) => config,
         Err(error) => return failure(&error, game),
     };
@@ -1556,7 +1575,10 @@ name = "test-game.exe"
             // And no launchers, for the same reason as the plugins below.
             Launchers::none(),
             AutomaticSettings::new(directory.recordings()),
-            Some(settings_file),
+            // Read here rather than inside the driver, which is the whole of
+            // what `run` does: from the file on disk to the settings a
+            // recording is started with.
+            load_configuration(Some(settings_file)),
             RecordingPlan::from(&args()),
             // No plugins: what a settings file does to a recording is what
             // these tests are about, and reading this machine's plugins

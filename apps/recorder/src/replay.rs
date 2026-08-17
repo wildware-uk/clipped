@@ -212,7 +212,9 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
     // same fold rather than a second one.
     let settings = configuration.resolve_global();
 
-    let config = ReplayConfig::resolve(args, *settings.replay_window().value())?;
+    // Nothing configured for where it goes: `replay`, like `record`, writes
+    // where its command line says (`crate::record`).
+    let config = ReplayConfig::resolve(args, *settings.replay_window().value(), None)?;
     // Before the capture session, the encoder and the file, so that an
     // unsupported duration is a usage error and not a discovery.
     let replay = Arc::new(ReplayRecording::new(config.window)?);

@@ -80,16 +80,18 @@ tauri = { version = "2", features = ["tray-icon"] }
 # (`src/main.rs`, "What the window can ask this process to do").
 tauri-plugin-opener = "2"
 # The native Save As dialog an export's destination is chosen through (issue
-# #399). Tauri's own plugin, dual MIT/Apache-2.0.
+# #399) and the folder picker a recording directory is chosen through (issue
+# #51). Tauri's own plugin, dual MIT/Apache-2.0.
 #
 # The one plugin the interface calls directly, which is why
-# `capabilities/default.json` gains `dialog:allow-save` and nothing else. That
-# permission is exactly what it needs: the window may ask the operating system
-# to show a Save As dialog, and the path that comes back is a path the person
-# in front of the machine typed. It grants no file-system access — the window
-# still cannot read, write or list anything — and the export it feeds is
-# performed by the recorder, which refuses a destination that already exists
-# (AGENTS.md section 56).
+# `capabilities/default.json` gains `dialog:allow-save` and `dialog:allow-open`
+# and nothing else. Those permissions are exactly what it needs: the window may
+# ask the operating system to show a dialog, and what comes back is a path the
+# person in front of the machine typed or chose. Neither grants file-system
+# access — the window still cannot read, write or list anything — and what
+# happens at those paths is the recorder's: it refuses an export destination
+# that already exists (AGENTS.md section 56), and it is what writes into the
+# recording directory.
 #
 # It brings `tauri-plugin-fs` in as a Rust dependency, which it uses to widen
 # that plugin's scope to a file the user picked *when that plugin is

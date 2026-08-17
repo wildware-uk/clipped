@@ -49,8 +49,10 @@
         "plugins",
         "export_recording",
         "get_hotkeys",
-        "shutdown",
-        "apply_settings"
+        "get_settings",
+        "apply_settings",
+        "get_audio_devices",
+        "shutdown"
       ],
       "tolerates_unrecognised": true
     },
@@ -123,7 +125,8 @@
         "library",
         "export",
         "hotkeys",
-        "replay"
+        "replay",
+        "settings"
       ],
       "tolerates_unrecognised": true
     },
@@ -162,6 +165,8 @@
         "library_games",
         "recording_exported",
         "hotkeys",
+        "settings",
+        "audio_devices",
         "shutting_down",
         "library_events",
         "library_trash",
@@ -202,6 +207,25 @@
         "lead_seconds",
         "recording_id"
       ]
+    },
+    "apply_settings": {
+      "required": [],
+      "optional": [
+        "values"
+      ]
+    },
+    "audio_device": {
+      "required": [
+        "is_default",
+        "name"
+      ],
+      "optional": []
+    },
+    "audio_devices": {
+      "required": [
+        "microphones"
+      ],
+      "optional": []
     },
     "bookmark_summary": {
       "required": [
@@ -473,6 +497,13 @@
       ],
       "optional": []
     },
+    "reply.audio_devices": {
+      "required": [
+        "devices",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.bookmark_added": {
       "required": [
         "bookmark",
@@ -572,6 +603,13 @@
       ],
       "optional": []
     },
+    "reply.settings": {
+      "required": [
+        "reply",
+        "settings"
+      ],
+      "optional": []
+    },
     "reply.shutting_down": {
       "required": [
         "reply"
@@ -630,6 +668,27 @@
         "at_seconds",
         "recording_id"
       ]
+    },
+    "setting_entry": {
+      "required": [
+        "accepted",
+        "applies",
+        "key",
+        "label",
+        "overridden",
+        "value"
+      ],
+      "optional": [
+        "choices",
+        "unavailable"
+      ]
+    },
+    "settings_view": {
+      "required": [
+        "file",
+        "settings"
+      ],
+      "optional": []
     },
     "shutdown": {
       "required": [],
@@ -780,16 +839,28 @@
       "available_in_this_build": true
     },
     {
-      "name": "shutdown",
-      "params": "shutdown",
-      "reply": "reply.shutting_down",
+      "name": "get_settings",
+      "params": null,
+      "reply": "reply.settings",
       "available_in_this_build": true
     },
     {
       "name": "apply_settings",
+      "params": "apply_settings",
+      "reply": "reply.settings",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_audio_devices",
       "params": null,
-      "reply": null,
-      "available_in_this_build": false
+      "reply": "reply.audio_devices",
+      "available_in_this_build": true
+    },
+    {
+      "name": "shutdown",
+      "params": "shutdown",
+      "reply": "reply.shutting_down",
+      "available_in_this_build": true
     }
   ],
   "samples": [
@@ -949,7 +1020,8 @@
           "library",
           "export",
           "hotkeys",
-          "replay"
+          "replay",
+          "settings"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -1733,26 +1805,105 @@
       "discriminant": "response.error.already_recording"
     },
     {
-      "name": "a command this build cannot perform",
+      "name": "a subscription this build cannot serve",
       "direction": "server",
       "frame": {
-        "id": 3,
+        "code": "not_implemented",
+        "detail": {
+          "detail": "not_implemented",
+          "milestone": "M14",
+          "subsystem": "live recording metrics",
+          "tracking_issue": 100
+        },
+        "message": "live recording metrics is not in this build",
+        "type": "refused"
+      },
+      "parses": true,
+      "discriminant": "refused.not_implemented.not_implemented"
+    },
+    {
+      "name": "the settings, one of which nothing reads yet",
+      "direction": "server",
+      "frame": {
+        "id": 13,
         "outcome": {
-          "error": {
-            "code": "not_implemented",
-            "detail": {
-              "detail": "not_implemented",
-              "milestone": "M7",
-              "subsystem": "the settings API",
-              "tracking_issue": 108
-            },
-            "message": "the settings API is not in this build"
+          "ok": {
+            "reply": "settings",
+            "settings": {
+              "file": "C:\\Users\\alex\\AppData\\Local\\Clipped\\settings.json",
+              "settings": [
+                {
+                  "accepted": "\"default\", \"none\" or a device name",
+                  "applies": true,
+                  "key": "microphone",
+                  "label": "Microphone",
+                  "overridden": true,
+                  "value": "name:Shure MV7"
+                },
+                {
+                  "accepted": "\"game-window\" or \"display\"",
+                  "applies": false,
+                  "choices": [
+                    "game-window",
+                    "display"
+                  ],
+                  "key": "capture_target",
+                  "label": "Capture target",
+                  "overridden": false,
+                  "unavailable": "a recording still captures the game's own window; reading this setting when a recording starts is issue #61",
+                  "value": "game-window"
+                }
+              ]
+            }
           }
         },
         "type": "response"
       },
       "parses": true,
-      "discriminant": "response.error.not_implemented.not_implemented"
+      "discriminant": "response.ok.settings"
+    },
+    {
+      "name": "the microphones this machine has, with the default one marked",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "devices": {
+              "microphones": [
+                {
+                  "is_default": true,
+                  "name": "Shure MV7"
+                },
+                {
+                  "is_default": false,
+                  "name": "Line In (Realtek High Definition Audio)"
+                }
+              ]
+            },
+            "reply": "audio_devices"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.audio_devices"
+    },
+    {
+      "name": "a setting refused with what would have been accepted",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "error": {
+            "code": "invalid_parameters",
+            "message": "`framerate` cannot be 900: 1-480 frames per second"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.invalid_parameters"
     },
     {
       "name": "a refusal with no detail",

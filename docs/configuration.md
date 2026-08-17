@@ -117,6 +117,23 @@ both pages and means the same thing on both.
 questions without naming a setting's type, so the badge and the Reset control
 can be drawn by a loop over `SettingKey::ALL`.
 
+A screen also needs to change a setting without knowing its type, which is
+`Preferences::set_written(key, value)`: the value is the text the settings file
+spells that setting in — `120`, `hevc`, `name:Shure MV7` — and it is parsed by
+the file reader's own parsers, so a value a screen can save is exactly a value
+the file would accept, refused with the same message when it is not.
+`SettingKey::choices()` is the closed set of values where there is one and empty
+where the set is open, and `SettingKey::accepted()` is the sentence a refusal
+would carry — which is how a screen draws a list of options for one setting and
+a field for another without keeping a copy of either.
+
+The window itself reaches none of this directly: it may link `clipped-ipc` and
+nothing else of this workspace, so it asks the recorder — `get_settings`,
+`apply_settings` and `get_audio_devices`, in `docs/ipc.md`. The recorder answers
+with one entry per setting carrying exactly the fields above, plus whether
+anything in that build reads the setting when a recording starts, so that a
+screen never draws a control for a key nothing acts on (AGENTS.md section 27).
+
 ## The settings
 
 Exactly the settings this build can be told about, and no others. SPEC.md
@@ -144,6 +161,7 @@ configured ([#111]).
 
 | Key in `storage` | Type | Default | Accepted |
 | --- | --- | --- | --- |
+| `recording_directory` | text | the Clipped folder of your videos directory | an absolute path |
 | `maximum_usage_bytes` | number | none | a gigabyte or more |
 | `minimum_free_space_bytes` | number | none | any number of bytes |
 | `maximum_age_days` | number | none | one day or more, whole days |
@@ -155,6 +173,22 @@ maximum age under a day deletes footage recorded this afternoon. Both floors are
 `clipped-library`'s own constants and the refusal is its own message. A key
 inside `storage` that this build does not understand is kept and written back,
 like every other unknown key.
+
+`recording_directory` is where recordings and their session records are
+written. It is in `storage` rather than in the per-game table for the reason the
+limits are: a per-game directory would put one game's sittings outside the root
+the library indexes, storage accounting measures and cleanup sweeps. The
+directory is not checked when it is set — a removable drive that is not plugged
+in at the moment somebody opens the settings screen is not a reason to refuse
+the setting — and a recording that cannot be written to it reports that against
+the recording ([#307]).
+
+Three things read it, in this order of precedence: `clipped-recorder watch`
+falls back to it when `--output-directory` is not given, a recording started
+from the window is written under it, and the trash defaults to sitting beside
+it. `clipped-recorder record` and `clipped-recorder replay` deliberately do
+**not**: those two do exactly what their command line says, and apply no setting
+from this file at all.
 
 `trash_directory` defaults to the recordings folder's path with `.trash`
 appended — `D:\Clips` becomes `D:\Clips.trash`. Beside rather than inside,
@@ -190,6 +224,7 @@ set one, and the list of the largest recordings is the review path [#111] asks
 for: a chance to act before automatic deletion does.
 
 [#111]: https://github.com/wildware-uk/clipped/issues/111
+[#307]: https://github.com/wildware-uk/clipped/issues/307
 
 The vocabulary is the command line's, deliberately: `--codec hevc` and
 `"codec": "hevc"` mean the same thing, because a settings file and a command

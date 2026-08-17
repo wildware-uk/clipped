@@ -492,6 +492,139 @@ fn fully_populated() -> Configuration {
     configuration
 }
 
+/// One value per setting that is *not* the shipped default, written the way
+/// the file writes it.
+///
+/// Not a list of expected outputs: each of these goes in through
+/// `Preferences::set_written` and comes back out through `written_value`, and
+/// the test asserts the two are the same text rather than that either equals
+/// something computed by hand from the implementation.
+fn a_written_value_for(key: SettingKey) -> String {
+    match key {
+        SettingKey::CaptureTarget => "display".to_owned(),
+        SettingKey::Resolution => "1280x720".to_owned(),
+        SettingKey::Framerate => "120".to_owned(),
+        SettingKey::Codec => "hevc".to_owned(),
+        SettingKey::Encoder => "nvenc".to_owned(),
+        SettingKey::Microphone => "name:Shure MV7".to_owned(),
+        SettingKey::SystemAudio => "none".to_owned(),
+        SettingKey::ReplayWindow => "600".to_owned(),
+    }
+}
+
+#[test]
+fn every_setting_goes_in_and_comes_back_out_as_the_same_words() {
+    // What the settings screen does: it is handed a setting's value as text
+    // over the control protocol, sends the edited text back, and draws whatever
+    // comes next. A setting whose value changed spelling in transit would show
+    // the user something other than what they chose, and a setting that could
+    // not be set from text at all would be a control that does nothing.
+    for key in SettingKey::ALL {
+        let written = a_written_value_for(key);
+
+        let mut global = Preferences::none();
+        global
+            .set_written(key, Some(&written))
+            .unwrap_or_else(|error| panic!("{key} accepts {written}: {error}"));
+        let mut configuration = Configuration::defaults();
+        configuration.set_global(global);
+
+        let resolved = configuration.resolve_global();
+        assert_eq!(
+            resolved.written_value(key),
+            written,
+            "{key} came back spelled differently from the way it went in",
+        );
+        assert!(
+            resolved.is_overridden(key),
+            "{key} was set from text and does not count as set",
+        );
+    }
+}
+
+#[test]
+fn every_choice_a_setting_offers_is_one_it_accepts() {
+    // The list a screen draws as a set of options. An option that the setter
+    // then refuses is a control that fails when it is used, which is worse than
+    // one that is not offered.
+    for key in SettingKey::ALL {
+        for choice in key.choices() {
+            let mut global = Preferences::none();
+            global
+                .set_written(key, Some(&choice))
+                .unwrap_or_else(|error| panic!("{key} offers {choice} and refuses it: {error}"));
+
+            let mut configuration = Configuration::defaults();
+            configuration.set_global(global);
+            assert_eq!(
+                configuration.resolve_global().written_value(key),
+                choice,
+                "{key}'s choice {choice} is not the value it becomes",
+            );
+        }
+        assert!(
+            !key.accepted().is_empty(),
+            "{key} says nothing about what it would accept",
+        );
+    }
+}
+
+#[test]
+fn clearing_a_setting_from_text_returns_it_to_the_default() {
+    // Reset. `None` is the absence of a value, not the default written out: a
+    // setting reset here has to start following the layer below it again.
+    let mut global = Preferences::none();
+    global
+        .set_written(SettingKey::Framerate, Some("120"))
+        .expect("120 is in range");
+    global
+        .set_written(SettingKey::Framerate, None)
+        .expect("clearing is always allowed");
+
+    let mut configuration = Configuration::defaults();
+    configuration.set_global(global);
+
+    let resolved = configuration.resolve_global();
+    assert_eq!(
+        resolved.source_of(SettingKey::Framerate),
+        SettingSource::Default
+    );
+    assert!(!resolved.is_overridden(SettingKey::Framerate));
+}
+
+#[test]
+fn a_value_set_from_text_is_refused_exactly_as_the_file_would_refuse_it() {
+    // One set of rules. The settings screen must not be able to save a value
+    // that the same text typed into settings.json would be refused for, and the
+    // refusal it shows must be the one the file's reader gives (AGENTS.md
+    // section 55).
+    let mut global = Preferences::none();
+    let refused = global
+        .set_written(SettingKey::Framerate, Some("900"))
+        .expect_err("900 frames per second is outside the range");
+
+    let directory = TestDirectory::new("same-refusal");
+    fs::write(
+        directory.file(),
+        r#"{"version": 1, "global": {"framerate": 900}}"#,
+    )
+    .expect("the fixture can be written");
+    let from_the_file = ConfigurationStore::at(directory.file())
+        .load()
+        .expect_err("the same value in the file is refused too");
+
+    assert!(
+        from_the_file.to_string().contains(&refused.to_string()),
+        "the file said `{from_the_file}` and the setter said `{refused}`",
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains(&SettingKey::Framerate.accepted()),
+        "the refusal should say what would have been accepted: {refused}",
+    );
+}
+
 #[test]
 fn every_setting_survives_being_written_and_read_back() {
     let directory = TestDirectory::new("round-trip");

@@ -256,6 +256,8 @@ mod recording;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub use audio::{available_microphones, MicrophoneChoice};
 pub use disk::{SpaceVerdict, VolumeSpace, VolumeUnreadable, DEFAULT_MINIMUM_FREE_SPACE};
 pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};

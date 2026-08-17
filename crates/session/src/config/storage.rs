@@ -1,4 +1,5 @@
-//! What the library is allowed to occupy, as the settings file holds it.
+//! Where the library lives and what it is allowed to occupy, as the settings
+//! file holds it.
 //!
 //! # Why this is a section of its own
 //!
@@ -9,6 +10,11 @@
 //! "What is this game's maximum library size" has no answer, and putting these
 //! three keys in that vocabulary would have forced one
 //! ([issue #111](https://github.com/wildware-uk/clipped/issues/111)).
+//!
+//! [`RECORDING_DIRECTORY`] is here for the same reason and it is the one a
+//! settings screen reaches for first (SPEC.md section 45, step 3): a per-game
+//! recording directory would put one game's sittings outside the root the
+//! library indexes, storage accounting measures and cleanup sweeps.
 //!
 //! So they live beside `games`, `hotkeys` and `plugins` as a section of the
 //! document, in the shape [`super::plugins`] established: read into a value,
@@ -56,6 +62,17 @@ pub(crate) const MAXIMUM_AGE_DAYS: &str = "maximum_age_days";
 /// The key naming where deleted media waits out its retention.
 pub(crate) const TRASH_DIRECTORY: &str = "trash_directory";
 
+/// The key naming where recordings are written.
+///
+/// Here rather than in [`SettingKey`](super::SettingKey) for the reason this
+/// module exists: the library is one thing however many games are in it, and a
+/// per-game recording directory would put a game's sittings outside the root
+/// storage accounting measures and cleanup sweeps. "Where does Counter-Strike
+/// record to" has an answer only if the library is allowed to be several
+/// libraries, which it is not
+/// ([issue #307](https://github.com/wildware-uk/clipped/issues/307)).
+pub(crate) const RECORDING_DIRECTORY: &str = "recording_directory";
+
 /// Seconds in a day, for the one conversion this module makes.
 const DAY: u64 = 86_400;
 
@@ -70,7 +87,7 @@ const TRASH_SUFFIX: &str = ".trash";
 
 /// Why a `storage` value was refused.
 ///
-/// Two shapes, because the two refusals come from different places: a limit is
+/// Three shapes, because the refusals come from different places: a limit is
 /// `clipped-library`'s to judge, and a path is this crate's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageProblem {
@@ -78,6 +95,8 @@ pub enum StorageProblem {
     Limit(LimitError),
     /// A trash directory that cannot be used.
     TrashPath(TrashPathError),
+    /// A recording directory that cannot be used.
+    RecordingPath(RecordingPathError),
 }
 
 impl core::fmt::Display for StorageProblem {
@@ -85,6 +104,7 @@ impl core::fmt::Display for StorageProblem {
         match self {
             Self::Limit(error) => error.fmt(formatter),
             Self::TrashPath(error) => error.fmt(formatter),
+            Self::RecordingPath(error) => error.fmt(formatter),
         }
     }
 }
@@ -94,6 +114,7 @@ impl std::error::Error for StorageProblem {
         match self {
             Self::Limit(error) => Some(error),
             Self::TrashPath(error) => Some(error),
+            Self::RecordingPath(error) => Some(error),
         }
     }
 }
@@ -124,6 +145,45 @@ impl core::fmt::Display for TrashPathError {
 
 impl std::error::Error for TrashPathError {}
 
+/// Why a recording directory was refused.
+///
+/// Both messages name the value and what would have been accepted, because this
+/// is what a settings screen shows somebody who has just typed a path
+/// (AGENTS.md section 45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingPathError {
+    /// Nothing, or only whitespace. Distinct from [`Self::NotAbsolute`] because
+    /// "" is not a path a user can be told to make absolute, and because
+    /// clearing the setting is `None` rather than a blank string.
+    Blank,
+    /// The path is relative, so what it names depends on the directory the
+    /// recorder happened to be started from — and a recording that lands
+    /// somewhere different each time is a library nobody can find.
+    NotAbsolute {
+        /// What was written.
+        path: PathBuf,
+    },
+}
+
+impl core::fmt::Display for RecordingPathError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Blank => formatter.write_str(
+                "a recording directory cannot be blank; name a folder such as `D:\\Clips`, or \
+                 clear the setting to record to the Clipped folder of your videos directory",
+            ),
+            Self::NotAbsolute { path } => write!(
+                formatter,
+                "`{}` is not an absolute path, and where recordings are written must not depend \
+                 on where Clipped was started from; name a folder such as `D:\\Clips`",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordingPathError {}
+
 /// Where deleted media goes when nothing says otherwise.
 ///
 /// `D:\Clips` becomes `D:\Clips.trash`. Beside the recordings, on the same
@@ -143,6 +203,7 @@ pub struct StorageSettings {
     minimum_free_space: Option<u64>,
     maximum_age_days: Option<u64>,
     trash_directory: Option<PathBuf>,
+    recording_directory: Option<PathBuf>,
     /// Keys this build could not read, kept so that writing the file back does
     /// not delete what a newer build stored.
     unknown: BTreeMap<String, Value>,
@@ -267,6 +328,45 @@ impl StorageSettings {
         Ok(())
     }
 
+    /// Where recordings are written, where the user has said.
+    ///
+    /// [`None`] means the recorder's own default — the Clipped folder of the
+    /// user's videos directory — which is resolved where a recording is started
+    /// rather than here, because this crate has no opinion about where a
+    /// Windows profile keeps its videos.
+    #[must_use]
+    pub fn recording_directory(&self) -> Option<&Path> {
+        self.recording_directory.as_deref()
+    }
+
+    /// Sets where recordings are written.
+    ///
+    /// The directory is not created, and its existence is not checked here: a
+    /// removable drive that is not plugged in at the moment somebody opens the
+    /// settings screen is not a reason to refuse the setting, and the recording
+    /// that cannot be written reports it against the recording
+    /// (`crate::config`'s `check_directory_usable` in `apps/recorder`). What is
+    /// checked is what the file can carry and give back unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordingPathError`] for a blank path or a relative one.
+    pub fn set_recording_directory(
+        &mut self,
+        path: Option<PathBuf>,
+    ) -> Result<(), RecordingPathError> {
+        if let Some(path) = &path {
+            if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+                return Err(RecordingPathError::Blank);
+            }
+            if !path.is_absolute() {
+                return Err(RecordingPathError::NotAbsolute { path: path.clone() });
+            }
+        }
+        self.recording_directory = path;
+        Ok(())
+    }
+
     /// Keeps a key this build did not understand.
     fn keep_unrecognised(&mut self, key: String, value: Value) {
         self.unknown.insert(key, value);
@@ -313,6 +413,12 @@ pub(crate) fn read(
                     .map_err(|error| (TRASH_DIRECTORY, StorageProblem::TrashPath(error)))?,
                 None => settings.keep_unrecognised(key, value),
             },
+            (RECORDING_DIRECTORY, _) => match value.as_str() {
+                Some(path) => settings
+                    .set_recording_directory(Some(PathBuf::from(path)))
+                    .map_err(|error| (RECORDING_DIRECTORY, StorageProblem::RecordingPath(error)))?,
+                None => settings.keep_unrecognised(key, value),
+            },
             _ => settings.keep_unrecognised(key, value),
         }
     }
@@ -335,6 +441,12 @@ pub(crate) fn write(settings: &StorageSettings) -> Map<String, Value> {
     if let Some(path) = &settings.trash_directory {
         object.insert(
             TRASH_DIRECTORY.to_owned(),
+            Value::from(path.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(path) = &settings.recording_directory {
+        object.insert(
+            RECORDING_DIRECTORY.to_owned(),
             Value::from(path.to_string_lossy().into_owned()),
         );
     }
@@ -450,6 +562,68 @@ mod tests {
             write(&settings).get(MAXIMUM_USAGE),
             Some(&Value::from("lots"))
         );
+    }
+
+    #[test]
+    fn the_recording_directory_survives_a_round_trip_through_the_file() {
+        // Step 3 of SPEC.md section 45's MVP: the directory somebody picked has
+        // to come back out of the file as the directory they picked.
+        let settings = read(object(r#"{"recording_directory": "D:\\Clips"}"#))
+            .expect("an absolute path is accepted");
+
+        assert_eq!(settings.recording_directory(), Some(Path::new(r"D:\Clips")));
+
+        let written = write(&settings);
+        assert_eq!(
+            written.get(RECORDING_DIRECTORY),
+            Some(&Value::from(r"D:\Clips")),
+        );
+        assert_eq!(
+            read(Some(written)).expect("what was written reads back"),
+            settings,
+        );
+    }
+
+    #[test]
+    fn a_relative_recording_directory_is_refused_and_says_what_would_be_accepted() {
+        // Not silently resolved against the recorder's working directory: that
+        // is a folder the user did not pick and cannot predict.
+        let (key, problem) = read(object(r#"{"recording_directory": "clips"}"#))
+            .expect_err("a relative path is refused");
+
+        assert_eq!(key, RECORDING_DIRECTORY);
+        let message = problem.to_string();
+        assert!(
+            message.contains("clips") && message.contains("absolute"),
+            "the refusal should name the value and what would have been accepted: {message}",
+        );
+    }
+
+    #[test]
+    fn a_blank_recording_directory_is_refused_rather_than_written_as_an_empty_path() {
+        let (key, problem) = read(object(r#"{"recording_directory": "   "}"#))
+            .expect_err("whitespace is not a directory");
+
+        assert_eq!(key, RECORDING_DIRECTORY);
+        assert_eq!(
+            problem,
+            StorageProblem::RecordingPath(RecordingPathError::Blank)
+        );
+    }
+
+    #[test]
+    fn clearing_the_recording_directory_leaves_the_recorder_to_choose() {
+        // What Reset writes. `None` is not a path of its own: it is the absence
+        // that the recorder's own default answers.
+        let mut settings = read(object(r#"{"recording_directory": "D:\\Clips"}"#))
+            .expect("an absolute path is accepted");
+
+        settings
+            .set_recording_directory(None)
+            .expect("clearing is always allowed");
+
+        assert_eq!(settings.recording_directory(), None);
+        assert!(!write(&settings).contains_key(RECORDING_DIRECTORY));
     }
 
     #[test]

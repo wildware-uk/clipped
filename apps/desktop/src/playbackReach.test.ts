@@ -72,6 +72,13 @@ describe('what the window may load', () => {
     // performed by the recorder, over the control protocol, and the recorder
     // refuses a destination that already exists (AGENTS.md section 56).
     //
+    // `dialog:allow-open` is issue #51's, and it is the same shape: the folder
+    // picker on the Settings screen, whose answer is a path a person chose and
+    // which the window then sends to the recorder as a setting. It reaches no
+    // file either - `tauri-plugin-fs` is present as a dependency of the dialog
+    // plugin and is **not registered**, so none of its commands exists to be
+    // permitted, and the directory itself is written to by the recorder.
+    //
     // What is *not* here is the reason `open_recording` and `reveal_recording`
     // are `#[tauri::command]`s rather than the opener plugin's own commands:
     // the permission that would allow those from the interface is
@@ -85,6 +92,7 @@ describe('what the window may load', () => {
       'core:event:allow-listen',
       'core:event:allow-unlisten',
       'dialog:allow-save',
+      'dialog:allow-open',
     ]);
   });
 

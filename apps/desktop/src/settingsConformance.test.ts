@@ -2,12 +2,12 @@
 //
 // Holds the Settings screen to the Rust that owns what it talks about.
 //
-// The screen is an account of settings this window cannot read: what each one
-// is, how it is set today, and what has to land before this window can hold it
-// (`settings.ts`). Every one of those is a claim about code in another process,
-// and a screen of claims nobody re-checks is a screen that goes quietly wrong —
-// a renamed settings key, a subcommand that moved, an `apply_settings` that got
-// implemented, and the screen still says what it said in August.
+// The screen draws a control per setting the recorder sends, and an account of
+// the settings SPEC.md asks for that have nowhere to be saved (`settings.ts`).
+// Both halves are claims about code in another process, and a screen of claims
+// nobody re-checks is a screen that goes quietly wrong — a renamed settings key
+// the window then never draws, a subcommand that moved, a `#252` that landed
+// and a screen still saying what it said in August.
 //
 // TypeScript cannot call any of it, so this file does the next honest thing and
 // reads the definitions out of the sources that hold them. Each case names the
@@ -24,7 +24,6 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
-  NOTHING_IS_EDITABLE,
   NOTIFICATIONS_FILE,
   SETTINGS_FILE,
   SETTINGS_SECTIONS,
@@ -45,6 +44,8 @@ const DIRECTORIES_RS = source('crates/logging/src/directories.rs');
 const COMMAND_RS = source('crates/ipc/src/command.rs');
 const CLI_RS = source('apps/recorder/src/cli.rs');
 const POLICY_RS = source('apps/desktop/src-tauri/src/notification_policy.rs');
+const RECORDER_SETTINGS_RS = source('apps/recorder/src/settings.rs');
+const MESSAGE_RS = source('crates/ipc/src/message.rs');
 const NOTIFICATIONS_RS = source('apps/desktop/src-tauri/src/notifications.rs');
 const TAURI_CONF = source('apps/desktop/src-tauri/tauri.conf.json');
 
@@ -97,14 +98,14 @@ function keysNamedOnTheScreen(file: SettingsFile): readonly string[] {
   );
 }
 
+/** Every setting the screen draws a control for, in section order. */
+const KEYS_DRAWN_AS_CONTROLS = SETTINGS_SECTIONS.flatMap((section) => section.keys);
+
 /** Everything the screen says, as one body of text to read commands out of. */
-const EVERYTHING_THE_SCREEN_SAYS = [
-  ...Object.values(NOTHING_IS_EDITABLE),
-  ...SETTINGS_SECTIONS.flatMap((section) => [
-    section.lead,
-    ...section.rows.flatMap((row) => [row.label, row.today, row.run ?? '', row.needs]),
-  ]),
-].join('\n');
+const EVERYTHING_THE_SCREEN_SAYS = SETTINGS_SECTIONS.flatMap((section) => [
+  section.lead,
+  ...section.rows.flatMap((row) => [row.label, row.today, row.run ?? '', row.needs]),
+]).join('\n');
 
 describe('the settings the screen names', () => {
   /*
@@ -116,7 +117,7 @@ describe('the settings the screen names', () => {
    * and a setting the screen invented is a failure here rather than a row a
    * reader believes.
    */
-  it('are exactly the ones the configuration API models', () => {
+  it('are exactly the ones the recorder will send, and every one is drawn', () => {
     const modelled = quoted(
       blockAfter(
         'crates/session/src/config/value.rs',
@@ -124,9 +125,41 @@ describe('the settings the screen names', () => {
         "pub const fn name(self) -> &'static str",
       ),
     );
-
     expect(modelled.length, 'SettingKey::name no longer returns any key').toBeGreaterThan(0);
-    expect([...keysNamedOnTheScreen('settings.json')].sort()).toEqual([...modelled].sort());
+
+    // The recording directory is not a `SettingKey` — it is global rather than
+    // per game — and the recorder puts it in the same list, so the screen has
+    // to draw it from the same list (`apps/recorder/src/settings.rs`).
+    const directory = constant(
+      'apps/recorder/src/settings.rs',
+      RECORDER_SETTINGS_RS,
+      'RECORDING_DIRECTORY',
+    );
+
+    // Both directions. A setting the configuration API gains and this screen
+    // does not list is one nobody can change from the window, which is the
+    // failure this whole issue was about; one the screen lists and the recorder
+    // never sends is a control that would never be drawn.
+    expect([...KEYS_DRAWN_AS_CONTROLS].sort()).toEqual([...modelled, directory].sort());
+  });
+
+  /*
+   * And the keys the account rows quote are real keys too. These are the rows
+   * that say "set this by hand in the file" — a spelling that has drifted sends
+   * somebody to edit a key nothing reads.
+   */
+  it('include only keys the settings file really has, in the rows that name one', () => {
+    const named = keysNamedOnTheScreen('settings.json');
+    expect(named.length, 'no row names a settings.json key any more').toBeGreaterThan(0);
+
+    for (const key of named) {
+      expect(
+        [VALUE_RS, RECORDER_SETTINGS_RS, source('crates/session/src/config/storage.rs')].some(
+          (text) => text.includes(`"${key}"`),
+        ),
+        `${key} is not a key any Rust source declares`,
+      ).toBe(true);
+    }
   });
 
   /*
@@ -194,44 +227,51 @@ describe('the files the screen tells somebody to open', () => {
 
 describe('the claim the whole screen rests on', () => {
   /*
-   * The screen says, in the one panel a reader is meant to take away, that
-   * `apply_settings` is refused as not implemented by every build. On the day
-   * that stops being true this screen is misleading in the worst way available
-   * to it: telling somebody that what they want is impossible when it has just
-   * been built.
+   * That the recorder has the three commands this screen is built out of. Until
+   * issue #51 it had none of them: `apply_settings` was parsed only so that it
+   * could be refused with `not_implemented`, and there was no command that read
+   * a setting at all. A screen of live controls against a build that refuses
+   * them is worse than the account it replaced — every control would fail at
+   * the moment somebody used it.
+   *
+   * Read as the commands `Command::from_request` parses, so that a command
+   * quietly renamed on the Rust side fails here rather than in a window nobody
+   * has opened yet.
    */
-  it('is that apply_settings is still an unbuilt command', () => {
-    const declaration = COMMAND_RS.slice(COMMAND_RS.indexOf('pub const UNBUILT_COMMANDS'));
-    const listed = declaration.slice(0, declaration.indexOf('];'));
-
-    expect(listed, 'UNBUILT_COMMANDS is gone from crates/ipc/src/command.rs').not.toBe('');
-    expect(listed).toContain('UnbuiltCommand::ApplySettings');
-
-    // And that it is still called what the panel calls it. `UnbuiltCommand`'s
-    // own `name` is the second of the two in that file; `Command`'s takes
-    // `&self`, which is what keeps these two markers apart.
-    const unbuiltNames = quoted(
-      blockAfter('crates/ipc/src/command.rs', COMMAND_RS, 'pub const fn name(self)'),
-    );
-    expect(unbuiltNames).toContain('apply_settings');
-    expect(NOTHING_IS_EDITABLE.why).toContain('apply_settings');
-  });
-
-  /*
-   * And that nothing in the protocol reads configuration either — which is the
-   * half that would let this window at least *show* a setting. Read as the
-   * commands the recorder parses, so that adding one called `get_settings`
-   * fails here and this screen gets rewritten with it.
-   */
-  it('is that no command reads the settings back', () => {
+  it('is that the recorder reads and changes settings, and lists this machine’s devices', () => {
     const commands = quoted(
       blockAfter('crates/ipc/src/command.rs', COMMAND_RS, 'pub fn from_request'),
     ).filter((literal) => /^[a-z_]+$/.test(literal));
 
     expect(commands).toContain('get_status');
-    for (const command of commands) {
-      expect(command, `${command} looks like a settings command`).not.toMatch(/settings|config/);
+    for (const command of ['get_settings', 'apply_settings', 'get_audio_devices']) {
+      expect(commands, `${command} is not a command this recorder parses`).toContain(command);
     }
+  });
+
+  /*
+   * And that none of the three is refused as unbuilt. `apply_settings` was the
+   * last command in that list, and a command left in it after its subsystem
+   * landed refuses every request with a plausible sentence about a milestone
+   * that nobody questions — which is exactly what the previous version of this
+   * screen was written around.
+   */
+  it('is that none of them is a command the recorder refuses as not built', () => {
+    expect(
+      COMMAND_RS,
+      'UNBUILT_COMMANDS is back in crates/ipc/src/command.rs, and the screen has not been told',
+    ).not.toContain('UNBUILT_COMMANDS');
+  });
+
+  /*
+   * And that a window can tell before it draws anything. A recorder older than
+   * this window still answers the handshake, and the feature is what stops the
+   * screen offering controls it will refuse (AGENTS.md section 27).
+   */
+  it('is that the recorder says so in its welcome', () => {
+    expect(MESSAGE_RS, 'crates/ipc no longer declares a `settings` feature').toMatch(
+      /SETTINGS = "settings";/,
+    );
   });
 });
 
@@ -252,7 +292,7 @@ describe('the commands the screen tells somebody to run', () => {
     ),
   ];
 
-  it('are the subcommands the recorder has', () => {
+  it('are the subcommands the recorder has, with the options those take', () => {
     const declared = [
       ...blockAfter('apps/recorder/src/cli.rs', CLI_RS, 'pub enum Command').matchAll(
         /^ {4}(\w+)\(/gm,
@@ -272,11 +312,10 @@ describe('the commands the screen tells somebody to run', () => {
 
       expect(declared, `clipped-recorder ${subcommand}`).toContain(variant);
     }
-  });
 
-  it('are the options those subcommands take', () => {
-    expect(OPTIONS, 'the screen quotes no options').not.toHaveLength(0);
-
+    // The options, in the same case rather than one of their own: the screen
+    // quotes fewer of them now that most settings are controls, and a case that
+    // asserted "every option is real" over an empty list would pass on nothing.
     for (const option of OPTIONS) {
       // A `long` clap takes from the field name, kebab back to snake.
       const field = option.replaceAll('-', '_');
