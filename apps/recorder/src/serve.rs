@@ -1510,6 +1510,11 @@ fn status_of(running: Option<&Running>) -> RecorderStatus {
                 .replay
                 .as_ref()
                 .map(|replay| u32::try_from(replay.window().as_secs()).unwrap_or(u32::MAX)),
+            // A recording `serve` was asked for directly is not part of a
+            // sitting the recorder is driving, so there is no game name to
+            // give and `target` is the whole of what is known about it. The
+            // watcher is what fills this in, which is issue #421.
+            session: None,
         }),
         _ => RecorderStatus::Idle,
     }
