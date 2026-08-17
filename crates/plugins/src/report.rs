@@ -215,6 +215,20 @@ impl ReportedEvent {
             return Err(ReportRefused::UnknownKind { tag: tag.clone() });
         }
 
+        // And a plugin may not label a mark as the *user's* own.
+        // `EventKind::UserLabelled` is a name somebody typed into this
+        // application (ADR 0010), and a timeline that cannot tell one of those
+        // from a plugin's claim is a timeline where an integration can put words
+        // in a user's mouth. This module's own documentation says a plugin
+        // cannot attribute a mark to anybody else because `source` is a field
+        // that does not exist on the wire — `kind` *is* a field a plugin
+        // controls, so this is the check that makes the same promise of it.
+        if let EventKind::UserLabelled(label) = &self.kind {
+            return Err(ReportRefused::NotAPluginsToGive {
+                tag: label.to_string(),
+            });
+        }
+
         let ago = Duration::from_nanos(self.ago_ns);
         let timing = EventTiming::new(
             received.saturating_sub(ago),
@@ -243,6 +257,12 @@ pub enum ReportRefused {
         /// What the plugin sent.
         tag: String,
     },
+    /// A kind reserved for something other than a plugin: a label the user
+    /// typed, or a mark one of this application's own subsystems made.
+    NotAPluginsToGive {
+        /// What the plugin sent.
+        tag: String,
+    },
     /// A confidence outside 0 to 1.
     Confidence {
         /// The refusal from `crates/events`.
@@ -264,6 +284,10 @@ impl fmt::Display for ReportRefused {
                  name in the project's vocabulary: a plugin's own event is namespaced, as in \
                  `my-plugin.{tag}`"
             ),
+            Self::NotAPluginsToGive { tag } => write!(
+                formatter,
+                "`{tag}` is a label the user gives an event, not one a plugin gives itself: a                  plugin's own event is namespaced, as in `my-plugin.something`"
+            ),
             Self::Confidence { source } => write!(formatter, "{source}"),
             Self::Payload { source } => write!(formatter, "{source}"),
         }
@@ -273,7 +297,7 @@ impl fmt::Display for ReportRefused {
 impl core::error::Error for ReportRefused {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::UnknownKind { .. } => None,
+            Self::UnknownKind { .. } | Self::NotAPluginsToGive { .. } => None,
             Self::Confidence { source } => Some(source),
             Self::Payload { source } => Some(source),
         }
@@ -472,6 +496,30 @@ mod tests {
         assert_eq!(event.timing().latency(), Duration::from_millis(480));
         assert_eq!(event.timing().precision(), Duration::from_millis(100));
         assert_eq!(event.timing().observed(), received);
+    }
+
+    #[test]
+    fn a_plugin_cannot_put_a_mark_on_the_timeline_as_the_user() {
+        // ADR 0010 gives a name somebody typed its own kind. A plugin sending
+        // one would be an integration writing on a user's timeline in the
+        // user's own hand, which is the same failure this module prevents for
+        // `source` by leaving that field off the wire entirely — `kind` is a
+        // field a plugin does control, so it takes a check instead.
+        let label = clipped_events::UserLabel::new("clutch").expect("a valid label");
+        let refusal = reported(EventKind::UserLabelled(label))
+            .into_event(&source(), EventTime::ZERO)
+            .expect_err("a user's label is not a plugin's to give");
+
+        assert_eq!(
+            refusal,
+            ReportRefused::NotAPluginsToGive {
+                tag: "clutch".to_owned()
+            }
+        );
+        assert!(
+            refusal.to_string().contains("my-plugin."),
+            "the message should show the plugin author what to send instead: {refusal}"
+        );
     }
 
     #[test]
