@@ -4,7 +4,7 @@
 //! `crate::accounting::cleanup` has always had a vocabulary of reasons a sweep
 //! leaves a recording alone, and its scope named four. Two shipped. This is the
 //! third, and the column it reads was added by
-//! `0006_locked_media.sql` because there was nothing in the schema to read.
+//! `0007_locked_media.sql` because there was nothing in the schema to read.
 //!
 //! # What a lock means, and what it does not
 //!
