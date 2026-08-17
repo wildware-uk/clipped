@@ -37,6 +37,7 @@
 //! what this process happened to have in memory (AGENTS.md section 56).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use clipped_ipc::settings::{
@@ -110,6 +111,26 @@ pub struct SettingsFile {
     /// says so rather than pretending to have saved
     /// ([`ConfigurationStore::default_path`]).
     store: Option<Mutex<ConfigurationStore>>,
+    /// How many times [`Self::apply`] has saved, so that a holder of a copy can
+    /// tell whether its copy is still the current one without taking the lock.
+    ///
+    /// The automatic recorder keeps a `Configuration` of its own — the session
+    /// manager owns what it resolves per-game settings from — and its loop runs
+    /// a pass a second for as long as the recorder is up. Asking
+    /// [`Self::configuration`] every pass would take this store's lock and
+    /// clone the whole configuration a second, forever, to learn nothing on all
+    /// but the handful of passes where a save actually happened. One relaxed
+    /// load answers that question instead, and the lock and the clone happen
+    /// only when the answer is yes — the same trade
+    /// [`clipped_session::RecordingProgress`] makes for a bookmark reading a
+    /// running recording (AGENTS.md section 20, `crate::watch`, issue #51).
+    ///
+    /// Relaxed is enough. It is not guarding data: the configuration itself
+    /// travels through the mutex below, which orders the write against the read
+    /// that follows it. All this has to do is differ from what the reader saw
+    /// last time, and a counter that is observed late costs one more pass —
+    /// about a second — before a saved setting reaches the next recording.
+    generation: AtomicU64,
 }
 
 impl SettingsFile {
@@ -123,7 +144,7 @@ impl SettingsFile {
     pub fn for_this_user() -> Self {
         match ConfigurationStore::default_path() {
             Some(path) => Self::at(path),
-            None => Self { store: None },
+            None => Self::nowhere(),
         }
     }
 
@@ -141,6 +162,7 @@ impl SettingsFile {
         }
         Self {
             store: Some(Mutex::new(store)),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -148,7 +170,10 @@ impl SettingsFile {
     /// per-user directory.
     #[must_use]
     pub const fn nowhere() -> Self {
-        Self { store: None }
+        Self {
+            store: None,
+            generation: AtomicU64::new(0),
+        }
     }
 
     /// The configuration a recording starting now is made with.
@@ -166,6 +191,25 @@ impl SettingsFile {
                 .clone(),
             None => Configuration::defaults(),
         }
+    }
+
+    /// How many times a save has landed here, for a holder of a copy to compare
+    /// against.
+    ///
+    /// The number itself means nothing and is not part of any protocol; only
+    /// *changing* means anything. A reader keeps the value it last saw beside
+    /// the configuration it took, and takes a fresh one when the two differ —
+    /// see the `generation` field for why the automatic recorder asks this
+    /// rather than asking for the configuration every pass.
+    ///
+    /// Read this **before** [`Self::configuration`], never after. A save that
+    /// lands between the two calls must leave the reader believing it is
+    /// behind, which costs it one redundant refresh; reading it afterwards
+    /// would let the reader file a generation its configuration does not
+    /// contain, and that setting would never arrive.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Where the settings are kept, for the window to show.
@@ -249,6 +293,18 @@ impl SettingsFile {
                 format!("the settings could not be saved: {error}"),
             )
         })?;
+
+        // After the save and before the lock is let go: a reader that sees this
+        // number change and then takes the lock is guaranteed the configuration
+        // it clones is the one that was just stored, or a later one. Bumping it
+        // before the store would announce a save that could still be refused.
+        //
+        // This is the whole of what makes a saved setting reach an automatic
+        // recording. Everything else in this process reads the store directly
+        // when it needs it; the automatic recorder is the one holder of a copy,
+        // and this is how it is told the copy is stale (`crate::watch`, issue
+        // #51).
+        self.generation.fetch_add(1, Ordering::Relaxed);
 
         Ok(view_of(store.current(), store.path()))
     }

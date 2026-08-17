@@ -454,6 +454,19 @@ impl SessionManager {
     /// nothing here reaches into one that is running. A user who changes the
     /// frame rate while a game is being recorded gets the new frame rate on the
     /// next recording, not a re-opened encoder halfway through a file.
+    ///
+    /// Called by the recorder's watcher loop once a pass, before anything in
+    /// that pass can ask for a recording, so that a setting saved from the
+    /// Settings screen reaches the next automatically-started recording without
+    /// the recorder being restarted — `Driver::take_the_settings_the_user_saved`
+    /// in `apps/recorder/src/watch.rs`, SPEC.md section 45, issue #51. It is
+    /// named here because for a long time this method had no caller but its own
+    /// tests, and a seam nothing goes through is one the next reader has to
+    /// guess about.
+    ///
+    /// Replaces the configuration whole — global settings and per-game layers
+    /// together — so the caller cannot lose a per-game override by refreshing
+    /// (AGENTS.md section 30, `docs/configuration.md`).
     pub fn set_configuration(&mut self, configuration: Configuration) {
         self.configuration = configuration;
     }

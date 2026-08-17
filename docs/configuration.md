@@ -585,6 +585,61 @@ A session that spans a change therefore holds recordings made at different
 settings, which is why each recording's own record carries its own answer
 (`docs/sessions.md`).
 
+### What calls `set_configuration`, and how often
+
+The automatic recorder's loop, once a pass — `Driver::take_the_settings_the_user_saved`
+in `apps/recorder/src/watch.rs`, before anything in that pass can ask the
+manager for a recording.
+
+It has to, and this is the part that was missing until issue #51. A recording
+the window asks for reads `SettingsFile` at the moment it starts, so it always
+gets the settings as last saved. The automatic recorder cannot: its
+`SessionManager` **owns** the configuration it resolves per-game settings from,
+and is handed a copy when the watcher thread starts. Nothing replaced that
+copy, so a microphone saved from the Settings screen reached automatic
+recordings only after the recorder was restarted — which SPEC.md section 45
+rules out in as many words.
+
+The loop does not take the settings lock every pass to find out. `SettingsFile`
+keeps a generation counter, bumped under the lock by `apply` after a save
+lands, and the driver compares one relaxed atomic load against the generation
+it took its copy at. The lock is taken and the configuration cloned only on a
+pass that follows a save. Nothing about this runs on a capture thread: it is
+the watcher's loop, which spends its time waiting on process events, and a
+recording's own thread never reads settings after it starts (AGENTS.md
+section 20).
+
+Read the generation **before** the configuration, never after. A save landing
+between the two reads must leave the driver believing it is behind — costing
+one redundant clone on the next pass — rather than believing it is current
+with a configuration that predates the save, which would strand that setting
+until somebody saved again.
+
+What the whole `Configuration` is replaced with, rather than a global half laid
+over per-game entries the driver had been carrying, so per-game overrides
+survive the refresh. Plugin consents do not travel this path: they are cloned
+out of the configuration *before* it moves into the manager, so that
+`attach_plugins` never goes looking for a settings file, and they remain a
+start-up snapshot (`docs/plugin-api.md`).
+
+### What still needs a restart: the recording directory
+
+**Where** automatic recordings are written is not in the configuration this
+path replaces. `watch::recordings_directory` resolves it once, before the
+watcher thread starts, and it is frozen into the manager's `AutomaticSettings`,
+which has no setter. A recording directory saved from the Settings screen
+therefore still reaches automatic recordings only after a restart, even though
+a recording the *window* asks for honours it immediately.
+
+That is the same criterion — SPEC.md section 45 names the directory beside the
+microphone in step 3 — but it is different state, and it carries a question the
+configuration does not. A session's sidecar is written next to the recordings
+it describes (`SessionManager::begin_recording` persists to
+`AutomaticSettings::directory`), so moving the directory while a sitting is
+open would leave a session record in one folder and the files it names in
+another (AGENTS.md section 56). Applying it only between sittings is probably
+the answer, and it wants deciding rather than assuming.
+
 ### Which layer a game is resolved against
 
 `RecordingRequest::game` is a `GameIdentity`, and `GameIdentity::slug()` is the
