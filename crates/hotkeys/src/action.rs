@@ -43,10 +43,13 @@ pub enum HotkeyAction {
 
 /// Every action, in the order the configuration UI should list them.
 ///
-/// An action's position here is also the identifier it is registered with, so
-/// the order is load-bearing rather than cosmetic —
+/// An action's position here is also the identifier it is *first* registered
+/// with, so the order is load-bearing rather than cosmetic —
 /// [`HotkeyAction::index`] and the tests around it are what hold the two
-/// together when a variant is added.
+/// together when a variant is added. `crates/hotkeys/src/service/windows.rs`
+/// moves a rebound action onto an identifier of its own the first time it is
+/// rebound, so this is only a starting point, not an invariant that holds for
+/// the life of a running service.
 pub const ACTIONS: [HotkeyAction; 7] = [
     HotkeyAction::SaveReplay,
     HotkeyAction::AddBookmark,
@@ -99,11 +102,13 @@ impl HotkeyAction {
 
     /// The action's position in [`ACTIONS`].
     ///
-    /// This is also the identifier the combination is registered with on
-    /// Windows, which is why it is defined by an exhaustive match rather than
-    /// by searching [`ACTIONS`]: adding a variant then has to say where it goes,
-    /// and `every_action_is_listed_once_and_indexed_by_its_position` fails if
-    /// the two disagree.
+    /// This is also the identifier the combination is *first* registered with
+    /// on Windows — rebinding later moves it to an identifier of its own
+    /// (`crates/hotkeys/src/service/windows.rs`) — which is why it is defined
+    /// by an exhaustive match rather than by searching [`ACTIONS`]: adding a
+    /// variant then has to say where it goes, and
+    /// `every_action_is_listed_once_and_indexed_by_its_position` fails if the
+    /// two disagree.
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
