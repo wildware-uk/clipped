@@ -1369,6 +1369,11 @@ fn copy_packets(
     // rather than leaving it to infer it from silence.
     let interval = options.progress_interval();
     let mut report_due_at = Duration::ZERO;
+    // What the caller was last told, so the report after the trailer is not a
+    // second copy of it. The interval can land exactly on the final packet —
+    // a four-second recording reported once a second does — and a progress bar
+    // told the same thing twice is a bar that appears to stall at the end.
+    let mut last_reported: Option<RemuxProgress> = None;
 
     loop {
         // SAFETY: both pointers are live and exclusively owned. `av_read_frame`
@@ -1454,7 +1459,9 @@ fn copy_packets(
         if options.reports() {
             let written = copied.duration();
             if written >= report_due_at {
-                options.report(copied.progress(total));
+                let progress = copied.progress(total);
+                options.report(progress);
+                last_reported = Some(progress);
                 report_due_at = written.saturating_add(interval);
             }
         }
@@ -1476,7 +1483,10 @@ fn copy_packets(
     // two-hour recording, say — and a progress bar that stops short of the end
     // and then vanishes reads as a copy that gave up.
     if options.reports() {
-        options.report(copied.progress(input.duration()));
+        let final_progress = copied.progress(input.duration());
+        if last_reported != Some(final_progress) {
+            options.report(final_progress);
+        }
     }
 
     info!(
