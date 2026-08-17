@@ -13,6 +13,9 @@
 //! | `stopping_the_service_gives_its_combinations_back` | That a stopped service's combinations can be taken again — by *something*; see the test, which is careful about what it claims |
 //! | `a_registered_hotkey_fires_when_the_combination_is_actually_pressed` | That `RegisterHotKey`, the message loop, the virtual-key mapping and the dispatcher agree, against a keystroke Windows delivered |
 //! | `a_second_hotkey_arrives_while_the_first_handler_is_still_busy` | The acceptance criterion, through the real message loop: a handler that blocks for a second costs the *next* press nothing |
+//! | `rebinding_registers_the_new_combination_and_releases_the_old_one_for_someone_else` | Issue #233's first acceptance criterion, against Windows: the old combination is free for another registration, the new one fires, and unbinding frees that one too |
+//! | `a_rebind_windows_refuses_leaves_the_previous_binding_registered_and_delivering` | Issue #233's second acceptance criterion: a rebind onto a combination another registration owns reports the conflict and the old binding keeps working |
+//! | `rebinding_to_a_combination_a_different_clipped_action_already_holds_is_refused_before_windows_is_asked` | The other way a rebind can fail, which never reaches Windows at all |
 //! | `hotkeys_fire_while_a_fullscreen_subject_holds_a_display` | `#[ignore]`d: the same, while `test-apps/fullscreen-dx11` covers or exclusively owns a display |
 //!
 //! # These tests type
@@ -48,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use clipped_hotkeys::{
     BindingState, Bindings, ConflictCause, Handlers, Hotkey, HotkeyAction, HotkeyEvent,
-    HotkeyService, PressOutcome,
+    HotkeyService, PressOutcome, RebindError,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -487,6 +490,253 @@ fn a_second_hotkey_arrives_while_the_first_handler_is_still_busy() {
         .recv_timeout(SLOW * 3)
         .expect("the slow handler still finishes");
     assert_eq!(then, HotkeyAction::SaveReplay);
+
+    service.stop();
+}
+
+/// Issue #233's first acceptance criterion, and the reason `rebind` exists at
+/// all: a binding can change while the service keeps running, the old
+/// combination becomes free for somebody else immediately, and the new one
+/// fires. Unbinding is the same claim carried one step further — releasing a
+/// combination entirely rather than moving it — so it is proven here too
+/// rather than in a test of its own, reusing the same registration.
+#[test]
+fn rebinding_registers_the_new_combination_and_releases_the_old_one_for_someone_else() {
+    let (old, _) = combination(7);
+    let (new, new_key) = combination(8);
+    let (ran, handled) = mpsc::channel();
+
+    let (mut service, events) = HotkeyService::start(
+        &binding(HotkeyAction::SaveReplay, old),
+        Handlers::new().on(HotkeyAction::SaveReplay, move |press| {
+            ran.send(press.hotkey()).expect("the test is listening");
+        }),
+    )
+    .expect("starting a hotkey service");
+    if !is_bound(&service, HotkeyAction::SaveReplay) {
+        return;
+    }
+
+    service
+        .rebind(HotkeyAction::SaveReplay, Some(new))
+        .expect("the new combination is free and Windows should accept it");
+
+    let status = service
+        .registration()
+        .status(HotkeyAction::SaveReplay)
+        .expect("every action has a row");
+    assert_eq!(
+        status.binding(),
+        Some(new),
+        "the row should show the new combination"
+    );
+    assert_eq!(
+        status.state(),
+        &BindingState::Bound,
+        "a successful rebind should read as bound, not as a fresh conflict",
+    );
+
+    // The old combination is Clipped's to lose no longer: something else can
+    // take it immediately, which is what a user notices when they move Save
+    // Replay off a key another application wants.
+    let (freed, _events) =
+        HotkeyService::start(&binding(HotkeyAction::TakeScreenshot, old), Handlers::new())
+            .expect("starting a probe service");
+    assert!(
+        matches!(
+            freed
+                .registration()
+                .status(HotkeyAction::TakeScreenshot)
+                .map(clipped_hotkeys::ActionStatus::state),
+            Some(BindingState::Bound),
+        ),
+        "the old combination was not released by the rebind: {:?}",
+        freed.registration(),
+    );
+    freed.stop();
+
+    // And the new combination is the one that actually fires now.
+    let keyboard = KEYBOARD.lock().expect("the keyboard lock is not poisoned");
+    if !press(new_key, &keyboard) {
+        drop(keyboard);
+        skipped("this session would not accept synthetic keystrokes");
+        service.stop();
+        return;
+    }
+    drop(keyboard);
+
+    let event = next_event(&events)
+        .unwrap_or_else(|| panic!("{new} was rebound and pressed, and no press was reported"));
+    assert_eq!(event.press().action(), HotkeyAction::SaveReplay);
+    assert_eq!(
+        event.press().hotkey(),
+        new,
+        "the reported press should carry the new combination"
+    );
+    assert_eq!(
+        handled
+            .recv_timeout(DELIVERY)
+            .expect("the handler runs on its own thread"),
+        new,
+        "the handler should have been told the new combination, not the old one",
+    );
+
+    // Unbinding is the other half of `rebind`'s contract: nothing is bound,
+    // and the combination it gives up is free too.
+    service
+        .rebind(HotkeyAction::SaveReplay, None)
+        .expect("unbinding cannot conflict with anything");
+    assert_eq!(
+        service
+            .registration()
+            .status(HotkeyAction::SaveReplay)
+            .map(clipped_hotkeys::ActionStatus::state),
+        Some(&BindingState::Unbound),
+    );
+
+    let (freed_again, _events) = HotkeyService::start(
+        &binding(HotkeyAction::ToggleRecording, new),
+        Handlers::new(),
+    )
+    .expect("starting a second probe service");
+    assert!(
+        matches!(
+            freed_again
+                .registration()
+                .status(HotkeyAction::ToggleRecording)
+                .map(clipped_hotkeys::ActionStatus::state),
+            Some(BindingState::Bound),
+        ),
+        "unbinding should have released the new combination too: {:?}",
+        freed_again.registration(),
+    );
+    freed_again.stop();
+
+    service.stop();
+}
+
+/// Issue #233's second acceptance criterion: a rebind Windows refuses must
+/// not cost the action the combination it already had. `hotkeys.md` calls
+/// this out by name — "take the new one before giving up the old" — and this
+/// is that claim against a real, taken combination rather than a fixture.
+#[test]
+fn a_rebind_windows_refuses_leaves_the_previous_binding_registered_and_delivering() {
+    let (taken, _) = combination(9);
+    let (current, current_key) = combination(10);
+    let (ran, handled) = mpsc::channel();
+
+    let (owner, _owner_events) =
+        HotkeyService::start(&binding(HotkeyAction::SaveReplay, taken), Handlers::new())
+            .expect("starting the hotkey service that will hold the combination");
+    if !is_bound(&owner, HotkeyAction::SaveReplay) {
+        return;
+    }
+
+    let (mut contender, events) = HotkeyService::start(
+        &binding(HotkeyAction::TakeScreenshot, current),
+        Handlers::new().on(HotkeyAction::TakeScreenshot, move |press| {
+            ran.send(press.hotkey()).expect("the test is listening");
+        }),
+    )
+    .expect("starting the hotkey service whose rebind will be refused");
+    if !is_bound(&contender, HotkeyAction::TakeScreenshot) {
+        owner.stop();
+        return;
+    }
+
+    let error = contender
+        .rebind(HotkeyAction::TakeScreenshot, Some(taken))
+        .expect_err("the owner already holds this combination");
+    let RebindError::Conflict(conflict) = error else {
+        panic!("a combination another registration owns should be a Conflict: {error}");
+    };
+    assert_eq!(conflict.action(), HotkeyAction::TakeScreenshot);
+    assert_eq!(conflict.hotkey(), taken);
+    assert_eq!(conflict.cause(), ConflictCause::AlreadyRegistered);
+
+    // The row must still show the combination that was already working,
+    // exactly as though the rebind had never been attempted.
+    let status = contender
+        .registration()
+        .status(HotkeyAction::TakeScreenshot)
+        .expect("every action has a row");
+    assert_eq!(
+        status.binding(),
+        Some(current),
+        "a refused rebind must not have changed what the row reports",
+    );
+    assert_eq!(status.state(), &BindingState::Bound);
+
+    // And it must still be the combination that actually works.
+    let keyboard = KEYBOARD.lock().expect("the keyboard lock is not poisoned");
+    if !press(current_key, &keyboard) {
+        drop(keyboard);
+        skipped("this session would not accept synthetic keystrokes");
+        contender.stop();
+        owner.stop();
+        return;
+    }
+    drop(keyboard);
+
+    let event = next_event(&events).unwrap_or_else(|| {
+        panic!("{current} should still be registered after a refused rebind, and no press was reported")
+    });
+    assert_eq!(event.press().action(), HotkeyAction::TakeScreenshot);
+    assert_eq!(event.press().hotkey(), current);
+    assert_eq!(
+        handled
+            .recv_timeout(DELIVERY)
+            .expect("the previous binding's handler should still be the one that runs"),
+        current,
+    );
+
+    contender.stop();
+    owner.stop();
+}
+
+/// The other way a rebind can be refused, and the one that never touches
+/// Windows: two Clipped actions cannot point at the same combination, and
+/// `rebind` enforces the rule [`Bindings::bind`] does before a fresh start
+/// would.
+#[test]
+fn rebinding_to_a_combination_a_different_clipped_action_already_holds_is_refused_before_windows_is_asked(
+) {
+    let (hotkey, _) = combination(11);
+
+    let (mut service, _events) =
+        HotkeyService::start(&binding(HotkeyAction::SaveReplay, hotkey), Handlers::new())
+            .expect("starting a hotkey service");
+    if !is_bound(&service, HotkeyAction::SaveReplay) {
+        return;
+    }
+
+    let error = service
+        .rebind(HotkeyAction::AddBookmark, Some(hotkey))
+        .expect_err("Save replay already holds this combination");
+    assert!(
+        matches!(error, RebindError::AlreadyBound(_)),
+        "a combination another Clipped action holds must be refused before Windows is asked: {error}",
+    );
+    let message = error.to_string();
+    assert!(message.contains(&hotkey.to_string()), "{message}");
+    assert!(message.contains("Save replay"), "{message}");
+
+    // Refused before Windows was asked means nothing changed: Add bookmark
+    // is still unbound, and Save replay still has the combination.
+    assert_eq!(
+        service
+            .registration()
+            .status(HotkeyAction::AddBookmark)
+            .map(clipped_hotkeys::ActionStatus::state),
+        Some(&BindingState::Unbound),
+    );
+    assert_eq!(
+        service
+            .registration()
+            .status(HotkeyAction::SaveReplay)
+            .map(clipped_hotkeys::ActionStatus::state),
+        Some(&BindingState::Bound),
+    );
 
     service.stop();
 }

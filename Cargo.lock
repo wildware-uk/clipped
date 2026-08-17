@@ -201,7 +201,6 @@ dependencies = [
 name = "clipped-background"
 version = "0.1.0"
 dependencies = [
- "clipped-media-validation",
  "tracing",
  "windows",
 ]
@@ -385,11 +384,13 @@ name = "clipped-muxer"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-encoder",
  "clipped-ffmpeg-runtime",
  "clipped-logging",
  "clipped-media-validation",
  "rusty_ffmpeg",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -471,6 +472,7 @@ dependencies = [
  "clipped-plugins",
  "clipped-replay",
  "clipped-storage",
+ "clipped-windows",
  "rusty_ffmpeg",
  "serde",
  "serde_json",

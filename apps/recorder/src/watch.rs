@@ -1,7 +1,16 @@
-//! The `watch` subcommand: record games as they start, without being asked.
+//! Recording games as they start, without being asked.
 //!
-//! This is the mode the product is for (SPEC.md sections 2 and 7). It joins
-//! three things that already existed and were not connected:
+//! This is the mode the product is for (SPEC.md sections 2 and 7), and it runs
+//! in two places. `clipped-recorder watch` is the terminal-facing command;
+//! [`AutomaticRecorder`] is the same loop on a thread of `serve`'s, which is
+//! what a shipped build runs. They share every line below — the difference is
+//! that a recording made under `serve` is handed to the recording state the
+//! protocol answers against, so a bookmark, a screenshot and a stop reach it
+//! ([issue #421](https://github.com/wildware-uk/clipped/issues/421),
+//! `docs/sessions.md`). A recording made by `watch` is reachable by nothing,
+//! because that command serves no protocol and registers no hotkey.
+//!
+//! It joins three things that already existed and were not connected:
 //! `clipped_game_detection::ProcessWatcher` says what started and stopped, its
 //! `Catalogue` says whether that is a game, and `clipped_session::record`
 //! records a window to a playable file. `clipped_session::automatic` holds the
@@ -85,6 +94,8 @@ use std::error::Error;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -110,9 +121,10 @@ use clipped_session::{
 };
 use clipped_windows::WindowInfo;
 
-use crate::cli::{RecordArgs, WatchArgs};
+use crate::cli::{RecordArgs, WatchArgs, DEFAULT_WINDOW_TIMEOUT_SECONDS};
 use crate::config::{CaptureTarget, RecordingConfig};
 use crate::record::{choose_window, settings_for, RecordError};
+use crate::serve::{Adopted, RecorderService, RecordingState};
 use crate::shutdown::{install_ctrl_c_handler, CtrlCError, ShutdownSignal};
 
 /// How long the loop waits on the watcher before letting the clock move on.
@@ -255,6 +267,13 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
         ConfigurationStore::default_path().as_deref(),
         RecordingPlan::from(args),
         installed_plugins(),
+        // Nothing. This command serves no protocol and registers no hotkey, so
+        // there is nothing for a recording of it to be reachable *from*: a
+        // bookmark, a screenshot and a stop all arrive as commands, and no
+        // command can arrive here. That is the whole of issue #421, and the
+        // answer to it is `serve --watch-for-games` rather than a control
+        // endpoint of this command's own (`docs/sessions.md`).
+        None,
     );
 
     announce(&directory, &watcher, &driver.manager);
@@ -268,9 +287,166 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
     }
 }
 
+/// The same watching, inside a process that is doing something else.
+///
+/// `serve --watch-for-games` is the shape a shipped build runs: the desktop
+/// supervisor starts it, `start-at-login` writes it into the `Run` key, and it
+/// serves the control protocol and owns the global hotkeys. Before issue #421 it
+/// did not watch for games, and `watch` — which did — served no protocol and
+/// registered no hotkey, so the recordings a user is most likely to want to
+/// bookmark were the ones nothing could bookmark.
+///
+/// Joining the two here rather than giving `watch` a control endpoint of its own
+/// is what keeps [ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)
+/// true: exactly one process registers the combinations, and it is the one whose
+/// endpoint already decided that it is the only recorder in the session. Two
+/// recorders both wanting the keys is the arrangement that ADR rules out.
+///
+/// # Threads
+///
+/// One, of its own, running exactly the loop `watch` runs on its main thread.
+/// The process watcher is started on it rather than handed to it, because a
+/// failure to start detection must not stop a recorder that still has a window
+/// to serve — `watch` has nothing left to do without detection and says so by
+/// failing; here it is reported and the protocol carries on.
+#[derive(Debug)]
+pub(crate) struct AutomaticRecorder {
+    stop: ShutdownSignal,
+    /// [`None`] when there was nothing to start — a recordings directory that
+    /// could not be made, which is reported rather than fatal.
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AutomaticRecorder {
+    /// Starts watching for games on a thread of its own.
+    ///
+    /// Never fails, for the reason `crate::hotkeys::start` never fails: a
+    /// recorder that refused to serve the desktop application because it could
+    /// not create a folder would be a far worse thing to ship than one that
+    /// records nothing automatically and says why.
+    pub(crate) fn start(service: &Arc<RecorderService>) -> Self {
+        let stop = ShutdownSignal::new();
+        let recordings = Arc::clone(service.recordings());
+        let catalogue = recordings.catalogue().clone();
+
+        let directory = match recordings_directory(
+            None,
+            service.configuration().storage().recording_directory(),
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "games will not be recorded automatically, because the folder they would be \
+                     written to could not be used"
+                );
+                eprintln!("Games will not be recorded automatically: {error}");
+                return Self { stop, thread: None };
+            }
+        };
+
+        let plugins = installed_plugins();
+        let signal = stop.clone();
+        let thread = thread::Builder::new()
+            .name("clipped-automatic-recorder".to_owned())
+            .spawn(move || watch_for_games(&directory, catalogue, plugins, &recordings, &signal))
+            .expect("a thread can be started to watch for games on");
+
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stops watching, and waits for the recording it is making to be finished.
+    ///
+    /// The wait is the point: the session's last file is being finalised and its
+    /// record written, and a recorder that exited without waiting would leave a
+    /// recording somebody was making of a game they are still playing
+    /// (AGENTS.md section 17).
+    pub(crate) fn stop(mut self) {
+        self.stop.request();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for AutomaticRecorder {
+    /// The same wait, for a `serve` that is unwinding out of a panic. A watcher
+    /// thread left running would go on recording into a process that is gone.
+    fn drop(&mut self) {
+        self.stop.request();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The loop, on the automatic recorder's own thread.
+fn watch_for_games(
+    directory: &Path,
+    catalogue: Catalogue,
+    plugins: Vec<InstalledPlugin>,
+    recordings: &Arc<RecordingState>,
+    signal: &ShutdownSignal,
+) {
+    let mut watcher = match ProcessWatcher::start(WatchConfig::default()) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "games will not be recorded automatically, because this machine could not be \
+                 watched for them"
+            );
+            eprintln!("Games will not be recorded automatically: {error}");
+            return;
+        }
+    };
+
+    let mut driver = Driver::new(
+        catalogue,
+        // Discovered here rather than taken from the service, which has a set
+        // of its own: `Launchers` is not `Clone` and the session manager owns
+        // what it is given. It is a registry walk and six directory reads,
+        // once, on a thread nothing is waiting on (issue #522).
+        Launchers::discover(),
+        AutomaticSettings::new(directory.to_path_buf()),
+        // The same file the service read when it started, read again for the
+        // per-game settings the manager resolves. `watch` reads it twice for
+        // the same reason, and it is a small file read at start-up.
+        ConfigurationStore::default_path().as_deref(),
+        RecordingPlan::default(),
+        plugins,
+        Some(Arc::clone(recordings)),
+    );
+
+    announce(directory, &watcher, &driver.manager);
+
+    if let Some(reason) = driver.watch(&mut watcher, signal) {
+        tracing::error!(
+            reason,
+            "games are no longer being recorded automatically, because detection stopped"
+        );
+        eprintln!("Games are no longer being recorded automatically: {reason}");
+    }
+}
+
 /// Where recordings and session records go.
 fn output_directory(
     args: &WatchArgs,
+    configured: Option<&Path>,
+) -> Result<PathBuf, WatchCommandError> {
+    recordings_directory(args.output_directory.as_deref(), configured)
+}
+
+/// The same, for a caller with no command line to read a flag from.
+///
+/// `serve --watch-for-games` is that caller: it has the settings file and
+/// nothing else, and a directory chosen once in the settings screen has to mean
+/// the same thing to it as it does to `watch` (AGENTS.md section 55).
+fn recordings_directory(
+    named: Option<&Path>,
     configured: Option<&Path>,
 ) -> Result<PathBuf, WatchCommandError> {
     // Three layers, top down: the flag, then the settings file, then the videos
@@ -278,8 +454,8 @@ fn output_directory(
     // SPEC.md section 45 - a directory chosen once in the settings screen has to
     // be the one an automatic recording lands in, since nobody is at a command
     // line when a game launches (issue #307).
-    let directory = match (&args.output_directory, configured) {
-        (Some(named), _) => named.clone(),
+    let directory = match (named, configured) {
+        (Some(named), _) => named.to_path_buf(),
         (None, Some(chosen)) => chosen.to_path_buf(),
         (None, None) => {
             crate::config::default_output_directory().ok_or(WatchCommandError::NoOutputDirectory)?
@@ -588,6 +764,16 @@ struct Driver {
     /// ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
     session_epoch: Option<Instant>,
     running: Option<Running>,
+    /// Where a recording this driver starts makes itself reachable over the
+    /// protocol, when there is a protocol.
+    ///
+    /// [`Some`] under `serve --watch-for-games`, and [`None`] under `watch`,
+    /// which serves none. It is what a bookmark, a screenshot and a stop arrive
+    /// through, and handing the recording over is all it takes — there is one
+    /// implementation of each of the three, in `crate::serve`, and it does not
+    /// know or care which of the two started the recording it is acting on
+    /// (issue #421, AGENTS.md section 55).
+    recordings: Option<Arc<RecordingState>>,
 }
 
 /// A recording in progress.
@@ -607,6 +793,14 @@ struct Running {
     /// fixed it, and hold it as the *session's* zero for every later recording
     /// of the same session.
     progress: RecordingProgress,
+    /// Raised by `stop_recording` when somebody stopped this recording.
+    ///
+    /// The one thing the protocol cannot do to a recording on its own. Stopping
+    /// it is a signal the recorder already holds; what it cannot decide is
+    /// whether the *session* should start another recording of a game that is
+    /// still running, which is the manager's to decide and this thread's to tell
+    /// it (issue #421).
+    asked_to_stop: Arc<AtomicBool>,
 }
 
 impl Driver {
@@ -624,6 +818,12 @@ impl Driver {
     /// directory and reports what it refused: a test that builds a driver must
     /// not have its result depend on what is installed on the machine running
     /// it (AGENTS.md section 25).
+    ///
+    /// `recordings` is where a recording this driver starts is handed over so
+    /// that the protocol can reach it, and is [`None`] for a process that serves
+    /// no protocol. It is an argument rather than something set afterwards
+    /// because forgetting it is the defect issue #421 is about, and an argument
+    /// is what makes every caller answer the question.
     fn new(
         catalogue: Catalogue,
         launchers: Launchers,
@@ -631,6 +831,7 @@ impl Driver {
         settings_file: Option<&Path>,
         plan: RecordingPlan,
         installed_plugins: Vec<InstalledPlugin>,
+        recordings: Option<Arc<RecordingState>>,
     ) -> Self {
         // Per-game settings reach a recording through the manager: it resolves
         // them when it asks for one, and `attempt` lays the answer over what
@@ -654,6 +855,7 @@ impl Driver {
             plugin_consents,
             session_epoch: None,
             running: None,
+            recordings,
         }
     }
 
@@ -663,10 +865,18 @@ impl Driver {
         let mut detection_stopped: Option<String> = None;
 
         loop {
-            // Before anything else, and every time round: what a plugin had to
-            // say is only useful while the recording it belongs to is running,
-            // and a `PluginTrouble` nobody reads is one that was logged and
-            // forgotten (AGENTS.md section 45).
+            // First of all, and before the recording that is running can be
+            // collected: `stop_recording` raises the flag *before* it raises
+            // the stop signal, so a pass that sees the recording finished has
+            // already had a pass at the flag. Reading it after collecting the
+            // outcome would let the manager schedule another recording of the
+            // same game before it was told the user had asked for the stop.
+            self.take_the_stop_the_user_asked_for();
+
+            // Then what a plugin had to say, every time round: it is only
+            // useful while the recording it belongs to is running, and a
+            // `PluginTrouble` nobody reads is one that was logged and forgotten
+            // (AGENTS.md section 45).
             self.report_plugin_activity();
 
             if let Some(finished) = self.collect_finished() {
@@ -711,6 +921,26 @@ impl Driver {
                         .get_or_insert_with(|| "the process watcher finished".to_owned());
                 }
             }
+        }
+    }
+
+    /// Tells the session manager that somebody stopped the recording, if they
+    /// did.
+    ///
+    /// The stop itself has already happened — `stop_recording` raised the
+    /// recording's own signal and is waiting for the file — so what is left is
+    /// the decision this thread owns: whether the sitting starts another
+    /// recording of a game that is still running. It does not, until the game
+    /// relaunches (`SessionManager::asked_to_stop_recording`, issue #421).
+    ///
+    /// Taken rather than read, so that one stop is reported once.
+    fn take_the_stop_the_user_asked_for(&mut self) {
+        let asked = self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.asked_to_stop.swap(false, Ordering::SeqCst));
+        if asked {
+            self.manager.asked_to_stop_recording();
         }
     }
 
@@ -883,7 +1113,21 @@ impl Driver {
                         "a stop arrived for a recording that is no longer running"
                     ),
                 },
-                SessionAction::SessionEnded(session) => report_session(&session),
+                SessionAction::SessionEnded(session) => {
+                    report_session(&session);
+                    // The sidecar is on disk by now — the manager wrote it
+                    // before it handed the session over — so this is the first
+                    // moment the library has a complete sitting to index. A
+                    // recording `start_recording` made asks for the same run
+                    // from `RecordingState::finish`; an automatic session is
+                    // closed here, so this is where it is asked for
+                    // (`crate::library`, issue #402). Without it the sitting
+                    // somebody has just finished playing would not appear in
+                    // the window until the recorder was restarted.
+                    if let Some(recordings) = self.recordings.as_ref() {
+                        recordings.index_now();
+                    }
+                }
             }
         }
     }
@@ -925,9 +1169,27 @@ impl Driver {
         let plugins = self.attach_plugins(&request, &progress);
         let recording_progress = progress.clone();
 
+        // Made here, beside the stop signal, because the two answer one
+        // question between them: the signal ends the file, and this says the
+        // session should not start another. Shared with the recording's thread
+        // so that whoever adopts the recording can raise it.
+        let asked_to_stop = Arc::new(AtomicBool::new(false));
+        let reachable = self.recordings.as_ref().map(|recordings| Reachable {
+            recordings: Arc::clone(recordings),
+            asked_to_stop: Arc::clone(&asked_to_stop),
+        });
+
         let thread = thread::Builder::new()
             .name("clipped-automatic-recording".to_owned())
-            .spawn(move || record_process(&request, &plan, &signal, &recording_progress))
+            .spawn(move || {
+                record_process(
+                    &request,
+                    &plan,
+                    &signal,
+                    &recording_progress,
+                    reachable.as_ref(),
+                )
+            })
             .expect("a thread can be started to record on");
 
         self.running = Some(Running {
@@ -936,6 +1198,7 @@ impl Driver {
             thread,
             plugins,
             progress,
+            asked_to_stop,
         });
     }
 
@@ -1102,6 +1365,57 @@ struct RecordingPlan {
     window_timeout: Duration,
 }
 
+/// What a recording needs in order to be reachable over the protocol.
+///
+/// Carried to the recording's own thread, because the moment a recording
+/// becomes reachable is the moment there is a window to record — not the moment
+/// the game launched. A recorder that reported itself as recording while it was
+/// still waiting for a game to draw would be refusing `start_recording` for two
+/// minutes over a window that may never appear, and answering `get_status` with
+/// a recording that does not exist (AGENTS.md section 54).
+#[derive(Debug)]
+struct Reachable {
+    recordings: Arc<RecordingState>,
+    asked_to_stop: Arc<AtomicBool>,
+}
+
+impl Reachable {
+    /// Hands the recording over, or says why it could not be.
+    fn adopt(
+        &self,
+        output: &Path,
+        target: String,
+        progress: &RecordingProgress,
+        stop: &ShutdownSignal,
+    ) -> Result<Adopted, String> {
+        self.recordings
+            .adopt(output, target, progress, stop, &self.asked_to_stop)
+    }
+}
+
+impl Default for RecordingPlan {
+    /// What `serve --watch-for-games` records at, having no command line to be
+    /// told by.
+    ///
+    /// The same values `watch`'s own flags default to, and the same ones
+    /// `serve` already gives a `start_recording` that names nothing
+    /// (`crate::serve::record_args`): the shipped defaults of the types
+    /// themselves. A recording made automatically and one made from the window
+    /// are the same recording, and this is where that stays true for the
+    /// parameters neither of them names (AGENTS.md section 55).
+    fn default() -> Self {
+        Self {
+            resolution: crate::options::Resolution::default(),
+            framerate: crate::options::Framerate::DEFAULT,
+            codec: crate::options::VideoCodec::default(),
+            encoder: crate::options::EncoderSelection::default(),
+            microphone: crate::options::AudioDeviceSelection::default(),
+            system_audio: crate::options::AudioDeviceSelection::default(),
+            window_timeout: Duration::from_secs(u64::from(DEFAULT_WINDOW_TIMEOUT_SECONDS)),
+        }
+    }
+}
+
 impl RecordingPlan {
     fn from(args: &WatchArgs) -> Self {
         Self {
@@ -1155,8 +1469,9 @@ fn record_process(
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
     progress: &RecordingProgress,
+    reachable: Option<&Reachable>,
 ) -> RecordingOutcome {
-    let outcome = attempt(request, plan, stop, progress);
+    let outcome = attempt(request, plan, stop, progress, reachable);
 
     // An attempt that produced nothing is said out loud. The summary printed
     // when the session ends counts files, so a recording that never happened
@@ -1183,12 +1498,14 @@ fn attempt(
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
     progress: &RecordingProgress,
+    reachable: Option<&Reachable>,
 ) -> RecordingOutcome {
     attempt_with(
         request,
         plan,
         stop,
         progress,
+        reachable,
         wait_for_window,
         |settings, stop, outputs| clipped_session::record_into(settings, stop, outputs),
     )
@@ -1210,6 +1527,7 @@ fn attempt_with<FindWindow, Record>(
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
     progress: &RecordingProgress,
+    reachable: Option<&Reachable>,
     find_window: FindWindow,
     record: Record,
 ) -> RecordingOutcome
@@ -1254,20 +1572,57 @@ where
     let settings = request
         .settings
         .apply_configured_to(settings_for(&config, &window));
-    // `record_into` rather than `record`, for the one output this command needs:
-    // where the recording's timeline begins. That is what places a plugin's
-    // event inside the file (`clipped_session::plugins`), and publishing it is
-    // one `OnceLock` store on the first frame — nothing the capture thread can
-    // wait on.
-    let outputs = RecordingOutputs::default().with_progress(progress);
-    match std::panic::catch_unwind(AssertUnwindSafe(|| record(&settings, stop, &outputs))) {
-        Ok(Ok(report)) => RecordingOutcome::Recorded(Box::new(report)),
-        Ok(Err(error)) => session_failure(&error, game, &config.output),
-        Err(_) => failure(
-            &"the recording thread panicked; the file was finalised before it did",
-            game,
-        ),
+
+    // Here, and not when the recording was asked for: this is the moment there
+    // is something a bookmark could mark. From now until the recording ends,
+    // `add_bookmark`, `take_screenshot`, `stop_recording` and `get_status` all
+    // reach it — through the one implementation of each, which does not know
+    // this recording was started by anything unusual (issue #421).
+    let adopted = match reachable
+        .map(|reachable| {
+            reachable.adopt(
+                &request.output,
+                request.game.display_name().to_owned(),
+                progress,
+                stop,
+            )
+        })
+        .transpose()
+    {
+        Ok(adopted) => adopted,
+        // One recording at a time is this process's rule whoever asked for it.
+        // Somebody recording by hand keeps the encoder, and the sitting records
+        // that it got no footage rather than silently getting none.
+        Err(refusal) => return failure(&refusal, game),
+    };
+
+    // `record_into` rather than `record`, for the outputs this command needs:
+    // where the recording's timeline begins, which is what places a plugin's
+    // event inside the file (`clipped_session::plugins`), and — once the
+    // recording is reachable — where a `take_screenshot` asks it for a frame it
+    // has already captured. Both are stores the capture thread cannot wait on.
+    let mut outputs = RecordingOutputs::default().with_progress(progress);
+    if let Some(adopted) = adopted.as_ref() {
+        outputs = outputs.with_screenshots(adopted.screenshots());
     }
+    let outcome =
+        match std::panic::catch_unwind(AssertUnwindSafe(|| record(&settings, stop, &outputs))) {
+            Ok(Ok(report)) => RecordingOutcome::Recorded(Box::new(report)),
+            Ok(Err(error)) => session_failure(&error, game, &config.output),
+            Err(_) => failure(
+                &"the recording thread panicked; the file was finalised before it did",
+                game,
+            ),
+        };
+
+    // Handed back before this thread returns, so that the recorder's status,
+    // and anything waiting on `stop_recording`, learn what became of it. A path
+    // that skipped this would leave a recording nobody could stop; `Adopted`
+    // releases itself on drop for exactly that reason.
+    if let Some(adopted) = adopted {
+        adopted.finished(&outcome);
+    }
+    outcome
 }
 
 /// A failure the recording pipeline diagnosed, put to the user.
@@ -1456,6 +1811,7 @@ mod tests {
 
     use clipped_game_detection::catalogue::EntrySource;
     use clipped_game_detection::{LaunchGroup, LaunchId, ProcessSnapshot};
+    use clipped_ipc::{CommandHandler, RecorderStatus};
     use clipped_session::config::{
         AudioDeviceSetting, GameKey, Preferences, ResolutionSetting, SettingSource,
     };
@@ -1551,6 +1907,149 @@ name = "test-game.exe"
         }
     }
 
+    /// A recorder over a library, an index and a catalogue of this test's own.
+    ///
+    /// Never `RecorderService::new`: that one reads the settings, the games
+    /// file and the recording library of whoever is running the tests
+    /// (AGENTS.md section 25).
+    fn a_recorder(directory: &TestDirectory) -> Arc<RecorderService> {
+        Arc::new(RecorderService::with_library(
+            clipped_ipc::EventPublisher::new(),
+            crate::library::LibraryReader::at(Some(directory.recordings().join("library.db"))),
+            crate::library::LibraryIndexer::at(
+                Some(directory.recordings().join("library.db")),
+                vec![directory.recordings()],
+            ),
+            Catalogue::default(),
+        ))
+    }
+
+    #[test]
+    fn pressing_the_bookmark_hotkey_during_an_automatic_recording_marks_the_moment() {
+        // Issue #421's acceptance criterion, end to end and through every real
+        // link: the attempt that a launch produces, the moment it hands the
+        // recording over, the handler `serve` registers for `add_bookmark`, the
+        // command that handler sends, and the recorder answering it against the
+        // recording detection started.
+        //
+        // The press is `handlers_for(...).press(...)` and not `perform(...)`,
+        // for the reason `crate::hotkeys`'s own tests give: `perform` is told
+        // which action to run, so calling it proves only that an action maps to
+        // a command. What is being asserted here is that the key wired to Add
+        // bookmark reaches a recording nobody asked for.
+        let directory = TestDirectory::new("hotkey-bookmark");
+        let service = a_recorder(&directory);
+        let request = recording_asked_for(&directory, &directory.settings_file());
+        let reachable = Reachable {
+            recordings: Arc::clone(service.recordings()),
+            asked_to_stop: Arc::new(AtomicBool::new(false)),
+        };
+        let progress = RecordingProgress::new();
+
+        let mut pressed = None;
+        let outcome = attempt_with(
+            &request,
+            &RecordingPlan::from(&args()),
+            &ShutdownSignal::new(),
+            &progress,
+            Some(&reachable),
+            |_, _, _| Ok(window()),
+            |_settings, _stop, outputs| {
+                // Inside the recording: this is the only moment at which there
+                // is anything to bookmark, and it is where a key press lands.
+                assert!(
+                    outputs.screenshots.is_some(),
+                    "a recording that can be reached must serve a screenshot from a frame it \
+                     already has, rather than opening a second capture of the same window",
+                );
+                progress.reached(Duration::from_secs(120));
+
+                let recorder = Arc::clone(&service) as Arc<dyn CommandHandler>;
+                pressed = Some(
+                    crate::hotkeys::handlers_for(&recorder)
+                        .press(
+                            clipped_hotkeys::HotkeyAction::AddBookmark,
+                            "Ctrl+F9".parse().expect("Ctrl+F9 is a hotkey"),
+                        )
+                        .map(|()| recorder.status()),
+                );
+                Err(SessionError::TargetHasNoPixels)
+            },
+        );
+
+        assert!(
+            matches!(outcome, RecordingOutcome::Failed { .. }),
+            "the stand-in engine reports a failure: {outcome:?}"
+        );
+        let status = pressed
+            .expect("the recording ran")
+            .expect("this build performs Add bookmark, so its key has a handler");
+        let RecorderStatus::Recording(active) = status else {
+            panic!("the recording was still running when the key was pressed");
+        };
+        assert_eq!(
+            active.target,
+            request.game.display_name(),
+            "the window has to be told which game is being recorded",
+        );
+
+        let read = clipped_session::bookmarks::BookmarkFile::for_recording(&request.output)
+            .expect("a press writes the bookmark down beside the recording");
+        assert_eq!(read.bookmarks.len(), 1, "one press, one mark: {read:?}");
+        assert_eq!(
+            read.bookmarks[0].at().as_secs_f64(),
+            120.0 - clipped_session::bookmarks::DEFAULT_LEAD.as_secs_f64(),
+            "and it lands where a bookmark of a window-started recording lands: the moment \
+             before the press, by the same lead",
+        );
+
+        assert!(
+            matches!(service.status(), RecorderStatus::Idle),
+            "and the recording is handed back when it ends, so nothing goes on claiming it",
+        );
+    }
+
+    #[test]
+    fn a_recording_nothing_can_reach_is_still_made_and_still_reports_its_own_timeline() {
+        // The other side of the seam, which is what `watch` is. Handing over
+        // nowhere has to leave the recording exactly as it was — the same
+        // settings, the same progress, the same outcome — because the whole of
+        // this change is meant to be reachability and not a second kind of
+        // recording (AGENTS.md section 55).
+        let directory = TestDirectory::new("unreachable");
+        let request = recording_asked_for(&directory, &directory.settings_file());
+        let progress = RecordingProgress::new();
+
+        let mut screenshots_offered = None;
+        let outcome = attempt_with(
+            &request,
+            &RecordingPlan::from(&args()),
+            &ShutdownSignal::new(),
+            &progress,
+            None,
+            |_, _, _| Ok(window()),
+            |_settings, _stop, outputs| {
+                screenshots_offered = Some(outputs.screenshots.is_some());
+                assert!(
+                    outputs.progress.is_some(),
+                    "the timeline is what places a plugin's event, and belongs to every recording",
+                );
+                Err(SessionError::TargetHasNoPixels)
+            },
+        );
+
+        assert_eq!(
+            screenshots_offered,
+            Some(false),
+            "nothing can ask this recording for a screenshot, so it is not offered a way to \
+             serve one",
+        );
+        assert!(
+            matches!(outcome, RecordingOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
+    }
+
     /// A launch of one process.
     ///
     /// [`LaunchId::ALREADY_RUNNING`] is the only identifier constructible
@@ -1580,6 +2079,10 @@ name = "test-game.exe"
             // these tests are about, and reading this machine's plugins
             // directory would make them depend on it (AGENTS.md section 25).
             Vec::new(),
+            // And nowhere to hand a recording over to: what these tests are
+            // about is the settings a recording is made with, which is the
+            // same question whether or not anything can reach it.
+            None,
         );
 
         driver
@@ -1623,6 +2126,7 @@ name = "test-game.exe"
             &RecordingPlan::from(&args()),
             &ShutdownSignal::new(),
             &RecordingProgress::new(),
+            None,
             |_, _, _| Ok(window()),
             |settings, _, _| {
                 started = Some(settings.clone());

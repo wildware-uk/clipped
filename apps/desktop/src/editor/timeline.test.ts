@@ -1,22 +1,27 @@
 import { describe, expect, it } from 'vitest';
 
 import { storedDocument } from '../test/editDocumentFixture';
-import { readEditDocument, type EditDocument, type Segment } from './document';
+import { readEditDocument, type AudioTrack, type EditDocument, type Segment } from './document';
 import {
-  anySoloed,
   boundaries,
+  fadeAmplitude,
   formatTickLabel,
   formatTimecode,
   locate,
+  monitor,
+  monitoredAmplitudeAt,
   nextBoundary,
   outputNanosOf,
   overlaysAt,
   previousBoundary,
+  resolve,
   scrollToShow,
+  SOLO_NONE,
   ticks,
   tickIntervalNanos,
+  toggleSolo,
   totalOutputNanos,
-  trackOutput,
+  trackAmplitudeAt,
 } from './timeline';
 
 /**
@@ -62,7 +67,7 @@ function only<T>(list: readonly T[], index: number): T {
 /** A document made of `segments` and nothing else. */
 function clipOf(segments: readonly Segment[]): EditDocument {
   return {
-    schema_version: 1,
+    schema_version: 2,
     title: 'test',
     aspect_ratio: null,
     sources: [{ id: 0, recording: 'rec' }],
@@ -193,48 +198,123 @@ describe('the boundaries a cut can be at', () => {
   });
 });
 
-describe('an audio track', () => {
-  const track = (changes: Record<string, unknown>) => ({
+/** One audio track, spread over whatever a case changes about it. */
+function track(changes: Record<string, unknown> = {}): AudioTrack {
+  return {
     name: 'Game',
     inputs: [{ source: 0, stream: 0 }],
     gain_db: -3,
     muted: false,
-    soloed: false,
     fade_in: 0,
     fade_out: 0,
     ...changes,
-  });
+  };
+}
 
-  it('is heard at its own level when nothing is soloed', () => {
-    expect(trackOutput(track({}), false)).toEqual({ audible: true, gainDb: -3 });
+/**
+ * `resolve`, `monitor` and `Solo`, held to the figures `crates/edit/src/audio.rs`
+ * asserts of `resolve`, `monitor` and `Solo::toggled` — the port for the same
+ * reason every other block in this file exists: a preview a few frames or a
+ * few decibels away from an export is the defect a second implementation would
+ * produce, and a test against the port's own output could not catch it.
+ */
+describe('an audio track', () => {
+  it('is heard at its own level in the export, and in a preview soloing nothing', () => {
+    expect(resolve(track())).toEqual({ audible: true, gainDb: -3 });
+    expect(monitor(track(), 0, SOLO_NONE)).toEqual({ audible: true, gainDb: -3 });
   });
 
   it('is silent when muted, whatever else is set', () => {
-    expect(trackOutput(track({ muted: true }), false)).toEqual({ audible: false });
+    expect(resolve(track({ muted: true }))).toEqual({ audible: false });
     // Mute wins over solo on the same track: soloing a muted track does not
     // unmute it, which is what every mixing desk does and what
     // `docs/editing.md` requires.
-    expect(trackOutput(track({ muted: true, soloed: true }), true)).toEqual({ audible: false });
+    expect(monitor(track({ muted: true }), 0, 0)).toEqual({ audible: false });
   });
 
-  it('is silent when something else is soloed', () => {
-    expect(trackOutput(track({}), true)).toEqual({ audible: false });
-    expect(trackOutput(track({ soloed: true }), true)).toEqual({ audible: true, gainDb: -3 });
+  it('is silent in the preview when another track is soloed, and never in the export', () => {
+    const other = track();
+
+    expect(monitor(other, 1, 0)).toEqual({ audible: false });
+    // "the export is never given a solo": crates/edit's own words for it.
+    expect(resolve(other)).toEqual({ audible: true, gainDb: -3 });
   });
 
-  it('reports whether anything in the document is soloed at all', () => {
-    expect(anySoloed(fixture())).toBe(false);
+  it('solo changes nothing when nothing is soloed, so the preview matches the export', () => {
+    expect(monitor(track(), 2, SOLO_NONE)).toEqual(resolve(track()));
+  });
+});
 
-    const soloed = fixture({
-      audio_tracks: [
-        { name: 'Game', inputs: [{ source: 0, stream: 0 }], soloed: true },
-        { name: 'Microphone', inputs: [{ source: 0, stream: 1 }] },
-      ],
+describe('toggling a solo', () => {
+  it('moves the solo to whichever track is pressed', () => {
+    expect(toggleSolo(SOLO_NONE, 0)).toBe(0);
+    expect(toggleSolo(0, 2)).toBe(2);
+  });
+
+  it('clears the solo when the soloed track is pressed again', () => {
+    expect(toggleSolo(2, 2)).toBe(SOLO_NONE);
+  });
+
+  it('names one track, so two of them cannot be soloed at once', () => {
+    // The whole reason solo is not a field on a track: pressing solo on a
+    // second track moves it rather than adding to it.
+    const moved = toggleSolo(toggleSolo(SOLO_NONE, 0), 2);
+
+    expect(moved).toBe(2);
+    expect(monitor(only([track(), track(), track()], 0), 0, moved)).toEqual({ audible: false });
+    expect(monitor(only([track(), track(), track()], 2), 2, moved)).toEqual({
+      audible: true,
+      gainDb: -3,
     });
-    expect(anySoloed(soloed)).toBe(true);
-    expect(trackOutput(only(soloed.audio_tracks, 1), anySoloed(soloed))).toEqual({
-      audible: false,
-    });
+  });
+});
+
+describe('the fade envelope of a track', () => {
+  // The figures `crates/edit`'s own `a_fade_rises_from_silence_and_falls_back_to_it`
+  // asserts: a two-second fade in and a four-second fade out on a twenty-second
+  // clip.
+  const faded = (): AudioTrack => track({ fade_in: 2_000_000_000, fade_out: 4_000_000_000 });
+  const clipNanos = 20_000_000_000;
+  const SECOND = 1_000_000_000;
+
+  it('rises linearly in amplitude and falls back to it', () => {
+    const at = (atNanos: number) => fadeAmplitude(faded(), atNanos, clipNanos);
+
+    expect(at(0)).toBe(0);
+    expect(at(SECOND)).toBeCloseTo(0.5, 12);
+    expect(at(2 * SECOND)).toBe(1);
+    expect(at(10 * SECOND)).toBe(1);
+    expect(at(16 * SECOND)).toBe(1);
+    expect(at(18 * SECOND)).toBeCloseTo(0.5, 12);
+    expect(at(clipNanos - 1)).toBeLessThan(1e-8);
+    expect(at(clipNanos)).toBe(0);
+  });
+
+  it('folds the level, the mute and the fade into one multiplier for the export', () => {
+    expect(trackAmplitudeAt(faded(), 0, clipNanos)).toBe(0);
+    expect(trackAmplitudeAt(track({ muted: true }), SECOND, clipNanos)).toBe(0);
+    expect(trackAmplitudeAt(track({ gain_db: 0 }), 10 * SECOND, clipNanos)).toBe(1);
+  });
+
+  it('applies the editor’s solo on top, in the preview only', () => {
+    // The preview plays the fade the export will write; the solo only decides
+    // which tracks it plays it for — `crates/edit`'s
+    // `a_soloed_preview_is_still_faded`.
+    // Against what the export writes, rather than against 0.5: the fade is a
+    // half here, but the fixture's track also carries -3 dB, so the amplitude
+    // is 0.354 and a literal 0.5 asserts the fade alone. Comparing the two
+    // functions states the property this test is named for — the preview plays
+    // the fade the export will write — and cannot rot if the fixture's gain
+    // changes.
+    expect(monitoredAmplitudeAt(faded(), 2, 2, SECOND, clipNanos)).toBeCloseTo(
+      trackAmplitudeAt(faded(), SECOND, clipNanos),
+      12,
+    );
+    // A track the solo silences reads silent for the whole clip.
+    expect(monitoredAmplitudeAt(faded(), 0, 2, SECOND, clipNanos)).toBe(0);
+    expect(monitoredAmplitudeAt(faded(), 2, SOLO_NONE, SECOND, clipNanos)).toBe(
+      trackAmplitudeAt(faded(), SECOND, clipNanos),
+    );
   });
 });
 

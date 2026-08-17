@@ -13,11 +13,11 @@ import { recordingOf, type AudioTrack, type EditDocument } from './document';
 import { countByKind, describeKind, kindsPresent, type EventMark } from './events';
 import { ExportDialog } from './ExportDialog';
 import {
-  anySoloed,
   boundaries,
   formatTickLabel,
   formatTimecode,
   locate,
+  monitor,
   nextBoundary,
   NANOS_PER_SECOND,
   outputPositionsOf,
@@ -25,9 +25,11 @@ import {
   outputNanosOf,
   previousBoundary,
   scrollToShow,
+  SOLO_NONE,
   ticks,
   tickIntervalNanos,
-  trackOutput,
+  toggleSolo,
+  type Solo,
   ZOOM_STEPS,
 } from './timeline';
 
@@ -69,10 +71,15 @@ import {
  *   it has no waveform rather than drawing a flat line, which is exactly what
  *   `docs/waveforms.md` says a missing waveform must never look like.
  *
- * # Nothing here changes anything
+ * # Nothing here changes anything, with one exception
  *
- * The playhead and the zoom are this component's own state. No path from this
- * file writes a document, let alone a recording (AGENTS.md sections 56 and 57).
+ * The playhead, the zoom and which track is soloed are this component's own
+ * state. No path from this file writes a document, let alone a recording
+ * (AGENTS.md sections 56 and 57) — and solo is not an exception to that: it is
+ * `Solo` (`crates/edit/src/audio.rs`), a value the editor listens with rather
+ * than a field of the document, so soloing a track changes what is heard in
+ * this window's preview and nothing that could be saved ([issue
+ * #85](https://github.com/wildware-uk/clipped/issues/85)).
  */
 
 /** What a keyboard step moves the playhead by. */
@@ -167,8 +174,8 @@ function percent(fraction: number): string {
 }
 
 /** How a track's level reads once mute and solo are resolved. */
-function describeLevel(track: AudioTrack, soloed: boolean): string {
-  const output = trackOutput(track, soloed);
+function describeLevel(track: AudioTrack, index: number, solo: Solo): string {
+  const output = monitor(track, index, solo);
   if (!output.audible) {
     return track.muted ? 'Muted' : 'Silent while another track is soloed';
   }
@@ -184,6 +191,13 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
   const [zoom, setZoom] = useState(ZOOM_STEPS[0] ?? 1);
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
   const [showExport, setShowExport] = useState(false);
+  /*
+   * Which track, if any, the editor is listening to alone. `Solo` in
+   * `crates/edit`, held here rather than on the document for the same reason
+   * the playhead and the zoom are this component's own state (issue #85): it
+   * describes this window's listening, not the clip.
+   */
+  const [solo, setSolo] = useState<Solo>(SOLO_NONE);
   const scroller = useRef<HTMLDivElement>(null);
 
   /*
@@ -215,7 +229,6 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
     [eventMarks, hiddenKinds],
   );
   const placement = locate(clip, playheadNanos);
-  const soloed = anySoloed(clip);
   const interval = tickIntervalNanos(durationNanos, zoom);
   const marks = ticks(durationNanos, zoom);
   const overlays = overlaysAt(clip, playheadNanos);
@@ -226,6 +239,16 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
     },
     [durationNanos],
   );
+
+  /*
+   * Pressing a track's Solo button moves the solo there, or clears it if that
+   * track was already the one soloed — `toggleSolo`, which is `Solo::toggled`
+   * in `crates/edit`. There is deliberately no way to reach two tracks soloed
+   * at once.
+   */
+  const onToggleSolo = useCallback((track: number) => {
+    setSolo((current) => toggleSolo(current, track));
+  }, []);
 
   /* Hiding a kind is the one thing that keeps a mark off the timeline, and it
      is the user's own decision every time. */
@@ -339,9 +362,10 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
          * this window, is `ExportDialog`'s (issue #90).
          *
          * Export is the **first** tab stop of the editor, ahead of the zoom
-         * controls, the kind filters, the event marks and the playhead. That is
-         * not an accident of where two branches happened to meet: it is where
-         * the button is drawn — in the header, beside the clip's title — and
+         * controls, the kind filters, each track's Solo button, the event
+         * marks and the playhead. That is not an accident of where two
+         * branches happened to meet: it is where the button is drawn — in
+         * the header, beside the clip's title — and
          * focus order follows visual order. Putting the whole-document action
          * last, after the timeline "content", would read well in the abstract
          * and would mean a keyboard user's focus jumping from the bottom of the
@@ -501,10 +525,28 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
               {clip.segments.length} {clip.segments.length === 1 ? 'segment' : 'segments'}
             </span>
           </li>
-          {clip.audio_tracks.map((track) => (
+          {clip.audio_tracks.map((track, index) => (
             <li className="clipped-timeline__label" key={track.name}>
               <span className="clipped-timeline__track-name">{track.name}</span>
-              <span className="clipped-muted">{describeLevel(track, soloed)}</span>
+              {/*
+               * Soloing is this component's own state (issue #85): it changes
+               * what the preview plays, here and nowhere the document could
+               * carry it, so it needs no path to `crates/edit` the way a
+               * volume slider or a mute button would. `aria-pressed` says the
+               * state in words as well as by style, matching every other
+               * toggle on this screen (AGENTS.md section 46).
+               */}
+              <button
+                type="button"
+                className={`clipped-btn ${solo === index ? 'clipped-btn--secondary' : 'clipped-btn--ghost'}`}
+                aria-pressed={solo === index}
+                onClick={() => {
+                  onToggleSolo(index);
+                }}
+              >
+                Solo
+              </button>
+              <span className="clipped-muted">{describeLevel(track, index, solo)}</span>
             </li>
           ))}
         </ul>
