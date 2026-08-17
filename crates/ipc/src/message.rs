@@ -182,6 +182,16 @@ pub mod features {
         /// after the user had chosen a file name for a file that was never
         /// going to be written.
         EXPORT = "export";
+        /// The recorder can open a finished recording for playback in the
+        /// desktop window: `open_playback`.
+        ///
+        /// A UI asks for this before drawing a player, for the reason the
+        /// others give: a recorder built before
+        /// [issue #304](https://github.com/wildware-uk/clipped/issues/304) has
+        /// no `open_playback` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// after a screen had already drawn a transport over nothing.
+        PLAYBACK = "playback";
         /// The recorder registers the global hotkeys and can report where each
         /// one stands: `get_hotkeys`.
         ///

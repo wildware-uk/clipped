@@ -122,6 +122,7 @@ export const FEATURES = [
   'shutdown',
   'library',
   'export',
+  'playback',
   'hotkeys',
   'replay',
   'automatic',
@@ -158,6 +159,7 @@ export const COMMANDS = [
   'set_favourite',
   'plugins',
   'export_recording',
+  'open_playback',
   'get_hotkeys',
   'shutdown',
   'apply_settings',
@@ -192,6 +194,7 @@ export const ERROR_CODES = [
   'shutting_down',
   'destination_exists',
   'export_failed',
+  'playback_failed',
   'library_unavailable',
   'internal',
 ] as const;
@@ -244,6 +247,7 @@ export const REPLIES = [
   'favourited',
   'plugins',
   'recording_exported',
+  'playback_opened',
   'hotkeys',
   'shutting_down',
 ] as const;
@@ -559,6 +563,82 @@ export interface ExportSummary {
    * what the recorder puts on the wire.
    */
   readonly losses?: readonly string[];
+}
+
+/**
+ * Which recording to open for playback, and which of its tracks to hear.
+ *
+ * The track is a **stream index of the file**, as {@link PlaybackTrack.index}
+ * carries it, rather than an ordinal among the sound tracks: the two differ by
+ * however many picture tracks come first. Absent means the one a player should
+ * choose on its own, which the recorder decides — for a Clipped recording, the
+ * compatibility mix.
+ */
+export type OpenPlaybackParams = {
+  /** The recording to play, as {@link LibraryRecording.path} reported it. */
+  readonly source: string;
+  /** Which sound track to hear. Absent means the recorder's own choice. */
+  readonly audio_track?: number;
+};
+
+/**
+ * A recording, ready to be played, and what could be heard instead.
+ *
+ * The window plays {@link PlaybackStream.path} and offers
+ * {@link PlaybackStream.audio_tracks} beside it. There is deliberately **no
+ * duration and no picture size** here: the media element measures both from the
+ * file it is given, and a figure sent from the recorder would be a second
+ * answer to the same question.
+ */
+export interface PlaybackStream {
+  /** The file to play. */
+  readonly path: string;
+  /**
+   * The source stream index whose sound this carries.
+   *
+   * Absent only for a recording with no sound at all, which a window has to be
+   * able to tell from a track that would not play.
+   */
+  readonly audio_track?: number;
+  /**
+   * Every sound track of the **recording**, in the order the container declares
+   * them — not of the file being played, which may hold one of them.
+   *
+   * Absent rather than an empty array for a recording with no sound, because
+   * that is what the recorder puts on the wire.
+   */
+  readonly audio_tracks?: readonly PlaybackTrack[];
+  /**
+   * Whether {@link PlaybackStream.path} is a copy made for this choice rather
+   * than the recording itself.
+   *
+   * A prepared copy is a cache entry: it is not in anybody's library and must
+   * not be presented to a user as their recording.
+   */
+  readonly prepared?: boolean;
+}
+
+/** One sound track of a recording, as a window offers it. */
+export interface PlaybackTrack {
+  /** The stream index the container declares it at. */
+  readonly index: number;
+  /**
+   * What the track is called, where the recording named it.
+   *
+   * Absent for a file that named none. A window shows the position rather than
+   * inventing a name.
+   */
+  readonly name?: string;
+  /** The track's language tag, where the recording carried one. */
+  readonly language?: string;
+  /**
+   * Whether the container flags this as the track a player should choose on its
+   * own.
+   *
+   * Not a promise about what a media element will play: Chromium ignores the
+   * flag, which is why `open_playback` decides what is served.
+   */
+  readonly default?: boolean;
 }
 
 /** One media file a sitting produced. */
@@ -1093,6 +1173,14 @@ export interface RecordingExportedReply {
   readonly export: ExportSummary;
 }
 
+/** A recording is ready to be played, and here is what to play. */
+export interface PlaybackOpenedReply {
+  /** The tag. */
+  readonly reply: 'playback_opened';
+  /** The file to play, the track it carries, and the tracks beside it. */
+  readonly playback: PlaybackStream;
+}
+
 /**
  * The states one hotkey binding can be in.
  *
@@ -1204,6 +1292,7 @@ export type Reply =
   | FavouritedReply
   | PluginsReply
   | RecordingExportedReply
+  | PlaybackOpenedReply
   | HotkeysReply
   | ShuttingDownReply;
 

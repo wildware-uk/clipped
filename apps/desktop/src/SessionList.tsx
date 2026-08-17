@@ -38,7 +38,7 @@ import { useSessionWindow } from './virtualWindow';
  * against the file it acts on, because "Export" with no subject exports
  * something the user did not choose.
  *
- * A recording whose file has gone gets the same three controls **disabled**,
+ * A recording whose file has gone gets the same controls **disabled**,
  * rather than hidden: hiding them would leave a row with nothing on it and no
  * explanation, and a disabled control that says why is what AGENTS.md sections
  * 27 and 45 ask for.
@@ -82,6 +82,16 @@ export interface SessionListProps {
    */
   readonly actions?: RecordingActions;
   /**
+   * Opens a recording on the playback screen.
+   *
+   * Separate from {@link SessionListProps.actions} because it is not a round
+   * trip to anywhere: it is navigation, and the row it hands over is what saves
+   * the playback screen a second read of what this list already has (issue
+   * #304). Absent draws no Play control, which is a control that would do
+   * nothing.
+   */
+  readonly onPlay?: (recording: LibraryRecording) => void;
+  /**
    * Marking a sitting or a recording as one to keep (issue #58).
    *
    * Absent draws no stars at all. Home passes none for the same reason it
@@ -92,7 +102,13 @@ export interface SessionListProps {
 }
 
 /** The sittings, one row each, and their recordings under them. */
-export function SessionList({ sessions, label, actions, favourites }: SessionListProps): ReactNode {
+export function SessionList({
+  sessions,
+  label,
+  actions,
+  favourites,
+  onPlay,
+}: SessionListProps): ReactNode {
   const table = useRef<HTMLTableElement>(null);
   const showsRecordings = actions !== undefined;
   const window_ = useSessionWindow(table, sessions, showsRecordings);
@@ -157,6 +173,7 @@ export function SessionList({ sessions, label, actions, favourites }: SessionLis
                 key={recording.recording_id}
                 recording={recording}
                 actions={actions}
+                onPlay={onPlay}
                 session={session}
                 {...(favourites === undefined ? {} : { favourites })}
               />
@@ -178,11 +195,16 @@ export function SessionList({ sessions, label, actions, favourites }: SessionLis
 function RecordingRow({
   recording,
   actions,
+  onPlay,
   session,
   favourites,
 }: {
   readonly recording: LibraryRecording;
   readonly actions: RecordingActions;
+  // Not optional but possibly absent, which is what `exactOptionalPropertyTypes`
+  // asks a caller to be explicit about: this component is internal and is always
+  // handed the list's own answer, whether or not there is one.
+  readonly onPlay: ((recording: LibraryRecording) => void) | undefined;
   readonly session: LibrarySession;
   readonly favourites?: Favourites;
 }): ReactNode {
@@ -214,6 +236,26 @@ function RecordingRow({
         {!available && <span className="clipped-muted"> · file missing</span>}
       </td>
       <td>
+        {onPlay !== undefined && (
+          <>
+            {/*
+             * First, because watching it is what most people came for, and it
+             * is the one action that happens *here* rather than in another
+             * application (issue #304).
+             */}
+            <button
+              type="button"
+              disabled={!available || busy !== undefined}
+              title={why}
+              aria-label={`Play ${of}`}
+              onClick={() => {
+                onPlay(recording);
+              }}
+            >
+              Play
+            </button>{' '}
+          </>
+        )}
         <button
           type="button"
           disabled={!available || busy !== undefined}

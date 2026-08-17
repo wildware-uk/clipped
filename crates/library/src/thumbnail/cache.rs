@@ -72,11 +72,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use clipped_background::SourceIdentity;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::render::RenderedThumbnail;
-use super::source::SourceIdentity;
 use super::ThumbnailError;
 
 /// The directory under Clipped's per-user data directory that entries live in.
@@ -291,7 +291,7 @@ impl ThumbnailCache {
             // The recording changed, or two paths' digests collided. Either way
             // the entry describes something else and is about to be replaced.
             debug!(
-                recording = %current.redacted(),
+                recording = %clipped_logging::RedactedPath::new(current.path()),
                 "the cached thumbnail belongs to an older version of this recording"
             );
             return ThumbnailState::Pending;
@@ -303,14 +303,14 @@ impl ThumbnailCache {
             // one `stat` a tile and costing a seek and a decode a tile, every
             // time it is opened, for ever.
             return ThumbnailState::Unavailable(ThumbnailError::Remembered {
-                path: current.redacted(),
+                path: clipped_logging::RedactedPath::new(current.path()),
                 reason,
             });
         }
 
         let Some(image) = entry.image else {
             warn!(
-                recording = %current.redacted(),
+                recording = %clipped_logging::RedactedPath::new(current.path()),
                 "a thumbnail sidecar records neither a picture nor a failure"
             );
             return ThumbnailState::Pending;
@@ -321,7 +321,7 @@ impl ThumbnailCache {
             // Somebody deleted the picture and left the sidecar, or a store was
             // interrupted between the two writes.
             debug!(
-                recording = %current.redacted(),
+                recording = %clipped_logging::RedactedPath::new(current.path()),
                 "a thumbnail sidecar has no picture beside it; it will be made again"
             );
             return ThumbnailState::Pending;
@@ -886,7 +886,7 @@ mod tests {
             .remember_failure(
                 &identity,
                 &ThumbnailError::NoVideo {
-                    path: identity.redacted(),
+                    path: clipped_logging::RedactedPath::new(identity.path()),
                 },
             )
             .expect("the failure can be written");
