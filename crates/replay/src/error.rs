@@ -109,6 +109,27 @@ pub enum LeaseError {
         /// What the buffer holds.
         held: TimeRange,
     },
+    /// The source has produced no video for longer than was asked for, so
+    /// everything the buffer holds predates the requested stretch.
+    ///
+    /// A minimised window — alt-tabbing out of an exclusive fullscreen game does
+    /// it — or a display that has powered down delivers no frames at all, and
+    /// the buffer measures "the last thirty seconds" back from now rather than
+    /// from its newest picture ([`ReplayBuffer::note_source_silence`]). Refused
+    /// rather than answered with the video from before the stall, which would be
+    /// a clip presented as the last thirty seconds and taken from some other
+    /// hour ([issue #574](https://github.com/wildware-uk/clipped/issues/574)).
+    ///
+    /// Nothing is lost by refusing: a replay buffer runs beside a recording, and
+    /// every packet in it was written to that file too.
+    ///
+    /// [`ReplayBuffer::note_source_silence`]: crate::ReplayBuffer::note_source_silence
+    SourceSilent {
+        /// How long the source has been producing nothing.
+        silence: Duration,
+        /// What the buffer holds, all of it from before that.
+        held: TimeRange,
+    },
     /// A segment the buffer had spilled to disk could not be read back.
     ///
     /// The lease is refused rather than returned short. A clip written from
@@ -138,6 +159,12 @@ impl fmt::Display for LeaseError {
             Self::OutsideBuffer { requested, held } => write!(
                 formatter,
                 "the replay buffer holds {held} and nothing of the requested {requested}"
+            ),
+            Self::SourceSilent { silence, held } => write!(
+                formatter,
+                "nothing has been captured for {}, so the whole of the replay buffer ({held}) is \
+                 older than the clip that was asked for",
+                seconds(*silence)
             ),
             Self::Unreadable {
                 segment, detail, ..
@@ -196,6 +223,28 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "a memory ceiling of 64 MiB cannot hold the configured window, which needs 704 MiB"
+        );
+    }
+
+    #[test]
+    fn a_silent_source_is_refused_by_saying_how_long_it_has_been_silent() {
+        // The whole point of this refusal is that the user learns the footage
+        // would have been old. "The replay buffer holds nothing of what you
+        // asked for" would send somebody looking for a bug in the buffer, when
+        // what happened is that their game stopped drawing an hour ago.
+        let error = LeaseError::SourceSilent {
+            silence: Duration::from_secs(7200),
+            held: TimeRange::new(Duration::from_secs(12), Duration::from_secs(42)),
+        };
+
+        let message = error.to_string();
+        assert!(
+            message.contains("7200.0s"),
+            "the refusal has to say how long nothing was captured for: {message}"
+        );
+        assert!(
+            message.contains("12.000s to 42.000s"),
+            "and what is actually there, so the age is visible: {message}"
         );
     }
 

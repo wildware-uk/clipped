@@ -401,6 +401,16 @@ Two things it does not do, stated rather than glossed:
 | Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
 | The window closes | Reported as `CaptureError::TargetLost`. |
 
+A minimised stretch reaches further than the file it leaves a still passage in.
+A replay buffer receives nothing for its whole length, and "save the last thirty
+seconds" is resolved against the newest picture rather than against a clock — so
+the recording loop tells the buffer how long the source has been quiet, and a
+save that would otherwise have answered with the video from before the minimise
+comes back short or is refused. `docs/replay-buffer.md`'s "When the source stops
+producing pictures" and
+[ADR 0010](adr/0010-a-replay-save-does-not-reach-across-a-gap.md) are the rule
+and the reasoning.
+
 That last row is worth its own paragraph, because the obvious implementation of
 it does not work. `GraphicsCaptureItem::Closed` is subscribed to, but it is
 delivered through the creating thread's dispatcher queue, and a capture thread

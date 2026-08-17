@@ -72,3 +72,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0007](0007-visual-c-runtime-linkage.md) | The recorder links the Visual C++ runtime statically and the universal CRT dynamically | Accepted |
 | [0008](0008-codec-patent-position.md) | AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away | Proposed |
 | [0009](0009-the-recorder-registers-global-hotkeys.md) | The recorder registers the global hotkeys, and a press becomes a protocol command | Accepted |
+| [0010](0010-a-replay-save-does-not-reach-across-a-gap.md) | A replay save never reaches across a gap, and one that lands entirely inside one is refused | Accepted |
