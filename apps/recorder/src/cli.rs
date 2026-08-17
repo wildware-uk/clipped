@@ -684,7 +684,7 @@ pub struct ReplayArgs {
     pub save_duration: Option<ReplayLength>,
 
     /// Keep only the buffer: write no continuous recording, just the clips that
-    /// are asked for.
+    /// are asked for. [default: off]
     ///
     /// SPEC.md section 4's Manual/Replay capture mode. The capture, the encoder
     /// and the audio are identical to a recording; what is missing is the file,
