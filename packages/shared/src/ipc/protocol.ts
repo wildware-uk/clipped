@@ -157,6 +157,7 @@ export const COMMANDS = [
   'restore_from_trash',
   'empty_trash',
   'set_favourite',
+  'set_lock',
   'plugins',
   'export_recording',
   'open_playback',
@@ -245,6 +246,7 @@ export const REPLIES = [
   'restored',
   'trash_emptied',
   'favourited',
+  'locked',
   'plugins',
   'recording_exported',
   'playback_opened',
@@ -686,6 +688,21 @@ export interface LibraryRecording {
   readonly missing_since?: string;
   /** Whether the user favourited it. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked this recording itself.
+   *
+   * Its own lock only, which is what a *control* is drawn from: a recording
+   * inside a locked sitting has nothing of its own to release.
+   */
+  readonly locked?: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * `locked`, or its sitting's lock, worked out by the recorder so the
+   * cascade has one expression rather than one per window. This is what a
+   * padlock is drawn from.
+   */
+  readonly protected?: boolean;
   /** The tags on it, alphabetically. */
   readonly tags: readonly string[];
 }
@@ -738,6 +755,14 @@ export interface LibrarySession {
   readonly end_reason?: string;
   /** Whether the user favourited the sitting itself. */
   readonly favourite: boolean;
+  /**
+   * Whether the user locked the sitting against automatic cleanup.
+   *
+   * A locked sitting protects every recording in it, so a padlock against a
+   * *recording* is drawn from that recording's `protected` rather than from
+   * this. Absent from a recorder older than locks — that build has none.
+   */
+  readonly locked?: boolean;
   /** The files it recorded, in the order they were recorded. */
   readonly recordings: readonly LibraryRecording[];
   /** The clips cut from it. */
@@ -1091,6 +1116,58 @@ export interface FavouritedReply {
   readonly mark: FavouriteMark;
 }
 
+/**
+ * Locking one thing against automatic cleanup, or unlocking it.
+ *
+ * The same target shape as {@link SetFavourite} over a shorter vocabulary: a
+ * clip cannot be locked, because automatic cleanup deletes recordings and a
+ * mark nothing consults is worse than no mark at all.
+ *
+ * A lock protects against automatic cleanup and nothing else. A locked
+ * recording is deleted by a manual delete exactly as an unlocked one is, and a
+ * window must not imply otherwise.
+ */
+export interface SetLock {
+  /** `session` or `recording`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it should be locked afterwards. */
+  readonly locked: boolean;
+}
+
+/** What the lock is now. */
+export interface LockMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording`. */
+  readonly id: number;
+  /** Whether it has a lock of its own now. */
+  readonly locked: boolean;
+  /**
+   * Whether automatic cleanup will leave it alone.
+   *
+   * Not the same question as {@link locked}, and this is the one a padlock is
+   * drawn from: a recording inside a locked sitting is protected without
+   * having a lock of its own.
+   */
+  readonly protected: boolean;
+  /** Whether this request is what changed it. */
+  readonly changed: boolean;
+}
+
+/** A lock was set or cleared. */
+export interface LockedReply {
+  /** The tag. */
+  readonly reply: 'locked';
+  /** Which thing, what its lock is now, and whether cleanup will leave it alone. */
+  readonly lock: LockMark;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1290,6 +1367,7 @@ export type Reply =
   | RestoredReply
   | TrashEmptiedReply
   | FavouritedReply
+  | LockedReply
   | PluginsReply
   | RecordingExportedReply
   | PlaybackOpenedReply

@@ -198,6 +198,7 @@ fn main() {
             restore_from_trash,
             empty_trash,
             set_favourite,
+            set_lock,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -516,6 +517,29 @@ fn set_favourite(
     ))? {
         clipped_ipc::Reply::Favourited { mark } => Ok(mark),
         _ => Err(wrong_reply("set_favourite")),
+    }
+}
+
+/// Locks one thing against automatic cleanup, or unlocks it (issue #472).
+///
+/// A lock protects against automatic cleanup and nothing else: a locked
+/// recording is deleted by a manual delete exactly as an unlocked one is.
+#[tauri::command(async)]
+fn set_lock(
+    link: tauri::State<'_, RecorderLink>,
+    kind: String,
+    session_id: String,
+    id: i64,
+    locked: bool,
+) -> Result<clipped_ipc::LockMark, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::SetLock(clipped_ipc::SetLock {
+        kind,
+        session_id,
+        id,
+        locked,
+    }))? {
+        clipped_ipc::Reply::Locked { lock } => Ok(lock),
+        _ => Err(wrong_reply("set_lock")),
     }
 }
 

@@ -138,8 +138,8 @@ pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
     EmptyTrash, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
     LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
-    LibraryTrash, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied, TrashListing,
-    TrashedItem,
+    LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
+    TrashListing, TrashedItem,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,

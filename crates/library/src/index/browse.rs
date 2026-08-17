@@ -165,6 +165,13 @@ pub struct IndexedSession {
     pub end_reason: Option<String>,
     /// Whether the user favourited the sitting itself.
     pub favourite: bool,
+    /// Whether the user locked the sitting.
+    ///
+    /// A locked sitting protects every recording in it from automatic cleanup,
+    /// which is what locking one means (`crate::locks`). The recordings do not
+    /// carry a mark of their own for it, so a screen drawing a padlock against
+    /// one has to read this as well as [`IndexedRecording::locked`].
+    pub locked: bool,
     /// The files it recorded, in the order they were recorded.
     pub recordings: Vec<IndexedRecording>,
     /// The clips cut from it.
@@ -215,6 +222,13 @@ pub struct IndexedRecording {
     pub missing_since: Option<String>,
     /// Whether the user favourited it.
     pub favourite: bool,
+    /// Whether the user locked this recording itself.
+    ///
+    /// Its own lock only. A recording inside a locked sitting is protected
+    /// without carrying one, so this is the field a *control* is drawn from —
+    /// there is nothing here to release — and
+    /// [`IndexedSession::locked`] is the other half of what a padlock means.
+    pub locked: bool,
     /// The tags on it, alphabetically.
     pub tags: Vec<String>,
 }
@@ -325,6 +339,7 @@ struct SessionHeader {
     ended_at: Option<String>,
     end_reason: Option<String>,
     favourite: bool,
+    locked: bool,
 }
 
 /// The next `limit` session rows after the cursor that `query` selects, newest
@@ -358,7 +373,7 @@ fn session_headers(
     // the `sessions_started_at` index for it either way.
     let mut statement = connection.prepare(&format!(
         "SELECT s.session_id, s.game_id, catalogue.name, \
-                s.started_at, s.ended_at, s.end_reason, s.favourited_at \
+                s.started_at, s.ended_at, s.end_reason, s.favourited_at, s.locked_at \
          FROM sessions s LEFT JOIN games catalogue ON catalogue.game_id = s.game_id \
          WHERE ((?1 IS NULL) OR ((s.started_at, s.session_id) < (?1, ?2))) \
            AND ({}) \
@@ -397,6 +412,7 @@ fn read_header(row: &SqlRow<'_>) -> Result<SessionHeader, IndexError> {
         ended_at: row.get(4)?,
         end_reason: row.get(5)?,
         favourite: row.get::<_, Option<String>>(6)?.is_some(),
+        locked: row.get::<_, Option<String>>(7)?.is_some(),
     })
 }
 
@@ -412,6 +428,7 @@ fn hydrate(connection: &Connection, header: SessionHeader) -> Result<IndexedSess
         ended_at: header.ended_at,
         end_reason: header.end_reason,
         favourite: header.favourite,
+        locked: header.locked,
         recordings,
         clips,
     })
@@ -424,7 +441,7 @@ fn recordings_of(
 ) -> Result<Vec<IndexedRecording>, IndexError> {
     let mut statement = connection.prepare(
         "SELECT recording_id, session_index, path, started_at, ended_at, outcome, end_reason, \
-                duration_seconds, width, height, size_bytes, missing_since, favourited_at \
+                duration_seconds, width, height, size_bytes, missing_since, favourited_at, locked_at \
          FROM recordings WHERE session_id = ?1 AND deleted_at IS NULL \
          ORDER BY session_index",
     )?;
@@ -449,6 +466,7 @@ fn recordings_of(
             size_bytes: row.get(10)?,
             missing_since: row.get(11)?,
             favourite: row.get::<_, Option<String>>(12)?.is_some(),
+            locked: row.get::<_, Option<String>>(13)?.is_some(),
             tags: Vec::new(),
         });
     }

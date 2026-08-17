@@ -1,0 +1,49 @@
+-- A sitting or a recording can be marked as one automatic cleanup may not take.
+--
+-- Issue #472. `clipped_library::accounting::cleanup::Protection` is the whole
+-- vocabulary of reasons a sweep leaves a recording alone, and its scope named
+-- four. Two shipped: a favourite, and a recording clips were cut from. The other
+-- two did not, because there was nothing to read -- there was no `locked`
+-- anywhere in this schema and nothing that would set one.
+--
+-- This is the column that was missing.
+--
+-- WHY IT IS A MOMENT AND NOT A FLAG
+--
+-- `favourited_at` is a moment for the same reason, and this follows it
+-- deliberately rather than inventing a second convention two rows apart. A
+-- boolean answers "is it locked"; a moment also answers "since when", which is
+-- the question somebody asks when a drive is full and they are looking at a
+-- list of things cleanup would not take. NULL is unlocked.
+--
+-- WHY BOTH TABLES
+--
+-- The unit a person thinks in is the sitting -- "keep that night" -- and the
+-- unit cleanup deletes is the recording. So both carry a lock, and a recording
+-- inside a locked session is protected by the session's.
+--
+-- That cascade is the one place this differs from favourites, which are
+-- independent by design (`clipped_library::favourites` documents why: a cascade
+-- cannot be undone faithfully). It is a deliberate difference, not an
+-- oversight. A favourite is a statement about one thing; a lock is a statement
+-- about what may be deleted, and a night somebody locked with three recordings
+-- in it is a night they meant to keep. The cost is that a recording inside a
+-- locked session cannot be individually unlocked, and the sweep says which lock
+-- is protecting it so that is visible rather than mysterious.
+--
+-- The mark is not written down through the children. Unlocking a session must
+-- not leave a trail of locks behind it, which is the same argument #58 made for
+-- favourites and is why `sessions.locked_at` is read by the sweep rather than
+-- copied into `recordings`.
+--
+-- WHY NOT CLIPS
+--
+-- Automatic cleanup deletes recordings. `cleanup::candidates` reads the
+-- `recordings` table and nothing else, so a lock on a clip would be a column
+-- nothing consults -- and a clip already protects the recording it was cut from
+-- through `Protection::SourceOfClips`. Adding one is adding a column here and a
+-- rule there, on the day something deletes clips.
+
+ALTER TABLE sessions ADD COLUMN locked_at TEXT;
+
+ALTER TABLE recordings ADD COLUMN locked_at TEXT;
