@@ -44,8 +44,18 @@ windows = { workspace = true, features = [
 # handle to register a window class with. Kept out of the shipped feature list
 # because nothing in the library creates a window: this crate observes the
 # desktop, it does not add to it.
+#
+# `tests/foreground.rs` additionally has to *take* the foreground, and Windows
+# grants that only to a process that has just produced input — so it synthesises
+# a zero-pixel mouse movement first (`docs/testing.md`). Nothing in the library
+# synthesises input, and nothing in Clipped may: reading the keyboard is what
+# `docs/hotkeys.md` rules out, and this is the opposite direction of the same
+# API. It is a dev-dependency for exactly that reason.
 [dev-dependencies]
-windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+windows = { workspace = true, features = [
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [lints]
 workspace = true

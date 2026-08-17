@@ -105,6 +105,16 @@ use crate::this_application;
 /// taskbar, which is what the tray icon lives in, so it is the one that matters;
 /// the rest are the surfaces beside it. `CabinetWClass` — a File Explorer window
 /// — is deliberately absent.
+///
+/// **The recorder has this list too**, as
+/// `clipped_windows::SHELL_SURFACE_CLASSES`: the "Start or stop recording"
+/// hotkey has to answer the same question in a process that may have no window
+/// open at all ([issue
+/// #416](https://github.com/wildware-uk/clipped/issues/416)), and this
+/// application may not link the crate that answers it there (ADR 0002). The two
+/// copies are kept in step by `tests/integration/tests/foreground_rules.rs`: an
+/// entry added here and not there leaves the button and the key offering to
+/// record different things, which is invisible to every other test.
 const SHELL_WINDOW_CLASSES: &[&str] = &[
     "Shell_TrayWnd",
     "Shell_SecondaryTrayWnd",

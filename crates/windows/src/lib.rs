@@ -30,6 +30,11 @@
 //! costs. [`process_table`] is the one read of the process table in the
 //! workspace: `clipped_game_detection`'s process watcher folded its own copy
 //! into it ([issue #289](https://github.com/wildware-uk/clipped/issues/289)).
+//! What the user is looking at, and whether it is something to record
+//! ([issue #416](https://github.com/wildware-uk/clipped/issues/416)) — see
+//! [`foreground_target`], which is what a press of the "Start or stop
+//! recording" hotkey turns into a target, in a process that may have no window
+//! open at all.
 //! COM and
 //! WinRT apartment handling arrives with the first capture backend
 //! ([issue #12](https://github.com/wildware-uk/clipped/issues/12)), which is
@@ -117,6 +122,7 @@
 //! ```
 
 mod error;
+mod foreground;
 mod geometry;
 mod monitor;
 mod process;
@@ -126,6 +132,9 @@ mod selection;
 mod window;
 
 pub use error::WindowsError;
+pub use foreground::{
+    foreground_target, ForegroundTarget, NotRecordable, CLIPPED_EXECUTABLES, SHELL_SURFACE_CLASSES,
+};
 pub use geometry::{scale_percentage, PixelRect, PixelSize, DEFAULT_DPI};
 pub use monitor::{
     enumerate_monitors, monitor_for_window, monitor_info, MonitorHandle, MonitorInfo,

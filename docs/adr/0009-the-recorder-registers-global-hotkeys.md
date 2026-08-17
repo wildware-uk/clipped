@@ -73,8 +73,8 @@ Concretely, and in the order it happens:
   goes.** A request is answered to the client that sent it; a press has no
   client, so its outcome is logged — at `info` for what happened and `warn` for
   what did not.
-- **Handlers exist only for what this build performs**: `add_bookmark`,
-  `take_screenshot`, and the stop half of `toggle_recording`. An action with no
+- **Handlers exist only for what this build performs**: `save_replay`,
+  `add_bookmark`, `take_screenshot` and `toggle_recording`. An action with no
   handler reports itself as unhandled when pressed, carrying the milestone and
   issue that would build it, and is shown the same way before it is pressed.
   Nothing is wired to a handler that quietly does nothing.
@@ -94,11 +94,13 @@ window presents any of it beyond requiring that it present it truthfully.
 The obvious design, and the one most overlay-style applications use. It puts the
 registration in the process that has the settings screen, so binding a
 combination and registering it are one operation with no round trip and no
-restart — which is most of issue #233's difficulty gone. It is also the only
-process that knows what the user is looking at, so `toggle_recording` could
-start a recording of the foreground application, which is the thing a user most
-wants a hotkey to do and which the chosen design cannot yet do
-([issue #416](https://github.com/wildware-uk/clipped/issues/416)).
+restart — which is most of issue #233's difficulty gone. It was also, when this
+was written, the only process that knew what the user was looking at, so
+`toggle_recording` could start a recording of the foreground application —
+which is the thing a user most wants a hotkey to do. That advantage has since
+gone: [issue #416](https://github.com/wildware-uk/clipped/issues/416) gave the
+recorder the same answer, because a key press does not take the foreground the
+way opening a tray menu does.
 
 It was rejected on lifetime, which is the same axis ADR 0002 turned on. A hotkey
 that works only while a particular window process is alive is a hotkey scoped to
@@ -119,6 +121,13 @@ be the only place "what would this record" can honestly be answered, and issue
 #416 cannot answer it in the recorder, then the balance shifts — a hotkey that
 starts a recording is worth more than one that survives the window closing. The
 answer to that is issue #416's, not this record's.
+
+**It did not win.** Issue #416 answered the question in the recorder:
+`clipped_windows::foreground_target` asks Windows what has the foreground at the
+moment of the press, which the window cannot do for its tray menu — opening one
+gives the foreground to the taskbar — but the recorder can, because a press
+raises nothing. So the hotkey starts a recording *and* survives the window
+closing, and this decision stands unchanged.
 
 ### Both processes register, each taking the actions it can perform
 

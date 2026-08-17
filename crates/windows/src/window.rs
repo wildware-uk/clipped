@@ -543,7 +543,7 @@ impl WindowFacts {
 /// silent drop this module allows. Any other failure is an error: dropping it
 /// too would quietly change the "N of M top-level windows" denominator and
 /// leave a user asking why their game is not in the list with no answer.
-fn describe(
+pub(crate) fn describe(
     handle: HWND,
     shell: HWND,
     desktop: HWND,
