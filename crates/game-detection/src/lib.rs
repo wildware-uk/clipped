@@ -54,6 +54,11 @@ pub mod catalogue;
 pub mod launcher;
 mod process_watcher;
 
+/// The scratch directory the tests in this crate build fixtures in. Never built
+/// into the library.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use process_watcher::{
     EventSource, LaunchGroup, LaunchId, Next, ProcessExit, ProcessSnapshot, SourceError,
     WatchConfig, WatchError, WatchEvent,

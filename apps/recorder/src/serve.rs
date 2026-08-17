@@ -2796,7 +2796,6 @@ fn codec_token(codec: clipped_encoder::Codec) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::atomic::AtomicU32;
     use std::time::Duration;
 
     use clipped_game_detection::catalogue::EntrySource;
@@ -2804,6 +2803,7 @@ mod tests {
     use clipped_windows::{MonitorHandle, PixelSize, WindowGeometry, WindowHandle};
 
     use super::*;
+    use crate::test_support::Scratch;
 
     /// A catalogue that claims **this test process** as a game, by the name and
     /// the directory its executable really has.
@@ -2867,18 +2867,20 @@ mod tests {
         )
     }
 
-    /// A directory of this test's own; several of these run at once.
-    fn scratch(name: &str) -> PathBuf {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-
-        let directory = std::env::temp_dir().join(format!(
-            "clipped-serve-{name}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
-        directory
+    /// A directory of this test's own, removed again when the test that made it
+    /// passes; several of these run at once.
+    ///
+    /// Every test here used to end with `let _ = fs::remove_dir_all(&directory)`
+    /// instead, which is two defects at once and 1,787 `clipped-serve-*`
+    /// directories on one machine
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)). A
+    /// test that fails never reaches its last line, so exactly the runs worth
+    /// diagnosing left nothing to diagnose *and* left the directory; and the
+    /// service under test holds the library database open until it is dropped
+    /// at the end of the test body, so on Windows the removal was refused —
+    /// silently, because its result went to `_`.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("serve-{name}"))
     }
 
     fn moment() -> SystemTime {
@@ -3042,8 +3044,6 @@ mod tests {
             "with the watcher gone and nothing recording, this recorder will record nothing by \
              itself, and `idle` is the honest word for that",
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A sitting reported by a driver whose recorder is not watching is not put
@@ -3066,8 +3066,6 @@ mod tests {
         })));
 
         assert_eq!(state.status(), RecorderStatus::Idle);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Issue #241's first acceptance criterion, for a recording nobody asked
@@ -3139,8 +3137,6 @@ mod tests {
              unrelated recording: {:?}",
             session.recordings,
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The other kind of recording, and the reason the two are told apart.
@@ -3198,8 +3194,6 @@ mod tests {
             session.ended_at, None,
             "a sitting on a status is one the recorder is still in",
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The sitting reaching a window **while the recording is still running**.
@@ -3270,7 +3264,6 @@ mod tests {
         // an outcome for it.
         drop(adopted);
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Issue #241's second acceptance criterion, for the sitting a
@@ -3345,7 +3338,6 @@ mod tests {
 
         drop(subscribed);
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3366,8 +3358,6 @@ mod tests {
             "the refusal has to say what is missing: {}",
             error.message
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3394,8 +3384,6 @@ mod tests {
             matches!(state.status(), RecorderStatus::Recording(active) if active.replay_seconds.is_none()),
             "and the status has to say the same thing, so a window never offers the control"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3431,8 +3419,6 @@ mod tests {
             .save_replay(&SaveReplay::default(), moment())
             .expect_err("the encoder has produced nothing yet");
         assert_eq!(error.code, ErrorCode::NotRecording);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3456,8 +3442,6 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::NotRecording);
         assert!(error.message.contains("r-99"), "{}", error.message);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3487,8 +3471,6 @@ mod tests {
                 error.message
             );
         }
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3623,8 +3605,6 @@ mod tests {
             ordinary.replay.is_none(),
             "a recording nobody asked to keep a buffer keeps none, however the settings read"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3681,8 +3661,6 @@ mod tests {
             "the game's own replay window has to beat the global one, or per-game settings stop \
              at the buffer"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3718,8 +3696,6 @@ mod tests {
                 .with_file_name("clipped-cs2.bookmarks.json")
                 .to_string_lossy()
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3755,8 +3731,6 @@ mod tests {
         assert_eq!(written.label(), Some("triple kill"));
         assert_eq!(written.colour(), Some("#ffcc00"));
         assert_eq!(written.duration(), Some(Duration::from_millis(12_500)));
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3799,8 +3773,6 @@ mod tests {
             .expect_err("r-9 is not the recording that is running");
         assert_eq!(error.code, ErrorCode::NotRecording);
         assert!(error.message.contains("r-9"), "{}", error.message);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -3854,15 +3826,13 @@ mod tests {
             BookmarkFile::for_recording(&output).is_err(),
             "a bookmark the recorder refused must not have been written"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A service over a library holding one sitting whose file has gone.
     ///
     /// The library is built here rather than reconciled, because what is under
     /// test is the path from a command to a reply, not indexing.
-    fn service_over_a_library(name: &str) -> RecorderService {
+    fn service_over_a_library(name: &str) -> (Scratch, RecorderService) {
         let directory = scratch(name);
         let path = directory.join("library.db");
         {
@@ -3893,12 +3863,18 @@ mod tests {
                 .expect("a recording inserts");
         }
 
-        RecorderService::with_library(
+        // The directory comes back with the service. The service holds a
+        // `LibraryReader`, which caches the database it opens, so the directory
+        // has to outlive it — and a tuple's bindings are dropped in reverse, so
+        // `let (directory, service) = …` at the call site drops the service
+        // first, which is the order Windows insists on.
+        let service = RecorderService::with_library(
             EventPublisher::new(),
             LibraryReader::at(Some(path)),
             indexer_over(&directory),
             Catalogue::default(),
-        )
+        );
+        (directory, service)
     }
 
     #[test]
@@ -3909,7 +3885,7 @@ mod tests {
         // routes a command to it is the gap this ticket exists to close. A
         // command wired to the wrong handler, or refused before dispatch, fails
         // here and nowhere else.
-        let service = service_over_a_library("library");
+        let (_directory, service) = service_over_a_library("library");
 
         let Reply::LibrarySessions { page } = service
             .call(Command::LibrarySessions(
@@ -4036,8 +4012,6 @@ mod tests {
             clipped_ipc::base64(b"the picture of that recording"),
             "the window would have been handed somebody else's frame"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4090,7 +4064,7 @@ mod tests {
         // "None" and "nobody asked" are different things to draw, and the
         // Editor screen says them differently. An empty lane is the first; a
         // refusal would make the window guess at the second.
-        let service = service_over_a_library("library-events-none");
+        let (_directory, service) = service_over_a_library("library-events-none");
 
         let Reply::LibraryEvents { lane } = service
             .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
@@ -4106,7 +4080,7 @@ mod tests {
 
     #[test]
     fn an_identifier_that_is_not_a_recording_is_the_callers_mistake() {
-        let service = service_over_a_library("library-events-bad-id");
+        let (_directory, service) = service_over_a_library("library-events-bad-id");
 
         let refusal = service
             .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
@@ -4265,7 +4239,6 @@ mod tests {
         assert!(sessions[0].ended_at.is_some());
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4340,7 +4313,6 @@ mod tests {
         assert_eq!(games[0].sessions, 1);
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4409,8 +4381,6 @@ mod tests {
             "the sitting still has a record, so the recording still reaches the library"
         );
         drop(session);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4451,7 +4421,6 @@ mod tests {
         );
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4498,7 +4467,6 @@ mod tests {
         );
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4542,7 +4510,6 @@ mod tests {
         );
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4638,7 +4605,6 @@ mod tests {
         );
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4672,7 +4638,6 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidParameters);
 
         service.shut_down();
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4765,8 +4730,6 @@ mod tests {
             "the muxer's own sentence has to survive the dispatch: {}",
             refusal.message
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4900,7 +4863,6 @@ mod tests {
         assert_eq!(read.bookmarks.len(), 1);
 
         drop(adopted);
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4926,8 +4888,6 @@ mod tests {
             .bookmark(&AddBookmark::default(), moment())
             .expect_err("the recording has ended, so there is no moment to mark");
         assert_eq!(error.code, ErrorCode::NotRecording);
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4955,8 +4915,6 @@ mod tests {
             refusal.contains("already recording"),
             "the sitting's record has to say why it got nothing: {refusal}"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4997,8 +4955,6 @@ mod tests {
             ErrorCode::RecordingFailed,
             "and whoever asked for the stop is told what became of the file"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -5026,6 +4982,5 @@ mod tests {
         );
 
         drop(adopted);
-        let _ = std::fs::remove_dir_all(&directory);
     }
 }

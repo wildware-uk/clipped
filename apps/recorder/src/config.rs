@@ -684,6 +684,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::test_support::Scratch;
 
     /// A directory of this test's own, removed by [`TestDirectory`]'s `Drop`.
     ///
@@ -692,28 +693,20 @@ mod tests {
     /// `std::env::temp_dir` and the process id, and following that keeps the
     /// dependency count where it is (AGENTS.md sections 10 and 55).
     #[derive(Debug)]
-    struct TestDirectory(PathBuf);
+    ///
+    /// The removal is [`Scratch`]'s rather than this type's own. What it had
+    /// was `let _ = fs::remove_dir_all(…)` in [`Drop`]: that takes a failing
+    /// test's evidence with it, and it cannot report a removal that did not
+    /// happen — the defect PR #597 was written to expose (issue #598).
+    struct TestDirectory(Scratch);
 
     impl TestDirectory {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "clipped-recorder-{label}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("the temporary directory can be created");
-            Self(path)
+            Self(Scratch::new(&format!("recorder-config-{label}")))
         }
 
         fn path(&self) -> &Path {
             &self.0
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

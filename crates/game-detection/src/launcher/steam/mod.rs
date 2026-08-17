@@ -643,23 +643,18 @@ fn join(root: &Path, relative: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Scratch;
 
     /// An empty directory of one test's own, under the system temporary
-    /// directory.
+    /// directory, removed again when the test that made it passes.
     ///
-    /// Named for the test rather than randomly, and emptied on the way in, so a
-    /// run left half-finished does not decide the next one. Several agents share
-    /// the machine this is developed on, so the process and thread identifiers
-    /// keep two concurrent runs out of each other's way.
-    pub(super) fn scratch(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "clipped-steam-{label}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the temporary directory can be created");
-        path
+    /// This used to return a bare [`PathBuf`] and nothing ever removed it,
+    /// which is where 1,578 of the `clipped-steam-*` directories counted in
+    /// [issue #598](https://github.com/wildware-uk/clipped/issues/598) came
+    /// from. See [`Scratch`] for what the returned value does and how to hold
+    /// it.
+    pub(super) fn scratch(label: &str) -> Scratch {
+        Scratch::new(&format!("steam-{label}"))
     }
 
     /// The library an `installdir` is resolved against in these tests.
@@ -758,8 +753,12 @@ mod tests {
             .expect("no Steam is not an error")
             .is_none());
 
-        let uninstalled = std::env::temp_dir().join("clipped-no-such-steam-directory");
-        let _ = fs::remove_dir_all(&uninstalled);
+        // Named inside a directory of this test's own rather than straight
+        // under `%TEMP%`: a path that has to *not* exist used to be removed on
+        // the way in, and removing something the test did not create is how a
+        // suite deletes another run's files (issue #598).
+        let directory = scratch("no-steam");
+        let uninstalled = directory.join("absent");
         assert!(Steam::at_registry_path(Some(uninstalled))
             .expect("a registry entry left behind by an uninstall is not an error")
             .is_none());

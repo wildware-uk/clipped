@@ -8,21 +8,19 @@
 //! one nobody can change safely (AGENTS.md section 25).
 
 use std::fs;
-use std::path::PathBuf;
 
 use super::*;
 use crate::catalogue::MatchStrength;
+use crate::test_support::Scratch;
 
-/// An empty directory of this test's own, removed first if it survived.
-fn scratch(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-epic-{}-{name}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("a scratch directory can be made");
-    directory
+/// An empty directory of this test's own, removed again when the test passes.
+///
+/// This used to return a bare path, cleaned up by a line at the end of each
+/// test that a panic skipped and that nothing checked the result of. See
+/// [`Scratch`] for what the returned value does and how to hold it
+/// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)).
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(&format!("epic-{name}"))
 }
 
 /// Writes a manifest as the launcher writes them: PascalCase, and carrying
@@ -74,8 +72,6 @@ fn an_installed_application_is_read_out_of_its_manifest() {
         r"FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe"
     );
     assert_eq!(app.manifest(), directory.join("Fortnite.item"));
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -103,8 +99,6 @@ fn a_running_executable_under_an_installation_is_claimed_as_that_application() {
         Some((LauncherKind::Epic, "Fortnite")),
         "a process inside an Epic installation has to reach the catalogue as one"
     );
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -126,8 +120,6 @@ fn a_process_epic_does_not_know_about_carries_no_launcher_identity() {
     let candidate = epic.candidate_for("cs2.exe", r"D:\Steam\steamapps\common\cs2\game\cs2.exe");
 
     assert_eq!(candidate.launcher(), None);
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -159,8 +151,6 @@ fn the_deepest_installation_claims_a_path_inside_two_of_them() {
         .expect("something claims it");
 
     assert_eq!(app.app_name(), "Inner");
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -178,8 +168,6 @@ fn an_installation_directory_itself_is_not_a_program_in_it() {
     let epic = Epic::read_at(&directory).expect("the directory is there");
 
     assert!(epic.app_for("x.exe", r"D:\Epic\Fortnite").is_none());
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -230,8 +218,6 @@ fn the_executable_decides_when_several_applications_share_one_directory() {
         )
         .expect("the plugin's own manifest claims it");
     assert_eq!(plugin.app_name(), "FabPlugin_5.8");
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -279,8 +265,6 @@ fn a_shared_directory_that_no_executable_settles_is_refused_rather_than_guessed(
         None,
         "a candidate with no identity falls back to the path and name rungs"
     );
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -315,8 +299,6 @@ fn a_game_that_is_owned_and_not_installed_is_skipped_without_being_a_problem() {
         "an entitlement is not a fault: {:?}",
         epic.problems()
     );
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -346,8 +328,6 @@ fn one_unreadable_manifest_does_not_cost_the_user_every_other_game() {
         "a problem has to name the file: {}",
         epic.problems()[0]
     );
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -369,8 +349,6 @@ fn a_file_that_is_not_a_manifest_is_ignored_rather_than_reported() {
 
     assert_eq!(epic.apps().len(), 1);
     assert!(epic.problems().is_empty(), "{:?}", epic.problems());
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -387,8 +365,6 @@ fn a_manifest_with_no_identifier_says_which_field_is_missing() {
         "the message has to name the field: {}",
         epic.problems()[0]
     );
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -408,14 +384,16 @@ fn a_manifest_with_no_display_name_falls_back_to_its_identifier() {
 
     assert_eq!(epic.apps().len(), 1);
     assert_eq!(epic.apps()[0].name(), "OddApp");
-
-    let _ = fs::remove_dir_all(&directory);
 }
 
 #[test]
 fn a_directory_that_is_not_there_is_refused_by_name() {
-    let missing = std::env::temp_dir().join("clipped-epic-no-such-directory");
-    let _ = fs::remove_dir_all(&missing);
+    // Named inside a directory of this test's own rather than straight under
+    // `%TEMP%`: a path that has to *not* exist used to be removed on the way
+    // in, and removing something the test did not create is how a suite deletes
+    // another run's files (issue #598).
+    let directory = scratch("no-such-directory");
+    let missing = directory.join("absent");
 
     let error = Epic::read_at(&missing).expect_err("there is nothing to read");
 

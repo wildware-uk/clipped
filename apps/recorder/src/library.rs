@@ -1396,20 +1396,50 @@ fn report_unindexed(report: &IndexReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Scratch;
     use clipped_storage::rusqlite::params;
 
-    /// An empty directory of this test's own.
-    fn scratch_directory(name: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("clipped-recorder-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory can be created");
-        directory
+    /// An empty directory of this test's own, removed again when the test that
+    /// made it passes.
+    ///
+    /// This used to return a bare [`PathBuf`] and nothing ever removed it,
+    /// which is where 3,312 of the `clipped-recorder-*` directories counted in
+    /// [issue #598](https://github.com/wildware-uk/clipped/issues/598) came
+    /// from — eleven a run, every run, since these tests were written.
+    fn scratch_directory(name: &str) -> Scratch {
+        Scratch::new(&format!("recorder-{name}"))
+    }
+
+    /// A [`LibraryReader`] and the scratch directory its database sits in.
+    ///
+    /// The helpers below used to return the reader alone, which dropped the
+    /// directory at the end of the helper — so nothing removed it, and nothing
+    /// could have, because the test had not finished with it. Returning both
+    /// keeps the directory alive for as long as the test that reads it.
+    ///
+    /// The field order is load-bearing. [`LibraryReader`] caches the
+    /// [`Database`] it opens, and Windows refuses to remove a file that is
+    /// still open; a struct's fields are dropped in declaration order, so the
+    /// reader has to be declared first. Get it the wrong way round and the
+    /// removal fails — which [`Scratch`] now says out loud rather than
+    /// swallowing, the defect PR #597 was written to expose.
+    struct TestLibrary {
+        reader: LibraryReader,
+        _directory: Scratch,
+    }
+
+    impl std::ops::Deref for TestLibrary {
+        type Target = LibraryReader;
+
+        fn deref(&self) -> &LibraryReader {
+            &self.reader
+        }
     }
 
     /// A reader over a library of one sitting, whose file has gone.
-    fn library_with_a_missing_recording(name: &str) -> LibraryReader {
-        let path = scratch_directory(name).join("library.db");
+    fn library_with_a_missing_recording(name: &str) -> TestLibrary {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
         {
             let database = Database::open(&path).expect("a database opens");
             let connection = database.connection();
@@ -1438,7 +1468,10 @@ mod tests {
                 )
                 .expect("a recording inserts");
         }
-        LibraryReader::at(Some(path))
+        TestLibrary {
+            reader: LibraryReader::at(Some(path)),
+            _directory: directory,
+        }
     }
 
     #[test]
@@ -1488,8 +1521,11 @@ mod tests {
         // The distinction issue #305's last acceptance criterion turns on. This
         // is the empty half; `a_library_that_cannot_be_opened_says_so` is the
         // other, and they must not be the same reply.
-        let library =
-            LibraryReader::at(Some(scratch_directory("library-empty").join("library.db")));
+        // `directory` is bound rather than used in place: a `Scratch` used as a
+        // temporary is dropped at the end of the statement, taking the
+        // directory the reader is about to be pointed at with it.
+        let directory = scratch_directory("library-empty");
+        let library = LibraryReader::at(Some(directory.join("library.db")));
 
         let page = library
             .sessions(&LibrarySessions::default())
@@ -1505,7 +1541,8 @@ mod tests {
         // index cannot be read — a drive that is not plugged in, a database
         // from a newer build, a corrupt file. What matters is that none of them
         // reaches the window as "you have not recorded anything".
-        let path = scratch_directory("library-unopenable").join("library.db");
+        let directory = scratch_directory("library-unopenable");
+        let path = directory.join("library.db");
         std::fs::write(&path, b"this is not a database").expect("the file is written");
         let library = LibraryReader::at(Some(path));
 
@@ -1526,8 +1563,9 @@ mod tests {
     /// Written as SQL because what is under test is the read, and the row a
     /// generated highlight leaves is a `path` of NULL whichever writer made it
     /// (`0004_clips_without_a_file.sql`).
-    fn library_with_an_unexported_highlight(name: &str) -> LibraryReader {
-        let path = scratch_directory(name).join("library.db");
+    fn library_with_an_unexported_highlight(name: &str) -> TestLibrary {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
         {
             let database = Database::open(&path).expect("a database opens");
             let connection = database.connection();
@@ -1562,7 +1600,10 @@ mod tests {
                 )
                 .expect("the generated highlight inserts");
         }
-        LibraryReader::at(Some(path))
+        TestLibrary {
+            reader: LibraryReader::at(Some(path)),
+            _directory: directory,
+        }
     }
 
     #[test]
@@ -1652,8 +1693,9 @@ mod tests {
     /// generated highlight leaves has `path` NULL whichever writer made it
     /// (`0004_clips_without_a_file.sql`), and the deleted recording beside it
     /// is there so that the frame can be checked for losing anything else.
-    fn trash_holding_a_clip_with_no_file(name: &str) -> LibraryReader {
-        let path = scratch_directory(name).join("library.db");
+    fn trash_holding_a_clip_with_no_file(name: &str) -> TestLibrary {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
         {
             let database = Database::open(&path).expect("a database opens");
             let connection = database.connection();
@@ -1698,7 +1740,10 @@ mod tests {
                 )
                 .expect("a live highlight with no file inserts");
         }
-        LibraryReader::at(Some(path))
+        TestLibrary {
+            reader: LibraryReader::at(Some(path)),
+            _directory: directory,
+        }
     }
 
     /// The JSON one `ServerMessage` becomes on the wire, read back with none of
@@ -1877,8 +1922,9 @@ mod tests {
     ///
     /// The sittings are ordered by `started_at`, newest last, so the session at
     /// rank `r` of a page — newest first — is [`session_id_at_rank`].
-    fn library_of(name: &str, sessions: usize, recordings_each: usize) -> LibraryReader {
-        let path = scratch_directory(name).join("library.db");
+    fn library_of(name: &str, sessions: usize, recordings_each: usize) -> TestLibrary {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
         {
             let database = Database::open(&path).expect("a database opens");
             let connection = database.connection();
@@ -1935,7 +1981,10 @@ mod tests {
 
             connection.execute_batch("COMMIT").expect("it commits");
         }
-        LibraryReader::at(Some(path))
+        TestLibrary {
+            reader: LibraryReader::at(Some(path)),
+            _directory: directory,
+        }
     }
 
     /// The identifier of the sitting `library_of` inserted `index`th.
