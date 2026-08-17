@@ -359,14 +359,80 @@ questions the activation cannot answer:
 | What happens | What the capture does |
 | --- | --- |
 | A process of the game starts or exits | nothing: Windows follows the tree itself |
-| The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence |
+| The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence. The other side of a pair follows it onto the same process — see below |
 | …and more than one member survives, in separate trees | re-scopes onto the lowest-numbered one and logs a `warn` naming the members whose audio is therefore not in this track ([issue #311](https://github.com/wildware-uk/clipped/issues/311)) |
-| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the track continues as silence until the caller stops it |
+| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the including side continues as silence until the caller stops it. What the excluding side then carries is [an open question](#what-the-excluding-side-does-after-the-game-exits) |
 | A process of the game cannot be opened | it is not a member — an unpinned identifier is not one to scope a capture to — and its name is logged at `debug` |
 
 The tree is rooted at the game rather than at the launcher, for the reason
 [The tree is rooted at the game](#the-tree-is-rooted-at-the-game-not-at-the-launch)
 gives: Steam's notification chime does not belong in a track named after a game.
+
+**Windows offers both sides, and a recording takes both or neither.**
+`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` is everything the machine
+played *except* the tree — the other-system-audio track. A recording with a
+`Game` track scoped to the tree and a system track that is the whole endpoint
+has the game's audio on **two** tracks, which is worse than one honest track and
+a note saying separation was unavailable (ADR 0003). So:
+
+```rust
+// What a recording opens. Two captures, one thread each, one agreement.
+let (game, other) = ProcessLoopbackCapture::open_pair(game_process)?;
+```
+
+`open` and `open_excluding` are still there for a caller that wants one side,
+but a recording that opened both of them separately would carry a defect that
+only appears when a game's launcher exits partway through. Each capture then
+resolves the surviving tree from its **own** `ProcessTree`, refreshed on its own
+schedule, and nothing makes them land on the same process: a process in one
+side's tree and not the other's has its audio on both tracks, or on neither.
+
+`open_pair` gives the two captures one `AtomicU32` naming the process both are
+scoped to. An atomic rather than a shared tree behind a lock, because both sides
+are read on capture threads and a capture thread waits on nothing (AGENTS.md
+section 20). The rule, in `decide_scope`:
+
+| What the cell says | What the capture does |
+| --- | --- |
+| something other than what this capture names | follows it, even if this side's tree has not listed that process yet — being briefly scoped to something invisible is a moment of silence, disagreeing is the wrong audio on a track |
+| what this capture names, and it is alive | nothing |
+| what this capture names, it is dead, and this capture is *following* | nothing: a follower does not lead. This is what makes the rule terminate — without it, two captures whose trees disagree would move away from each other for ever |
+| what this capture names, it is dead, and this capture is not following | publishes the lowest-numbered living member. If the other side published first, in the window between the read and the write, that one wins |
+
+A capture opened on its own owns its cell, always reads back what it wrote, and
+therefore behaves exactly as it did before pairs existed.
+
+The two sides are distinct in the log: `audio_source` is `game` for the
+including side and `other_system` for the excluding one, and the `device` field
+names which side it is. Two captures whose lines were indistinguishable would
+make the one question worth asking of them — which track did this audio go to —
+unanswerable (AGENTS.md section 35).
+
+### What the excluding side does after the game exits
+
+**Not known, and deliberately not claimed.** Once the tree is empty, the
+excluding activation names a process that no longer exists. An already-open
+stream is left alone — nothing asks it to reopen — but whether Windows then
+delivers everything the machine plays, or nothing, has not been measured on
+hardware, so neither the log line nor this document says which.
+
+What *is* certain from the code is the reopen path: `open_stream` refuses an
+empty tree, so if anything does ask the excluding side to reopen after the game
+has gone, that track becomes synthesised silence for the rest of the recording.
+For a user still playing a browser after closing the game, that is a track that
+should have audio on it and does not. Fixing it means either activating an
+exclude-mode client against a dead identifier, or falling back to
+`SystemAudioCapture` on the whole endpoint — and choosing between those needs
+the measurement above, not a guess.
+
+### The contents are still unproven
+
+What none of this proves is that the *contents* are separated. That is a
+measurement on real hardware:
+[issue #34](https://github.com/wildware-uk/clipped/issues/34) is the automated
+form, and `cargo run -p clipped-audio --example process_loopback_probe` is the
+manual one — it opens the pair and prints a peak level per side, so a game tone
+and a browser tone should raise one column each and never both at once.
 
 **Ending a capture drains it.** The audio engine holds up to 200 ms of captured
 audio; closing a capture throws that away, which is the last fraction of a

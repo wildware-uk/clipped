@@ -479,7 +479,9 @@ impl Stream {
                 // reason a microphone track is silent and the stream itself
                 // cannot tell.
                 SourceKind::Microphone => EndpointMute::of(&device),
-                SourceKind::SystemAudio | SourceKind::GameAudio => None,
+                SourceKind::SystemAudio | SourceKind::GameAudio | SourceKind::OtherSystemAudio => {
+                    None
+                }
             },
             // An endpoint reports the position of every packet it delivers, and
             // `tests/system_audio.rs` asserts that it does.
@@ -763,7 +765,10 @@ impl CaptureSource {
     fn kind(&self) -> SourceKind {
         match self {
             Self::Endpoint(endpoint) => endpoint.kind,
-            Self::ProcessTree(_) => SourceKind::GameAudio,
+            // Which side of the tree, not merely "a tree": both sides run at
+            // once in a recording and every line the engine writes has to say
+            // which of them it is about (issue #27).
+            Self::ProcessTree(process) => process.kind(),
         }
     }
 
