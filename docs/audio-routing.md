@@ -465,14 +465,20 @@ exclude-mode client against a dead identifier, or falling back to
 `SystemAudioCapture` on the whole endpoint — and choosing between those needs
 the measurement above, not a guess.
 
-### The contents are still unproven
+### Proving the contents are separated
 
-What none of this proves is that the *contents* are separated. That is a
-measurement on real hardware:
-[issue #34](https://github.com/wildware-uk/clipped/issues/34) is the automated
-form, and `cargo run -p clipped-audio --example process_loopback_probe` is the
-manual one — it opens the pair and prints a peak level per side, so a game tone
-and a browser tone should raise one column each and never both at once.
+What none of this proves on its own is that the *contents* are separated. That is
+a measurement on real hardware, and it is
+[`tests/audio/track_isolation.rs`](../tests/audio/track_isolation.rs)
+([issue #34](https://github.com/wildware-uk/clipped/issues/34)): it records a
+window whose process tree is holding one tone while another process holds a
+second, and measures both frequencies on both tracks. Measured on this project's
+development machine, each track's own tone reads 0.0565 and the other tree's
+reads 0.00003 — about 1,900 times apart, against a rejection threshold of eight.
+
+`cargo run -p clipped-audio --example process_loopback_probe` is the same claim
+by hand: it opens the pair and prints a peak level per side, so a game tone and a
+browser tone should raise one column each and never both at once.
 
 **Ending a capture drains it.** The audio engine holds up to 200 ms of captured
 audio; closing a capture throws that away, which is the last fraction of a
@@ -1195,12 +1201,14 @@ Written during M2, alongside the code:
 - Per-source processing — gain, mute, noise suppression, gate, compressor,
   limiter — and where in the chain each sits
   ([issue #31](https://github.com/wildware-uk/clipped/issues/31)).
-- How to verify isolation across the whole track model at once
-  ([issue #34](https://github.com/wildware-uk/clipped/issues/34)): a recording
-  with a game track, a system track and a microphone track, each asserted by
-  frequency to hold its own tone and none of the others. Two trees against one
-  capture is asserted today, in
-  `test-apps/process-tree-audio/tests/process_loopback_isolation.rs`.
+- Verifying isolation across the whole track model at once, **including the
+  microphone** ([issue #34](https://github.com/wildware-uk/clipped/issues/34)).
+  A recording's game track, complement track and compatibility mix are asserted
+  by frequency today, against real endpoints and real processes, in
+  `tests/audio/track_isolation.rs`; two trees against one capture are asserted in
+  `test-apps/process-tree-audio/tests/process_loopback_isolation.rs`. The
+  microphone is not, and cannot be without a virtual capture device to render a
+  known tone into, so it stays in the manual procedure in `docs/testing.md`.
 - The Windows version requirements the subsystem depends on, measured rather
   than read off the documentation, and how it behaves on a machine that does not
   meet them. What is known today is above: the activation fails and

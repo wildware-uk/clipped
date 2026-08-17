@@ -45,7 +45,7 @@ use clipped_audio::windows::ProcessLoopbackCapture;
 use clipped_audio::{AudioError, Capture};
 use clipped_media_validation::AudioContent;
 use clipped_process_tree_audio::harness::ToneSubject;
-use clipped_process_tree_audio::SECOND_FREQUENCY;
+use clipped_video_pattern::steady_tone::SECOND_FREQUENCY;
 
 /// The subject, built by Cargo for this package.
 const SUBJECT: &str = env!("CARGO_BIN_EXE_process-tree-audio");

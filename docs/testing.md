@@ -1,10 +1,10 @@
 # Testing capture against controlled test applications
 
-**Status: the video test applications exist and one capture test drives them.**
-`test-apps/video-pattern` and `test-apps/fullscreen-dx11` are built, documented
-here, and exercised end to end by the tests in `tests/capture/`. The audio ones
-AGENTS.md section 26 also names do not exist yet, and
-[the last section](#what-is-not-built-yet) says why and where they are tracked.
+**Status: three of the four test applications AGENTS.md section 26 names exist,
+and the tests in `tests/capture/` and `tests/audio/` drive them.**
+`test-apps/video-pattern`, `test-apps/fullscreen-dx11` and
+`test-apps/process-tree-audio` are built and documented here. The fourth is not,
+and [the last section](#what-is-not-built-yet) says why and where it is tracked.
 
 The other half of testing a recorder is what comes _out_ of it, which is
 [validating produced media](#validating-produced-media) — one harness, used by
@@ -33,6 +33,7 @@ arrived twice — with nobody watching.
 | --------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `test-apps/video-pattern`   | A window — bordered or borderless — presenting the deterministic pattern at a fixed rate | `cargo run -p clipped-video-pattern --bin video-pattern -- --help`     |
 | `test-apps/fullscreen-dx11` | The same pattern covering a whole display, exclusively where Windows allows it           | `cargo run -p clipped-fullscreen-dx11 --bin fullscreen-dx11 -- --help` |
+| `test-apps/process-tree-audio` | A silent parent that starts a child which plays a tone, so that process-scoped capture can be proved against a known process *tree* | `cargo run -p clipped-process-tree-audio --bin process-tree-audio -- --help` |
 
 Both are ordinary workspace members, so `cargo build --workspace`,
 `cargo clippy --workspace --all-targets` and `cargo fmt --all` cover them. A
@@ -135,6 +136,11 @@ cargo run -p clipped-video-pattern --bin video-pattern -- --ignore-stdin
 # With sound: a quiet 997 Hz tone at the moment a named frame is presented,
 # every five seconds. Silent without this.
 cargo run -p clipped-video-pattern --bin video-pattern -- --tone --seconds 20
+
+# The other kind of sound: one quiet frequency held for the whole run, so that a
+# recording of this window has a source an isolation test can look for on a
+# track. Exclusive with --tone, which places bursts a plateau would swamp.
+cargo run -p clipped-video-pattern --bin video-pattern -- --steady-tone 997 --seconds 20
 ```
 
 `--help` lists every option. A release build is not needed — a debug build
@@ -218,6 +224,18 @@ applications:
 | `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards — and, when Windows refused the exclusive transition, that the run says so and fails under `CLIPPED_REQUIRE_CAPTURE` rather than passing as if it had proved something |
 | `av_sync.rs`             | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the _absolute_ A/V offset of a capture is ([av-sync.md](av-sync.md))                 |
 | `readback.rs`            | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it                                                                                                                                                                                                                          |
+
+`tests/audio/` holds the one test that points a real _recording_ at these
+applications and asks what landed on each of its tracks:
+
+| Test                  | What it decides                                                                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both |
+
+`test-apps/process-tree-audio` has one of its own,
+`tests/process_loopback_isolation.rs`, which asks a narrower question with no
+recording involved: that a capture scoped to a *parent* picks up a tone played by
+a child it started afterwards, and not one played by an unrelated tree.
 
 ## The end-to-end recorder tests
 
@@ -308,6 +326,7 @@ has (`tests/capture/README.md`, and the `Test` step in
 cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
+cargo test -p clipped-video-pattern --test track_isolation -- --ignored --nocapture
 ```
 
 `av_sync.rs` additionally needs an audio endpoint, runs for about ninety seconds
@@ -359,8 +378,10 @@ into a failure on a machine that is supposed to be able to capture.
 ## Running the suite without making a noise
 
 Some tests play sound. `crates/audio/tests/system_audio.rs` renders a quiet
-997 Hz tone so it can capture it back and measure it, and the A/V sync tests
-drive `video-pattern --tone`. That is the right way to test a capture path —
+997 Hz tone so it can capture it back and measure it, the A/V sync tests drive
+`video-pattern --tone`, and `tests/audio/track_isolation.rs` holds two tones at
+once — `video-pattern --steady-tone` and one of its own — for the length of a
+recording. That is the right way to test a capture path —
 a real reference signal, not a mock — but `cargo test --workspace` is the
 command CONTRIBUTING.md asks every contributor to run before review, and on a
 machine with a sound card it makes noise. On a call, in headphones, or on the
@@ -503,11 +524,29 @@ runs on.
 
 **They do not measure Windows.** Whether `ProcessLoopbackCapture`'s include mode
 really captures only the game's process tree, and its exclude mode really
-captures everything else and not the game, is a property of the platform and
-needs real endpoints and real processes. That is #34's system half, it waits on
-the test applications of
-[issue #136](https://github.com/wildware-uk/clipped/issues/136), and until they
-exist the check is manual:
+captures everything else and not the game, is a property of the platform: a
+build that routed the whole endpoint to the game's track passes every one of the
+assertions above, because scripted sources cannot say what Windows actually
+handed over.
+
+That is #34's system half, and it is
+[`tests/audio/track_isolation.rs`](../tests/audio/track_isolation.rs). It starts
+`video-pattern --steady-tone 997` — one process tree that owns a window *and*
+makes a sound, which is what a stand-in for a game has to be — plays 1373 Hz from
+the test process itself, records the window through `record_into`, and measures
+every track of the file by frequency. On this project's development machine each
+track's own tone measures 0.0565 and the neighbour's measures 0.00003, which is
+about **1,900 times** apart against a threshold of eight. It needs a GPU, a
+display, an encoder and an output endpoint, so it is `#[ignore]`d like everything
+in `tests/capture/`; [tests/audio/README.md](../tests/audio/README.md) has the
+command and what to set.
+
+**The microphone leg is still manual.** A simulated microphone at a known
+frequency needs a capture endpoint a test can feed — a virtual audio device,
+installed by somebody — which AGENTS.md section 25 rules out assuming, and
+opening the real microphone of whoever ran the tests would record their room
+(section 14). So the microphone is checked by hand, and so is a real game rather
+than a test application:
 
 1. Start a game, something playing audio that is not the game (a browser tab is
    enough), and have a microphone connected.
@@ -520,10 +559,10 @@ exist the check is manual:
    **Microphone** must contain only the microphone.
 5. Mute all three and unmute **Compatibility Mix**: it must contain all of them.
 
-Step 4 is the one that matters and the one most likely to fail: a build that
-routed the whole endpoint to the game's track passes every automated assertion
-above, because scripted sources cannot tell you what Windows actually handed
-over.
+Step 4 is the one that matters. The first two thirds of it are now the automated
+test above; the microphone third is not, and is where a run of this procedure
+earns its place. Record what it found on the milestone issue (AGENTS.md
+section 53).
 
 Nothing is asserted until `assert_valid()`, so one run reports every failed
 expectation rather than the first:
@@ -665,8 +704,16 @@ purpose rather than stubbed:
   the tone plan from AGENTS.md section 26 (440 Hz, 880 Hz, 1320 Hz) written into
   its acceptance criteria. Much of what it was for is now covered from the other
   end: `crates/session/src/audio/tests.rs` scripts sources through the real
-  muxing path and asserts tone isolation by frequency analysis, and
-  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks.
+  muxing path and asserts tone isolation by frequency analysis,
+  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks, and
+  `tests/audio/track_isolation.rs` does it against real endpoints and real
+  processes with `video-pattern --steady-tone` as the source.
+
+The generator that is missing is a **microphone** one, and it is missing for a
+reason no test application can fix: a simulated microphone needs a capture
+endpoint to render into, which is a virtual audio device rather than a program.
+That is why `track_isolation.rs` records no microphone track and why the
+procedure above still has a manual step for it.
 
 Anything else this document describes is built. Where it describes something
 that is not, it says so — a document that quietly describes intentions as facts

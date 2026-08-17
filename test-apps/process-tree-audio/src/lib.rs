@@ -39,39 +39,12 @@
 //!
 //! # It makes a noise
 //!
-//! Quietly — [`AMPLITUDE`] is about −28 dBFS — and only while a player is
-//! running. [`FREQUENCY`] is 997 Hz for the reason `crates/audio` chose it: it
-//! is the frequency digital audio has used for a century of measurements
-//! because no instrument plays it, so music playing on the machine puts almost
-//! nothing in that bin. A test that asks for two tones at once should pick the
-//! second one the same way (`tests/process_loopback_isolation.rs` uses
-//! [`SECOND_FREQUENCY`]).
+//! Quietly — about −28 dBFS — and only while a player is running. The waveform,
+//! the loop that feeds it to the endpoint and the frequencies a test asks for
+//! are `clipped_video_pattern::steady_tone`, which is where they moved when the
+//! video subject needed the same continuous tone: two test applications
+//! rendering a sine to the same endpoint should be one loop rather than two
+//! that drift apart (AGENTS.md section 55). It says why the frequencies are
+//! 997 Hz and 1373 Hz rather than a musical note or its harmonic.
 
 pub mod harness;
-
-#[cfg(windows)]
-pub mod tone;
-
-/// The tone a player renders unless it is told otherwise, in hertz.
-///
-/// 997 Hz: not a musical note, so background music on a developer's machine
-/// contributes almost nothing to the bin a test measures. See the module
-/// documentation.
-pub const FREQUENCY: f32 = 997.0;
-
-/// A second tone for the process tree a test is *not* capturing.
-///
-/// 1373 Hz is neither a harmonic of [`FREQUENCY`] nor a musical note, so
-/// neither tone can be mistaken for the other and nothing on the machine
-/// produces either by accident. Both matter: an isolation test asserts that one
-/// tone is present *and* that the other is not, and a second frequency that was
-/// a harmonic of the first would fail the second half for a reason that has
-/// nothing to do with the capture.
-pub const SECOND_FREQUENCY: f32 = 1373.0;
-
-/// The peak amplitude of a rendered tone, as a fraction of full scale.
-///
-/// About −28 dBFS. A Goertzel filter finds a tone far below this; the volume is
-/// set by politeness on a machine somebody is using rather than by what the
-/// measurement needs.
-pub const AMPLITUDE: f32 = 0.04;

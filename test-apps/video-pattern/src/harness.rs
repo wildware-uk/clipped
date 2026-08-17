@@ -70,6 +70,7 @@ pub struct TestApp {
     exclusive: bool,
     monitor: String,
     tone: Tone,
+    steady_tone: SteadyTone,
     /// A `stopped` line that arrived while [`TestApp::tones`] was draining.
     ///
     /// [`TestApp::stop`] reads the last line the application printed, and a
@@ -95,6 +96,25 @@ pub enum Tone {
     Unavailable,
     /// The run is playing tones on this plan.
     Playing(TonePlan),
+}
+
+/// What a run said about its *continuous* tone, which is the other kind of
+/// sound this application makes (`--steady-tone`).
+///
+/// Separate from [`Tone`] rather than a fourth variant of it, because the two
+/// are separate options and a run can be asked for either. Three states for the
+/// same reason [`Tone`] has three: a driver has to be able to tell a run that
+/// was never asked for a sound from a run that was asked and could not make
+/// one, and only the second is a reason to skip a measurement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SteadyTone {
+    /// The run was not asked for a continuous tone, and is silent.
+    Off,
+    /// The run was asked for one and the machine could not play it. The
+    /// application says why on standard error.
+    Unavailable,
+    /// The run is holding this frequency, in hertz, for its whole length.
+    Playing(f32),
 }
 
 /// Which frames of a run carry a tone.
@@ -265,6 +285,7 @@ impl TestApp {
             exclusive: fields.exclusive,
             monitor: fields.monitor,
             tone: fields.tone,
+            steady_tone: fields.steady_tone,
             stopped_early: None,
         })
     }
@@ -307,6 +328,12 @@ impl TestApp {
     #[must_use]
     pub const fn tone(&self) -> Tone {
         self.tone
+    }
+
+    /// What the run said about its continuous tone, from the `ready` line.
+    #[must_use]
+    pub const fn steady_tone(&self) -> SteadyTone {
+        self.steady_tone
     }
 
     /// Takes every tone the application has announced since this was last
@@ -474,6 +501,7 @@ struct Ready {
     exclusive: bool,
     monitor: String,
     tone: Tone,
+    steady_tone: SteadyTone,
 }
 
 /// Parses `ready hwnd=0x… client=1280x720 …`.
@@ -552,6 +580,19 @@ fn parse_ready(line: &str) -> Result<Ready, HarnessError> {
         Some(other) => return Err(protocol(format!("`tone={other}` is not a state"))),
     };
 
+    let steady_tone =
+        match fields.get("steady-tone").copied() {
+            Some("yes") => {
+                let frequency = field("steady-tone-hz")?;
+                SteadyTone::Playing(frequency.parse().map_err(|_| {
+                    protocol(format!("`steady-tone-hz` does not parse: {frequency}"))
+                })?)
+            }
+            Some("no") => SteadyTone::Unavailable,
+            Some("off") | None => SteadyTone::Off,
+            Some(other) => return Err(protocol(format!("`steady-tone={other}` is not a state"))),
+        };
+
     Ok(Ready {
         window,
         client,
@@ -559,6 +600,7 @@ fn parse_ready(line: &str) -> Result<Ready, HarnessError> {
         exclusive: field("exclusive")? == "yes",
         monitor: field("monitor").unwrap_or_default(),
         tone,
+        steady_tone,
     })
 }
 
@@ -777,6 +819,44 @@ mod tests {
         assert_eq!(ready.presentation, "borderless");
         assert!(!ready.exclusive);
         assert_eq!(ready.monitor, "\\\\.\\DISPLAY1");
+    }
+
+    #[test]
+    fn a_steady_tone_run_is_read_back_as_the_frequency_it_is_holding() {
+        let ready = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=60 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1 tone=off steady-tone=yes steady-tone-hz=997 \
+             steady-tone-rate=48000 steady-tone-channels=2",
+        )
+        .expect("this is the line a --steady-tone run prints");
+
+        assert_eq!(ready.steady_tone, SteadyTone::Playing(997.0));
+        assert_eq!(
+            ready.tone,
+            Tone::Off,
+            "the two kinds of sound are separate options and must not be read as each other"
+        );
+    }
+
+    #[test]
+    fn a_run_that_could_not_hold_a_tone_is_not_read_as_one_that_was_never_asked() {
+        // The distinction the whole three-state enumeration exists for. An
+        // isolation test measuring a track for a frequency has to skip on the
+        // first and would otherwise measure silence and blame the routing
+        // (AGENTS.md section 54).
+        let refused = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=60 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1 tone=off steady-tone=no",
+        )
+        .expect("this is the line a machine with no output endpoint prints");
+        assert_eq!(refused.steady_tone, SteadyTone::Unavailable);
+
+        let silent = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=30 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1",
+        )
+        .expect("a `ready` line without the steady-tone fields is still a `ready` line");
+        assert_eq!(silent.steady_tone, SteadyTone::Off);
     }
 
     #[test]

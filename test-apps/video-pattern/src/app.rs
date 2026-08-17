@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! ready hwnd=0x00000000000a06f2 client=1280x720 fps=30 presentation=borderless \
-//!     exclusive=no monitor=\\.\DISPLAY1 tone=off
+//!     exclusive=no monitor=\\.\DISPLAY1 tone=off steady-tone=off
 //! stopped frames=901 reason=deadline
 //! ```
 //!
@@ -41,6 +41,20 @@
 //! is one it had not reported by the time the frame went to the compositor —
 //! probably played, but with nothing to measure it from. They are counted
 //! separately because one is a missing sound and the other is a missing report.
+//!
+//! A `--steady-tone` run is the other kind of sound, and says so in the same
+//! line and nowhere else — there are no per-tone announcements, because there
+//! is only one tone and it never stops:
+//!
+//! ```text
+//! ready hwnd=0x… client=1280x720 fps=60 presentation=borderless exclusive=no \
+//!     monitor=\\.\DISPLAY1 tone=off steady-tone=yes steady-tone-hz=997 \
+//!     steady-tone-rate=48000 steady-tone-channels=2
+//! ```
+//!
+//! `steady-tone=no` is a run that was asked for one on a machine that cannot
+//! play it, which is a reason for a driver to skip rather than to record
+//! silence and blame what it was measuring ([`crate::steady_tone`]).
 //!
 //! # Stopping, and never being left behind
 //!
@@ -79,6 +93,7 @@ use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, C
 
 use crate::pattern::{self, PatternError};
 use crate::render::{handle_value, PatternWindow, Placement};
+use crate::steady_tone::{self, SteadyToneOutput};
 use crate::tone::{Emitted, ToneOutput};
 
 /// Set by the console control handler; read by the run loop.
@@ -200,6 +215,14 @@ pub struct Options {
     /// noise nobody asked for is one somebody turns off. See [`crate::tone`]
     /// for what the tone is and what its announced moment means.
     pub tone: bool,
+    /// A frequency to hold, unbroken, for the whole run.
+    ///
+    /// [`None`] by default, for the same reason [`Options::tone`] is false. It
+    /// is the other kind of sound this application makes and the two are
+    /// exclusive: `--tone` places short bursts against the frame counter, and a
+    /// continuous tone underneath them would leave the burst detector measuring
+    /// a plateau. See [`crate::steady_tone`].
+    pub steady_tone: Option<f32>,
 }
 
 impl Default for Options {
@@ -214,6 +237,7 @@ impl Default for Options {
             size: (1280, 720),
             stop_on_stdin_end: true,
             tone: false,
+            steady_tone: None,
         }
     }
 }
@@ -301,12 +325,23 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
             .ok()
     });
 
+    // Opened before the `ready` line for the same reason the burst tone is: a
+    // recording started on the strength of that line would otherwise measure
+    // the silence before the endpoint started. Held for the whole run and
+    // dropped with everything else at the end of this function, which stops the
+    // stream (AGENTS.md section 58).
+    let steady = options.steady_tone.and_then(|frequency| {
+        SteadyToneOutput::start(frequency, steady_tone::AMPLITUDE)
+            .inspect_err(|reason| eprintln!("[warn] this run will be silent: {reason}"))
+            .ok()
+    });
+
     let interval = Duration::from_secs(1) / options.fps.max(1);
     let mut tones = Tones::planned(sound.is_some(), options.fps, window.presented());
 
     let (width, height) = window.size();
     announce(&format!(
-        "ready hwnd=0x{:016x} client={}x{} fps={} presentation={} exclusive={} monitor={} {}",
+        "ready hwnd=0x{:016x} client={}x{} fps={} presentation={} exclusive={} monitor={} {} {}",
         handle_value(window.handle()),
         width,
         height,
@@ -315,6 +350,7 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
         if window.is_exclusive() { "yes" } else { "no" },
         monitor,
         tones.announcement(options.tone),
+        steady_announcement(options.steady_tone, steady.as_ref()),
     ));
 
     let started = Instant::now();
@@ -368,6 +404,9 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
     // display has been given back and the window has gone, which is what lets a
     // test treat the line as permission to stop worrying about this process.
     drop(window);
+    // And the sound has stopped with it, for the same reason: `stopped` means
+    // this process is making no more noise on a machine somebody is using.
+    drop(steady);
 
     announce(&format!("stopped frames={frames} reason={reason}"));
 
@@ -492,6 +531,29 @@ impl Tones {
                 "tone index={index} frame={frame} onset=pending present={present_nanos} skew=none"
             )),
         }
+    }
+}
+
+/// The `ready` line's steady-tone fields.
+///
+/// Three answers, not two, for the reason `Tones::announcement` gives three:
+/// "this run was not asked for a continuous tone" and "this run was asked for
+/// one and this machine cannot play it" are different things to a test. The
+/// first is every other test in this workspace; the second is a reason to skip
+/// an isolation measurement rather than to record silence and blame the routing
+/// (AGENTS.md section 54).
+fn steady_announcement(requested: Option<f32>, playing: Option<&SteadyToneOutput>) -> String {
+    match (requested, playing) {
+        (_, Some(tone)) => {
+            let (rate, channels) = tone.format();
+            format!(
+                "steady-tone=yes steady-tone-hz={} steady-tone-rate={rate} \
+                 steady-tone-channels={channels}",
+                tone.frequency()
+            )
+        }
+        (Some(_), None) => "steady-tone=no".to_owned(),
+        (None, None) => "steady-tone=off".to_owned(),
     }
 }
 

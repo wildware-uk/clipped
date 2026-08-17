@@ -25,15 +25,16 @@
 //! | [`harness`] | Starting the application from a test and stopping it afterwards | Anywhere |
 //! | The renderer and the run loop | A Direct3D 11 window presenting the pattern at a fixed rate | Windows |
 //! | The tone output | `--tone` only: a short sound placed at the moment a named frame is presented, so that a recording of this application has an event whose sound and picture are simultaneous at the source | Windows |
-//! | [`render_stream`] | The default output endpoint, opened once for both the tone output and the drift measurement's silent stream | Windows |
+//! | [`steady_tone`] | `--steady-tone` only: one frequency held for the whole run, so that a recording of this application is a *source* an audio isolation test can look for on a track | Windows |
+//! | [`render_stream`] | The default output endpoint, opened once for the tone output, the steady tone and the drift measurement's silent stream | Windows |
 //!
-//! Only the last two are platform code, and they are compiled only on Windows
+//! Only the last three are platform code, and they are compiled only on Windows
 //! (AGENTS.md section 5). Everything the pattern promises can therefore be
 //! tested on any machine, which is what stops the pattern and the decoder
 //! drifting apart between capture runs.
 //!
-//! **It is silent unless `--tone` is passed.** Every existing test that starts
-//! this application gets the window and nothing else.
+//! **It is silent unless `--tone` or `--steady-tone` is passed.** Every
+//! existing test that starts this application gets the window and nothing else.
 //!
 //! # How it is used
 //!
@@ -59,6 +60,8 @@ pub mod harness;
 pub mod pattern;
 #[cfg(windows)]
 pub mod render_stream;
+#[cfg(windows)]
+pub mod steady_tone;
 
 #[cfg(windows)]
 mod app;

@@ -64,6 +64,16 @@ path = "../../tests/capture/screenshot_during_recording.rs"
 name = "odd_client_area"
 path = "../../tests/capture/odd_client_area.rs"
 
+# The audio isolation measurement (issue #34), in tests/audio/ with the system
+# tests that record known tone generators. It belongs to this package because
+# it starts this binary — `--steady-tone` makes it a process tree that owns a
+# window *and* makes a sound, which is what a stand-in for a game has to be —
+# and because a recording of that window is the only place the game's track and
+# its complement can be measured against what Windows actually handed over.
+[[test]]
+name = "track_isolation"
+path = "../../tests/audio/track_isolation.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root
