@@ -39,9 +39,12 @@ any player that handles Matroska will open them.
 **`npm run build:app` builds an installer that records.** It carries the
 recorder and the FFmpeg libraries beside the window, so an installed Clipped
 finds and starts its recorder with nothing set by hand
-([docs/packaging.md](docs/packaging.md)). It is not a shippable build: it is
-unsigned, and it does not yet carry the licence texts and third-party notices a
-distributed copy owes ([#123](https://github.com/wildware-uk/clipped/issues/123)).
+([docs/packaging.md](docs/packaging.md)). It carries the licence texts and
+third-party notices a distributed copy owes
+([#123](https://github.com/wildware-uk/clipped/issues/123),
+[docs/licensing.md](docs/licensing.md)). It is still not a shippable build: it
+is unsigned, so SmartScreen will warn about it, and nothing has been released —
+[docs/releasing.md](docs/releasing.md) says when anything will be.
 
 Screenshots are pending.
 

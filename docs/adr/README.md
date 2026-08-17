@@ -76,3 +76,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0011](0011-what-the-webview-plays.md) | The window plays the archival recording itself, and the recorder chooses which sound track it carries | Accepted |
 | [0012](0012-a-session-follows-a-resize-with-a-new-file.md) | A session follows a mid-recording size change with a new file, and Clipped does not scale | Accepted |
 | [0013](0013-capture-rounds-an-odd-dimension-away.md) | Capture rounds an odd dimension away, and crops the frame to match | Accepted |
+| [0014](0014-a-milestone-is-not-a-version.md) | A milestone is not a version, and the first release is v1.0.0 | Accepted |
