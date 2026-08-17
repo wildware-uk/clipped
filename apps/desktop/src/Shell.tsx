@@ -1,6 +1,6 @@
 import { SCREENS, screensInGroup, type Screen } from '@clipped/shared';
 import { AppShell, RecorderStatus, ScreenNav, ScreenNotBuilt } from '@clipped/ui';
-import { useCallback, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { ClipPlaybackScreen } from './ClipPlaybackScreen';
@@ -11,6 +11,8 @@ import { GamesScreen } from './GamesScreen';
 import { HomeScreen } from './HomeScreen';
 import { LibraryScreen } from './LibraryScreen';
 import { SettingsScreen } from './SettingsScreen';
+import { SetupScreen } from './SetupScreen';
+import { SETUP_PATH, useFirstRun } from './setup';
 import { UnknownScreen } from './UnknownScreen';
 import {
   describeInterruption,
@@ -40,6 +42,9 @@ const screenFor = (pathname: string): Screen | undefined =>
 function titleFor(pathname: string, screen: Screen | undefined): string {
   if (screen !== undefined) {
     return `Clipped — ${screen.label}`;
+  }
+  if (pathname === SETUP_PATH) {
+    return 'Clipped — Setup';
   }
   return isClipPath(pathname) ? 'Clipped — Playback' : 'Clipped';
 }
@@ -148,6 +153,33 @@ export function Shell(): ReactNode {
   );
   const trayNotice = useTray(goToPath);
 
+  /*
+   * The first run, and the one thing about it that is not a screen: getting
+   * somebody to it without ever getting in their way afterwards (issue #109).
+   *
+   * The question is asked once, of the recorder, and answered from the settings
+   * that already exist — a profile that has configured neither a microphone nor
+   * a recording directory has not been set up (`setup.ts`). Three rules keep it
+   * from becoming a nuisance:
+   *
+   * - only a definite yes navigates. A recorder that could not be reached has
+   *   not said this profile is unconfigured, and putting somebody through a
+   *   flow whose Save was going to fail is worse than not offering it;
+   * - it happens at most once per window. Finishing setup saves the settings
+   *   and navigates home, and a gate that re-read its answer would race that
+   *   save and send them straight back;
+   * - `replace` rather than a push, so Back does not lead to a Home screen
+   *   nobody chose to visit.
+   */
+  const sentToSetup = useRef(false);
+  const firstRun = useFirstRun();
+  useEffect(() => {
+    if (firstRun.state === 'needed' && !sentToSetup.current) {
+      sentToSetup.current = true;
+      void navigate(SETUP_PATH, { replace: true });
+    }
+  }, [firstRun.state, navigate]);
+
   return (
     <AppShell
       screenKey={pathname}
@@ -217,6 +249,13 @@ export function Shell(): ReactNode {
          * with no recording to show (issue #52).
          */}
         <Route path={CLIP_ROUTE} element={<ClipPlaybackScreen view={view} />} />
+        {/*
+         * The ninth route, and outside `SCREENS` for the same reason the eighth
+         * is: it is not a destination in the sidebar. It is what a profile that
+         * has never been configured is sent to once, and what "Run setup again"
+         * on the Settings screen leads back to (issue #109).
+         */}
+        <Route path={SETUP_PATH} element={<SetupScreen />} />
         <Route path="*" element={<UnknownScreen />} />
       </Routes>
     </AppShell>

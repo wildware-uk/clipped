@@ -2,6 +2,7 @@ import type { SettingEntry, SettingsView } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { StrictMode } from 'react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -102,6 +103,23 @@ function settingsWith(key: string, changes: Partial<SettingEntry>): SettingsView
   };
 }
 
+/**
+ * The settings a profile that has been through the first run sends.
+ *
+ * Both answers the first run asks for are configured, which is what stops the
+ * shell sending the window to the setup flow (`setup.ts`, issue #109). A test
+ * about the sidebar has to start from a profile that is past that, or it is a
+ * test about the first run.
+ */
+const CONFIGURED: SettingsView = {
+  ...SETTINGS,
+  settings: SETTINGS.settings.map((candidate) =>
+    candidate.key === 'microphone' || candidate.key === 'recording_directory'
+      ? { ...candidate, overridden: true }
+      : candidate,
+  ),
+};
+
 /** This machine's microphones, as `get_audio_devices` answers. */
 const MICROPHONES = {
   microphones: [
@@ -147,7 +165,13 @@ function renderScreen(
     recorderHotkeys: () => [],
     ...overrides,
   });
-  render(<SettingsScreen />);
+  // In a router because the screen carries one link — the way back to the
+  // first run (issue #109) — and `Link` reads the router's context.
+  render(
+    <MemoryRouter>
+      <SettingsScreen />
+    </MemoryRouter>,
+  );
   return runtime;
 }
 
@@ -479,7 +503,7 @@ describe('the Settings screen', () => {
   it('is reached from the sidebar with Tab and Enter', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime({ link: 'connecting' }, null, {
-      recorderSettings: () => SETTINGS,
+      recorderSettings: () => CONFIGURED,
       audioDevices: () => MICROPHONES,
       recorderHotkeys: () => [],
     });

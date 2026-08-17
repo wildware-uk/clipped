@@ -1,4 +1,4 @@
-import type { AudioDevices, SettingsView, StartAtLogin } from '@clipped/shared';
+import type { AudioDevices, SettingEntry, SettingsView, StartAtLogin } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useState } from 'react';
@@ -207,6 +207,46 @@ export function describeSettingsProblem(problem: LibraryProblem): string {
     default:
       return problem.message;
   }
+}
+
+/** One thing a microphone control offers. */
+export interface MicrophoneOption {
+  /** The value the settings file would carry, which is what a control sends. */
+  readonly value: string;
+  /** What it is called in the list. */
+  readonly label: string;
+}
+
+/**
+ * What a microphone setting offers: the two words, then this machine's devices.
+ *
+ * Here rather than in a screen because two screens draw the chooser — the
+ * Settings screen and the first run (issue #109) — and a second copy of this
+ * list would be a second answer to "what can I record from", differing in
+ * whichever of them somebody forgot to change (AGENTS.md section 55).
+ */
+export function microphoneOptions(
+  entry: SettingEntry,
+  devices: LibraryRead<AudioDevices>,
+): readonly MicrophoneOption[] {
+  const listed = devices.state === 'read' ? devices.value.microphones : [];
+  const options = [
+    { value: DEFAULT_DEVICE, label: 'Whichever Windows is using' },
+    { value: NO_DEVICE, label: 'Do not record a microphone' },
+    ...listed.map((device) => ({
+      value: `${DEVICE_PREFIX}${device.name}`,
+      label: device.is_default ? `${device.name} (default)` : device.name,
+    })),
+  ];
+
+  // A configured device that is not in the list is one that is unplugged, and
+  // it stays on offer: dropping it would silently change what is recorded to
+  // whatever the list happened to start with (AGENTS.md section 27).
+  const named = deviceNamed(entry.value);
+  if (named !== undefined && !options.some((option) => option.value === entry.value)) {
+    options.push({ value: entry.value, label: `${named} (not connected)` });
+  }
+  return options;
 }
 
 /** The device a microphone setting names, without the prefix that made it literal. */

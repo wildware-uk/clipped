@@ -212,6 +212,7 @@ fn main() {
             recorder_settings,
             apply_recorder_settings,
             audio_devices,
+            microphone_level,
             start_at_login,
             set_start_at_login,
             start_recording,
@@ -736,6 +737,32 @@ fn audio_devices(
     match link.call(&clipped_ipc::Command::GetAudioDevices)? {
         clipped_ipc::Reply::AudioDevices { devices } => Ok(devices),
         _ => Err(wrong_reply("get_audio_devices")),
+    }
+}
+
+/// What the microphone a setting names is hearing right now.
+///
+/// The half of choosing a microphone a list of names cannot answer: which of
+/// this machine's three input devices can actually hear the person choosing
+/// (SPEC.md section 45, step 3). Asked repeatedly while a meter is on screen,
+/// and each call opens the endpoint and closes it again — so a window that is
+/// killed mid-choice leaves no capture running and no microphone-in-use
+/// indicator behind (`clipped_session::microphone_level`).
+///
+/// The value crosses as the settings file's own spelling of a microphone, not as
+/// a device name, because the question is what the choice being looked at would
+/// record. The recorder resolves it with the code a recording resolves it with,
+/// so the meter and the recording cannot be pointed at different endpoints.
+#[tauri::command(async)]
+fn microphone_level(
+    link: tauri::State<'_, RecorderLink>,
+    microphone: String,
+) -> Result<clipped_ipc::MicrophoneLevel, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetMicrophoneLevel(
+        clipped_ipc::MicrophoneLevelRequest { microphone },
+    ))? {
+        clipped_ipc::Reply::MicrophoneLevel { level } => Ok(level),
+        _ => Err(wrong_reply("get_microphone_level")),
     }
 }
 

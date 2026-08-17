@@ -539,6 +539,14 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_audio_device(), &[]),
         ),
         (
+            "microphone_level_request".to_owned(),
+            structure_of(&exemplar_microphone_level_request(), &[]),
+        ),
+        (
+            "microphone_level".to_owned(),
+            structure_of(&exemplar_microphone_level(), &[]),
+        ),
+        (
             "set_start_at_login".to_owned(),
             structure_of(&exemplar_set_start_at_login(), &[]),
         ),
@@ -615,6 +623,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::OpenPlayback(_) => Some("open_playback".to_owned()),
                 Command::ApplySettings(_) => Some("apply_settings".to_owned()),
+                Command::GetMicrophoneLevel(_) => Some("microphone_level_request".to_owned()),
                 Command::SetStartAtLogin(_) => Some("set_start_at_login".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -653,6 +662,7 @@ fn commands() -> Vec<CommandSchema> {
                     Some("reply.settings".to_owned())
                 }
                 Command::GetAudioDevices => Some("reply.audio_devices".to_owned()),
+                Command::GetMicrophoneLevel(_) => Some("reply.microphone_level".to_owned()),
                 // And both start-at-login commands, for the same reason: what
                 // a change produced is the arrangement as it now stands
                 // (`crate::startup`).
@@ -1354,6 +1364,15 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "what a microphone is hearing, from a device that is plugged in",
+            ServerMessage::Response(Response {
+                id: 19,
+                outcome: Outcome::Ok(Reply::MicrophoneLevel {
+                    level: exemplar_microphone_level(),
+                }),
+            }),
+        ),
+        (
             "a setting refused with what would have been accepted",
             ServerMessage::Response(Response {
                 id: 15,
@@ -1648,6 +1667,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
         Reply::Settings { .. } => "settings".to_owned(),
         Reply::AudioDevices { .. } => "audio_devices".to_owned(),
+        Reply::MicrophoneLevel { .. } => "microphone_level".to_owned(),
         // Three paths rather than one, because they are the three things a
         // window says differently and a mirror that dropped either field would
         // reach the same discriminant for all of them. "Off" and "on" are the
@@ -1927,6 +1947,28 @@ fn exemplar_audio_devices() -> crate::settings::AudioDevices {
                 is_default: false,
             },
         ],
+    }
+}
+
+/// The question a settings screen asks while somebody is choosing.
+fn exemplar_microphone_level_request() -> crate::settings::MicrophoneLevelRequest {
+    crate::settings::MicrophoneLevelRequest {
+        microphone: "name:Shure MV7".to_owned(),
+    }
+}
+
+/// A microphone that is present, unmuted and hearing something.
+///
+/// Every optional field populated, because a field that was skipped would not
+/// reach [`structure_of`] and the TypeScript mirror would never be held to it.
+fn exemplar_microphone_level() -> crate::settings::MicrophoneLevel {
+    crate::settings::MicrophoneLevel {
+        device: Some("Shure MV7".to_owned()),
+        // Exactly representable in `f32`, so the sample frame reads `0.5`
+        // rather than the nearest float to a decimal that is not — a number
+        // nobody typed, in a file people read to learn the shape.
+        peak: 0.5,
+        muted: Some(false),
     }
 }
 
@@ -2427,6 +2469,7 @@ fn every_built_command() -> Vec<Command> {
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
         Command::GetAudioDevices,
+        Command::GetMicrophoneLevel(exemplar_microphone_level_request()),
         Command::GetStartAtLogin,
         Command::SetStartAtLogin(exemplar_set_start_at_login()),
         Command::Shutdown(Shutdown::default()),
@@ -2455,6 +2498,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::GetSettings
             | Command::ApplySettings(_)
             | Command::GetAudioDevices
+            | Command::GetMicrophoneLevel(_)
             | Command::GetStartAtLogin
             | Command::SetStartAtLogin(_)
             | Command::Shutdown(_) => {}
@@ -2644,6 +2688,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::AudioDevices {
             devices: exemplar_audio_devices(),
         },
+        Reply::MicrophoneLevel {
+            level: exemplar_microphone_level(),
+        },
         Reply::StartAtLogin {
             // The broken arrangement, because both optional fields are `Some`
             // in it and a `None` is skipped: the schema would otherwise never
@@ -2751,6 +2798,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Hotkeys { .. }
             | Reply::Settings { .. }
             | Reply::AudioDevices { .. }
+            | Reply::MicrophoneLevel { .. }
             | Reply::StartAtLogin { .. }
             | Reply::RecordingExported { .. }
             | Reply::PlaybackOpened { .. }

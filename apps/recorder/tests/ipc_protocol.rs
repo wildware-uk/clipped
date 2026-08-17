@@ -539,6 +539,56 @@ fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_reco
 }
 
 #[test]
+fn a_recorder_that_can_listen_to_a_microphone_says_so_and_answers_about_one() {
+    // The first run's meter, over the wire (issue #109). Two things are checked
+    // and neither needs a microphone plugged into the machine running the test:
+    //
+    // - the capability is advertised **separately** from `settings`, because a
+    //   window that cannot get a level should still draw the device chooser
+    //   rather than refuse the whole screen;
+    // - `none` is refused rather than answered with a reading of zero. That is
+    //   the distinction the meter exists for: a setting somebody chose and a
+    //   microphone that heard nothing must not arrive looking the same
+    //   (AGENTS.md section 27).
+    //
+    // What is *not* checked here is the number, because that needs an endpoint.
+    // `crates/session/src/audio/tests.rs` holds the reduction of a buffer of
+    // samples to a peak, which is the part of it that is arithmetic.
+    let home = scratch_home("microphone-level");
+    let recorder = ServedRecorder::start_under("microphone-level", Some(&home));
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::MICROPHONE_LEVEL),
+        "a build that can measure a microphone has to say so, or the window draws a meter that          will never move: {:?}",
+        client.welcome()
+    );
+
+    match client.call(&IpcCommand::GetMicrophoneLevel(
+        clipped_ipc::MicrophoneLevelRequest {
+            microphone: "none".to_owned(),
+        },
+    )) {
+        Err(ClientError::Refused(refusal)) => {
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+            assert!(
+                refusal.message.contains("no microphone"),
+                "the refusal has to say why there is no level: {}",
+                refusal.message,
+            );
+        }
+        other => panic!("`none` has no level to report, got {other:?}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
 fn a_setting_the_file_would_refuse_is_refused_with_what_would_have_been_accepted() {
     // AGENTS.md section 45, over the wire: not "invalid", but the value, the
     // range and the setting — the same sentence the file's own reader gives,

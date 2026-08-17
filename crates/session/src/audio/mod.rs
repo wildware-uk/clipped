@@ -71,6 +71,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use clipped_audio::{AudioError, AudioFormat, Capture};
 use clipped_capture::{
@@ -207,9 +208,7 @@ impl core::fmt::Debug for OpenSource {
 /// [`SessionError::AudioDeviceNotSelectable`] for a named system-audio device,
 /// which this build cannot honour.
 pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, SessionError> {
-    use clipped_audio::windows::{
-        MicrophoneCapture, MicrophoneSelection, ProcessLoopbackCapture, SystemAudioCapture,
-    };
+    use clipped_audio::windows::{MicrophoneCapture, ProcessLoopbackCapture, SystemAudioCapture};
 
     let mut sources = Vec::new();
 
@@ -261,25 +260,18 @@ pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, Sess
         }
     }
 
-    match settings.microphone() {
-        AudioSourceSetting::Off => {}
-        selection => {
-            let selection = match selection {
-                AudioSourceSetting::Named(name) => chosen_microphone(name)?,
-                _ => MicrophoneSelection::SystemDefault,
-            };
-            let capture =
-                MicrophoneCapture::open(&selection).map_err(|source| SessionError::Audio {
-                    track: AudioSource::Microphone.track_name(),
-                    source,
-                })?;
-            sources.push(OpenSource {
-                source: AudioSource::Microphone,
-                device: capture.device_name().map(str::to_owned),
-                format: capture.format(),
-                capture: Box::new(capture),
-            });
-        }
+    if let Some(selection) = selected_microphone(settings.microphone())? {
+        let capture =
+            MicrophoneCapture::open(&selection).map_err(|source| SessionError::Audio {
+                track: AudioSource::Microphone.track_name(),
+                source,
+            })?;
+        sources.push(OpenSource {
+            source: AudioSource::Microphone,
+            device: capture.device_name().map(str::to_owned),
+            format: capture.format(),
+            capture: Box::new(capture),
+        });
     }
 
     Ok(sources)
@@ -384,6 +376,177 @@ pub fn available_microphones() -> Result<Vec<MicrophoneChoice>, SessionError> {
             is_default: device.is_default(),
         })
         .collect())
+}
+
+/// The endpoint a microphone setting names, resolved against this machine.
+///
+/// [`None`] for [`AudioSourceSetting::Off`], which is not a device that could
+/// not be found: it is the absence of a microphone track, and the caller opens
+/// nothing.
+///
+/// **This is the one place a microphone setting becomes a device**, and both
+/// callers go through it: the recording that is about to be made
+/// ([`open`]) and the level check a settings screen runs before saving one
+/// ([`microphone_level`]). A second resolution would be a meter that listened to
+/// one endpoint while the recording opened another, which is a worse lie than no
+/// meter at all (AGENTS.md sections 27 and 55).
+///
+/// # Errors
+///
+/// [`SessionError::MicrophoneNotFound`] when a named device matches nothing on
+/// this machine, or more than one, and [`SessionError::Audio`] when the
+/// endpoints cannot be enumerated at all.
+fn selected_microphone(
+    setting: &AudioSourceSetting,
+) -> Result<Option<clipped_audio::windows::MicrophoneSelection>, SessionError> {
+    use clipped_audio::windows::MicrophoneSelection;
+
+    match setting {
+        AudioSourceSetting::Off => Ok(None),
+        AudioSourceSetting::Named(name) => chosen_microphone(name).map(Some),
+        AudioSourceSetting::SystemDefault => Ok(Some(MicrophoneSelection::SystemDefault)),
+    }
+}
+
+/// What a microphone is hearing at this moment.
+///
+/// The answer to the one question a person choosing a microphone is actually
+/// asking — "is this the one that can hear me?" — which no list of device names
+/// can answer. A settings screen asks repeatedly and draws the result as a
+/// meter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MicrophoneLevel {
+    /// The endpoint that was listened to, as Windows names it.
+    ///
+    /// [`None`] while the device is unplugged or disabled, during which a
+    /// capture produces silence rather than failing — so this is the difference
+    /// between "nobody is speaking" and "there is nothing there".
+    pub device: Option<String>,
+    /// The loudest sample heard, from `0.0` to `1.0`.
+    ///
+    /// A linear amplitude rather than decibels, because it is a measurement and
+    /// not a presentation: how a meter scales it is the drawing side's, and
+    /// converting here would mean two places deciding what `-60 dB` looks like.
+    /// Clamped at `1.0`: a float endpoint can deliver samples above full scale,
+    /// and "louder than the loudest" is not a thing a meter can draw.
+    pub peak: f32,
+    /// Whether Windows reports the microphone muted.
+    ///
+    /// [`None`] when Windows will not report the switch for this device — some
+    /// virtual devices have none. A muted microphone reads as silence, so this
+    /// is what stops a flat meter being reported as "say something louder" when
+    /// the answer is a switch.
+    pub muted: Option<bool>,
+}
+
+/// Listens to the microphone `setting` names for `listen`, and reports the
+/// loudest thing it heard.
+///
+/// # Why it opens and closes the device every time
+///
+/// Because the alternative is a capture nobody owns. A monitor held open
+/// between calls has to be closed by something, and the only thing that knows
+/// the user has finished choosing is a window that may have been killed — which
+/// would leave Windows showing the microphone-in-use indicator for the life of
+/// the recorder (AGENTS.md section 58). Opening per call makes the cleanup
+/// deterministic, and a settings screen polling a few times a second is not a
+/// load worth carrying that risk for.
+///
+/// The consequence is stated rather than hidden: [`MicrophoneLevel::peak`] is
+/// the loudest sample in the slice that was listened to, not since the last
+/// call. Between two calls there is a gap that nothing measured.
+///
+/// # Privacy
+///
+/// One number leaves this function. The samples are read, reduced to a maximum
+/// and dropped, and nothing here logs a buffer — the guarantee
+/// `docs/audio-routing.md` makes about microphone audio never reaching a log
+/// (AGENTS.md section 13) applies with more force to a function whose whole
+/// purpose is to listen to somebody's room.
+///
+/// # Errors
+///
+/// [`SessionError::AudioDeviceNotSelectable`] is *not* one of them; a setting of
+/// [`AudioSourceSetting::Off`] is refused by the caller rather than here, since
+/// "record no microphone" is a valid setting and simply has no level.
+///
+/// [`SessionError::MicrophoneNotFound`] when the named device is not on this
+/// machine, and [`SessionError::Audio`] when the device cannot be opened —
+/// unplugged, in use, or presenting a format this build will not convert. A
+/// caller shows the reason rather than a meter reading zero, because those are
+/// opposite answers (AGENTS.md section 27).
+///
+/// # Panics
+///
+/// Never. `listen` of zero opens the device and reports what one read of it
+/// gives, which is the honest answer to being asked for no time at all.
+pub fn microphone_level(
+    setting: &AudioSourceSetting,
+    listen: Duration,
+) -> Result<Option<MicrophoneLevel>, SessionError> {
+    use clipped_audio::windows::MicrophoneCapture;
+
+    let Some(selection) = selected_microphone(setting)? else {
+        return Ok(None);
+    };
+
+    let mut capture =
+        MicrophoneCapture::open(&selection).map_err(|source| SessionError::Audio {
+            track: AudioSource::Microphone.track_name(),
+            source,
+        })?;
+
+    let deadline = Instant::now() + listen;
+    let mut peak = 0.0_f32;
+    loop {
+        // The first read gets the whole window: a capture that has just started
+        // has nothing buffered, and a timeout of what is left after the first
+        // read would shrink to nothing before the endpoint's first packet
+        // arrived.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match capture.read(remaining) {
+            // Silence the crate synthesised for a device that produced nothing
+            // is a peak of zero, which is what it sounds like. `device` below
+            // is what says the device was not there.
+            Ok(Capture::Samples(buffer)) => peak = peak.max(loudest(buffer.samples())),
+            Ok(Capture::Idle | Capture::FormatChanged(_)) => {}
+            Err(source) => {
+                return Err(SessionError::Audio {
+                    track: AudioSource::Microphone.track_name(),
+                    source,
+                })
+            }
+        }
+    }
+
+    let level = MicrophoneLevel {
+        device: capture.device_name().map(str::to_owned),
+        peak,
+        muted: capture.is_muted(),
+    };
+
+    // Before the borrow ends rather than at drop, so that the microphone-in-use
+    // indicator goes away when this returns and not whenever the value happens
+    // to be dropped.
+    capture.close();
+    Ok(Some(level))
+}
+
+/// The loudest of `samples`, as a positive amplitude no greater than `1.0`.
+///
+/// Non-finite samples are ignored rather than propagated: a `NaN` from a driver
+/// would otherwise become the peak and stay it, since `NaN` compares greater
+/// than nothing and `f32::max` prefers the number — a meter pinned at the top
+/// for the rest of the session with no way back down.
+fn loudest(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .filter(|sample| sample.is_finite())
+        .fold(0.0_f32, |loudest, sample| loudest.max(sample.abs()))
+        .min(1.0)
 }
 
 /// The microphone whose name contains `wanted`.

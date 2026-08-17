@@ -48,7 +48,9 @@ use crate::library::{
 use crate::message::Request;
 use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
-use crate::settings::{ApplySettings, AudioDevices, SettingsView};
+use crate::settings::{
+    ApplySettings, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest, SettingsView,
+};
 use crate::startup::{SetStartAtLogin, StartAtLogin};
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
@@ -140,6 +142,15 @@ pub enum Command {
     /// window has to be able to show what is there rather than asking somebody
     /// to type a name they cannot see.
     GetAudioDevices,
+    /// What one microphone is hearing at this moment.
+    ///
+    /// The other half of step 3 of SPEC.md section 45's MVP. A list of endpoint
+    /// names says which microphones exist and nothing about which of them can
+    /// hear the person choosing — and on a machine with a webcam, a headset and
+    /// a monitor's array microphone, that is the whole of the question. Answered
+    /// by opening the endpoint the setting names, listening briefly, and closing
+    /// it again (`crate::settings::MicrophoneLevel`).
+    GetMicrophoneLevel(MicrophoneLevelRequest),
     /// Whether the recorder starts when this user signs in.
     ///
     /// Not a setting: it is a `Run` value Windows reads at sign-in rather than
@@ -191,6 +202,7 @@ impl Command {
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
             Self::GetAudioDevices => "get_audio_devices",
+            Self::GetMicrophoneLevel(_) => "get_microphone_level",
             Self::GetStartAtLogin => "get_start_at_login",
             Self::SetStartAtLogin(_) => "set_start_at_login",
             Self::Shutdown(_) => "shutdown",
@@ -229,6 +241,7 @@ impl Command {
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
             "get_audio_devices" => Ok(Self::GetAudioDevices),
+            "get_microphone_level" => Ok(Self::GetMicrophoneLevel(parse_params(request)?)),
             "get_start_at_login" => Ok(Self::GetStartAtLogin),
             "set_start_at_login" => Ok(Self::SetStartAtLogin(parse_params(request)?)),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
@@ -266,6 +279,7 @@ impl Command {
             Self::SetFavourite(request) => serde_json::to_value(request),
             Self::SetLock(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
+            Self::GetMicrophoneLevel(request) => serde_json::to_value(request),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
             Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
@@ -768,6 +782,11 @@ pub enum Reply {
         /// Every microphone, with the default one marked.
         devices: AudioDevices,
     },
+    /// What the microphone that was asked about is hearing.
+    MicrophoneLevel {
+        /// The reading, and what was listened to.
+        level: MicrophoneLevel,
+    },
     /// Whether the recorder starts at sign-in, as it now stands.
     ///
     /// The answer to `get_start_at_login` **and** to `set_start_at_login`, for
@@ -891,6 +910,7 @@ mod tests {
             "get_settings",
             "apply_settings",
             "get_audio_devices",
+            "get_microphone_level",
             "get_start_at_login",
             "set_start_at_login",
             "shutdown",

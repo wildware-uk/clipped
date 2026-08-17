@@ -110,6 +110,15 @@ export interface CommandAnswers {
    */
   readonly audioDevices?: () => unknown;
   /**
+   * What `microphone_level` answers, given the microphone it was asked about.
+   *
+   * The default is a rejection, because a meter reading zero and a recorder
+   * that was never asked must not look the same: one means "say something" and
+   * the other means the screen is drawing a control over nothing (AGENTS.md
+   * section 27, issue #109).
+   */
+  readonly microphoneLevel?: (args: Record<string, unknown>) => unknown;
+  /**
    * What `start_at_login` answers: whether the recorder starts at sign-in.
    *
    * The default is a rejection, for the reason `audioDevices`' is: "Clipped
@@ -309,6 +318,13 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'audio_devices') {
         return answered(commands.audioDevices);
+      }
+      if (command === 'microphone_level') {
+        return answered(
+          commands.microphoneLevel === undefined
+            ? undefined
+            : () => commands.microphoneLevel?.(args),
+        );
       }
       if (command === 'start_at_login') {
         return answered(commands.startAtLogin);

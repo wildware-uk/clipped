@@ -40,6 +40,9 @@ import type {
   AudioDevice,
   AudioDevices,
   AudioDevicesReply,
+  MicrophoneLevel,
+  MicrophoneLevelParams,
+  MicrophoneLevelReply,
   SetStartAtLoginParams,
   StartAtLogin,
   StartAtLoginReply,
@@ -584,6 +587,13 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   audio_device: fields<AudioDevice>({ name: 'required', is_default: 'required' }),
   audio_devices: fields<AudioDevices>({ microphones: 'required' }),
   'reply.audio_devices': fields<AudioDevicesReply>({ reply: 'required', devices: 'required' }),
+  microphone_level_request: fields<MicrophoneLevelParams>({ microphone: 'required' }),
+  microphone_level: fields<MicrophoneLevel>({
+    peak: 'required',
+    device: 'optional',
+    muted: 'optional',
+  }),
+  'reply.microphone_level': fields<MicrophoneLevelReply>({ reply: 'required', level: 'required' }),
   start_at_login: fields<StartAtLogin>({
     enabled: 'required',
     location: 'required',
@@ -771,6 +781,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_microphone_level',
+    params: 'microphone_level_request',
+    reply: 'reply.microphone_level',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_start_at_login',
     params: null,
     reply: 'reply.start_at_login',
@@ -864,6 +880,11 @@ function replyDiscriminant(reply: Reply): string {
       // The same. A machine with no microphone is an empty list rather than a
       // different reply.
       return 'audio_devices';
+    case 'microphone_level':
+      // One discriminant: a device that is not there and one that is silent are
+      // the same shape with a field left out, and which is which is
+      // `MicrophoneLevel.device` rather than a different reply.
+      return 'microphone_level';
     case 'start_at_login':
       // Three paths, because they are the three things the window says
       // differently: off, on, and on but pointing at an executable that is no

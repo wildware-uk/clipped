@@ -165,9 +165,76 @@ pub struct AudioDevices {
     pub microphones: Vec<AudioDevice>,
 }
 
+/// Which microphone to listen to, and for how long the recorder decides.
+///
+/// # Why a setting's value rather than a device name
+///
+/// Because the question is "what would *this choice* record", asked while
+/// somebody is still choosing. The value is spelled exactly as the settings file
+/// spells it — `default`, `name:Shure MV7` — so the level a window shows is
+/// measured against the same words it is about to save, resolved by the same
+/// code a recording resolves them with (`clipped_session::audio`). A window that
+/// sent a bare device name would be asking about a device; this asks about a
+/// setting, and those differ the moment `default` moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MicrophoneLevelRequest {
+    /// The microphone setting to listen to, in the settings file's own
+    /// spelling.
+    pub microphone: String,
+}
+
+/// What a microphone is hearing.
+///
+/// # Why this is asked for repeatedly rather than streamed
+///
+/// A level is only wanted while somebody is looking at a meter, which is a few
+/// seconds on a settings screen and never again. An event stream would have to
+/// be started, stopped, and cleaned up after a window that was killed
+/// mid-choice — and the thing left behind would be an open capture, which
+/// Windows shows as a microphone-in-use indicator for the life of the recorder
+/// (AGENTS.md section 58). Asking opens and closes the device inside the call,
+/// so there is nothing to leak and nothing to tidy up.
+///
+/// The cost is stated in [`peak`](Self::peak) rather than hidden: between two
+/// questions there is a gap nothing measured.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicrophoneLevel {
+    /// The endpoint that was listened to, as Windows names it.
+    ///
+    /// Absent while the device is unplugged or disabled, during which a capture
+    /// produces silence rather than failing — which is what tells "nobody is
+    /// speaking" from "there is nothing there". A window that drew both as a
+    /// flat meter would send somebody looking for the volume control when the
+    /// answer is a cable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The loudest sample heard, from `0.0` to `1.0`.
+    ///
+    /// The loudest in the moment that was listened to, **not** since the last
+    /// question: this is a sample of the signal, not a running maximum, and a
+    /// window that held the highest reading it ever saw would show a meter that
+    /// only ever went up.
+    ///
+    /// A linear amplitude rather than decibels, because how a meter scales it is
+    /// the drawing side's decision and converting here would put that decision
+    /// in two places.
+    pub peak: f32,
+    /// Whether Windows reports the microphone muted.
+    ///
+    /// Absent when Windows will not report the switch for this device — some
+    /// virtual devices have none. A muted microphone reads as silence, so this
+    /// is what stops a screen telling somebody to speak up when what they need
+    /// is to unmute (AGENTS.md section 28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ApplySettings, AudioDevice, AudioDevices, SettingEntry, SettingsView};
+    use super::{
+        ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
+        SettingEntry, SettingsView,
+    };
 
     #[test]
     fn a_setting_nothing_reads_carries_the_sentence_that_says_so() {
@@ -272,6 +339,58 @@ mod tests {
                 .map(|device| device.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["Shure MV7"],
+        );
+    }
+
+    #[test]
+    fn a_level_asks_about_a_setting_in_the_words_the_file_spells_it() {
+        // The mistake this guards against is sending a device name: the window
+        // is asking what the value it is about to save would record, and
+        // `default` is a value the file holds and not a device.
+        let request: MicrophoneLevelRequest =
+            serde_json::from_str(r#"{"microphone":"name:Shure MV7"}"#).expect("it parses");
+
+        assert_eq!(request.microphone, "name:Shure MV7");
+    }
+
+    #[test]
+    fn a_device_that_is_not_there_is_an_absent_name_rather_than_an_empty_one() {
+        // The one distinction the meter exists to draw: a peak of zero from a
+        // device that is present is somebody not speaking, and a peak of zero
+        // with no device is a microphone that is not plugged in.
+        let unplugged = MicrophoneLevel {
+            device: None,
+            peak: 0.0,
+            muted: None,
+        };
+
+        let json = serde_json::to_string(&unplugged).expect("it serialises");
+        assert_eq!(
+            json, r#"{"peak":0.0}"#,
+            "an absent device and an unknown mute switch are absent fields: {json}",
+        );
+        assert_eq!(
+            serde_json::from_str::<MicrophoneLevel>(&json).expect("and deserialises"),
+            unplugged,
+        );
+    }
+
+    #[test]
+    fn a_muted_microphone_says_so_beside_a_reading_of_silence() {
+        let muted = MicrophoneLevel {
+            device: Some("Shure MV7".to_owned()),
+            peak: 0.0,
+            muted: Some(true),
+        };
+
+        let json = serde_json::to_string(&muted).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<MicrophoneLevel>(&json).expect("and deserialises"),
+            muted,
+        );
+        assert!(
+            json.contains(r#""muted":true"#),
+            "the switch is what explains the silence: {json}",
         );
     }
 

@@ -171,6 +171,14 @@ fn features_of_this_build() -> Vec<String> {
         // read and written through `clipped_session::config` and the
         // microphones are enumerated by `clipped-audio` (issue #51).
         features::SETTINGS.to_owned(),
+        // Separate from the settings themselves, because a window that cannot
+        // get a level should still draw the list of microphones rather than
+        // refusing the whole screen (`clipped_ipc::features`, issue #109). This
+        // build opens the endpoint and listens, on Windows; a build without an
+        // audio backend does not claim it, so a window there draws the list and
+        // says why there is no meter instead of showing one stuck at zero.
+        #[cfg(windows)]
+        features::MICROPHONE_LEVEL.to_owned(),
         // And this before it draws a start-at-login switch, so that a recorder
         // built before issue #308 — which has the settings commands and neither
         // of these two — is told apart from a recorder that is simply not set
@@ -752,6 +760,14 @@ impl CommandHandler for RecorderService {
             // one somebody is about to choose (issue #308).
             Command::GetAudioDevices => Ok(Reply::AudioDevices {
                 devices: crate::settings::audio_devices()?,
+            }),
+            // The device is opened, listened to and closed inside this call.
+            // Nothing is held between questions, so a window that is killed
+            // while somebody is choosing leaves no capture behind and no
+            // microphone-in-use indicator (AGENTS.md section 58,
+            // `clipped_session::microphone_level`).
+            Command::GetMicrophoneLevel(request) => Ok(Reply::MicrophoneLevel {
+                level: crate::settings::microphone_level(&request)?,
             }),
             // One registry value, read and written by the same code the
             // `start-at-login` subcommand runs (`crate::start_at_login`, issue
@@ -3702,6 +3718,92 @@ mod tests {
             1024,
             "and must never write to one"
         );
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_build_that_can_measure_a_microphone_says_so_apart_from_the_settings() {
+        // Its own capability, and the reason is what a window does without it:
+        // a settings screen that cannot get a level still has a working list of
+        // devices, so it must draw the chooser and leave out the meter rather
+        // than refuse the screen (`clipped_ipc::features`, issue #109).
+        let features = features_of_this_build();
+        assert!(features.contains(&clipped_ipc::features::SETTINGS.to_owned()));
+        assert_eq!(
+            features.contains(&clipped_ipc::features::MICROPHONE_LEVEL.to_owned()),
+            cfg!(windows),
+            "a build with no audio backend must not claim it can listen: {features:?}",
+        );
+    }
+
+    #[test]
+    fn recording_no_microphone_is_refused_a_level_rather_than_answered_with_silence() {
+        // The distinction the meter exists to draw, at its own boundary. `none`
+        // is a setting somebody chose and a reading of zero is a microphone
+        // that heard nothing, and a screen given the second for the first would
+        // draw a dead meter over a deliberate choice (AGENTS.md section 27).
+        //
+        // Needs no audio device: `none` names no endpoint, so nothing is opened
+        // before the refusal.
+        let directory = scratch("microphone-level-none");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        let error = service
+            .call(Command::GetMicrophoneLevel(
+                clipped_ipc::MicrophoneLevelRequest {
+                    microphone: "none".to_owned(),
+                },
+            ))
+            .expect_err("`none` has no level to report");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(
+            error.message.contains("no microphone"),
+            "the refusal has to say why there is no level: {}",
+            error.message,
+        );
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_microphone_the_settings_file_would_refuse_is_refused_in_its_own_words() {
+        // The value is parsed by the settings file's own parser, so a value
+        // this can be asked about is exactly a value that could be saved
+        // (`crate::settings::microphone_level`). A second, looser parser here
+        // would let a window meter something it could never write down.
+        //
+        // Needs no audio device: the value never resolves to an endpoint.
+        let directory = scratch("microphone-level-refused");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        let error = service
+            .call(Command::GetMicrophoneLevel(
+                clipped_ipc::MicrophoneLevelRequest {
+                    // Blank is the shortest thing the file refuses, and it is
+                    // refused by `AudioDeviceSetting::named` rather than by
+                    // anything written here.
+                    microphone: "name:".to_owned(),
+                },
+            ))
+            .expect_err("a blank device name is not a value the settings file holds");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
 
         service.shut_down();
         let _ = std::fs::remove_dir_all(&directory);

@@ -126,6 +126,7 @@ export const FEATURES = [
   'hotkeys',
   'replay',
   'settings',
+  'microphone_level',
   'startup',
   'automatic',
 ] as const;
@@ -167,6 +168,7 @@ export const COMMANDS = [
   'get_settings',
   'apply_settings',
   'get_audio_devices',
+  'get_microphone_level',
   'get_start_at_login',
   'set_start_at_login',
   'shutdown',
@@ -259,6 +261,7 @@ export const REPLIES = [
   'hotkeys',
   'settings',
   'audio_devices',
+  'microphone_level',
   'start_at_login',
   'shutting_down',
 ] as const;
@@ -567,6 +570,20 @@ export type ExportRecordingParams = {
 export type ApplySettingsParams = {
   /** The settings to change, by the key each has in the settings file. */
   readonly values?: Readonly<Record<string, string | null>>;
+};
+
+/**
+ * Which microphone to listen to.
+ *
+ * A setting's value rather than a device name, spelled as the settings file
+ * spells it — `default`, `name:Shure MV7` — because the question is what the
+ * choice somebody is looking at would record. Resolved by the same code a
+ * recording resolves it with, so the meter and the recording cannot end up
+ * pointed at different endpoints.
+ */
+export type MicrophoneLevelParams = {
+  /** The microphone setting to listen to, in the settings file's own spelling. */
+  readonly microphone: string;
 };
 
 /**
@@ -1441,6 +1458,48 @@ export interface AudioDevicesReply {
 }
 
 /**
+ * What a microphone is hearing.
+ *
+ * Asked repeatedly while a meter is on screen rather than streamed: the recorder
+ * opens the endpoint, listens briefly and closes it inside the call, so a window
+ * that is killed mid-choice leaves no capture running.
+ */
+export interface MicrophoneLevel {
+  /**
+   * The endpoint that was listened to, as Windows names it.
+   *
+   * Absent while the device is unplugged or disabled, during which a capture
+   * produces silence rather than failing — which is what tells "nobody is
+   * speaking" from "there is nothing there".
+   */
+  readonly device?: string;
+  /**
+   * The loudest sample heard, from `0` to `1`.
+   *
+   * The loudest in the moment that was listened to, not since the last question:
+   * a screen that kept the highest reading it ever saw would draw a meter that
+   * only ever went up.
+   */
+  readonly peak: number;
+  /**
+   * Whether Windows reports the microphone muted.
+   *
+   * Absent when Windows will not report the switch for this device. A muted
+   * microphone reads as silence, so this is what stops a screen telling somebody
+   * to speak up when what they need is to unmute.
+   */
+  readonly muted?: boolean;
+}
+
+/** What the microphone that was asked about is hearing. */
+export interface MicrophoneLevelReply {
+  /** The tag. */
+  readonly reply: 'microphone_level';
+  /** The reading, and what was listened to. */
+  readonly level: MicrophoneLevel;
+}
+
+/**
  * Whether the recorder starts when this user signs in, and what is arranged.
  *
  * Not a setting: it is a `Run` value Windows reads at sign-in rather than a key
@@ -1540,6 +1599,7 @@ export type Reply =
   | HotkeysReply
   | SettingsReply
   | AudioDevicesReply
+  | MicrophoneLevelReply
   | StartAtLoginReply
   | ShuttingDownReply;
 

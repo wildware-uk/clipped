@@ -61,6 +61,7 @@ import type {
   TrashListing,
   TrashedItem,
   LibraryEventMark,
+  MicrophoneLevel,
   PlaybackStream,
   PlaybackTrack,
   PluginDeclaration,
@@ -421,6 +422,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'settings', settings: readSettingsView(reply['settings']) };
     case 'audio_devices':
       return { reply: 'audio_devices', devices: readAudioDevices(reply['devices']) };
+    case 'microphone_level':
+      return { reply: 'microphone_level', level: readMicrophoneLevel(reply['level']) };
     case 'start_at_login':
       return { reply: 'start_at_login', start_at_login: readStartAtLogin(reply['start_at_login']) };
     case 'shutting_down': {
@@ -545,6 +548,29 @@ function readAudioDevice(value: JsonValue | undefined): AudioDevice {
   return {
     name: stringField(device, 'name', 'an audio device'),
     is_default: booleanField(device, 'is_default', 'an audio device'),
+  };
+}
+
+/**
+ * What a microphone is hearing.
+ *
+ * The peak is required and the other two are not, and the difference is the
+ * point: a reading always has a level, and an absent device is a microphone
+ * that is not plugged in — the one thing a flat meter cannot say for itself.
+ */
+function readMicrophoneLevel(value: JsonValue | undefined): MicrophoneLevel {
+  const level = object(value, 'a microphone level');
+  const what = 'a microphone level';
+  const device = optionalStringField(level, 'device', what);
+  const muted = optionalBooleanField(level, 'muted', what);
+  return {
+    peak: numberField(level, 'peak', what),
+    // Absent means the device is not there, which is a different answer from
+    // silence and must not be flattened into an empty name.
+    ...(device === undefined ? {} : { device }),
+    // Absent means Windows will not report the switch for this device, which
+    // is not the same as "not muted".
+    ...(muted === undefined ? {} : { muted }),
   };
 }
 

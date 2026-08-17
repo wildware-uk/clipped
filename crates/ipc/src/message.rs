@@ -234,6 +234,22 @@ pub mod features {
         /// a window that did not check would draw a full form of controls and
         /// discover that none of them save only when somebody pressed Save.
         SETTINGS = "settings";
+        /// The recorder can say what a microphone is hearing right now:
+        /// `get_microphone_level`.
+        ///
+        /// Its own capability rather than part of [`SETTINGS`], because it is
+        /// the one thing a settings form asks for that has no fallback. A
+        /// window that cannot read the settings can say so and offer nothing; a
+        /// window that can read them but cannot meter a microphone still has a
+        /// working list of devices to choose from, and should draw the list
+        /// without the meter rather than refuse the whole screen. A recorder
+        /// built before
+        /// [issue #109](https://github.com/wildware-uk/clipped/issues/109) has
+        /// no `get_microphone_level` command and refuses it with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand),
+        /// which is what the check turns into "this recorder cannot show you a
+        /// level" before a meter is drawn that would never move.
+        MICROPHONE_LEVEL = "microphone_level";
         /// The recorder can say whether it starts when this user signs in, and
         /// turn that on and off: `get_start_at_login` and
         /// `set_start_at_login`.
