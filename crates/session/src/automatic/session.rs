@@ -601,6 +601,29 @@ impl Session {
         self.ended_at
     }
 
+    /// Why it ended, or [`None`] while it is open.
+    ///
+    /// Read back out of the events rather than kept in a field beside
+    /// [`Self::ended_at`], so that there is one record of why a sitting ended.
+    /// The event is what the sidecar carries and what the library reads out of
+    /// it again (`clipped_library::index`), and a second copy could disagree
+    /// with the first — including for a session rebuilt from a sidecar, which
+    /// has the events and would have to remember to fill the field in as well
+    /// (AGENTS.md section 55).
+    ///
+    /// The last one, for a session that somehow recorded two: what ended it is
+    /// the last thing that happened to it.
+    #[must_use]
+    pub fn end_reason(&self) -> Option<SessionEndReason> {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match event.kind() {
+                SessionEventKind::Ended { reason } => Some(*reason),
+                _ => None,
+            })
+    }
+
     /// The recordings it contains, oldest first.
     #[must_use]
     pub fn recordings(&self) -> &[SessionRecording] {

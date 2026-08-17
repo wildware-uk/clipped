@@ -711,6 +711,40 @@ between "Counter-Strike 2" and "watching for games" and back. The sitting is the
 same object `library_sessions` returns a few seconds later, minus everything only
 the library knows — see `clipped_ipc::SessionSummary`.
 
+**A recording carries its sitting too, and that is where its game name is.**
+`target` is the selector the recording was asked for; the sitting is what asked
+the catalogue what that window was.
+
+```json
+{"type":"response","id":7,"outcome":{"ok":{"reply":"status","status":{
+  "state":"recording","recording_id":"r-1",
+  "output":"D:\\clips\\clipped-cs2-20260811-201400-02.mkv",
+  "target":"process 4242","elapsed_ms":4200,
+  "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+             "game_name":"Counter-Strike 2",
+             "started_at":"2026-08-11T20:14:00+01:00",
+             "recordings":[{"session_index":1,
+                            "output":"D:\\clips\\clipped-cs2-20260811-201400-01.mkv",
+                            "outcome":"recorded","duration_ms":600000},
+                           {"session_index":2,
+                            "output":"D:\\clips\\clipped-cs2-20260811-201400-02.mkv"}]}}}}}
+```
+
+`recordings` includes the file being written, which is what makes "the second
+file of this sitting" sayable while it is still being recorded, and the earlier
+ones are why that second file does not read as an unrelated recording. Which
+sitting a recording belongs to depends on who started it: a recording the
+watcher started belongs to the sitting the watcher is in — the one a `watching`
+status carries a moment later — and a `start_recording` is the whole of a sitting
+of its own, opened when it started. A recorder that is watching and is then asked
+for a recording of something else reports **that** recording's sitting, not the
+game it was waiting for.
+
+`session` is omitted rather than sent empty for a recording that belongs to no
+sitting. Nothing this build records is one — every recording opens a sitting,
+automatic or asked for — so it is the honest shape of the field rather than a
+state the recorder produces.
+
 `state` is a **closed** enumeration: a client that met a state it had never heard
 of fails the message rather than guessing at it, which is why adding a fourth
 would be a protocol version bump. See
@@ -1991,6 +2025,13 @@ rather than a delta, a client that missed one recovers on the next.
 `target` is the selector the user gave — `process `cs2.exe`` — and never the
 window title. A title is user content and the most reliable way to put somebody's
 document name into a screenshot of a bug report (AGENTS.md section 13).
+
+**`session_ended` is sent whenever a sitting ends**, whichever way it was made.
+A sitting the watcher owns ends when the game has been gone for the restart
+grace, when the machine resumes from suspend, or when the recorder is shutting
+down; a sitting a `start_recording` was the whole of ends when that recording
+does, with `end_reason` `recording-ended`. It arrives before the library has
+necessarily indexed anything, which is the next paragraph's point.
 
 **`session_ended` carries the sitting itself, not an identifier to look up.** A
 sitting ends the moment the game does, and the library may not have indexed a

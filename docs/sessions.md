@@ -53,8 +53,16 @@ there has ever been of it (`apps/recorder/src/serve.rs`):
 | `add_bookmark`, and `Ctrl`+`F9` | Marks the moment, in the recording's own bookmark file (`docs/bookmarks.md`) |
 | `take_screenshot` | Writes a still from a frame the recording already captured |
 | `stop_recording` | Finishes the file, and the sitting starts no further recording of a game that is still running — pressing stop is not undone five seconds later |
-| `get_status` | Reports it, so the window shows what is being recorded and offers no control that would be refused. Between recordings it reports `watching` and carries the sitting that is still open, which is what stops a window blanking the game's name across a restart grace ([#584]) |
+| `get_status` | Reports it, **with the sitting it belongs to**, so a window can say "Counter-Strike 2, the second file of this sitting" rather than "process 4242" ([#241]). Between recordings it reports `watching` and carries the same sitting while it is still open, which is what stops a window blanking the game's name across a restart grace ([#584]) |
 | `save_replay` | Refused: an automatic recording keeps no replay buffer. Whether it should is [#427] |
+
+And the sitting itself reaches a window when it is over: a `session_ended` event
+on the `status` stream, carrying the sitting with the files it produced rather
+than an identifier, because the library has not necessarily indexed any of them
+by then ([ipc.md](ipc.md), [#241]). Every sitting sends one — the ones this
+watcher owns, when the grace runs out, the machine resumes or the recorder is
+stopping, and the one a `start_recording` was the whole of, when that recording
+ends.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#38]: https://github.com/wildware-uk/clipped/issues/38
@@ -883,7 +891,9 @@ see what `serve --watch-for-games` is doing. [#241] gave the protocol the
 vocabulary: a recorder watching for a game answers `watching` rather than `idle`,
 and carries the sitting it is in while it is in one, so a window keeps the game's
 name across the restart grace instead of blanking it for those seconds
-([ipc.md](ipc.md), [#584]).
+([ipc.md](ipc.md), [#584]). A recording carries that same sitting while it runs,
+which is how a window names the game rather than the capture selector, and the
+sitting ending is a `session_ended` event carrying its files.
 
 ## How to test it
 

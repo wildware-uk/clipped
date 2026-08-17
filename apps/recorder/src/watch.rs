@@ -1211,8 +1211,21 @@ impl Driver {
                     // somebody has just finished playing would not appear in
                     // the window until the recorder was restarted.
                     if let Some(recordings) = self.recordings.as_ref() {
+                        // Before the index run and not after it: the event
+                        // carries the sitting's files precisely because the
+                        // library may not have indexed one of them yet, so a
+                        // window is told a sitting is over at the moment it
+                        // can offer to open it rather than when a walk of the
+                        // recordings folder finishes (`clipped_ipc::Event`,
+                        // issue #241).
+                        recordings.sitting_ended(sitting_of(&session));
                         recordings.index_now();
                     }
+                    // And the sitting comes off the status in the same breath.
+                    // The loop reports it once round, so leaving it would be up
+                    // to a second of a window naming a game nobody is playing,
+                    // after it has been told that sitting ended.
+                    self.report_the_sitting();
                 }
             }
         }
@@ -1340,7 +1353,7 @@ impl Driver {
 /// `crate::library`'s is: `clipped-session` is a domain crate that does not link
 /// the protocol, and the process that owns the state is the one that answers for
 /// it ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md)).
-fn sitting_of(session: &Session) -> clipped_ipc::SessionSummary {
+pub(crate) fn sitting_of(session: &Session) -> clipped_ipc::SessionSummary {
     clipped_ipc::SessionSummary {
         session_id: session.id().as_str().to_owned(),
         game_id: attributed(session.game()).map(|(game_id, _)| game_id.to_owned()),
@@ -1352,14 +1365,19 @@ fn sitting_of(session: &Session) -> clipped_ipc::SessionSummary {
         // Absent, because a sitting on a *status* is one the recorder is still
         // in: the manager holds it until it closes it, and closing it is what
         // hands it over. It is mapped rather than written as `None` so that
-        // this says what the session says.
+        // this says what the session says — and once the sitting is over, the
+        // same mapping describes it on a `SessionEnded` event, which is the
+        // whole reason there is one shape and not two
+        // (`clipped_ipc::SessionSummary`).
         ended_at: session.ended_at().map(rfc3339),
-        // A `Session` has no end reason to give — the reason travels with the
-        // action that ends the sitting, and the sitting as it ends belongs to
-        // `clipped_ipc::Event::SessionEnded`, which this recorder does not send
-        // yet (issue #241's second acceptance criterion). Inventing one here
-        // would be a screen saying why a sitting ended that has not.
-        end_reason: None,
+        // From the session's own events, which is where the reason it ended
+        // was written down: the sidecar carries that event and the library
+        // reads the same word back out of it, so a window told a sitting ended
+        // because the game exited and a library row saying so cannot disagree
+        // (`Session::end_reason`, AGENTS.md section 55). Absent while the
+        // sitting is open, where inventing one would be a screen saying why a
+        // sitting ended that has not.
+        end_reason: session.end_reason().map(|reason| reason.token().to_owned()),
         recordings: session.recordings().iter().map(file_of).collect(),
     }
 }
@@ -2086,8 +2104,20 @@ name = "test-game.exe"
     /// file and the recording library of whoever is running the tests
     /// (AGENTS.md section 25).
     fn a_recorder(directory: &TestDirectory) -> Arc<RecorderService> {
+        a_recorder_publishing_to(directory, &clipped_ipc::EventPublisher::new())
+    }
+
+    /// The same, publishing through a publisher the caller keeps hold of.
+    ///
+    /// For the one test that has to read what was published rather than what
+    /// was decided: the publisher has to be the same value on both sides of the
+    /// pipe (`crate::test_events`).
+    fn a_recorder_publishing_to(
+        directory: &TestDirectory,
+        events: &clipped_ipc::EventPublisher,
+    ) -> Arc<RecorderService> {
         Arc::new(RecorderService::with_library(
-            clipped_ipc::EventPublisher::new(),
+            events.clone(),
             crate::library::LibraryReader::at(Some(directory.recordings().join("library.db"))),
             crate::library::LibraryIndexer::at(
                 Some(directory.recordings().join("library.db")),
@@ -2382,6 +2412,114 @@ name = "test-game.exe"
             "nothing is watching now, and `idle` is what a recorder that will record nothing by \
              itself answers",
         );
+    }
+
+    /// Issue #241's second acceptance criterion, for the sitting a driver owns.
+    ///
+    /// `Event::SessionEnded` was defined, mirrored in the desktop's TypeScript
+    /// and carried by the schema, and **nothing ever sent one**: the driver's
+    /// `SessionEnded` arm printed a summary to the console and asked for an
+    /// index run, and said nothing to any window.
+    ///
+    /// It reads what was *published*, through a real server over a real pipe
+    /// (`crate::test_events`), because a test that called the publisher itself
+    /// is precisely the test this defect would have passed. The manager is
+    /// driven through the real events — a launch, the game exiting, and the
+    /// poll that closes the sitting once its restart grace has run out — and
+    /// what it decides goes through `Driver::apply`, which is the arm being
+    /// asserted. Only the recording is left out: making one would need a
+    /// desktop, a GPU and an encoder.
+    #[test]
+    fn a_sitting_that_ends_is_announced_with_the_files_it_produced() {
+        let directory = TestDirectory::new("sitting-ended");
+        let events = clipped_ipc::EventPublisher::new();
+        let service = a_recorder_publishing_to(&directory, &events);
+        let subscribed = crate::test_events::Subscribed::to(&events, &service, "sitting-ended");
+        let watching = service.recordings().watch_for_games();
+        let driver = &mut a_driver(&directory, &service);
+
+        let launched = SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725);
+        let asked = driver
+            .manager
+            .observe(&launch(4242, "test-game.exe"), launched)
+            .into_iter()
+            .find_map(|action| match action {
+                SessionAction::StartRecording(request) => Some(request.recording),
+                _ => None,
+            })
+            .expect("a launch of a game in the catalogue asks for a recording");
+        driver.report_the_sitting();
+
+        // The game goes, and the recording it was of ends. The sitting stays
+        // open through its restart grace, which is why the end of a sitting is
+        // not the end of a recording and needs an event of its own.
+        let exited = launched + Duration::from_secs(60);
+        let _ = driver.manager.observe(&exit(4242, "test-game.exe"), exited);
+        let _ = driver.manager.recording_finished(
+            &asked,
+            RecordingOutcome::Failed {
+                detail: "the stand-in engine in this test records nothing".to_owned(),
+            },
+            exited,
+        );
+        driver.report_the_sitting();
+
+        // And out the other side of the grace, which is where the manager
+        // closes the sitting and hands it over.
+        let actions = driver.manager.poll(
+            exited + clipped_session::automatic::DEFAULT_RESTART_GRACE + Duration::from_secs(1),
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, SessionAction::SessionEnded(_))),
+            "the manager should close the sitting once its restart grace has run out: {actions:?}",
+        );
+        driver.apply(actions);
+
+        let event = subscribed.wait_for("a sitting ending", |event| {
+            matches!(event, clipped_ipc::Event::SessionEnded { .. })
+        });
+        let clipped_ipc::Event::SessionEnded { session } = event else {
+            unreachable!("`wait_for` matched a sitting ending")
+        };
+
+        assert_eq!(
+            session.game_name.as_deref(),
+            Some("Test Game"),
+            "a window is told which sitting ended, in the words it was shown while it ran",
+        );
+        assert!(
+            session.ended_at.is_some(),
+            "what makes a sitting over is `ended_at`, and this one is: {session:?}",
+        );
+        assert_eq!(
+            session.end_reason.as_deref(),
+            Some("game-exited"),
+            "and why it ended, from the session's own record of it",
+        );
+        assert_eq!(
+            session.recordings.len(),
+            1,
+            "the files it produced are the point of the event: {:?}",
+            session.recordings,
+        );
+        assert_eq!(
+            session.recordings[0].outcome.as_deref(),
+            Some("failed"),
+            "a recording that produced no file is listed all the same, saying so",
+        );
+
+        assert_eq!(
+            service.status(),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "and the sitting comes off the status in the same breath: a window that went on \
+             naming the game after being told the sitting ended would be showing two answers",
+        );
+
+        drop(subscribed);
+        drop(watching);
+        service.shut_down();
     }
 
     /// The sitting on the recorder's status, or the reason there is none.
