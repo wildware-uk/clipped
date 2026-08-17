@@ -63,8 +63,13 @@
 //! - **Has the game gone?** An empty tree is the game and everything it started
 //!   having exited, which is what [`ProcessLoopbackCapture::target_is_running`]
 //!   reports. The capture does not end itself over it — a recording is worth
-//!   more than the audio it is missing (AGENTS.md section 17) — the track
-//!   simply becomes silence.
+//!   more than the audio it is missing (AGENTS.md section 17) — the including
+//!   side's track simply becomes silence. The **excluding** side's does not:
+//!   excluding an empty set is everything the machine plays, which is exactly
+//!   what that track is for when somebody closes the game and keeps recording
+//!   with a browser still playing. `opens_against_an_empty_tree` is that
+//!   asymmetry, and the measurement it rests on
+//!   ([issue #563](https://github.com/wildware-uk/clipped/issues/563)).
 //! - **Has the process the activation names gone, while the game lives on?**
 //!   Some titles re-execute themselves and exit the process that was launched.
 //!   The tree survives that (its members are pinned by handles, and a dead
@@ -470,21 +475,19 @@ impl ProcessLoopbackSource {
                     tracing::info!(
                         audio_source = %source,
                         root = self.root,
-                        // Not the same outcome for the two sides, and only one
-                        // of them is known. The including side has nothing left
-                        // to include, so its track is silence. What an already
-                        // open excluding stream delivers once the tree it
-                        // excludes is empty has not been measured on hardware
-                        // and is not claimed here (AGENTS.md section 54);
-                        // `docs/audio-routing.md` records it as an open
-                        // question. What *is* certain is that a reopen from
-                        // here produces no stream at all, because `open_stream`
-                        // refuses an empty tree.
+                        // Not the same outcome for the two sides, and both are
+                        // now measured rather than guessed at (issue #563,
+                        // `opens_against_an_empty_tree`). The including side
+                        // has nothing left to include, so its track is silence.
+                        // The excluding side excludes a set with nothing in it,
+                        // which on Windows 11 build 26200 is everything the
+                        // machine plays — for the stream that is already open
+                        // and for any stream reopened afterwards.
                         this_track_now = match self.scope {
                             TreeScope::Only => "is silence from here",
                             TreeScope::Except =>
-                                "excludes a tree with nothing left in it; if this stream is \
-                                 reopened from here it will be silence",
+                                "excludes a tree with nothing left in it, so it is everything \
+                                 the machine plays from here",
                         },
                         "the game and every process it started have exited"
                     );
@@ -551,9 +554,13 @@ impl ProcessLoopbackSource {
 
     /// Activates and initialises a client scoped to the tree.
     ///
-    /// [`None`] when there is nothing to scope to: every process of the game
-    /// has exited. The engine treats that as a state to wait through, exactly
-    /// as it waits through an unplugged microphone.
+    /// [`None`] when there is nothing to *include*: every process of the game
+    /// has exited, so the including side has no audio to ask Windows for. The
+    /// engine treats that as a state to wait through, exactly as it waits
+    /// through an unplugged microphone.
+    ///
+    /// The **excluding** side is opened anyway; [`opens_against_an_empty_tree`]
+    /// is why.
     ///
     /// # Errors
     ///
@@ -564,8 +571,25 @@ impl ProcessLoopbackSource {
         &mut self,
         enumerator: &IMMDeviceEnumerator,
     ) -> Result<Option<StreamParts>, AudioError> {
-        if self.tree.members().is_empty() {
+        let emptied = self.tree.members().is_empty();
+        if emptied && !opens_against_an_empty_tree(self.scope) {
             return Ok(None);
+        }
+        if emptied {
+            // Not on a packet path: `open_stream` runs when a stream is being
+            // activated, which is once at the start and once per reopen
+            // (AGENTS.md section 20). It is worth a line, because a track whose
+            // meaning changed halfway through a recording and said nothing is
+            // exactly what AGENTS.md section 35 exists to prevent — and because
+            // the identifier below names a process that has exited, which is
+            // the one thing a reader of this log would otherwise call a bug.
+            tracing::info!(
+                audio_source = %self.scope.kind().audio_source(),
+                scoped_to = self.scoped_to,
+                "the game's processes have all exited, so this capture is being reopened \
+                 excluding a tree with nothing in it; measured on Windows 11 build 26200, that \
+                 is everything the machine plays, which is what this track is for (issue #563)"
+            );
         }
 
         let client = activate_process_loopback(self.scoped_to, self.scope.mode())?;
@@ -606,6 +630,67 @@ impl ProcessLoopbackSource {
             // The first packet decides (`endpoint_capture.rs`).
             positions: PositionTrust::Unverified,
         }))
+    }
+}
+
+/// Whether a stream is still worth activating once the game's tree is empty.
+///
+/// The two sides answer differently, and the asymmetry is the whole of
+/// [issue #563](https://github.com/wildware-uk/clipped/issues/563).
+///
+/// **The including side: no.** There is nothing left to include, so an
+/// activation would produce a stream of zeroes. The engine synthesises silence
+/// of exactly the same length for nothing, and the track is silence either way.
+///
+/// **The excluding side: yes.** Excluding an empty set is *everything the
+/// machine plays* — which is precisely what that track is for, and precisely
+/// the case a user hits when they close the game and keep recording while a
+/// browser or a voice call is still playing. Refusing here gave that track
+/// silence for the rest of the recording from the first reopen onwards, and a
+/// reopen is what an endpoint change or a re-scope does.
+///
+/// # What Windows does with an identifier that no longer names a process
+///
+/// Undocumented, so it was measured rather than reasoned about (AGENTS.md
+/// section 54). On **Windows 11 Pro build 26200**, with a 997 Hz tone playing
+/// from the measuring process and a `cmd.exe` that plays nothing as the game:
+///
+/// | Activation | Result | 997 Hz measured |
+/// | --- | --- | --- |
+/// | exclude, live identifier | activate, initialise and start all succeed | 0.02687 |
+/// | exclude, identifier of a process that has exited | all succeed | 0.02690 |
+/// | exclude, identifier that has never existed | all succeed | 0.02717 |
+/// | include, identifier of a process that has exited | all succeed | 0.00000 |
+/// | either side, identifier `0` | activation refused, `E_INVALIDARG` | — |
+///
+/// So an exclude-mode activation against a dead identifier is not a special
+/// case to Windows at all: it excludes a tree with no members, which is
+/// everything. The numbers are the same measurement the live baseline gives,
+/// and the include row is the control that says the filter is really being
+/// applied rather than every activation returning the endpoint.
+///
+/// That is why this is one condition rather than a fall back to
+/// [`SystemAudioCapture`](super::SystemAudioCapture) on the whole endpoint,
+/// which was the other candidate: it is the same activation, the same client
+/// and the same format, so there is no changeover to make seamless and nothing
+/// that could double if the tree became non-empty again.
+///
+/// # What it costs
+///
+/// Windows reuses process identifiers, and once the tree is empty
+/// `ProcessTree` has released the handle that was pinning this one — that is
+/// what makes an empty tree empty. So a reopen long afterwards can name an
+/// identifier some unrelated process has since been given, and that process's
+/// audio would then be missing from this track. It is bounded — one tree's
+/// audio absent, where the alternative is the whole track silent — and it is
+/// the same exposure [issue #311](https://github.com/wildware-uk/clipped/issues/311)
+/// already describes for a game that leaves two trees behind. Closing it needs
+/// `clipped-windows` to lend out the handle that pins an identifier, which is
+/// a change to that crate's API rather than to this one.
+const fn opens_against_an_empty_tree(scope: TreeScope) -> bool {
+    match scope {
+        TreeScope::Only => false,
+        TreeScope::Except => true,
     }
 }
 
@@ -876,6 +961,16 @@ impl ProcessLoopbackCapture {
     /// same two captures with one agreement between them. This is for a caller
     /// that wants the excluding side alone.
     ///
+    /// It outlives the tree it excludes. Once every process of the game has
+    /// gone the set being excluded is empty, and this capture carries
+    /// everything the machine plays — including across a reopen, which is the
+    /// case that used to give the track silence for the rest of the recording
+    /// (`opens_against_an_empty_tree`, issue #563). A tree that is *already*
+    /// empty when this is called is still an error, because there is then no
+    /// recording in progress to protect and the caller has a better answer:
+    /// `SystemAudioCapture` and a note that per-source separation was
+    /// unavailable (`docs/audio-routing.md`).
+    ///
     /// # Errors
     ///
     /// Exactly [`open`](Self::open)'s: this is the same activation with one
@@ -986,9 +1081,14 @@ impl ProcessLoopbackCapture {
     ///
     /// `false` once the game and everything it started have exited, which is
     /// how a caller knows there is nothing left to capture. The capture does not
-    /// stop itself: the track keeps its place on the timeline as silence until
-    /// the caller stops it, because a recording is worth more than the audio it
-    /// is missing.
+    /// stop itself: the track keeps its place on the timeline until the caller
+    /// stops it, because a recording is worth more than the audio it is
+    /// missing.
+    ///
+    /// It says nothing about whether *this* capture still has audio to give.
+    /// An including capture's track is silence from here; an excluding one's is
+    /// everything the machine plays, because the set it excludes is now empty
+    /// (`opens_against_an_empty_tree`, issue #563).
     #[must_use]
     pub fn target_is_running(&self) -> bool {
         self.capture
@@ -1045,13 +1145,15 @@ impl ProcessLoopbackCapture {
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::AtomicBool;
     use std::io::Write as _;
     use std::process::{Child, ChildStdin, Command, Stdio};
     use std::time::Instant;
 
     use super::*;
     use crate::buffer::SampleOrigin;
-    use crate::windows::endpoint_capture::testing::{skipped, Contiguity};
+    use crate::windows::endpoint_capture::testing::{skipped, suppressed, Contiguity};
+    use crate::windows::notifications::EndpointChange;
 
     /// How long a test waits for Windows to start or end a process.
     ///
@@ -1161,10 +1263,15 @@ mod tests {
 
     /// Opens a capture of a process tree, or reports why this machine cannot.
     ///
-    /// **These tests make no sound.** They capture a process tree that renders
-    /// nothing — this test process, or a `cmd.exe` the test started — so what
-    /// they read is silence, and they are exempt from the "does this machine
-    /// want quiet" check every test that plays a tone begins with. What they
+    /// **The tests that open through here make no sound.** They capture a
+    /// process tree that renders nothing — this test process, or a `cmd.exe`
+    /// the test started — so what they read is silence, and they are exempt
+    /// from the "does this machine want quiet" check every test that plays a
+    /// tone begins with. One test in this module is *not* exempt and does not
+    /// come through here:
+    /// `a_track_of_everything_but_the_game_is_still_everything_once_the_game_has_gone`
+    /// has to play something to have anything to measure, so it asks
+    /// [`suppressed`] first. What they
     /// do need is a machine whose Windows can scope a capture to a process at
     /// all; where it cannot, they skip loudly rather than failing.
     ///
@@ -1984,5 +2091,467 @@ mod tests {
         let mut including = including;
         including.close();
         excluding.close();
+    }
+
+    #[test]
+    fn the_two_sides_answer_differently_when_there_is_nothing_left_to_scope_to() {
+        // The rule itself, with no machine involved: an empty tree stops the
+        // *including* side and not the excluding one. Everything else in
+        // `open_stream` is a Windows call; this is the decision, and it is the
+        // whole of issue #563 in one line.
+        assert!(
+            !opens_against_an_empty_tree(TreeScope::Only),
+            "there is nothing left to include, so there is no stream worth activating"
+        );
+        assert!(
+            opens_against_an_empty_tree(TreeScope::Except),
+            "excluding an empty set is everything the machine plays, which is what the \
+             other-system-audio track is for"
+        );
+    }
+
+    /// A 997 Hz tone rendered by *this* process, for as long as it is held.
+    ///
+    /// This process is not a member of the game's tree in the tests below — it
+    /// is the tree's grandparent — so what it plays is by definition the
+    /// complement the excluding side is supposed to carry. Playing it here
+    /// rather than from a third program is the same choice
+    /// `tests/audio/track_isolation.rs` makes and for the same reason: another
+    /// process would add a process without adding a claim.
+    ///
+    /// `crates/audio/tests/system_audio.rs` renders a tone the same way. It
+    /// cannot be shared with this one — that is an integration test, and its
+    /// helpers are not reachable from the crate's own unit tests, which is
+    /// where this has to live because forcing a reopen needs
+    /// [`EndpointCapture::simulate_endpoint_change`]. A single renderer for the
+    /// whole workspace belongs in `tests/media`, beside the Goertzel filter
+    /// that measures what it played; that is a change to a crate several people
+    /// are working in and it is not made here.
+    struct TonePlayer {
+        running: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TonePlayer {
+        /// Starts rendering, or explains why this machine cannot.
+        fn start() -> Result<Self, String> {
+            let running = Arc::new(AtomicBool::new(true));
+            let (ready, started) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn({
+                let running = Arc::clone(&running);
+                move || render_tone(&running, &ready)
+            });
+
+            match started.recv() {
+                Ok(Ok(())) => Ok(Self {
+                    running,
+                    thread: Some(thread),
+                }),
+                Ok(Err(reason)) => Err(reason),
+                Err(_) => Err("the render thread stopped before it reported anything".to_owned()),
+            }
+        }
+    }
+
+    impl Drop for TonePlayer {
+        fn drop(&mut self) {
+            // A test that panicked must not leave a tone sounding on somebody's
+            // speakers.
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The render thread's body: the endpoint's own mix format, filled with a
+    /// sine, until it is told to stop.
+    ///
+    /// Reports through `ready` whether it got as far as playing, so a machine
+    /// with no usable output endpoint skips rather than hangs.
+    fn render_tone(running: &AtomicBool, ready: &std::sync::mpsc::Sender<Result<(), String>>) {
+        use windows::Win32::Media::Audio::{
+            eConsole, IAudioRenderClient, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+        };
+        use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage};
+
+        // SAFETY: as `apartment.rs` explains — the reference is never given
+        // back, which is what makes it safe to take from a thread that exits.
+        if let Err(error) = unsafe { CoIncrementMTAUsage() } {
+            let _ = ready.send(Err(format!("COM is unavailable: {error}")));
+            return;
+        }
+
+        let prepared = (|| -> Result<_, String> {
+            let failed = |what: &str, error: &dyn core::fmt::Display| format!("{what}: {error}");
+            // SAFETY: `MMDeviceEnumerator` is the class identifier for
+            // `IMMDeviceEnumerator`, which is the return type.
+            let enumerator: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+                    .map_err(|error| failed("the device enumerator", &error))?;
+            // SAFETY: both arguments are values of the enumerations named.
+            let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+                .map_err(|error| failed("the default output device", &error))?;
+            // SAFETY: `device` is live; the interface comes from the return
+            // type.
+            let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+                .map_err(|error| failed("activating a render client", &error))?;
+            // SAFETY: `client` is live and uninitialised, which is when
+            // `GetMixFormat` is valid.
+            let mix = MixFormat::of(&client).map_err(|error| failed("the mix format", &error))?;
+            let format = mix.audio();
+            // SAFETY: `mix` owns a live `WAVEFORMATEX` for the whole call, and
+            // it is the format Windows itself reported for this endpoint.
+            unsafe {
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0,
+                    BUFFER_DURATION,
+                    0,
+                    mix.as_ptr(),
+                    None,
+                )
+            }
+            .map_err(|error| failed("initialising the render stream", &error))?;
+            // SAFETY: `client` is initialised, which is when `GetService` is
+            // valid.
+            let render: IAudioRenderClient = unsafe { client.GetService() }
+                .map_err(|error| failed("the render service", &error))?;
+            // SAFETY: `client` is initialised.
+            let frames = unsafe { client.GetBufferSize() }
+                .map_err(|error| failed("the render buffer size", &error))?;
+            Ok((client, render, frames, format))
+        })();
+
+        let (client, render, buffer_frames, format) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = ready.send(Err(format!(
+                    "the default output device would not take a render stream: {error}"
+                )));
+                return;
+            }
+        };
+        if format.endpoint_samples() != SampleFormat::Float32 {
+            let _ = ready.send(Err(format!(
+                "this endpoint presents {} samples, and this renderer only knows how to write \
+                 floats; writing anything else would be full-scale noise on somebody's speakers",
+                format.endpoint_samples()
+            )));
+            return;
+        }
+
+        // SAFETY: `client` is initialised and not started.
+        if let Err(error) = unsafe { client.Start() } {
+            let _ = ready.send(Err(format!("the render stream would not start: {error}")));
+            return;
+        }
+        let _ = ready.send(Ok(()));
+
+        let channels = format.channels().get() as usize;
+        let rate = format.sample_rate().get() as f32;
+        let step = 2.0 * core::f32::consts::PI * NEIGHBOUR as f32 / rate;
+        let mut phase = 0.0f32;
+
+        while running.load(Ordering::Relaxed) {
+            // SAFETY: `client` is a started `IAudioClient`.
+            let Ok(padding) = (unsafe { client.GetCurrentPadding() }) else {
+                break;
+            };
+            let free = buffer_frames.saturating_sub(padding);
+            if free == 0 {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            // SAFETY: `free` is at most the free space `GetCurrentPadding` just
+            // reported, which is what `GetBuffer` requires. The pointer is
+            // valid for `free * channels` floats until `ReleaseBuffer`, which
+            // is called below before anything else happens.
+            let Ok(buffer) = (unsafe { render.GetBuffer(free) }) else {
+                break;
+            };
+            // SAFETY: as above, and the endpoint was checked to present floats.
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(buffer.cast::<f32>(), free as usize * channels)
+            };
+            for frame in samples.chunks_exact_mut(channels) {
+                frame.fill(phase.sin() * NEIGHBOUR_AMPLITUDE);
+                phase = (phase + step) % (2.0 * core::f32::consts::PI);
+            }
+            // SAFETY: `free` is the frame count `GetBuffer` was asked for and
+            // the buffer has been written in full, so no silence flag is
+            // needed.
+            if unsafe { render.ReleaseBuffer(free, 0) }.is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // SAFETY: `client` was started; stopping it is what releases the
+        // endpoint.
+        let _ = unsafe { client.Stop() };
+    }
+
+    /// The tone this process holds while the tests below run.
+    ///
+    /// 997 Hz and not the more obvious 440 for the reason
+    /// `crates/audio/tests/system_audio.rs` gives: 440 Hz is a musical A, and
+    /// music playing on the machine while the suite runs puts energy in exactly
+    /// that bin.
+    const NEIGHBOUR: f64 = 997.0;
+
+    /// How loud it is played: about −28 dBFS, which is audible and not
+    /// startling.
+    const NEIGHBOUR_AMPLITUDE: f32 = 0.04;
+
+    /// How far apart the two tracks' measurements of [`NEIGHBOUR`] have to be.
+    ///
+    /// The same rejection threshold `tests/audio/track_isolation.rs` uses
+    /// (`Tone::DEFAULT_RATIO`): eight times, about 18 dB. Two streams that were
+    /// really the same endpoint are nowhere near that far apart.
+    const REJECTION: f64 = 8.0;
+
+    /// What one side of the pair produced over a stretch of reading.
+    struct Heard {
+        /// Every sample handed over, one channel of it.
+        mono: Vec<f32>,
+        /// How many frames the client delivered, as opposed to ones this crate
+        /// invented to cover a client that produced nothing.
+        from_the_client: u64,
+        /// The rate the samples above are at.
+        rate: u32,
+    }
+
+    impl Heard {
+        /// How much energy sits at `frequency`.
+        ///
+        /// Through `clipped_media_validation::AudioContent`, which is the same
+        /// filter `tests/audio/track_isolation.rs` and
+        /// `crates/muxer/tests/multi_track_audio.rs` measure a finished
+        /// recording with, rather than a second one written here (AGENTS.md
+        /// section 55).
+        fn magnitude_at(&self, frequency: f64) -> f64 {
+            clipped_media_validation::AudioContent::from_samples(self.mono.clone(), self.rate)
+                .magnitude_at(frequency)
+        }
+    }
+
+    /// Reads both sides of a pair for `duration`, at the same time.
+    ///
+    /// A thread each, which is how a session reads them and is not a detail
+    /// here. Reading one and then the other leaves the second unread for as
+    /// long as the first takes; the engine holds 200 ms and the rest of the
+    /// outage comes back as synthesised silence at the *front* of the track,
+    /// which is where a fixed analysis window then lands. A first attempt at
+    /// this test read them in turn and measured 0.00000 at 997 Hz on a track
+    /// whose peak amplitude was the tone's own 0.04 — the audio was there, and
+    /// the window was looking at the hole left by not reading.
+    fn listen_to_both(
+        first: &mut ProcessLoopbackCapture,
+        second: &mut ProcessLoopbackCapture,
+        duration: Duration,
+    ) -> (Heard, Heard) {
+        std::thread::scope(|scope| {
+            let one = scope.spawn(|| listen(first, duration));
+            let other = scope.spawn(|| listen(second, duration));
+            (
+                one.join().expect("a reading thread does not panic"),
+                other.join().expect("a reading thread does not panic"),
+            )
+        })
+    }
+
+    /// Reads `capture` for `duration`, keeping the samples.
+    fn listen(capture: &mut ProcessLoopbackCapture, duration: Duration) -> Heard {
+        let format = capture.format();
+        let channels = format.channels().get() as usize;
+        let mut mono = Vec::new();
+        let mut from_the_client = 0u64;
+        let until = Instant::now() + duration;
+
+        while Instant::now() < until {
+            match capture
+                .read(Duration::from_millis(50))
+                .expect("a healthy capture does not fail")
+            {
+                Capture::Samples(samples) => {
+                    if samples.origin() == SampleOrigin::Endpoint {
+                        from_the_client += samples.frames() as u64;
+                    }
+                    mono.extend(samples.samples().iter().step_by(channels));
+                }
+                Capture::Idle | Capture::FormatChanged(_) => {}
+            }
+        }
+
+        Heard {
+            mono,
+            from_the_client,
+            rate: format.sample_rate().get(),
+        }
+    }
+
+    #[test]
+    fn a_track_of_everything_but_the_game_is_still_everything_once_the_game_has_gone() {
+        // Issue #563. `open_stream` used to refuse an empty tree on both sides,
+        // so the first reopen after the game exited left the
+        // other-system-audio track as synthesised silence for the rest of the
+        // recording — and a reopen is what an endpoint change or a re-scope
+        // does. The case it cost is the ordinary one: somebody closes the game,
+        // keeps recording, and a browser or a voice call is still playing.
+        //
+        // Both halves are asserted, because only the pair of them says the
+        // change was made in the right place:
+        //
+        // - the **excluding** side has to carry this process's tone after the
+        //   reopen. That is the fix.
+        // - the **including** side must not. A build that simply stopped
+        //   refusing an empty tree on both sides would put everything the
+        //   machine plays into the track labelled with the game's name, which
+        //   is precisely ADR 0003's cardinal sin: muting the game in an editor
+        //   would not silence it.
+        //
+        // It makes a sound, so it asks first.
+        if suppressed() {
+            return;
+        }
+        let tone = match TonePlayer::start() {
+            Ok(playing) => playing,
+            Err(reason) => {
+                skipped(&format!("this machine cannot play a tone: {reason}"));
+                return;
+            }
+        };
+
+        // The game: a process tree that plays nothing at all.
+        let mut chain = Chain::start();
+        let root = chain.root_pid();
+        let (mut game_track, mut other_track) = match ProcessLoopbackCapture::open_pair(root) {
+            Ok(pair) => pair,
+            Err(error) => {
+                skipped(&format!("this machine will not scope a capture: {error}"));
+                return;
+            }
+        };
+
+        // While the game is running, the tone this process holds belongs to the
+        // excluding side and to nothing else. Asserted first so that a failure
+        // after the game exits is about the game having exited rather than
+        // about a machine whose two sides were never separated at all.
+        let (before_game, before_other) = listen_to_both(
+            &mut game_track,
+            &mut other_track,
+            Duration::from_millis(700),
+        );
+        assert_isolated(
+            "while the game was running",
+            &before_other,
+            &before_game,
+            &tone,
+        );
+
+        // The game and everything it started exit.
+        chain.kill_root();
+        drop(chain);
+        for capture in [&mut game_track, &mut other_track] {
+            assert!(
+                read_until(capture, |capture| !capture.target_is_running()),
+                "both sides have to notice that every process of the game has exited"
+            );
+        }
+
+        // And something asks for a stream to be activated again. A user plugs
+        // in a headset, or a call on the client reports its device invalidated;
+        // this is the second step of that path, and everything after it — the
+        // stream torn down, `open_stream` called again, the outage covered with
+        // silence — is the code a real endpoint change runs
+        // (`EndpointCapture::simulate_endpoint_change`).
+        game_track
+            .capture
+            .simulate_endpoint_change(EndpointChange::CaptureEndpointRemoved);
+        other_track
+            .capture
+            .simulate_endpoint_change(EndpointChange::CaptureEndpointRemoved);
+
+        // The change is acted on at the top of the next read, and one converted
+        // packet from the stream that has just been thrown away may still be
+        // waiting to be handed over — 480 frames of it, one WASAPI packet, was
+        // exactly what a first attempt at this test measured on the game's side
+        // and mistook for the reopened stream. So a moment of reading is
+        // discarded either side of the change, and the window measured below is
+        // the new stream and nothing else.
+        listen_to_both(
+            &mut game_track,
+            &mut other_track,
+            Duration::from_millis(400),
+        );
+
+        let (after_game, after_other) = listen_to_both(
+            &mut game_track,
+            &mut other_track,
+            Duration::from_millis(1_500),
+        );
+
+        assert!(
+            after_other.from_the_client > 0,
+            "after the game exited and the stream was reopened, the other-system-audio track has \
+             to be coming from a client. It measured {} frames from the client, which is a track \
+             made entirely of silence this crate invented — the whole of issue #563",
+            after_other.from_the_client
+        );
+        assert_eq!(
+            after_game.from_the_client, 0,
+            "the game's track must not start delivering audio once the game has gone. A tree \
+             with nothing in it plays nothing, and a client that hands over anything here is a \
+             `Game` track carrying the whole machine (ADR 0003)"
+        );
+        assert_isolated(
+            "after the game exited and both streams were reopened",
+            &after_other,
+            &after_game,
+            &tone,
+        );
+    }
+
+    /// Asserts that `carrying` holds [`NEIGHBOUR`] and `absent` does not.
+    ///
+    /// The rejection is the assertion. "The other-system track is not empty"
+    /// would pass just as well on a build that copied the endpoint into every
+    /// track, which is the failure this whole file exists to prevent.
+    fn assert_isolated(when: &str, carrying: &Heard, absent: &Heard, tone: &TonePlayer) {
+        // The tone has to still be playing, or both measurements below are
+        // zero and the test would pass by measuring nothing.
+        assert!(
+            tone.running.load(Ordering::Relaxed),
+            "the tone stopped playing part way through, so nothing measured here means anything"
+        );
+
+        let present = carrying.magnitude_at(NEIGHBOUR);
+        let rejected = absent.magnitude_at(NEIGHBOUR);
+        let _ = writeln!(
+            std::io::stderr(),
+            "{when}: other_system {NEIGHBOUR} Hz {present:.5} ({} client frames, {} samples, peak \
+             {:.5}), game {NEIGHBOUR} Hz {rejected:.5} ({} client frames, {} samples, peak {:.5})",
+            carrying.from_the_client,
+            carrying.mono.len(),
+            carrying.mono.iter().fold(0.0f32, |a, s| a.max(s.abs())),
+            absent.from_the_client,
+            absent.mono.len(),
+            absent.mono.iter().fold(0.0f32, |a, s| a.max(s.abs())),
+        );
+        assert!(
+            present > rejected * REJECTION,
+            "{when}, the tone this process was playing measured {present:.5} on the \
+             other-system-audio track and {rejected:.5} on the game's, which is {:.1} times \
+             apart against a threshold of {REJECTION:.0}. The tone belongs to the complement of \
+             the game's tree and to nothing else",
+            present / rejected.max(f64::MIN_POSITIVE)
+        );
+        assert!(
+            present > f64::from(NEIGHBOUR_AMPLITUDE) / 8.0,
+            "{when}, the other-system-audio track measured {present:.5} at {NEIGHBOUR} Hz, which \
+             is a track that is not carrying the tone at all. Two tracks that are both silent \
+             pass a ratio and prove nothing"
+        );
     }
 }

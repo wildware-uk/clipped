@@ -392,7 +392,14 @@ Some tests play sound. `crates/audio/tests/system_audio.rs` renders a quiet
 997 Hz tone so it can capture it back and measure it, the A/V sync tests drive
 `video-pattern --tone`, and `tests/audio/track_isolation.rs` holds two tones at
 once — `video-pattern --steady-tone` and one of its own — for the length of a
-recording. That is the right way to test a capture path —
+recording. One unit test does too:
+`a_track_of_everything_but_the_game_is_still_everything_once_the_game_has_gone`,
+in `crates/audio/src/windows/process_loopback.rs`, holds a 997 Hz tone while the
+game's process tree empties and the captures are reopened, and measures which of
+the two tracks it lands on
+([issue #563](https://github.com/wildware-uk/clipped/issues/563), and
+[audio-routing.md](audio-routing.md) for what was measured). That is the right
+way to test a capture path —
 a real reference signal, not a mock — but `cargo test --workspace` is the
 command CONTRIBUTING.md asks every contributor to run before review, and on a
 machine with a sound card it makes noise. On a call, in headphones, or on the
