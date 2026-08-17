@@ -361,6 +361,13 @@ export function describeInterruption(interrupted: InterruptedRecording | null): 
  * to have the capability, and a control drawn on the strength of the last one
  * is a control that refuses when pressed.
  *
+ * **It is not enough on its own to word a disabled control**, because those
+ * three states are `false` for three different reasons and only one of them is
+ * "this recorder cannot". `exportOffer` in `recordingActions.ts` is what that
+ * looks like done properly, and is the shape any second control should copy:
+ * this answers whether, and something beside it answers what to say (issue
+ * #447).
+ *
  * Takes the link rather than a `Welcome` because that is what a window holds —
  * `hasFeature` in `@clipped/shared` is the same question asked of the handshake
  * itself, which only `crates/ipc` ever sees.

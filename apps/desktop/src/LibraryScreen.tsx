@@ -23,6 +23,7 @@ import {
 import { describeFavouriteProblem, useFavourites } from './favourites';
 import { describeLockProblem, useLocks } from './locks';
 import { SessionList } from './SessionList';
+import type { RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
 /**
@@ -322,7 +323,25 @@ function ExportBar({ of }: { readonly of: ExportProgress }): ReactNode {
   );
 }
 
-export function LibraryScreen(): ReactNode {
+/** What the Library screen is given. */
+export interface LibraryScreenProps {
+  /**
+   * Where the recorder link stands, or `null` outside the Clipped window.
+   *
+   * Passed in rather than taken from `useRecorderLink` here, so that the shell
+   * holds one subscription rather than several — the same arrangement Home, the
+   * Games screen and playback use.
+   *
+   * This screen wants it for one thing: the features the attached recorder
+   * advertised. The Export control is a command an older recorder does not
+   * have, and asking before drawing the control is the difference between a
+   * refusal before it is pressed and one after a file name has been chosen
+   * (issue #447).
+   */
+  readonly link: RecorderLinkState | null;
+}
+
+export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
   /**
    * What has been typed, and what has been searched for.
    *
@@ -333,7 +352,7 @@ export function LibraryScreen(): ReactNode {
   const [typed, setTyped] = useState('');
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
-  const actions = useRecordingActions();
+  const actions = useRecordingActions(link);
   const favourites = useFavourites();
   const locks = useLocks();
   const navigate = useNavigate();

@@ -44,6 +44,16 @@ import { useSessionWindow } from './virtualWindow';
  * explanation, and a disabled control that says why is what AGENTS.md sections
  * 27 and 45 ask for.
  *
+ * # Export asks the recorder as well as the row
+ *
+ * The other two controls are shell calls this window's own host makes. Export
+ * is a command the *recorder* performs, and a recorder built before issue #399
+ * does not have it — so the control asks the features in that recorder's
+ * welcome before it draws itself, and is disabled with the reason in its label
+ * when they do not name `export` (issue #447). Without the check the refusal
+ * arrives after the Save As dialog, which is the only part of the interaction
+ * that costs the user anything.
+ *
  * # Favouriting is offered for a recording whose file has gone
  *
  * Deliberately, and unlike the three above. A favourite is a statement about
@@ -307,17 +317,14 @@ function RecordingRow({
         >
           Show in Explorer
         </button>{' '}
-        <button
-          type="button"
-          disabled={!available || busy !== undefined}
-          title={why}
-          aria-label={`Export ${of} as MP4`}
-          onClick={() => {
-            actions.exportToMp4(recording);
-          }}
-        >
-          {busy === 'Exporting' ? 'Exporting…' : 'Export MP4'}
-        </button>
+        <ExportButton
+          actions={actions}
+          recording={recording}
+          of={of}
+          available={available}
+          busy={busy}
+          whyNot={why}
+        />
       </td>
       {favourites !== undefined && (
         <td>
@@ -341,6 +348,75 @@ function RecordingRow({
         </td>
       )}
     </tr>
+  );
+}
+
+/**
+ * The Export control, which asks the recorder before it offers itself.
+ *
+ * Two questions, in this order, because they are about different things and
+ * send somebody to different places:
+ *
+ * - **can this recorder export at all**, from the features in its welcome
+ *   (`recordingActions.ts`). An older recorder has no `export_recording`
+ *   command, and finding that out costs a Save As dialog and a file name for a
+ *   file that was never going to be written
+ *   ([issue #447](https://github.com/wildware-uk/clipped/issues/447)). The way
+ *   out is restarting Clipped;
+ * - **is this recording's file still there**, which is the row's own question
+ *   and the one the other three controls share. The way out is finding the
+ *   file.
+ *
+ * Disabled with the reason in its own label rather than hidden, which is what
+ * the tray's menu does with the same question and what AGENTS.md sections 27
+ * and 45 ask for: a control that vanishes explains nothing, and a control that
+ * is greyed out with no reason explains less. The label carries the short form
+ * and the accessible name carries the sentence, because `aria-label` is what a
+ * screen reader announces instead of the text, and a `title` is not announced
+ * at all.
+ */
+function ExportButton({
+  actions,
+  recording,
+  of,
+  available,
+  busy,
+  whyNot,
+}: {
+  readonly actions: RecordingActions;
+  readonly recording: LibraryRecording;
+  readonly of: string;
+  readonly available: boolean;
+  readonly busy: string | undefined;
+  readonly whyNot: string | undefined;
+}): ReactNode {
+  const offer = actions.canExport;
+
+  if (!offer.offered) {
+    return (
+      <button
+        type="button"
+        disabled
+        title={offer.why}
+        aria-label={`Export ${of} as MP4 — ${offer.why}`}
+      >
+        Export MP4 — {offer.shortly}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={!available || busy !== undefined}
+      title={whyNot}
+      aria-label={`Export ${of} as MP4`}
+      onClick={() => {
+        actions.exportToMp4(recording);
+      }}
+    >
+      {busy === 'Exporting' ? 'Exporting…' : 'Export MP4'}
+    </button>
   );
 }
 

@@ -1,4 +1,4 @@
-import type { LibrarySession, LibrarySessionPage } from '@clipped/shared';
+import { FEATURES, type LibrarySession, type LibrarySessionPage } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
@@ -70,7 +70,7 @@ function renderApp(): void {
 function renderScreen(): void {
   render(
     <MemoryRouter>
-      <LibraryScreen />
+      <LibraryScreen link={ATTACHED} />
     </MemoryRouter>,
   );
 }
@@ -80,12 +80,28 @@ async function openLibrary(user: ReturnType<typeof userEvent.setup>): Promise<vo
   await user.click(screen.getByRole('link', { name: 'Library' }));
 }
 
+/**
+ * A recorder of this build, attached and idle.
+ *
+ * `FEATURES` rather than a list typed here, so a capability added to the
+ * protocol does not quietly leave every case below testing an older recorder
+ * than the one it is about — the same reason `tray_model.rs`'s own cases are
+ * built from `features::ALL` (issue #447).
+ */
 const ATTACHED = {
   link: 'attached',
   recorder_process_id: 7,
-  features: [],
+  features: [...FEATURES],
   status: { state: 'idle' },
 } as const;
+
+/** A recorder that advertises everything this build's does, except one thing. */
+function attachedWithout(missing: string) {
+  return {
+    ...ATTACHED,
+    features: FEATURES.filter((feature) => feature !== missing),
+  };
+}
 
 describe('the Library screen', () => {
   beforeEach(() => {
@@ -844,6 +860,100 @@ describe('the Library screen', () => {
       expect(await screen.findByRole('button', { name })).toBeDisabled();
     }
     expect(screen.getByRole('table', { name: 'Sessions' })).toHaveTextContent('file missing');
+  });
+
+  /*
+   * Issue #447's first acceptance criterion, and the reason `features` is on the
+   * link at all.
+   *
+   * The window can be newer than the recorder it finds: an installed Clipped
+   * attaches to whatever is already listening, and a recorder built before
+   * issue #399 has no `export_recording` command. Drawn as a working control,
+   * the refusal arrives *after* the Save As dialog — so the person has named a
+   * file that was never going to be written, which is the one thing AGENTS.md
+   * section 27 forbids.
+   *
+   * The other two controls staying live is half the point: they are shell calls
+   * this window's own host makes and have nothing to do with the recorder's
+   * age, so a check that disabled the row would be as wrong as no check at all.
+   */
+  it('does not offer an Export control against a recorder that never said it could export', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attachedWithout('export'), null, {
+      sessions: () => Promise.resolve(page([session()])),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const exportControl = await screen.findByRole('button', {
+      name: /^Export cs2-20260811-201400-1\.mkv/,
+    });
+    expect(exportControl).toBeDisabled();
+    // Said, not hidden, and said where a screen reader will hear it: `title` is
+    // not announced, and `aria-label` replaces the text rather than adding to
+    // it (AGENTS.md sections 27, 45 and 46).
+    expect(exportControl).toHaveAccessibleName(/older than this window and cannot export/);
+    expect(exportControl).toHaveTextContent('Export MP4 — this recorder cannot export');
+
+    expect(
+      screen.getByRole('button', { name: 'Open cs2-20260811-201400-1.mkv, Counter-Strike 2' }),
+      'opening a file is the window host’s own shell call and has nothing to do with the recorder',
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('button', {
+        name: 'Show cs2-20260811-201400-1.mkv, Counter-Strike 2 in Explorer',
+      }),
+    ).toBeEnabled();
+  });
+
+  /*
+   * The other direction, which is what stops the check above from being written
+   * as "never offer an Export control". A recorder of this build advertises
+   * `export`, and the control is the one every case above presses.
+   */
+  it('offers it against a recorder whose welcome named export', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const exportControl = await screen.findByRole('button', {
+      name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+    });
+    expect(exportControl).toBeEnabled();
+    expect(exportControl).toHaveTextContent('Export MP4');
+  });
+
+  /*
+   * Issue #447's third question: what a window shows while it is connecting.
+   *
+   * Features are not known until a recorder answers, so "this recorder cannot
+   * export" is a claim about a recorder nobody has spoken to — and one that
+   * would turn into a working control a second later. The control waits and
+   * says it is waiting. This case fails if `connecting` is folded in with "the
+   * recorder said no", which is the easy way to write the check and the wrong
+   * one.
+   */
+  it('says it is waiting rather than claiming a recorder it has not reached cannot export', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime({ link: 'connecting' }, null, {
+      sessions: () => Promise.resolve(page([session()])),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const exportControl = await screen.findByRole('button', {
+      name: /^Export cs2-20260811-201400-1\.mkv/,
+    });
+    expect(exportControl).toBeDisabled();
+    expect(exportControl).toHaveAccessibleName(/still looking for the recorder/);
+    expect(
+      exportControl,
+      'a recorder that has not answered has not refused anything',
+    ).not.toHaveAccessibleName(/older than this window/);
+    expect(exportControl).toHaveTextContent('Export MP4 — waiting for the recorder');
   });
 
   /*
