@@ -28,7 +28,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use clipped_ipc::settings::{ApplySettings, AudioDevice, AudioDevices, SettingEntry, SettingsView};
+use clipped_ipc::settings::{
+    ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
+    SettingEntry, SettingsView,
+};
 use clipped_ipc::{ErrorCode, ProtocolError};
 use clipped_session::config::{
     Configuration, ConfigurationStore, Preferences, SettingKey, StorageSettings,
@@ -395,6 +398,86 @@ pub fn audio_devices() -> Result<AudioDevices, ProtocolError> {
     Err(ProtocolError::new(
         ErrorCode::Internal,
         "this build has no audio capture and cannot list the machine's microphones",
+    ))
+}
+
+/// How long one level check listens.
+///
+/// Long enough to be past the first packet of a capture that has just started —
+/// WASAPI delivers at around 10 ms and the first one costs the activation — and
+/// short enough that a window polling for a meter is not waiting on the recorder
+/// (`clipped_session::microphone_level` explains why the device is opened per
+/// question rather than held).
+#[cfg(windows)]
+const LISTEN_FOR: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// What the microphone a settings value names is hearing.
+///
+/// # Why the value is parsed rather than taken as a device name
+///
+/// Because the window is asking about a *setting* it has not saved yet, and the
+/// settings file's spelling is the only vocabulary either side has for one
+/// (`clipped_ipc::settings`). Parsing it through [`Preferences::set_written`] —
+/// the same call [`SettingsFile::apply`] makes — means a value this can be asked
+/// about is exactly a value that could be saved, refused with the same sentence
+/// when it is not, and resolved to a device by the code a recording resolves it
+/// with. Three separate ways for the meter to end up pointed at a different
+/// endpoint from the recording, closed by using one path (AGENTS.md section 55).
+///
+/// # Errors
+///
+/// [`ErrorCode::InvalidParameters`] for a value the settings file would refuse,
+/// carrying `clipped_session`'s own sentence, and for `none` — which is a
+/// perfectly good setting with no level to report, and must not come back as a
+/// reading of silence (AGENTS.md section 27).
+///
+/// [`ErrorCode::Internal`] when the device cannot be opened: unplugged, in use,
+/// or a name that matches nothing on this machine. A window shows the reason
+/// rather than a meter at zero, because those are opposite answers.
+#[cfg(windows)]
+pub fn microphone_level(
+    request: &MicrophoneLevelRequest,
+) -> Result<MicrophoneLevel, ProtocolError> {
+    let mut scratch = Preferences::default();
+    scratch
+        .set_written(SettingKey::Microphone, Some(&request.microphone))
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))?;
+
+    let setting = scratch
+        .microphone()
+        .cloned()
+        .unwrap_or_default()
+        .as_source();
+
+    let level = clipped_session::microphone_level(&setting, LISTEN_FOR)
+        .map_err(|error| {
+            ProtocolError::new(
+                ErrorCode::Internal,
+                format!("this microphone could not be listened to: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                "\"none\" records no microphone, so there is no level to report",
+            )
+        })?;
+
+    Ok(MicrophoneLevel {
+        device: level.device,
+        peak: level.peak,
+        muted: level.muted,
+    })
+}
+
+/// The same, on a build with no audio backend at all.
+#[cfg(not(windows))]
+pub fn microphone_level(
+    _request: &MicrophoneLevelRequest,
+) -> Result<MicrophoneLevel, ProtocolError> {
+    Err(ProtocolError::new(
+        ErrorCode::Internal,
+        "this build has no audio capture and cannot listen to a microphone",
     ))
 }
 

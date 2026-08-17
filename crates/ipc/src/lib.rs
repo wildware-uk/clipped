@@ -152,7 +152,10 @@ pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
 };
-pub use settings::{ApplySettings, AudioDevice, AudioDevices, SettingEntry, SettingsView};
+pub use settings::{
+    ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
+    SettingEntry, SettingsView,
+};
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
     ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,

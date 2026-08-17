@@ -1278,3 +1278,81 @@ mod planning {
         ));
     }
 }
+
+/// Reducing a buffer to the one number a meter draws.
+///
+/// Opening a microphone needs Windows and an endpoint somebody has plugged in.
+/// Turning the samples it delivers into a level needs neither, and it is where
+/// the two failures worth having a test for live: a meter that reads zero while
+/// somebody is speaking, and a meter that sticks at the top and never comes
+/// down again (issue #109).
+mod level {
+    use super::*;
+
+    #[test]
+    fn the_peak_is_the_loudest_sample_however_it_is_signed() {
+        // The trough of a waveform is as loud as its crest. A meter that took
+        // the maximum rather than the maximum magnitude would read zero for
+        // every buffer whose loudest excursion happened to be downwards, which
+        // on a symmetric signal is half of them.
+        assert!((loudest(&[0.0, 0.25, -0.8, 0.3]) - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn silence_is_zero_and_not_something_a_meter_would_show() {
+        assert_eq!(loudest(&[0.0; 480]), 0.0);
+        assert_eq!(loudest(&[]), 0.0, "no samples is no signal, not a failure");
+    }
+
+    #[test]
+    fn a_sample_above_full_scale_is_the_top_of_the_meter_rather_than_past_it() {
+        // A float endpoint may deliver samples above 1.0, and the protocol
+        // promises 0.0 to 1.0. Without the clamp a meter drawn as a percentage
+        // of the width would run off the end of its own track.
+        assert_eq!(loudest(&[1.9, -0.2]), 1.0);
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_is_no_reading_rather_than_a_full_meter() {
+        // `f32::max` already prefers the number over a `NaN`, so dropping the
+        // filter would leave the two lines below passing. The infinity is the
+        // one that needs it: without the filter it becomes the peak, the clamp
+        // turns it into `1.0`, and the meter sits at the top for as long as the
+        // driver keeps producing them — a reading that says the microphone is
+        // clipping when what it means is that a sample was rubbish.
+        assert!((loudest(&[f32::NAN, 0.4]) - 0.4).abs() < f32::EPSILON);
+        assert!((loudest(&[0.4, f32::NAN]) - 0.4).abs() < f32::EPSILON);
+        assert_eq!(
+            loudest(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]),
+            0.0,
+            "a buffer of nothing but rubbish is no reading, not a full meter"
+        );
+    }
+
+    #[test]
+    fn recording_no_microphone_has_no_level_rather_than_a_level_of_zero() {
+        // `Off` is a setting somebody chose, not a device that could not be
+        // found, and the two must not arrive at a screen looking the same: one
+        // means "you asked for no microphone" and the other means "the one you
+        // asked for is not there" (AGENTS.md section 27). Resolution is the
+        // half of `microphone_level` that needs no endpoint, so it is the half
+        // this can check.
+        assert_eq!(
+            selected_microphone(&AudioSourceSetting::Off).expect("Off resolves"),
+            None,
+        );
+    }
+
+    #[test]
+    fn the_default_microphone_resolves_without_consulting_the_machine() {
+        // `default` follows whichever endpoint Windows considers default at the
+        // moment a capture opens, so resolving it must not enumerate: on a
+        // machine with no capture endpoints at all, enumerating would fail and
+        // a recording configured for `default` would be refused before the
+        // capture had a chance to say anything.
+        assert_eq!(
+            selected_microphone(&AudioSourceSetting::SystemDefault).expect("the default resolves"),
+            Some(clipped_audio::windows::MicrophoneSelection::SystemDefault),
+        );
+    }
+}

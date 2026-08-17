@@ -55,6 +55,7 @@
         "get_settings",
         "apply_settings",
         "get_audio_devices",
+        "get_microphone_level",
         "shutdown"
       ],
       "tolerates_unrecognised": true
@@ -133,6 +134,7 @@
         "hotkeys",
         "replay",
         "settings",
+        "microphone_level",
         "automatic"
       ],
       "tolerates_unrecognised": true
@@ -176,6 +178,7 @@
         "hotkeys",
         "settings",
         "audio_devices",
+        "microphone_level",
         "shutting_down",
         "library_events",
         "library_trash",
@@ -441,6 +444,21 @@
         "query"
       ]
     },
+    "microphone_level": {
+      "required": [
+        "peak"
+      ],
+      "optional": [
+        "device",
+        "muted"
+      ]
+    },
+    "microphone_level_request": {
+      "required": [
+        "microphone"
+      ],
+      "optional": []
+    },
     "open_playback": {
       "required": [
         "source"
@@ -615,6 +633,13 @@
     "reply.locked": {
       "required": [
         "lock",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.microphone_level": {
+      "required": [
+        "level",
         "reply"
       ],
       "optional": []
@@ -979,6 +1004,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "get_microphone_level",
+      "params": "microphone_level_request",
+      "reply": "reply.microphone_level",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -1161,6 +1192,7 @@
           "hotkeys",
           "replay",
           "settings",
+          "microphone_level",
           "automatic"
         ],
         "protocol_version": 2,
@@ -2264,6 +2296,26 @@
       },
       "parses": true,
       "discriminant": "response.ok.audio_devices"
+    },
+    {
+      "name": "what a microphone is hearing, from a device that is plugged in",
+      "direction": "server",
+      "frame": {
+        "id": 19,
+        "outcome": {
+          "ok": {
+            "level": {
+              "device": "Shure MV7",
+              "muted": false,
+              "peak": 0.5
+            },
+            "reply": "microphone_level"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.microphone_level"
     },
     {
       "name": "a setting refused with what would have been accepted",

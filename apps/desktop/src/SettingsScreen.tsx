@@ -1,18 +1,16 @@
 import type { AudioDevices, SettingEntry, SettingsView } from '@clipped/shared';
 import { railPanelId, railTabId, SectionRail, type RailSection } from '@clipped/ui';
 import { useState, type ReactNode } from 'react';
+import { Link } from 'react-router';
 
 import { HotkeyList } from './HotkeyList';
 import type { LibraryRead } from './library';
 import {
   chooseRecordingDirectory,
-  DEFAULT_DEVICE,
   describeSettingsProblem,
-  DEVICE_PREFIX,
-  deviceNamed,
   HOTKEYS_SECTION,
   MICROPHONE,
-  NO_DEVICE,
+  microphoneOptions,
   RECORDING_DIRECTORY,
   SETTINGS_SECTIONS,
   useAudioDevices,
@@ -20,6 +18,7 @@ import {
   type SettingRow,
   type SettingsSection,
 } from './settings';
+import { SETUP_PATH } from './setup';
 
 /**
  * The Settings screen (issue #51).
@@ -63,31 +62,6 @@ function fieldId(key: string): string {
 /** The element id a setting's hint has, so its control can be described by it. */
 function hintId(key: string): string {
   return `setting-${key}-hint`;
-}
-
-/** What a microphone setting offers: the two words, then this machine's devices. */
-function microphoneOptions(
-  entry: SettingEntry,
-  devices: LibraryRead<AudioDevices>,
-): readonly { readonly value: string; readonly label: string }[] {
-  const listed = devices.state === 'read' ? devices.value.microphones : [];
-  const options = [
-    { value: DEFAULT_DEVICE, label: 'Whichever Windows is using' },
-    { value: NO_DEVICE, label: 'Do not record a microphone' },
-    ...listed.map((device) => ({
-      value: `${DEVICE_PREFIX}${device.name}`,
-      label: device.is_default ? `${device.name} (default)` : device.name,
-    })),
-  ];
-
-  // A configured device that is not in the list is one that is unplugged, and
-  // it stays on offer: dropping it would silently change what is recorded to
-  // whatever the list happened to start with (AGENTS.md section 27).
-  const named = deviceNamed(entry.value);
-  if (named !== undefined && !options.some((option) => option.value === entry.value)) {
-    options.push({ value: entry.value, label: `${named} (not connected)` });
-  }
-  return options;
 }
 
 /** One setting the recorder says is in force: a control, and what it accepts. */
@@ -489,6 +463,20 @@ export function SettingsScreen(): ReactNode {
           />
         ) : null}
       </div>
+
+      {/*
+       * The way back to the first run (issue #109). A destination rather than a
+       * control that changes something: it clears nothing and resets nothing,
+       * it walks the two questions again with what is saved already filled in,
+       * and Finish saves them the same way this screen would.
+       *
+       * After the rail rather than before it, because the rail is this screen's
+       * first tab stop and a link ahead of it would put a stop between the
+       * sidebar and the sections every time somebody tabbed in.
+       */}
+      <p>
+        <Link to={SETUP_PATH}>Run setup again</Link>
+      </p>
     </>
   );
 }

@@ -40,6 +40,9 @@ import type {
   AudioDevice,
   AudioDevices,
   AudioDevicesReply,
+  MicrophoneLevel,
+  MicrophoneLevelParams,
+  MicrophoneLevelReply,
   SettingEntry,
   SettingsReply,
   SettingsView,
@@ -581,6 +584,13 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   audio_device: fields<AudioDevice>({ name: 'required', is_default: 'required' }),
   audio_devices: fields<AudioDevices>({ microphones: 'required' }),
   'reply.audio_devices': fields<AudioDevicesReply>({ reply: 'required', devices: 'required' }),
+  microphone_level_request: fields<MicrophoneLevelParams>({ microphone: 'required' }),
+  microphone_level: fields<MicrophoneLevel>({
+    peak: 'required',
+    device: 'optional',
+    muted: 'optional',
+  }),
+  'reply.microphone_level': fields<MicrophoneLevelReply>({ reply: 'required', level: 'required' }),
   apply_settings: fields<ApplySettingsParams>({ values: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
@@ -757,6 +767,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_microphone_level',
+    params: 'microphone_level_request',
+    reply: 'reply.microphone_level',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
@@ -838,6 +854,11 @@ function replyDiscriminant(reply: Reply): string {
       // The same. A machine with no microphone is an empty list rather than a
       // different reply.
       return 'audio_devices';
+    case 'microphone_level':
+      // One discriminant: a device that is not there and one that is silent are
+      // the same shape with a field left out, and which is which is
+      // `MicrophoneLevel.device` rather than a different reply.
+      return 'microphone_level';
     case 'recording_exported':
       // Whether the copy is complete is part of the path, because it is the one
       // thing the window has to say differently: a mirror that dropped

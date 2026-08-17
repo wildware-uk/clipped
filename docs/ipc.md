@@ -332,7 +332,7 @@ into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
 `shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `settings`,
-`automatic`.
+`microphone_level`, `automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -389,6 +389,14 @@ own Settings screen reaches the same place from the other end — it asks
 `get_settings` when it opens and draws no control until that is answered, so an
 older recorder produces the refusal in place of the form rather than a form that
 does not work.
+
+`microphone_level` is deliberately *not* part of `settings`, and the reason is
+what a window does without it. A window that cannot read the settings can say so
+and offer nothing; a window that can read them but cannot measure a microphone
+still has a working list of devices, so it must draw the chooser and leave out
+the meter rather than refuse the whole screen. It is also the one capability a
+build can lack for a reason other than its age: a recorder compiled without an
+audio backend does not claim it.
 
 ## Compatibility policy
 
@@ -573,6 +581,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `get_settings` | none | `settings` | yes |
 | `apply_settings` | `values`, below | `settings` | yes |
 | `get_audio_devices` | none | `audio_devices` | yes |
+| `get_microphone_level` | `microphone` | `microphone_level` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 
 ### `save_replay`
@@ -1459,6 +1468,57 @@ A recorder that could not enumerate the endpoints refuses with `internal` and
 the reason, so a window says why there is no list rather than drawing an empty
 one as though it had looked (AGENTS.md section 27).
 
+### `get_microphone_level`
+
+What one microphone is hearing at this moment, so that choosing one is a thing
+somebody can *check* rather than guess at ([#109]). A list of endpoint names says
+which microphones exist and nothing about which of them can hear the person
+choosing, and on a machine with a webcam, a headset and a monitor's array
+microphone that is the whole of the question.
+
+```json
+{"type":"request","id":19,"command":"get_microphone_level",
+ "params":{"microphone":"name:Shure MV7"}}
+```
+
+```json
+{"type":"response","id":19,"outcome":{"ok":{"reply":"microphone_level","level":{
+  "device":"Shure MV7","peak":0.5,"muted":false}}}}
+```
+
+`microphone` is a **setting's value**, spelled as the settings file spells it —
+`default`, `none`, `name:Shure MV7` — and not a device name. The question is
+what the choice somebody is looking at would record, asked before it is saved,
+so the recorder parses it with the settings file's own parser and resolves it to
+an endpoint with the code a recording resolves it with: a value that can be asked
+about is exactly a value that could be saved, and the meter cannot end up pointed
+at a different endpoint from the recording.
+
+`peak` is the loudest sample in the moment that was listened to — **not** since
+the last question — as a linear amplitude from 0 to 1. The endpoint is opened,
+listened to and closed inside the call, so a window that is killed mid-choice
+leaves no capture behind and no microphone-in-use indicator; the cost is that
+between two questions there is a gap nothing measured, which is why a client asks
+again rather than accumulating.
+
+The other two fields are the ones a meter cannot say for itself, and both are
+absent rather than guessed at:
+
+- `device` is missing while the endpoint is unplugged or disabled, during which a
+  capture produces silence rather than failing. It is what tells "nobody is
+  speaking" from "there is nothing there";
+- `muted` is missing when Windows will not report the switch for that device,
+  which some virtual devices do not have. A muted microphone reads as exactly the
+  silence of a quiet room, and telling somebody to speak up when the answer is a
+  switch is the vague message AGENTS.md section 28 is about.
+
+`none` is refused with `invalid_parameters` rather than answered with a peak of
+zero: it is a setting somebody chose, and a reading of silence would be drawn as
+a dead meter over a deliberate choice (AGENTS.md section 27). A device that
+cannot be opened is `internal` carrying the reason, for the same reason
+`get_audio_devices` refuses rather than sending an empty list.
+
+[#109]: https://github.com/wildware-uk/clipped/issues/109
 [#252]: https://github.com/wildware-uk/clipped/issues/252
 [#308]: https://github.com/wildware-uk/clipped/issues/308
 [#316]: https://github.com/wildware-uk/clipped/issues/316
