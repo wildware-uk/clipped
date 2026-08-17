@@ -239,6 +239,22 @@ fn encoder_lines(encoder: &EncoderReport, report: &CapabilityReport) -> String {
 
     if let Some(adapter) = encoder.adapter().and_then(|id| report.adapter(id)) {
         out.push_str(&format!("    on {}\n", adapter.description()));
+
+        // Where the frames will be, said only where it is the thing keeping this
+        // encoder out. `Availability` names the vendor; this names the card,
+        // because "on your NVIDIA GeForce RTX 4090" is what a reader can check
+        // against the adapter list four lines above
+        // ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+        if matches!(
+            encoder.availability(),
+            clipped_encoder::Availability::OnAnotherAdapter { .. }
+        ) {
+            let captured_on = report.capture_adapter().map_or_else(
+                || "another adapter".to_owned(),
+                |adapter| adapter.description().to_owned(),
+            );
+            out.push_str(&format!("    the capture adapter is {captured_on}\n"));
+        }
     }
 
     // One fact per line rather than a sentence of them: a machine with three
@@ -1091,6 +1107,102 @@ mod tests {
         assert!(
             footer.contains(INFERRED_MARKER),
             "the legend must explain the marker: {footer}"
+        );
+    }
+
+    fn integrated_amd() -> Adapter {
+        Adapter::new(
+            clipped_encoder::AdapterId::from_luid(2, 0),
+            "AMD Radeon(TM) Graphics",
+            Vendor::Amd,
+            0x13C0,
+            0,
+            false,
+        )
+    }
+
+    #[test]
+    fn an_encoder_on_an_adapter_frames_are_not_captured_on_is_not_called_available() {
+        // Issue #443's second acceptance criterion, at the place a user meets
+        // it. The machine is the one in that ticket: an RTX 4090 enumerated
+        // first and integrated AMD graphics behind it, both runtimes loaded and
+        // Windows listing `AMDh265Encoder`. `--encoder amf` on it cannot open a
+        // session at all, and the report used to say "AMD AMF — available".
+        let facts = SystemFacts::new(
+            vec![nvidia_card(), integrated_amd()],
+            EncoderObservations::none()
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Nvenc,
+                    "nvEncodeAPI64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Amf,
+                    "amfrt64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Amd,
+                    Codec::Hevc,
+                    "AMDh265Encoder",
+                )),
+        );
+        let output = rendered(&facts);
+
+        let amf = output
+            .lines()
+            .find(|line| line.trim_start().starts_with(&EncoderKind::Amf.to_string()))
+            .expect("every encoder family has a line")
+            .to_owned();
+        assert!(
+            !amf.ends_with("— available"),
+            "an encoder no recording here can open must not be reported as available: {amf}"
+        );
+
+        // And the qualification has to name the adapter the frames will be on,
+        // by the description printed in the adapter list above, or the reader
+        // is told there is a problem and not which card it is about.
+        let qualification = output
+            .lines()
+            .find(|line| line.contains("the capture adapter is"))
+            .expect("the qualification is printed under the encoder it qualifies");
+        assert!(
+            qualification.contains("NVIDIA GeForce RTX 4090"),
+            "the qualification must name the capture adapter: {qualification}"
+        );
+
+        // The encoder is still shown, with its measured codec, because the
+        // hardware is real. Hiding it would answer a question nobody asked.
+        assert!(
+            output.contains("AMDh265Encoder"),
+            "the encoder that is here must still be reported: {output}"
+        );
+
+        // "Automatic would choose" must not offer it, and the group that says
+        // why must.
+        let ranked: Vec<&str> = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Automatic would choose"))
+            .take_while(|line| !line.starts_with("Detected on this machine"))
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        assert!(
+            ranked.iter().any(|line| line.contains("NVIDIA NVENC")),
+            "the encoder on the capture adapter is still the choice: {output}"
+        );
+        assert!(
+            !ranked.iter().any(|line| line.contains("AMD AMF")),
+            "nothing under a heading that says it would be chosen may be an encoder that \
+             cannot be opened: {output}"
+        );
+        let not_chosen = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Detected on this machine"))
+            .find(|line| line.contains("AMD AMF"))
+            .expect("a detected encoder is still listed");
+        assert!(
+            not_chosen.contains("captured"),
+            "the entry has to say why it is not chosen: {not_chosen}"
         );
     }
 }

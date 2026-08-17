@@ -18,6 +18,12 @@
 //!    the software fallback, which does work. Recording on the CPU costs the
 //!    game frames; being handed an encoder that has never encoded one costs the
 //!    user the recording ([#175](https://github.com/wildware-uk/clipped/issues/175)).
+//!
+//!    An encoder on an adapter frames are not captured on is unopenable for a
+//!    second reason and ranks the same way, for the same trade: a vendor's
+//!    encode runtime refuses a Direct3D device belonging to another vendor's
+//!    adapter, so on a machine with two of them the encoder can be entirely real
+//!    and entirely unusable ([#443](https://github.com/wildware-uk/clipped/issues/443)).
 //! 2. **Hardware before software.** The recorder runs alongside a game and CPU
 //!    time is the scarcest thing on the machine (AGENTS.md section 18). A
 //!    software encoder takes frames away from the thing being recorded.
@@ -72,6 +78,18 @@ pub enum ChoiceReason {
     UnattributedHardware,
     /// The CPU. Available on every machine, and last of the encoders that work.
     SoftwareFallback,
+    /// The machine has this encoder and no recording made here can hand it a
+    /// frame: it is on an adapter that is not the one capture creates its
+    /// Direct3D device on, and vendor encode runtimes refuse another vendor's
+    /// device ([`crate::Availability::OnAnotherAdapter`], issue #443).
+    ///
+    /// Below the CPU, for the reason [`NoProvenBackend`](Self::NoProvenBackend)
+    /// is: encoding on the CPU costs the game frames, and choosing an encoder
+    /// that cannot open costs the recording. Still ranked and still printed,
+    /// because "your AMD card has an encoder and Clipped cannot use it here" is
+    /// a thing a user is entitled to be told rather than to deduce from a
+    /// missing line.
+    NotTheCaptureAdapter,
     /// The machine has this encoder and this build cannot drive it: detection
     /// found the hardware and the runtime, and
     /// [`EncoderKind::is_implemented`](crate::EncoderKind::is_implemented)
@@ -94,7 +112,8 @@ impl ChoiceReason {
             Self::HardwareWithSharedMemory => 1,
             Self::UnattributedHardware => 2,
             Self::SoftwareFallback => 3,
-            Self::NoProvenBackend => 4,
+            Self::NotTheCaptureAdapter => 4,
+            Self::NoProvenBackend => 5,
         }
     }
 }
@@ -110,6 +129,12 @@ impl fmt::Display for ChoiceReason {
             }
             Self::UnattributedHardware => "hardware encoding",
             Self::SoftwareFallback => "CPU encoding, which costs the game frames",
+            Self::NotTheCaptureAdapter => {
+                // Says which way round the mismatch is without naming either
+                // adapter: `Availability` carries the vendors, and the report
+                // prints that line directly above this one.
+                "it is on an adapter frames are not captured on, so no recording here can open it"
+            }
             Self::NoProvenBackend => {
                 // Not "detected on this machine, and …": an entry is only in
                 // this list because detection found it, and a caller that
@@ -167,17 +192,23 @@ impl Recommendation {
         self.reason
     }
 
-    /// Whether this build can actually open this encoder.
+    /// Whether this encoder can actually be opened here.
     ///
     /// `false` for a family the machine has and Clipped has no proven backend
-    /// for. Such an entry is still returned by [`recommend`], because a
+    /// for, and for one that is on an adapter frames are not captured on — the
+    /// two independent ways a real encoder can still be no use. Such an entry
+    /// is still returned by [`recommend`], because a
     /// capability report that hid it would be answering a question nobody
     /// asked — but it is ranked below the software fallback and no caller
     /// should open it. A settings screen offering the ranked list should
     /// present it as unavailable rather than as a choice.
     #[must_use]
     pub const fn is_openable(&self) -> bool {
-        self.kind.is_implemented()
+        // Two independent ways to be unopenable, and both have to be asked.
+        // The first is about this build; the second is about this machine, and
+        // a backend that is proven everywhere is still one that cannot bind a
+        // texture from another vendor's adapter (issue #443).
+        self.kind.is_implemented() && !matches!(self.reason, ChoiceReason::NotTheCaptureAdapter)
     }
 
     /// Which encoder to *open* for "Automatic".
@@ -238,7 +269,7 @@ pub fn recommend(report: &CapabilityReport) -> Vec<Recommendation> {
     let mut recommendations: Vec<Recommendation> = report
         .encoders()
         .iter()
-        .filter(|encoder| encoder.availability().is_available())
+        .filter(|encoder| encoder.availability().is_present())
         .filter_map(|encoder| recommendation_for(encoder, report))
         .collect();
 
@@ -305,6 +336,16 @@ fn reason_for(encoder: &EncoderReport, report: &CapabilityReport) -> ChoiceReaso
 
     if !encoder.kind().is_hardware() {
         return ChoiceReason::SoftwareFallback;
+    }
+
+    // After the backend question and before every question about how good the
+    // adapter is, for the same reason: how much video memory an encoder has
+    // decides nothing if no recording here can hand it a frame.
+    if matches!(
+        encoder.availability(),
+        crate::Availability::OnAnotherAdapter { .. }
+    ) {
+        return ChoiceReason::NotTheCaptureAdapter;
     }
 
     match encoder
@@ -742,5 +783,103 @@ mod tests {
             .expect("nvenc is reported");
 
         assert_eq!(measured_codecs(nvenc), vec![Codec::Hevc]);
+    }
+
+    #[test]
+    fn an_encoder_on_an_adapter_frames_are_not_captured_on_is_shown_and_never_chosen() {
+        // Issue #443's machine: the NVIDIA card is enumerated first, so capture
+        // lands there and the AMD encoder cannot be opened for a recording.
+        //
+        // Two things have to be true at once, and they pull in opposite
+        // directions. `for_opening` must never return it — handing it to
+        // `AmfEncoder::open` spends a recording's start-up on a refusal that was
+        // already known. And `recommend` must still list it, because a user with
+        // an AMD encoder Clipped will not use is entitled to be told that rather
+        // than to notice a missing line.
+        let facts = SystemFacts::new(
+            vec![nvidia_card(), integrated_amd()],
+            EncoderObservations::none()
+                .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
+                .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Amd,
+                    Codec::Hevc,
+                    "AMDh265Encoder",
+                )),
+        );
+        let report = detect(&facts);
+        let ranked = recommend(&report);
+
+        let amf = ranked
+            .iter()
+            .find(|recommendation| recommendation.encoder() == EncoderKind::Amf)
+            .expect("an encoder this machine has must still be listed");
+        assert_eq!(amf.reason(), ChoiceReason::NotTheCaptureAdapter);
+        assert!(
+            !amf.is_openable(),
+            "nothing may open an encoder that refuses the device it would be handed"
+        );
+        assert!(
+            amf.to_string().contains("captured"),
+            "the entry has to say why it is not chosen: {amf}"
+        );
+
+        assert_eq!(
+            Recommendation::for_opening(&report).map(|chosen| chosen.encoder()),
+            Some(EncoderKind::Nvenc),
+            "the encoder on the capture adapter is the one to open"
+        );
+
+        // Ranked below the software fallback, which is the difference between a
+        // caveat and a class: a reason that only described the entry would leave
+        // it sorted above an encoder that works.
+        let position = |kind| {
+            ranked
+                .iter()
+                .position(|recommendation| recommendation.encoder() == kind)
+        };
+        assert!(
+            position(EncoderKind::Amf) > position(EncoderKind::Software),
+            "an encoder that cannot be opened must rank below the CPU that can: {ranked:?}"
+        );
+    }
+
+    #[test]
+    fn reversing_the_adapter_order_moves_which_encoder_is_chosen() {
+        // The same two cards the other way round, so the integrated part is the
+        // default adapter — the laptop configuration issue #443 says would break
+        // NVENC. Nothing about the hardware changed; what changed is where the
+        // frames will be, and that alone has to change the choice.
+        let machine = |adapters: Vec<Adapter>| {
+            detect(&SystemFacts::new(
+                adapters,
+                EncoderObservations::none()
+                    .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
+                    .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
+                    .with_hardware_encoder(HardwareEncoder::new(
+                        Vendor::Amd,
+                        Codec::Hevc,
+                        "AMDh265Encoder",
+                    ))
+                    .with_hardware_encoder(HardwareEncoder::new(
+                        Vendor::Nvidia,
+                        Codec::Hevc,
+                        "NVIDIA HEVC Encoder MFT",
+                    )),
+            ))
+        };
+
+        assert_eq!(
+            Recommendation::for_opening(&machine(vec![nvidia_card(), integrated_amd()]))
+                .map(|chosen| chosen.encoder()),
+            Some(EncoderKind::Nvenc)
+        );
+        assert_eq!(
+            Recommendation::for_opening(&machine(vec![integrated_amd(), nvidia_card()]))
+                .map(|chosen| chosen.encoder()),
+            Some(EncoderKind::Amf),
+            "with capture on the AMD adapter, NVENC is the one that cannot be opened — even \
+             though its card has all the video memory and ranks first everywhere else"
+        );
     }
 }

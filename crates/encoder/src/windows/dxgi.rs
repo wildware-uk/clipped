@@ -12,7 +12,63 @@ use windows::Win32::Graphics::Dxgi::{
 
 use crate::adapter::{Adapter, AdapterId, DriverVersion};
 use crate::codec::Vendor;
+use crate::error::{EncodeError, EncodeErrorKind};
+use crate::frame::GraphicsDevice;
 use crate::probe::ProbeError;
+
+/// Refuses a device created on an adapter this encoder cannot encode from.
+///
+/// **All three hardware backends call this, and none of them may write its own
+/// version** (AGENTS.md section 55). The failure it prevents is not obscure: a
+/// machine with a discrete NVIDIA card and integrated AMD graphics — the
+/// ordinary gaming laptop — captures on the default adapter, and whichever
+/// vendor's encoder is not on that adapter is handed a device belonging to
+/// somebody else. What each runtime says about that is a status code that names
+/// no adapter: AMF answers `AMF_INVALID_ARG` from `AMFContext::InitDX11`, which
+/// reads as a broken driver
+/// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+///
+/// It does **not** make the encoder work on such a machine. Capturing on that
+/// adapter, or copying frames across adapters to reach it, is the larger
+/// question the issue carries; this is the part that is right whichever way that
+/// goes.
+///
+/// `encoder` is the backend's short name as its own error messages use it —
+/// "AMF", "NVENC", "Quick Sync" — rather than [`crate::EncoderKind`]'s display
+/// name, which already carries the vendor and would repeat it in the sentence.
+///
+/// # Errors
+///
+/// [`EncodeErrorKind::Configuration`] naming both vendors, or naming the device
+/// as one that would not answer as a DXGI device at all.
+///
+/// # Safety
+///
+/// `device` must hold null or a live `ID3D11Device` owned by the caller.
+pub(super) unsafe fn require_adapter_vendor(
+    device: &GraphicsDevice,
+    wanted: Vendor,
+    encoder: &str,
+    fail: &impl Fn(EncodeErrorKind) -> EncodeError,
+) -> Result<(), EncodeError> {
+    // SAFETY: the caller guarantees the handle is null or a live `ID3D11Device`
+    // it owns; this borrows it for the length of the call and releases nothing.
+    match unsafe { device_vendor(device.as_raw()) } {
+        Some(found) if found == wanted => Ok(()),
+        Some(other) => Err(fail(EncodeErrorKind::Configuration {
+            detail: format!(
+                "{encoder} encodes on {wanted} graphics and this device was created on a \
+                 {other} adapter; capture on the {wanted} adapter to encode with {encoder}, \
+                 or use that adapter's own encoder"
+            ),
+        })),
+        None => Err(fail(EncodeErrorKind::Configuration {
+            detail: "the graphics device did not answer as a DXGI device, so the adapter it \
+                     was created on could not be identified"
+                .to_owned(),
+        })),
+    }
+}
 
 /// Which vendor's adapter a graphics device was created on.
 ///
@@ -183,6 +239,173 @@ mod tests {
                 !adapter.description().contains('\0'),
                 "the description kept its padding: {:?}",
                 adapter.description()
+            );
+        }
+    }
+
+    /// The inference [`crate::adapter::capture_adapter`] rests on, checked
+    /// against the machine it is running on.
+    ///
+    /// That function decides which encoders a report calls available, and it is
+    /// not a measurement: it reads Microsoft's documentation for
+    /// `D3D11CreateDevice` — pass `NULL` "to use the default adapter, which is
+    /// the first adapter that is enumerated by `IDXGIFactory1::EnumAdapters`" —
+    /// and applies it to the enumeration [`adapters`] already performs. This
+    /// creates the device `clipped_capture` creates, by the same call with the
+    /// same arguments, and asks which adapter it actually landed on.
+    ///
+    /// **It can fail.** On a machine with more than one adapter, a
+    /// `capture_adapter` that took the last entry, or the one with the most
+    /// video memory, or any order other than DXGI's own, gives a different
+    /// answer from the device — which is the whole point of asking the device.
+    ///
+    /// A machine with no hardware adapter skips: the inference has nothing to
+    /// be wrong about there, and the report it feeds has no hardware encoder in
+    /// it either.
+    #[test]
+    fn the_device_capture_creates_lands_on_the_adapter_that_is_inferred_for_it() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+
+        let adapters = adapters().expect("DXGI can be asked on a Windows machine");
+        let Some(inferred) = crate::adapter::capture_adapter(&adapters) else {
+            eprintln!(
+                "SKIPPED (adapter): this machine reports no adapter that could host a hardware \
+                 encoder, so capture has none to land on"
+            );
+            return;
+        };
+
+        // Exactly the call `crates/capture/src/windows/device.rs` makes: no
+        // adapter, the hardware driver type, and BGRA support. Copying its
+        // arguments rather than approximating them is what makes this a test of
+        // that device rather than of a device like it.
+        let mut device: Option<ID3D11Device> = None;
+        // SAFETY: no adapter is named, so a driver type must be; the module
+        // handle is null as that requires, no feature level list is given, and
+        // the out parameter is a live local of the projected type. The context
+        // and feature level out parameters are absent because neither is wanted.
+        let created = unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&raw mut device),
+                None,
+                None,
+            )
+        };
+        let Some(device) = created.ok().and(device) else {
+            eprintln!(
+                "SKIPPED (adapter): this machine would not create a hardware Direct3D 11 device, \
+                 so capture could not either"
+            );
+            return;
+        };
+
+        let dxgi: IDXGIDevice = device
+            .cast()
+            .expect("a Direct3D 11 device is a DXGI device");
+        // SAFETY: `dxgi` is the live device just created, and both calls are
+        // ordinary queries returning by value or as a reference dropped here.
+        let description = unsafe {
+            dxgi.GetAdapter()
+                .expect("a device knows its adapter")
+                .GetDesc()
+                .expect("an adapter describes itself")
+        };
+        let landed = AdapterId::from_luid(
+            description.AdapterLuid.LowPart,
+            description.AdapterLuid.HighPart,
+        );
+
+        assert_eq!(
+            landed,
+            inferred.id(),
+            "capture will create its device on adapter {landed}, and detection believes it will \
+             be on {} ({}). Every encoder that is not that adapter's vendor is refused a \
+             recording, so an inference that is wrong here reports the wrong encoders as \
+             available",
+            inferred.id(),
+            inferred.description()
+        );
+    }
+
+    /// The refusal all three hardware backends share, driven against every
+    /// adapter this machine has.
+    ///
+    /// Each adapter is asked for a vendor it is not, which is the arrangement
+    /// issue #443 is about, and the sentence has to name both — the vendor that
+    /// encodes and the vendor whose device arrived — because a status code that
+    /// names neither is what sent the original report looking for a driver
+    /// fault.
+    #[test]
+    fn a_device_from_another_vendors_adapter_is_refused_by_naming_both_vendors() {
+        use crate::codec::EncoderKind;
+        use crate::error::EncodeContext;
+        use crate::windows::device::ProbeDevice;
+
+        let adapters = adapters().expect("DXGI can be asked on a Windows machine");
+        let usable: Vec<_> = adapters
+            .iter()
+            .filter(|adapter| adapter.can_host_hardware_encoder())
+            .collect();
+        if usable.is_empty() {
+            eprintln!("SKIPPED (adapter): no adapter here could host a hardware encoder");
+            return;
+        }
+
+        let context = EncodeContext::new(
+            EncoderKind::Amf,
+            crate::codec::Codec::H264,
+            crate::codec::Resolution::new(1280, 720),
+        );
+        let fail = |kind| EncodeError::new(context, kind);
+
+        for adapter in usable {
+            let Ok(probe) = ProbeDevice::on(adapter.id()) else {
+                continue;
+            };
+            let device = probe.as_graphics_device();
+
+            // The vendor this adapter is not. Picked from the adapter itself so
+            // that the test asks a real question on whatever silicon is here.
+            let wanted = if adapter.vendor() == Vendor::Nvidia {
+                Vendor::Amd
+            } else {
+                Vendor::Nvidia
+            };
+
+            // SAFETY: `device` borrows the live probe device for the length of
+            // the call.
+            let error = unsafe { require_adapter_vendor(&device, wanted, "TestEncoder", &fail) }
+                .expect_err("an adapter is not the vendor it is not");
+            let message = error.to_string();
+
+            assert!(
+                message.contains(&wanted.to_string())
+                    && message.contains(&adapter.vendor().to_string()),
+                "the refusal has to name the vendor that encodes and the vendor whose device \
+                 arrived, or it is another status code nobody can act on: {message}"
+            );
+
+            // And the same adapter asked for its own vendor is accepted, or the
+            // assertion above would pass on a function that refused everything.
+            //
+            // SAFETY: `device` borrows the live probe device for the length of
+            // the call, exactly as above.
+            let accepted =
+                unsafe { require_adapter_vendor(&device, adapter.vendor(), "TestEncoder", &fail) };
+            assert!(
+                accepted.is_ok(),
+                "{} was refused its own adapter",
+                adapter.vendor()
             );
         }
     }

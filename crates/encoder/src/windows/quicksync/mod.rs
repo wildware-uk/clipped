@@ -299,7 +299,11 @@ impl QuickSyncEncoder {
                 detail: "the graphics device is null".to_owned(),
             }));
         }
-        check_adapter(device, &fail)?;
+        // SAFETY: the handle has just been checked non-null, and `open`'s
+        // caller guarantees it is a live `ID3D11Device` it owns.
+        unsafe {
+            crate::windows::dxgi::require_adapter_vendor(device, Vendor::Intel, "Quick Sync", &fail)
+        }?;
 
         if let RateControl::Quality {
             ceiling: Some(ceiling),
@@ -494,36 +498,6 @@ fn validate(config: &EncoderConfig) -> Result<(), EncodeErrorKind> {
         });
     }
     Ok(())
-}
-
-/// Refuses a device that is not on an Intel adapter.
-///
-/// See the module documentation, "Hybrid graphics": this is the whole of the
-/// backend's adapter selection, because the caller's device *is* the choice.
-fn check_adapter(
-    device: &GraphicsDevice,
-    fail: &impl Fn(EncodeErrorKind) -> EncodeError,
-) -> Result<(), EncodeError> {
-    // SAFETY: the caller of `open` guarantees the handle is a live
-    // `ID3D11Device` it owns, and this function borrows it for the length of
-    // the call without releasing it.
-    let vendor = unsafe { crate::windows::dxgi::device_vendor(device.as_raw()) };
-
-    match vendor {
-        Some(Vendor::Intel) => Ok(()),
-        Some(other) => Err(fail(EncodeErrorKind::Configuration {
-            detail: format!(
-                "Quick Sync encodes on Intel graphics and this device was created on a {other} \
-                 adapter; capture on the Intel adapter to encode with Quick Sync, or use that \
-                 adapter's own encoder"
-            ),
-        })),
-        None => Err(fail(EncodeErrorKind::Configuration {
-            detail: "the graphics device did not answer as a DXGI device, so the adapter it was \
-                     created on could not be identified"
-                .to_owned(),
-        })),
-    }
 }
 
 /// One coded picture, waiting in the output buffer that holds it.

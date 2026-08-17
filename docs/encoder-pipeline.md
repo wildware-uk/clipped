@@ -158,6 +158,12 @@ separation, and two things enforce it:
   that says so and names its issue. It is still in the list, because a user
   whose GPU has an encoder Clipped cannot yet use should be told that; it is
   simply never at the top of it.
+- **The same, for a family on an adapter the frames will not be captured on**,
+  with the reason `ChoiceReason::NotTheCaptureAdapter`. A vendor encode runtime
+  refuses a Direct3D device belonging to another vendor's adapter, so on a
+  machine with two of them one encoder is real and unopenable — a second,
+  independent way for a detected family to be no use here, and the same trade
+  applies ([#443](https://github.com/wildware-uk/clipped/issues/443)).
 - **`Recommendation::for_opening` can only return an openable family**, and
   `Recommendation::is_openable` is on every entry for a settings screen that
   offers the whole list. `for_opening` is what a session layer calls.
@@ -775,10 +781,20 @@ than about how encoding is configured:
   adapter to encode with Quick Sync, or use that adapter's own encoder
   ```
 
-- On such a machine `recommend` already ranks the discrete GPU's encoder first
-  (see [encoder-capabilities.md](encoder-capabilities.md)), so "Automatic" does
-  not walk into this. A user who pins Quick Sync anyway gets the sentence above
-  rather than a failure inside the runtime.
+  The refusal itself is not this backend's own: all three hardware backends make
+  it, in the same words with their own vendor and name substituted, through
+  `require_adapter_vendor` in `crates/encoder/src/windows/dxgi.rs`. NVENC was the
+  last to get one — until #443 it left `NvEncOpenEncodeSessionEx` to refuse the
+  device with a status that names no adapter.
+
+- On such a machine `recommend` will not offer Quick Sync as a choice at all:
+  detection reports it as *present, and not usable for recording here*, and
+  `Recommendation::for_opening` cannot return it (see
+  [encoder-capabilities.md](encoder-capabilities.md)). That used to be true only
+  by luck — the ranking happened to put the discrete GPU's encoder first — and
+  [#443](https://github.com/wildware-uk/clipped/issues/443) made it the rule. A
+  user who pins Quick Sync anyway gets the sentence above rather than a failure
+  inside the runtime.
 - Deliberately encoding on the Intel GPU while the game renders on the discrete
   one — which some recorders offer, to keep the encode off the busy adapter — is
   not supported, because it needs a per-frame cross-adapter copy the capture

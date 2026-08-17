@@ -695,6 +695,58 @@ the run green.
   `ffprobe` themselves, over raw elementary streams rather than containers:
   [issue #154](https://github.com/wildware-uk/clipped/issues/154).
 
+## Which adapter the frames will be on
+
+[Issue #443](https://github.com/wildware-uk/clipped/issues/443): on a machine
+with two vendors' adapters, an encoder can be entirely real and entirely
+unusable, because capture creates its Direct3D device on the default adapter and
+a vendor encode runtime refuses another vendor's device. Three tests in
+`crates/encoder` cover it against whatever silicon is present.
+
+| Test | Where | What it needs |
+| --- | --- | --- |
+| `the_device_capture_creates_lands_on_the_adapter_that_is_inferred_for_it` | `src/windows/dxgi.rs` | Any adapter that could host a hardware encoder |
+| `a_device_from_another_vendors_adapter_is_refused_by_naming_both_vendors` | `src/windows/dxgi.rs` | The same |
+| `a_device_on_another_vendors_adapter_is_refused_by_name` | `src/windows/nvenc/tests.rs` | An adapter that is **not** NVIDIA's |
+
+```text
+cargo test -p clipped-encoder adapter -- --nocapture
+```
+
+**They are not `#[ignore]`d, and that is a considered difference from the capture
+tests above.** Those need a desktop session, a compositor and a display to take
+over; these need a `D3D11CreateDevice` call and no encode session at all, which
+is what the encoder crate's existing adapter test
+(`a_device_can_be_created_on_every_adapter_that_could_hold_an_encoder`) already
+does by default and green. Each of the three skips with a printed
+`SKIPPED (adapter): …` when the machine has nothing to ask — a hosted runner
+enumerates the Basic Render Driver and nothing else, so all three pass vacuously
+there, which is the arrangement that keeps them off `main`'s critical path.
+
+`CLIPPED_REQUIRE_ENCODER` deliberately does **not** cover them. That lever means
+"this machine has the encoder under test", and the third of these needs the
+opposite: a machine that has *somebody else's* adapter. Turning a skip into a
+failure under it would fail every single-vendor developer machine.
+
+The first is the one that earns its place. `CapabilityReport::capture_adapter`
+is an inference from Microsoft's documentation for `D3D11CreateDevice` — no
+adapter means "the first adapter that is enumerated by
+`IDXGIFactory1::EnumAdapters`" — and that inference decides which encoders a
+report calls available. The test creates the device `clipped_capture` creates,
+by the same call with the same arguments, and asks which adapter it landed on.
+On a machine with more than one, an inference that took the last adapter, or the
+one with the most video memory, gives a different answer and the test fails.
+
+The injected half is in `crates/encoder/src/detection.rs` and
+`recommendation.rs`: the same two adapters in both orders, which is what makes
+"the first DXGI enumerates" a rule that can be broken rather than a coincidence
+of this machine's enumeration order.
+
+**What is not tested here is that AMF then records.** It does not, on a machine
+whose capture device is not AMD's, and making it do so is the part of issue #443
+that is still open. These tests cover the refusal and the report, not the
+capability.
+
 ## What is not built yet
 
 AGENTS.md section 26 names four test applications. **Three exist.**

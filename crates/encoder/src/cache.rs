@@ -107,6 +107,13 @@ pub const CACHE_FORMAT: u32 = 2;
 /// without this bump every installation that had already cached would go on
 /// showing yesterday's inferred numbers until its GPU changed.
 ///
+/// Revision 4: an encoder on an adapter frames are not captured on is no longer
+/// reported as available ([#443](https://github.com/wildware-uk/clipped/issues/443)).
+/// A stored revision 3 report of a two-vendor machine says "AMD AMF —
+/// available" of an encoder no recording on it can open, and without this bump
+/// every installation that had already cached one would go on saying it until
+/// its GPU changed — which is precisely the machine this rule was added for.
+///
 /// # Why the key did not have to change with it
 ///
 /// The stored report now depends on something outside the key: whether the run
@@ -121,7 +128,7 @@ pub const CACHE_FORMAT: u32 = 2;
 /// stale, re-probes without opening a session, and replaces measured limits
 /// with published ones. That is correct — the measurements described the
 /// previous driver — and `capabilities --refresh` takes them again.
-pub const DETECTION_REVISION: u32 = 3;
+pub const DETECTION_REVISION: u32 = 4;
 
 /// What a display adapter set looks like, condensed to one line.
 ///

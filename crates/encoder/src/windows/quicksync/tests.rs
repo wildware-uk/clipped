@@ -313,11 +313,39 @@ fn detection_reports_quick_sync_with_a_reason_when_it_is_not_there() {
         .iter()
         .any(|adapter| adapter.vendor() == Vendor::Intel);
 
+    // Where a recording's frames will be, which is what decides whether an
+    // encoder that is present can be opened at all (issue #443).
+    let captures_on_intel = report
+        .adapters()
+        .iter()
+        .find(|adapter| adapter.can_host_hardware_encoder())
+        .is_some_and(|adapter| adapter.vendor() == Vendor::Intel);
+
     match quick_sync.availability() {
-        Availability::Available => assert!(
-            has_intel,
-            "Quick Sync is reported available on a machine with no Intel adapter"
-        ),
+        Availability::Available => {
+            assert!(
+                has_intel,
+                "Quick Sync is reported available on a machine with no Intel adapter"
+            );
+            assert!(
+                captures_on_intel,
+                "Quick Sync is reported available on a machine whose frames will be captured \
+                 on somebody else's adapter, and `open` refuses exactly that device"
+            );
+        }
+        Availability::OnAnotherAdapter { capture } => {
+            assert!(
+                has_intel,
+                "an encoder said to be on another adapter still has to be an encoder that is \
+                 here at all"
+            );
+            assert_ne!(
+                capture,
+                Vendor::Intel,
+                "the adapter frames are captured on is Intel's, so this is where Quick Sync \
+                 would work rather than where it would not"
+            );
+        }
         Availability::Unavailable(reason) => {
             if !has_intel {
                 assert_eq!(

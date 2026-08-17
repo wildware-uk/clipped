@@ -1048,3 +1048,65 @@ fn the_encoder_kind_is_the_one_this_module_implements() {
     assert_eq!(EncoderKind::Nvenc.vendor(), Some(Vendor::Nvidia));
     assert!(EncoderKind::Nvenc.is_hardware());
 }
+
+/// The refusal issue #443 added to this backend, driven against whatever
+/// non-NVIDIA adapter this machine has.
+///
+/// NVENC was the one hardware backend with no adapter check: AMF and Quick Sync
+/// have refused another vendor's device by name for some time, and NVENC left
+/// `NvEncOpenEncodeSessionEx` to refuse it with a status that names no adapter.
+/// The machine that reaches it is the mirror of the one in that issue — a laptop
+/// whose integrated adapter is the default one, so capture lands on Intel or AMD
+/// and NVENC is handed that device.
+///
+/// So this test is also the first observation of what that arrangement does to
+/// NVENC on real silicon: nothing here has ever watched
+/// `NvEncOpenEncodeSessionEx` be given somebody else's device, which is why the
+/// refusal is placed before the runtime is loaded rather than mapped from a
+/// status nobody has seen.
+///
+/// A machine with only NVIDIA adapters has nothing to ask and says so. It takes
+/// no session lock: nothing here opens an encoder, because the whole point is
+/// that the refusal happens before the runtime is touched.
+#[test]
+fn a_device_on_another_vendors_adapter_is_refused_by_name() {
+    use crate::windows::device::ProbeDevice;
+    use crate::windows::dxgi;
+
+    let adapters = dxgi::adapters().expect("DXGI can be asked on a Windows machine");
+    let Some(other) = adapters
+        .iter()
+        .find(|adapter| adapter.can_host_hardware_encoder() && adapter.vendor() != Vendor::Nvidia)
+    else {
+        // Not `skipped`: `CLIPPED_REQUIRE_ENCODER` is about a machine that has
+        // the encoder under test, and this test needs a machine that has
+        // somebody else's.
+        eprintln!(
+            "SKIPPED (adapter): every adapter here is NVIDIA's, so there is no other vendor's \
+             device to offer NVENC"
+        );
+        return;
+    };
+
+    let Ok(device) = ProbeDevice::on(other.id()) else {
+        eprintln!(
+            "SKIPPED (adapter): no Direct3D device could be created on {}",
+            other.description()
+        );
+        return;
+    };
+
+    let error = NvencEncoder::open(
+        &device.as_graphics_device(),
+        config_for(Codec::H264, Resolution::new(1280, 720)),
+    )
+    .expect_err("NVENC cannot encode a texture belonging to another vendor's adapter");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("NVENC encodes on NVIDIA graphics")
+            && message.contains(&other.vendor().to_string()),
+        "the refusal has to name this backend's vendor and the one whose device arrived, \
+         rather than a status code that names neither: {message}"
+    );
+}
