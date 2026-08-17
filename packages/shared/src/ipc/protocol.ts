@@ -351,14 +351,27 @@ export type StartRecordingParams = {
   /** `default`, `none`, or part of a device name. */
   readonly system_audio?: string;
   /**
-   * Keep the last this many seconds in memory, so that `save_replay` has
-   * something to save.
+   * Keep the last this many seconds, so that `save_replay` has something to
+   * save.
    *
-   * Absent means no buffer, which is what an ordinary recording is. It belongs
-   * to the recording rather than to the save, because a buffer has to have been
-   * filling since before the thing somebody wants to keep happened.
+   * Absent means no buffer unless {@link StartRecordingParams.replay} asks for
+   * one, which is what an ordinary recording is. It belongs to the recording
+   * rather than to the save, because a buffer has to have been filling since
+   * before the thing somebody wants to keep happened.
    */
   readonly replay_seconds?: number;
+  /**
+   * Keep a replay buffer, at the length the recorder has configured.
+   *
+   * `replay_seconds` names a length; this asks for one without naming it, and
+   * the recorder answers with `replay_window_seconds` resolved for the game it
+   * turns out to be recording. A caller that resolved a length itself would be
+   * a second place that setting is decided, and one that made a length up would
+   * be recording to a duration nobody chose.
+   *
+   * Absent is `false`, and `false` with no `replay_seconds` is no buffer.
+   */
+  readonly replay?: boolean;
 };
 
 /**

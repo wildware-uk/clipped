@@ -1766,6 +1766,7 @@ fn exemplar_start_recording() -> StartRecording {
         microphone: Some("none".to_owned()),
         system_audio: Some("none".to_owned()),
         replay_seconds: Some(60),
+        replay: true,
     }
 }
 
