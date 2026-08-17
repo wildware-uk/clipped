@@ -47,6 +47,7 @@
         "restore_from_trash",
         "empty_trash",
         "set_favourite",
+        "set_lock",
         "plugins",
         "export_recording",
         "open_playback",
@@ -176,6 +177,7 @@
         "restored",
         "trash_emptied",
         "favourited",
+        "locked",
         "plugins"
       ],
       "tolerates_unrecognised": false
@@ -375,8 +377,10 @@
         "end_reason",
         "ended_at",
         "height",
+        "locked",
         "missing_since",
         "outcome",
+        "protected",
         "size_bytes",
         "width"
       ]
@@ -393,7 +397,8 @@
         "end_reason",
         "ended_at",
         "game_id",
-        "game_name"
+        "game_name",
+        "locked"
       ]
     },
     "library_session_page": {
@@ -576,6 +581,13 @@
       ],
       "optional": []
     },
+    "reply.locked": {
+      "required": [
+        "lock",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.playback_opened": {
       "required": [
         "playback",
@@ -739,6 +751,7 @@
         "overwrite",
         "pid",
         "process",
+        "replay",
         "replay_seconds",
         "resolution",
         "system_audio",
@@ -859,6 +872,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "set_lock",
+      "params": "set_lock",
+      "reply": "reply.locked",
+      "available_in_this_build": true
+    },
+    {
       "name": "plugins",
       "params": null,
       "reply": "reply.plugins",
@@ -959,6 +978,7 @@
           "overwrite": false,
           "pid": 4242,
           "process": "cs2.exe",
+          "replay": true,
           "replay_seconds": 60,
           "resolution": "source",
           "system_audio": "none",
@@ -1435,6 +1455,7 @@
                   "favourite": true,
                   "game_id": "cs2",
                   "game_name": "Counter-Strike 2",
+                  "locked": true,
                   "recordings": [
                     {
                       "duration_seconds": 6540.0,
@@ -1442,9 +1463,11 @@
                       "ended_at": "2026-08-11T22:03:00+01:00",
                       "favourite": false,
                       "height": 1440,
+                      "locked": false,
                       "missing_since": "2026-08-12T09:00:00+01:00",
                       "outcome": "recorded",
                       "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "protected": true,
                       "recording_id": 12,
                       "session_index": 1,
                       "size_bytes": 9812009112,
@@ -1502,6 +1525,7 @@
                   "favourite": true,
                   "game_id": "cs2",
                   "game_name": "Counter-Strike 2",
+                  "locked": true,
                   "recordings": [
                     {
                       "duration_seconds": 6540.0,
@@ -1509,9 +1533,11 @@
                       "ended_at": "2026-08-11T22:03:00+01:00",
                       "favourite": false,
                       "height": 1440,
+                      "locked": false,
                       "missing_since": "2026-08-12T09:00:00+01:00",
                       "outcome": "recorded",
                       "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "protected": true,
                       "recording_id": 12,
                       "session_index": 1,
                       "size_bytes": 9812009112,
@@ -1663,6 +1689,29 @@
       },
       "parses": true,
       "discriminant": "response.ok.favourited"
+    },
+    {
+      "name": "a recording locked against automatic cleanup, and nothing else",
+      "direction": "server",
+      "frame": {
+        "id": 18,
+        "outcome": {
+          "ok": {
+            "lock": {
+              "changed": true,
+              "id": 1,
+              "kind": "recording",
+              "locked": true,
+              "protected": true,
+              "session_id": ""
+            },
+            "reply": "locked"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.locked"
     },
     {
       "name": "what is installed, and what each plugin asks for",

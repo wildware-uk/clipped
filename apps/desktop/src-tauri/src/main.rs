@@ -198,6 +198,7 @@ fn main() {
             restore_from_trash,
             empty_trash,
             set_favourite,
+            set_lock,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -519,6 +520,29 @@ fn set_favourite(
     }
 }
 
+/// Locks one thing against automatic cleanup, or unlocks it (issue #472).
+///
+/// A lock protects against automatic cleanup and nothing else: a locked
+/// recording is deleted by a manual delete exactly as an unlocked one is.
+#[tauri::command(async)]
+fn set_lock(
+    link: tauri::State<'_, RecorderLink>,
+    kind: String,
+    session_id: String,
+    id: i64,
+    locked: bool,
+) -> Result<clipped_ipc::LockMark, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::SetLock(clipped_ipc::SetLock {
+        kind,
+        session_id,
+        id,
+        locked,
+    }))? {
+        clipped_ipc::Reply::Locked { lock } => Ok(lock),
+        _ => Err(wrong_reply("set_lock")),
+    }
+}
+
 /// What the library holds per game (SPEC.md section 17).
 #[tauri::command(async)]
 fn library_games(
@@ -653,19 +677,44 @@ struct StartedRecording {
     output: String,
 }
 
+/// What this application asks the recorder to record, wherever it is asked
+/// from.
+///
+/// One function because there are two controls — the window's Record button and
+/// the tray's Start Recording — and they must not drift. Issue #427 is what
+/// drift here looks like: the tray's Save Replay item was correct, enabled
+/// exactly when the running recording had a buffer, and dark for ever, because
+/// the two places that started a recording both forgot to ask for one.
+///
+/// **`pid` rather than "whatever is in front now"** deliberately, and it is the
+/// same reasoning `StopRecording::recording_id` carries: the control names what
+/// it will record, and the foreground can change between the label being drawn
+/// and the button being pressed. Sending the identifier that was on screen means
+/// a press cannot record an application the user was never offered.
+///
+/// **`replay` rather than `replay_seconds`.** A recording started here keeps a
+/// replay buffer, so Save Replay is a control rather than a label, and how long
+/// it keeps is `replay_window_seconds` — a setting, resolved by the recorder for
+/// the game it turns out to be recording. This process cannot read it and should
+/// not: it may link `clipped-ipc` and nothing else of the workspace
+/// (`tests/integration/tests/workspace_layering.rs`), and a length invented here
+/// would be a duration nobody chose (AGENTS.md sections 30 and 55).
+///
+/// **Nothing else is sent.** Resolution, frame rate, codec, encoder and the
+/// audio devices are the recorder's own settings for the same reason; the output
+/// path is likewise the recorder's timestamped default, which is what
+/// `clipped-recorder record` writes with no `--output`.
+pub(crate) fn recording_request(process_id: u32) -> clipped_ipc::StartRecording {
+    clipped_ipc::StartRecording {
+        pid: Some(process_id),
+        replay: true,
+        ..clipped_ipc::StartRecording::default()
+    }
+}
+
 /// Records the process the window named.
 ///
-/// `process_id` rather than "whatever is in front now" deliberately, and it is
-/// the same reasoning `StopRecording::recording_id` carries: the control names
-/// what it will record, and the foreground can change between the label being
-/// drawn and the button being pressed. Sending the identifier the window had on
-/// screen means a press cannot record an application the user was never offered.
-///
-/// Nothing else is sent. Resolution, frame rate, codec, encoder and the audio
-/// devices are the recorder's own settings, and a window that sent its own
-/// values would be a second place those are decided (AGENTS.md section 30); the
-/// output path is likewise the recorder's timestamped default, which is what
-/// `clipped-recorder record` writes with no `--output`.
+/// The request is [`recording_request`], which is also what the tray sends.
 ///
 /// `async` for the reason [`recorder_status`] is, and more so: this one waits
 /// for a capture target to be resolved and an encoder session to be opened.
@@ -674,12 +723,9 @@ fn start_recording(
     link: tauri::State<'_, RecorderLink>,
     process_id: u32,
 ) -> Result<StartedRecording, RecorderProblem> {
-    let reply = link.call(&clipped_ipc::Command::StartRecording(
-        clipped_ipc::StartRecording {
-            pid: Some(process_id),
-            ..clipped_ipc::StartRecording::default()
-        },
-    ))?;
+    let reply = link.call(&clipped_ipc::Command::StartRecording(recording_request(
+        process_id,
+    )))?;
 
     match reply {
         clipped_ipc::Reply::RecordingStarted {
@@ -1022,7 +1068,7 @@ fn recorder_executable() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1072,7 +1118,7 @@ mod tests {
     /// A recorder that answers the two library commands and remembers exactly
     /// what it was asked.
     #[derive(Debug, Default)]
-    struct AskedRecorder {
+    pub(crate) struct AskedRecorder {
         /// Every command it was sent, in order.
         asked: std::sync::Mutex<Vec<clipped_ipc::Command>>,
         /// What to answer every command with instead of a reply.
@@ -1089,7 +1135,7 @@ mod tests {
         }
 
         /// What it has been asked so far.
-        fn asked(&self) -> Vec<clipped_ipc::Command> {
+        pub(crate) fn asked(&self) -> Vec<clipped_ipc::Command> {
             self.asked
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1208,9 +1254,10 @@ mod tests {
             output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 754_000,
-            // The window does not ask for a replay buffer, so a recording it
-            // started keeps none (#427).
-            replay_seconds: None,
+            // A recording this application started keeps a buffer, at the
+            // window the recorder's settings resolved (#427), so the status it
+            // reports one from carries the length rather than nothing.
+            replay_seconds: Some(300),
             session: None,
         })
     }
@@ -1304,16 +1351,16 @@ mod tests {
     /// is the point of these tests — the TypeScript suite stubs `invoke` and so
     /// stops at the window's edge, and the recorder's own tests start at its
     /// dispatch, leaving the two commands that join them covered by nothing.
-    struct FakeRecorder {
+    pub(crate) struct FakeRecorder {
         endpoint: Endpoint,
-        handler: std::sync::Arc<AskedRecorder>,
+        pub(crate) handler: std::sync::Arc<AskedRecorder>,
         events: clipped_ipc::EventPublisher,
         serving: Option<std::thread::JoinHandle<()>>,
     }
 
     impl FakeRecorder {
         /// Starts one on a pipe named after `test`, serving on a thread.
-        fn listening(test: &str, handler: AskedRecorder) -> Self {
+        pub(crate) fn listening(test: &str, handler: AskedRecorder) -> Self {
             let endpoint = Endpoint::named(&format!("clipped-{test}.{}", std::process::id()))
                 .expect("the generated name is valid");
             let mut listener = clipped_ipc::transport::Listener::bind(&endpoint)
@@ -1351,7 +1398,7 @@ mod tests {
         /// supervisor attaches rather than starting one. `RestartPolicy::NEVER`
         /// makes sure a test cannot leave something trying again in the
         /// background.
-        fn window(&self) -> tauri::App<tauri::test::MockRuntime> {
+        pub(crate) fn window(&self) -> tauri::App<tauri::test::MockRuntime> {
             let settings = SupervisorSettings {
                 restart: clipped_ipc::RestartPolicy::NEVER,
                 ..SupervisorSettings::new(
@@ -1522,6 +1569,12 @@ mod tests {
         // nothing — while the window said it had started, and every TypeScript
         // test in the repository would still be green, because they stub
         // `invoke` (issue #389).
+        //
+        // `replay: true` is on the wire for the same kind of reason (issue
+        // #427). A recording started here that did not ask for a buffer is one
+        // the tray's Save Replay item can never be enabled against, and nothing
+        // about that failure is visible: the item is correctly disabled, the
+        // recording is fine, and the control is dead for ever.
         let recorder = FakeRecorder::listening("record-start", AskedRecorder::default());
         let window = recorder.window();
 
@@ -1533,11 +1586,18 @@ mod tests {
             vec![clipped_ipc::Command::StartRecording(
                 clipped_ipc::StartRecording {
                     pid: Some(4_242),
+                    replay: true,
                     ..clipped_ipc::StartRecording::default()
                 }
             )],
             "the command the recorder received has to be `start_recording` for the process the \
-             window named, and nothing else"
+             window named, keeping a replay buffer, and nothing else"
+        );
+        assert_eq!(
+            recording_request(4_242).replay_seconds,
+            None,
+            "and it must not name a length: how long a buffer keeps is a setting, and this \
+             process cannot read one"
         );
         assert_eq!(
             started,

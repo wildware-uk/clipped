@@ -11,8 +11,10 @@ range becomes a playable file.
 **Something asks for one now.** `clipped-recorder replay` records with a buffer
 and binds `Ctrl`+`F10` to a save
 ([issue #38](https://github.com/wildware-uk/clipped/issues/38),
-`docs/recorder-cli.md`); `start_recording` takes a `replay_seconds` and
-`save_replay` saves from it over the protocol (`docs/ipc.md`).
+`docs/recorder-cli.md`); `start_recording` takes a `replay` and a
+`replay_seconds` and `save_replay` saves from it over the protocol
+(`docs/ipc.md`), which is what the desktop window sends for every recording it
+starts ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
 `clipped_session::replay::ReplayRecording` is the join between the two — it is
 what knows the video in the buffer well enough to write a container header for
 it — and `docs/sessions.md` is where a saved clip is written down.

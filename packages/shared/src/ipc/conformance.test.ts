@@ -71,6 +71,7 @@ import type {
   RestoredReply,
   TrashEmptiedReply,
   FavouritedReply,
+  LockedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -286,6 +287,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     microphone: 'optional',
     system_audio: 'optional',
     replay_seconds: 'optional',
+    replay: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
   add_bookmark: fields<AddBookmarkParams>({
@@ -393,6 +395,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     ended_at: 'optional',
     end_reason: 'optional',
     favourite: 'required',
+    locked: 'optional',
     recordings: 'required',
     clips: 'required',
   }),
@@ -410,6 +413,8 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     size_bytes: 'optional',
     missing_since: 'optional',
     favourite: 'required',
+    locked: 'optional',
+    protected: 'optional',
     tags: 'required',
   }),
   library_clip: fields<LibraryClip>({
@@ -517,6 +522,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.favourited': fields<FavouritedReply>({
     reply: 'required',
     mark: 'required',
+  }),
+  'reply.locked': fields<LockedReply>({
+    reply: 'required',
+    lock: 'required',
   }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
@@ -674,6 +683,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'set_lock',
+    params: 'set_lock',
+    reply: 'reply.locked',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -757,6 +772,10 @@ function replyDiscriminant(reply: Reply): string {
       // One discriminant: a refusal list that is empty is the same shape
       // carrying nothing, and it is always present.
       return 'trash_emptied';
+    case 'locked':
+      // One discriminant: whether the lock changed, and whether the sweep will
+      // leave the thing alone, are both fields rather than shapes.
+      return 'locked';
     case 'favourited':
       // One discriminant: whether the mark changed is a field, not a shape, and
       // a session and a recording differ only in which half of the target is
