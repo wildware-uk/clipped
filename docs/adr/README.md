@@ -75,3 +75,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0010](0010-user-labelled-event-kinds.md) | A user-labelled event kind carries its own text, and a host subsystem gets its own source | Accepted |
 | [0011](0011-what-the-webview-plays.md) | The window plays the archival recording itself, and the recorder chooses which sound track it carries | Accepted |
 | [0012](0012-a-session-follows-a-resize-with-a-new-file.md) | A session follows a mid-recording size change with a new file, and Clipped does not scale | Accepted |
+| [0013](0013-capture-rounds-an-odd-dimension-away.md) | Capture rounds an odd dimension away, and crops the frame to match | Accepted |

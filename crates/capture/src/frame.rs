@@ -41,6 +41,33 @@ impl FrameSize {
     pub const fn height(&self) -> u32 {
         self.height.get()
     }
+
+    /// The largest size with no odd dimension that fits inside this one.
+    ///
+    /// **This is what every backend in this crate reports, and it is not
+    /// cosmetic.** 4:2:0 chroma samples colour at half resolution in both
+    /// directions, so an odd width or an odd height has no representation in it,
+    /// and every encoder in `clipped-encoder` refuses one by name. An ordinary
+    /// bordered window sized to 1000x600 has a client area of 986x593 on Windows
+    /// 11 at 96 DPI, so this is not an exotic shape: before
+    /// [issue #561](https://github.com/wildware-uk/clipped/issues/561) such a
+    /// window could not be recorded at all, and under
+    /// [ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)
+    /// a window resized into one stopped a whole sitting rather than one file.
+    ///
+    /// A backend that reports a rounded size **must hand over a texture that is
+    /// actually that size** — the row or column is cropped away, not merely left
+    /// undeclared. `docs/capture-pipeline.md` says which edge goes and what it
+    /// costs.
+    ///
+    /// [`None`] when a dimension is a single pixel, because there is no even
+    /// size inside it. A backend turns that into
+    /// [`CaptureError::UnsupportedTarget`](crate::CaptureError::UnsupportedTarget)
+    /// rather than reporting a frame nothing can encode.
+    #[must_use]
+    pub const fn rounded_down_to_even(self) -> Option<Self> {
+        Self::new(self.width.get() & !1, self.height.get() & !1)
+    }
 }
 
 impl fmt::Display for FrameSize {
@@ -85,6 +112,15 @@ impl fmt::Display for PixelFormat {
 /// and [`CaptureBackend::resize`](crate::CaptureBackend::resize) so that the
 /// encoder can be configured before the first frame arrives, and reconfigured
 /// when the target changes shape.
+///
+/// # Both dimensions are even
+///
+/// A backend never reports an odd width or height: it reports
+/// [`FrameSize::rounded_down_to_even`] of whatever the target measures, and
+/// crops the frame to match. The encoder is the reason — 4:2:0 chroma cannot
+/// represent an odd dimension and every backend in `clipped-encoder` refuses one
+/// — and the size here is what the *track* will declare, so it has to be the
+/// size of the pictures actually in it (AGENTS.md section 22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrameFormat {
     size: FrameSize,
@@ -313,6 +349,47 @@ mod tests {
         assert!(FrameSize::new(1920, 0).is_none());
         assert!(FrameSize::new(0, 0).is_none());
         assert!(FrameSize::new(1920, 1080).is_some());
+    }
+
+    #[test]
+    fn an_odd_dimension_rounds_down_to_the_even_one_below_it() {
+        let odd = FrameSize::new(986, 593).expect("986x593 is a valid size");
+        assert_eq!(
+            odd.rounded_down_to_even(),
+            FrameSize::new(986, 592),
+            "the client area of an ordinary 1000x600 bordered window has to reach an \
+             encoder as 986x592"
+        );
+
+        // Down, never up. Rounding a dimension up would ask for a row of pixels
+        // the source does not have, and the backend would have to invent it.
+        let both = FrameSize::new(987, 593).expect("987x593 is a valid size");
+        assert_eq!(both.rounded_down_to_even(), FrameSize::new(986, 592));
+
+        // The overwhelmingly common case, which must cost nothing and must not
+        // move: an even size is already the largest even size inside itself, and
+        // a backend compares the two to decide whether to crop at all.
+        let even = FrameSize::new(2560, 1440).expect("2560x1440 is a valid size");
+        assert_eq!(even.rounded_down_to_even(), Some(even));
+    }
+
+    #[test]
+    fn a_single_pixel_dimension_has_no_even_size_inside_it() {
+        // Zero is not a `FrameSize`, so this cannot answer "1x0" or "0x0"; a
+        // backend reports the target as unsupported instead of handing over a
+        // frame no encoder can be configured for.
+        assert_eq!(
+            FrameSize::new(1920, 1)
+                .expect("1920x1 is a valid size")
+                .rounded_down_to_even(),
+            None
+        );
+        assert_eq!(
+            FrameSize::new(1, 1080)
+                .expect("1x1080 is a valid size")
+                .rounded_down_to_even(),
+            None
+        );
     }
 
     #[test]

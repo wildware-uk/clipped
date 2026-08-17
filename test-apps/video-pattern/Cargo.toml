@@ -56,6 +56,14 @@ path = "../../tests/capture/screenshot.rs"
 name = "screenshot_during_recording"
 path = "../../tests/capture/screenshot_during_recording.rs"
 
+# The odd-client-area measurement: a window whose client area has an odd
+# dimension could not be recorded at all until issue #561, and this application
+# is the only thing in the workspace that can be asked for a window of an exact
+# odd size (`--size 986x593 --mode borderless`).
+[[test]]
+name = "odd_client_area"
+path = "../../tests/capture/odd_client_area.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root
