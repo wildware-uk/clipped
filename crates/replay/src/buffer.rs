@@ -77,6 +77,63 @@
 //! byte handed to a save decodable, and put the loss in the statistics where
 //! somebody can see it.
 //!
+//! # When the source stops producing pictures
+//!
+//! The ceiling is not the only way a gap gets into a buffer, and it is the rarer
+//! one. A capture backend produces a frame when its source's content *changes*,
+//! so a window that stops drawing — minimised, which alt-tabbing out of an
+//! exclusive fullscreen game does, or on a display that has powered down
+//! ([issue #461](https://github.com/wildware-uk/clipped/issues/461)) — delivers
+//! nothing at all, for as long as it lasts. Nothing is dropped and nothing is
+//! wrong; there is simply no picture for that stretch of the timeline.
+//!
+//! That is fatal to `lease_last` on its own, because "the last thirty seconds"
+//! is resolved against the newest **picture** and not against a clock. A buffer
+//! whose source went quiet two hours ago would answer with the thirty seconds
+//! before it went quiet, [`SegmentLease::is_complete`] true and
+//! [`SegmentLease::shortfall`] zero, and nothing anywhere would say the footage
+//! was two hours old
+//! ([issue #574](https://github.com/wildware-uk/clipped/issues/574)). A wrong
+//! answer given confidently is worse than a refusal, and this one is invisible
+//! until somebody plays the clip.
+//!
+//! So a stretch with **no picture for longer than one segment** is a gap, and
+//! the buffer learns about one in two ways:
+//!
+//! - **From the packets, once video resumes.** A picture whose presentation time
+//!   is more than a segment beyond the newest one held cannot be continuous with
+//!   it. The open segment is sealed where it stands and everything from before
+//!   the gap goes when the next keyframe opens a segment — the same three steps
+//!   the ceiling takes, for the same reason ([`Inner::resume_after_any_gap`] is
+//!   shared between them). This needs nothing of a caller and no clock, so it
+//!   cannot be forgotten.
+//! - **From whoever is capturing, while it is still going on.** Nothing in this
+//!   crate reads a wall clock (AGENTS.md section 25), so a buffer receiving
+//!   nothing cannot tell an hour from an instant. The recording loop can, and
+//!   [`ReplayBuffer::note_source_silence`] is how it says so. A lease then
+//!   measures "the last thirty seconds" back from *now* — the newest picture
+//!   plus that silence — rather than from the newest picture, which is what
+//!   makes the shortfall real: thirty seconds asked for, ten held, twenty
+//!   missing.
+//!
+//! One segment is the threshold because it is where the tolerance this crate
+//! already promises breaks. `docs/replay-buffer.md` states that a saved clip
+//! satisfies `requested length ≤ clip length < requested length + segment
+//! length`; a stretch without pictures inside the selection adds its own length
+//! to the clip, so anything longer than a segment puts the clip outside the
+//! bound a caller was told it could rely on. Shorter than that is already
+//! inside the slack a clip carries, and dropping the window over it would cost
+//! real history for nothing.
+//!
+//! **A save whose whole request predates the gap is refused**
+//! ([`LeaseError::SourceSilent`]) rather than served with old video under a new
+//! name. The material is not lost by refusing: a replay buffer only ever runs
+//! beside a recording, and every packet in it was written to that file as well
+//! (`clipped_session::record_with_replay`), so the footage is still there to be
+//! cut out by hand. What refusing prevents is a clip labelled "the last thirty
+//! seconds" that is nothing of the sort. A request the gap only partly covers is
+//! served, short, and says by how much.
+//!
 //! The ceiling governs what the buffer *owns*, and deliberately not what a save
 //! is holding open. Counting a lease against it would mean a save of ten
 //! seconds evicting the buffer's history to pay for itself — the buffer would
@@ -157,6 +214,16 @@ pub enum PushOutcome {
     /// keyframe interval. Reaching this at all is a misconfiguration rather than
     /// an operating condition, and it is reported once at `warn`.
     DiscardedOverCeiling,
+    /// The packet was discarded because the source had stopped producing
+    /// pictures and this one is not the keyframe video can resume on.
+    ///
+    /// Distinct from [`AwaitingKeyframe`](Self::AwaitingKeyframe), which is the
+    /// ordinary wait at the start of a recording, and from
+    /// [`DiscardedOverCeiling`](Self::DiscardedOverCeiling), which is the buffer
+    /// losing video it had room for nowhere. This is the buffer refusing to
+    /// carry material across a gap it cannot decode from, and every encoder here
+    /// clears it within one keyframe interval.
+    DiscardedAfterSourceGap,
 }
 
 /// What one call to [`ReplayBuffer::push_audio`] did.
@@ -469,6 +536,34 @@ impl ReplayBuffer {
         self.locked().push_audio(&self.config, track, at, samples)
     }
 
+    /// Tells the buffer that the source has produced no picture for `elapsed`.
+    ///
+    /// The one thing a rolling buffer cannot work out for itself. Retention and
+    /// selection are measured in media time, which only advances when a packet
+    /// arrives, so a buffer receiving nothing cannot tell a stalled source from
+    /// a stopped clock — and nothing in this crate reads a wall clock, on
+    /// purpose (`crate::range`, AGENTS.md section 25). Whoever is capturing
+    /// knows: it is the thing waiting for the frame that never came.
+    ///
+    /// `elapsed` is the whole stretch so far and not an increment, so calling
+    /// this on every acquisition that found nothing is correct and calling it
+    /// once at the end of the stretch is too. It is forgotten as soon as a
+    /// picture arrives.
+    ///
+    /// What it changes is [`lease_last`](Self::lease_last), which measures back
+    /// from *now* — the newest picture plus this — rather than from the newest
+    /// picture. A save that reaches back into a silence longer than one segment
+    /// comes back short and says so, and one whose whole request predates the
+    /// silence is refused ([`LeaseError::SourceSilent`]). Without it, that save
+    /// is answered with whatever was on screen before the source went quiet,
+    /// marked complete.
+    ///
+    /// Cheap enough for the capture thread: it takes the same lock a push takes
+    /// and writes one [`Duration`].
+    pub fn note_source_silence(&self, elapsed: Duration) {
+        self.locked().source_silence = elapsed;
+    }
+
     /// The segments covering `range`, held against eviction until the lease is
     /// dropped.
     ///
@@ -485,22 +580,34 @@ impl ReplayBuffer {
         // The plan is taken under the lock and finished outside it, so a buffer
         // that has spilled to disk does not read a file while the capture
         // thread is waiting to push its next packet.
-        let plan = self.locked().plan_lease(Request::Range(range))?;
+        let plan = self
+            .locked()
+            .plan_lease(&self.config, Request::Range(range))?;
         plan.materialise()
     }
 
     /// The segments covering the last `length` of buffered video.
     ///
-    /// What a replay hotkey asks for. The range is resolved against the newest
-    /// packet under the same lock the eviction takes, so a buffer that rolls
-    /// over between deciding and leasing cannot produce a range that no longer
-    /// exists.
+    /// What a replay hotkey asks for. The range is resolved under the same lock
+    /// the eviction takes, so a buffer that rolls over between deciding and
+    /// leasing cannot produce a range that no longer exists.
+    ///
+    /// "The last `length`" is measured back from **now**, which is the newest
+    /// picture plus however long the source has been producing none
+    /// ([`note_source_silence`](Self::note_source_silence)). A save taken during
+    /// a stalled source therefore comes back short rather than answering with
+    /// the material from before the stall as though it were current.
     ///
     /// # Errors
     ///
-    /// [`LeaseError::Empty`] if no keyframe has reached the buffer yet.
+    /// [`LeaseError::Empty`] if no keyframe has reached the buffer yet, and
+    /// [`LeaseError::SourceSilent`] if the source has been quiet for longer than
+    /// `length`, so that nothing the buffer holds falls inside what was asked
+    /// for.
     pub fn lease_last(&self, length: Duration) -> Result<SegmentLease, LeaseError> {
-        let plan = self.locked().plan_lease(Request::Last(length))?;
+        let plan = self
+            .locked()
+            .plan_lease(&self.config, Request::Last(length))?;
         plan.materialise()
     }
 
@@ -529,6 +636,7 @@ impl ReplayBuffer {
 }
 
 /// What a lease was asked for, resolved under the lock.
+#[derive(Debug, Clone, Copy)]
 enum Request {
     Range(TimeRange),
     Last(Duration),
@@ -561,6 +669,32 @@ struct Inner {
     /// next keyframe will begin, which is what makes the older material
     /// unusable (see the module documentation).
     ceiling_gap: Option<u64>,
+    /// How long the source stopped producing pictures for, once video has come
+    /// back but before it has resumed on a keyframe.
+    ///
+    /// The other cause of a gap, and the common one: a minimised window or a
+    /// sleeping display delivers no frames at all, so no packet arrives and no
+    /// media time passes. Read from the packets themselves — a picture more than
+    /// a segment beyond the newest one held — and cleared by
+    /// [`resume_after_any_gap`](Inner::resume_after_any_gap), which drops what
+    /// was held from the far side of it.
+    ///
+    /// The length is kept and not merely the fact, because until a keyframe
+    /// arrives the newest picture the buffer holds is still the one from before
+    /// the gap, and a save in that stretch has to be told how old it is.
+    source_gap: Option<Duration>,
+    /// How long the source has been producing no pictures, as last reported.
+    ///
+    /// [`Duration::ZERO`] unless somebody with a clock has said otherwise
+    /// ([`ReplayBuffer::note_source_silence`]); nothing in this crate measures
+    /// it, because nothing in this crate reads a clock. It is what makes "the
+    /// last thirty seconds" mean the last thirty seconds rather than the thirty
+    /// before the source went quiet.
+    ///
+    /// Cleared by the next **picture** and deliberately not by the next block of
+    /// audio. Audio keeps flowing from a device while a minimised window draws
+    /// nothing, and it is video this measures the absence of.
+    source_silence: Duration,
     /// Segments handed to the spill thread and not yet reported back.
     ///
     /// Without this the same segment is queued on every push until the write
@@ -717,6 +851,9 @@ struct Counters {
     segments_evicted_over_ceiling: u64,
     segments_sealed_at_the_ceiling: u64,
     packets_discarded_over_ceiling: u64,
+    source_gaps: u64,
+    packets_discarded_after_a_source_gap: u64,
+    segments_dropped_after_a_source_gap: u64,
     audio_blocks_buffered: u64,
     audio_blocks_discarded_before_first_keyframe: u64,
     audio_blocks_discarded_over_ceiling: u64,
@@ -728,6 +865,23 @@ struct Counters {
 impl Inner {
     fn push(&mut self, config: &ReplayConfig, packet: &EncodedPacket<'_>) -> PushOutcome {
         let keyframe = packet.is_keyframe();
+
+        // A packet is the source producing pictures again, whatever becomes of
+        // this one. Anything a caller said about a silence describes a stretch
+        // that has ended.
+        self.source_silence = Duration::ZERO;
+
+        // Before anything else, because everything below measures against the
+        // newest picture held and this is the packet that says that picture is
+        // no longer continuous with what follows it. Sealing here cuts the
+        // segment at its end, so what is kept still begins on a keyframe and is
+        // still decodable — the same cut the ceiling makes, for the same
+        // reason.
+        if let Some(gap) = self.gap_before(config, packet) {
+            self.seal();
+            self.source_gap = Some(gap);
+            self.counters.source_gaps += 1;
+        }
 
         if self.open.is_none() && !keyframe {
             return self.discard_awaiting_keyframe();
@@ -804,17 +958,58 @@ impl Inner {
     /// ordinary and lossless, and a buffer that sealed the segment it was
     /// writing to stay under its ceiling, which is losing video.
     fn discard_awaiting_keyframe(&mut self) -> PushOutcome {
-        match &mut self.ceiling_gap {
-            Some(lost) => {
-                *lost += 1;
-                self.counters.packets_discarded_over_ceiling += 1;
-                PushOutcome::DiscardedOverCeiling
-            }
-            None => {
-                self.counters.packets_discarded_before_first_keyframe += 1;
-                PushOutcome::AwaitingKeyframe
-            }
+        if let Some(lost) = &mut self.ceiling_gap {
+            *lost += 1;
+            self.counters.packets_discarded_over_ceiling += 1;
+            return PushOutcome::DiscardedOverCeiling;
         }
+
+        // A third thing that looks the same from here: the source went quiet
+        // and has started drawing again on a picture that is not a keyframe.
+        // Counted apart from the other two because it is neither ordinary nor a
+        // misconfiguration — it is the price of not carrying video across a gap.
+        if self.source_gap.is_some() {
+            self.counters.packets_discarded_after_a_source_gap += 1;
+            return PushOutcome::DiscardedAfterSourceGap;
+        }
+
+        self.counters.packets_discarded_before_first_keyframe += 1;
+        PushOutcome::AwaitingKeyframe
+    }
+
+    /// How long the source produced nothing for, if `packet` is the first
+    /// picture after such a stretch.
+    ///
+    /// Read from the packets themselves, in media time, so this holds for a
+    /// buffer nobody remembered to tell anything to and for a test that pushes
+    /// an hour of video in a millisecond alike (AGENTS.md section 25).
+    ///
+    /// One segment is the threshold, and it is the one this crate already
+    /// promises: a saved clip is documented to satisfy `requested length ≤ clip
+    /// length < requested length + segment length`, and a stretch without
+    /// pictures inside a selection adds its own length to the clip. Longer than
+    /// a segment is therefore exactly where a clip stops honouring the bound its
+    /// caller was given; shorter is inside the slack a clip already carries, and
+    /// letting go of the window over it would cost real history for nothing.
+    ///
+    /// Presentation times, and `saturating_sub`, because an encoder that
+    /// reorders pictures emits them in decode order: a later packet can carry an
+    /// earlier presentation time, and the newest picture held is the latest of
+    /// them (`crate::segment`). Reordering is also the reason a small fixed
+    /// threshold would be wrong rather than merely cautious — the fixture in
+    /// `crate::save`'s reordering test hops 200 ms between consecutive packets
+    /// without any gap existing — and a segment is comfortably above any
+    /// reordering depth, since a segment is what a keyframe interval is.
+    fn gap_before(&self, config: &ReplayConfig, packet: &EncodedPacket<'_>) -> Option<Duration> {
+        if self.source_gap.is_some() || self.ceiling_gap.is_some() {
+            // Already inside a gap, waiting for the keyframe to resume on.
+            return None;
+        }
+
+        let since = packet
+            .presentation_time()
+            .saturating_sub(self.latest_presentation()?);
+        (since > config.segment_duration()).then_some(since)
     }
 
     /// Makes room for `incoming` bytes in the segment being written, sealing it
@@ -906,13 +1101,16 @@ impl Inner {
 
     /// Lets go of everything from before a gap, when video resumes after one.
     ///
-    /// Only what was lost matters: a segment sealed at the ceiling and followed
-    /// immediately by a keyframe leaves no gap at all, and nothing is dropped.
+    /// Both causes come here, because what a gap does to a save does not depend
+    /// on what made it. The ceiling's own gap is only a gap when packets were
+    /// actually lost: a segment sealed at the ceiling and followed immediately
+    /// by a keyframe leaves no hole in the timeline and nothing is dropped. A
+    /// source that stopped producing pictures always leaves one, by definition
+    /// of how it was detected.
     fn resume_after_any_gap(&mut self) {
-        let Some(lost) = self.ceiling_gap.take() else {
-            return;
-        };
-        if lost == 0 {
+        let over_ceiling = self.ceiling_gap.take().is_some_and(|lost| lost > 0);
+        let source_went_quiet = self.source_gap.take().is_some();
+        if !over_ceiling && !source_went_quiet {
             return;
         }
 
@@ -921,7 +1119,15 @@ impl Inner {
         // clip that jumps without saying so (AGENTS.md section 22).
         while !self.sealed.is_empty() {
             self.drop_front();
-            self.counters.segments_evicted_over_ceiling += 1;
+            // Attributed to whichever emptied the buffer, so that a window that
+            // came back short reads as the recording's own source going quiet
+            // rather than as this machine running out of memory. They are
+            // different problems with different answers (AGENTS.md section 19).
+            if over_ceiling {
+                self.counters.segments_evicted_over_ceiling += 1;
+            } else {
+                self.counters.segments_dropped_after_a_source_gap += 1;
+            }
         }
     }
 
@@ -1012,17 +1218,42 @@ impl Inner {
         self.leased_bytes = self.leased_bytes.saturating_sub(freed);
     }
 
-    fn plan_lease(&mut self, request: Request) -> Result<LeasePlan, LeaseError> {
+    fn plan_lease(
+        &mut self,
+        config: &ReplayConfig,
+        request: Request,
+    ) -> Result<LeasePlan, LeaseError> {
         self.release_finished_leases();
 
         let held = self.held().ok_or(LeaseError::Empty)?;
+        // Only "the last N seconds" is measured against now. A caller naming two
+        // instants has said what it wants, and a silence since then does not
+        // move the range it named.
+        let silence = match request {
+            Request::Range(_) => Duration::ZERO,
+            Request::Last(_) => self.stale_by(config),
+        };
         let (requested, requested_length) = match request {
             Request::Range(range) => (range, range.length()),
-            Request::Last(length) => (TimeRange::ending_at(held.end(), length), length),
+            // Now, rather than the newest picture. Without the silence the two
+            // are the same, and with it the difference is exactly what a save
+            // would otherwise claim to hold and does not.
+            Request::Last(length) => (
+                TimeRange::ending_at(held.end().saturating_add(silence), length),
+                length,
+            ),
         };
 
         if !held.overlaps(requested) {
-            return Err(LeaseError::OutsideBuffer { requested, held });
+            return Err(if silence.is_zero() {
+                LeaseError::OutsideBuffer { requested, held }
+            } else {
+                // Every instant asked for is on the far side of the silence, so
+                // there is no clip to be had — only an old one wearing a new
+                // name. Refused rather than served (see the module
+                // documentation, and AGENTS.md section 22).
+                LeaseError::SourceSilent { silence, held }
+            });
         }
 
         let starts: Vec<Duration> = self
@@ -1069,6 +1300,31 @@ impl Inner {
             requested,
             requested_length,
         })
+    }
+
+    /// How far behind now the newest picture is, as far as the buffer has been
+    /// told.
+    ///
+    /// The larger of what a caller has reported and what the packets showed. A
+    /// source delivers a frame when its content changes rather than on a
+    /// schedule, so short stretches with no picture are ordinary in every
+    /// recording — and a buffer that treated them as gaps would report a
+    /// shortfall on nearly every save and mean nothing by it. Reported silence
+    /// is therefore zero until it passes the threshold
+    /// [`gap_before`](Self::gap_before) uses, and for the same reason; a gap
+    /// read from the packets has already passed it.
+    ///
+    /// The packet-derived half matters for the stretch between video coming
+    /// back and it resuming on a keyframe, where the newest picture the buffer
+    /// holds is still the one from before the gap.
+    fn stale_by(&self, config: &ReplayConfig) -> Duration {
+        let reported = if self.source_silence > config.segment_duration() {
+            self.source_silence
+        } else {
+            Duration::ZERO
+        };
+
+        reported.max(self.source_gap.unwrap_or(Duration::ZERO))
     }
 
     /// The newest presentation time in the buffer.
@@ -1140,6 +1396,9 @@ impl Inner {
             peak_bytes_held: self.peak_bytes,
             segments_retained_for_a_save: self.leased.len(),
             covered: self.held(),
+            source_silence: self
+                .source_silence
+                .max(self.source_gap.unwrap_or(Duration::ZERO)),
             packets_buffered: self.counters.packets_buffered,
             packets_discarded_before_first_keyframe: self
                 .counters
@@ -1149,6 +1408,11 @@ impl Inner {
             segments_evicted_over_ceiling: self.counters.segments_evicted_over_ceiling,
             segments_sealed_at_the_ceiling: self.counters.segments_sealed_at_the_ceiling,
             packets_discarded_over_ceiling: self.counters.packets_discarded_over_ceiling,
+            source_gaps: self.counters.source_gaps,
+            packets_discarded_after_a_source_gap: self
+                .counters
+                .packets_discarded_after_a_source_gap,
+            segments_dropped_after_a_source_gap: self.counters.segments_dropped_after_a_source_gap,
             audio_blocks_buffered: self.counters.audio_blocks_buffered,
             audio_blocks_discarded_before_first_keyframe: self
                 .counters
@@ -1178,6 +1442,7 @@ pub struct ReplayStats {
     peak_bytes_held: u64,
     segments_retained_for_a_save: usize,
     covered: Option<TimeRange>,
+    source_silence: Duration,
     packets_buffered: u64,
     packets_discarded_before_first_keyframe: u64,
     segments_opened: u64,
@@ -1185,6 +1450,9 @@ pub struct ReplayStats {
     segments_evicted_over_ceiling: u64,
     segments_sealed_at_the_ceiling: u64,
     packets_discarded_over_ceiling: u64,
+    source_gaps: u64,
+    packets_discarded_after_a_source_gap: u64,
+    segments_dropped_after_a_source_gap: u64,
     audio_blocks_buffered: u64,
     audio_blocks_discarded_before_first_keyframe: u64,
     audio_blocks_discarded_over_ceiling: u64,
@@ -1289,9 +1557,64 @@ impl ReplayStats {
     }
 
     /// The media time held, or [`None`] if nothing is.
+    ///
+    /// What a save can be cut out of, and **not** a claim that it reaches up to
+    /// now. Read it beside [`source_silence`](Self::source_silence): a covered
+    /// range ending at 42 s means something different when the source has been
+    /// quiet for two hours since, and a diagnostic that showed the first without
+    /// the second would say a buffer was healthy while it was holding nothing
+    /// anybody could use ([issue
+    /// #574](https://github.com/wildware-uk/clipped/issues/574)).
     #[must_use]
     pub const fn covered(&self) -> Option<TimeRange> {
         self.covered
+    }
+
+    /// How long the source has been producing no pictures, as last reported.
+    ///
+    /// Zero for a buffer nobody has told
+    /// ([`ReplayBuffer::note_source_silence`]) and for one whose source is
+    /// drawing. Anything longer than a segment means the newest picture
+    /// [`covered`](Self::covered) ends at is that much older than now, and that
+    /// a save of the last N seconds will come back short by it or be refused
+    /// outright.
+    #[must_use]
+    pub const fn source_silence(&self) -> Duration {
+        self.source_silence
+    }
+
+    /// Times video resumed after the source had stopped producing pictures for
+    /// longer than a segment.
+    ///
+    /// Non-zero means this buffer let go of history it was holding, because
+    /// material from before a gap cannot serve "the last N seconds". It is not a
+    /// fault in itself — a minimised window produces one every time — but a
+    /// count that climbs during a game is a source that keeps going quiet.
+    #[must_use]
+    pub const fn source_gaps(&self) -> u64 {
+        self.source_gaps
+    }
+
+    /// Packets dropped while waiting for a keyframe to resume on after the
+    /// source went quiet.
+    ///
+    /// Zero whenever video resumes on a keyframe, which is what an encoder
+    /// producing them on a timer does after any real stall. A climbing count
+    /// means the first pictures after each stall are being lost.
+    #[must_use]
+    pub const fn packets_discarded_after_a_source_gap(&self) -> u64 {
+        self.packets_discarded_after_a_source_gap
+    }
+
+    /// Segments let go of because the source stopped producing pictures.
+    ///
+    /// Kept apart from
+    /// [`segments_evicted_over_ceiling`](Self::segments_evicted_over_ceiling)
+    /// because the two have different answers: this is the recorded window going
+    /// quiet, and that is this machine running out of memory.
+    #[must_use]
+    pub const fn segments_dropped_after_a_source_gap(&self) -> u64 {
+        self.segments_dropped_after_a_source_gap
     }
 
     /// Packets accepted since the buffer was created.
@@ -1732,6 +2055,265 @@ mod tests {
             held.length().as_secs_f64()
         );
         assert_eq!(buffer.stats().segments_sealed_at_the_ceiling(), 1);
+    }
+
+    /// How far apart two consecutive pictures of the 10 fps test video are.
+    const FRAME: Duration = Duration::from_millis(100);
+
+    /// The largest jump between consecutive presentation times in `lease`.
+    fn largest_jump(lease: &SegmentLease) -> Duration {
+        let times: Vec<Duration> = lease
+            .packets()
+            .map(|packet| packet.presentation_time())
+            .collect();
+        times
+            .windows(2)
+            .map(|pair| pair[1].saturating_sub(pair[0]))
+            .max()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    #[test]
+    fn a_save_after_the_source_went_quiet_is_not_answered_with_the_video_from_before_it() {
+        // Issue #574, and the reason it is worse than the empty buffer #461
+        // assumed: an empty result is obviously wrong and a stale one is not.
+        // `lease_last` resolves "the last thirty seconds" against the newest
+        // *picture*, and a window that stops drawing — minimised, which
+        // alt-tabbing out of an exclusive fullscreen game does — produces no
+        // packet for as long as it lasts.
+        //
+        // Before this was fixed the lease below covered 39.000s to 7209.900s,
+        // `is_complete()` was true and `shortfall()` was zero: a two-hour clip
+        // beginning with a second of footage from before lunch, handed over as
+        // the last thirty seconds with nothing anywhere saying otherwise.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+
+        // Two hours in which nothing was drawn, then the window comes back.
+        let resumed_at = Duration::from_secs(7200);
+        feed(&buffer, 72_000, 100);
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("ten seconds of resumed video are held");
+
+        assert!(
+            !lease.is_complete(),
+            "a save that reaches back over a two-hour gap must not claim to hold the thirty \
+             seconds it was asked for; it covers {} against a request for {}",
+            lease.covered(),
+            lease.requested()
+        );
+        assert!(
+            lease.shortfall() >= Duration::from_secs(19),
+            "ten seconds of the thirty exist, so about twenty are missing and the lease says \
+             {:?} is",
+            lease.shortfall()
+        );
+        assert!(
+            lease.covered().start() >= resumed_at,
+            "the clip reaches back over the gap: it covers {}",
+            lease.covered()
+        );
+        assert!(
+            largest_jump(&lease) <= FRAME,
+            "a save would write a clip that jumps by {:?} without saying so",
+            largest_jump(&lease)
+        );
+
+        let stats = buffer.stats();
+        assert_eq!(stats.source_gaps(), 1, "{stats:?}");
+        assert!(stats.segments_dropped_after_a_source_gap() > 0, "{stats:?}");
+        assert_eq!(
+            stats.segments_evicted_over_ceiling(),
+            0,
+            "a source that went quiet is not this machine running out of memory, and the two \
+             have different answers: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn a_save_taken_while_the_source_is_still_quiet_is_refused_rather_than_served_stale() {
+        // The way it actually happens: the hotkey is a global one, so somebody
+        // alt-tabs out of a game — minimising it — and presses Save Replay from
+        // the desktop. No packet has arrived to show the gap, and nothing in
+        // this crate reads a clock, so the recording loop says so instead.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+        buffer.note_source_silence(Duration::from_secs(7200));
+
+        let error = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect_err("every second asked for is on the far side of the silence");
+
+        match error {
+            LeaseError::SourceSilent { silence, held } => {
+                assert_eq!(silence, Duration::from_secs(7200));
+                assert!(held.end() < Duration::from_secs(40), "{held}");
+            }
+            other => panic!("expected a refusal naming the silence, got {other}"),
+        }
+
+        assert_eq!(
+            buffer.stats().source_silence(),
+            Duration::from_secs(7200),
+            "a diagnostic reading `covered` alone would call this buffer healthy"
+        );
+    }
+
+    #[test]
+    fn a_save_part_way_into_a_silence_gives_what_there_is_and_says_what_is_missing() {
+        // Not a refusal: two thirds of what was asked for exists and is worth
+        // saving, exactly as it is for a hotkey pressed ten seconds into a
+        // session. The vocabulary is the same one, deliberately.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+        buffer.note_source_silence(Duration::from_secs(10));
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("twenty of the thirty seconds asked for are held");
+
+        assert!(!lease.is_complete(), "{lease:?}");
+        assert!(
+            lease.shortfall() >= Duration::from_secs(10),
+            "ten seconds of the request are on the far side of the silence, and the lease says \
+             {:?} is",
+            lease.shortfall()
+        );
+        assert!(lease.covered().end() < Duration::from_secs(40), "{lease:?}");
+    }
+
+    #[test]
+    fn a_silence_shorter_than_a_segment_leaves_an_ordinary_save_alone() {
+        // The other direction, and what stops this from crying wolf. A source
+        // hands over a frame when its content changes, so every recording has
+        // short stretches with no picture in it — and a buffer that called those
+        // gaps would report a shortfall on nearly every save and mean nothing
+        // by any of them.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+        buffer.note_source_silence(Duration::from_millis(900));
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("thirty seconds are held");
+
+        assert!(lease.is_complete(), "{lease:?}");
+        assert_eq!(lease.shortfall(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_stretch_shorter_than_a_segment_without_pictures_costs_no_history() {
+        // The same threshold, read from the packets instead of from a caller.
+        // Dropping the window whenever a source paused for a moment would cost
+        // real history for nothing: a clip that carries a stretch of held
+        // picture is what the source actually did, and it stays inside the
+        // length a caller was told to expect.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+
+        // Nothing drawn for 0.9 s, against a one second segment.
+        feed(&buffer, 408, 100);
+
+        let stats = buffer.stats();
+        assert_eq!(stats.source_gaps(), 0, "{stats:?}");
+        assert_eq!(stats.segments_dropped_after_a_source_gap(), 0, "{stats:?}");
+        assert!(
+            buffer
+                .lease_last(Duration::from_secs(30))
+                .expect("thirty seconds are held")
+                .is_complete(),
+            "a momentary pause emptied the window"
+        );
+    }
+
+    #[test]
+    fn video_that_comes_back_on_a_predicted_picture_waits_for_the_keyframe() {
+        // A segment that does not begin on a keyframe cannot be decoded, so
+        // there is nowhere to put the first pictures after a gap until one
+        // arrives. Counted apart from the ceiling's own discards, because a
+        // source going quiet and a machine running out of memory are different
+        // problems.
+        //
+        // The save taken in that stretch is the subtle half: the newest picture
+        // the buffer holds is *still* the one from before the gap, so a lease
+        // resolved against it would be as stale as the one above.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+
+        // Frames 72,001 to 72,009 are predicted; the keyframe is 72,010.
+        feed(&buffer, 72_001, 9);
+
+        let stats = buffer.stats();
+        assert_eq!(stats.packets_discarded_after_a_source_gap(), 9, "{stats:?}");
+        assert_eq!(
+            stats.packets_discarded_before_first_keyframe(),
+            0,
+            "{stats:?}"
+        );
+        assert_eq!(stats.packets_discarded_over_ceiling(), 0, "{stats:?}");
+
+        let error = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect_err("the newest picture held is two hours old");
+        assert!(
+            matches!(error, LeaseError::SourceSilent { .. }),
+            "a save between video coming back and the keyframe it resumes on was answered with \
+             the video from before the gap: {error}"
+        );
+
+        // And the keyframe puts it right.
+        feed(&buffer, 72_010, 100);
+        assert!(
+            buffer
+                .lease_last(Duration::from_secs(30))
+                .expect("resumed video is held")
+                .covered()
+                .start()
+                >= Duration::from_secs(7201)
+        );
+    }
+
+    #[test]
+    fn a_picture_ends_a_reported_silence() {
+        // Otherwise a buffer told once about a stall would refuse every save for
+        // the rest of the recording, which is a worse failure than the one this
+        // exists to prevent.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+        buffer.note_source_silence(Duration::from_secs(7200));
+
+        feed(&buffer, 400, 10);
+
+        assert_eq!(buffer.stats().source_silence(), Duration::ZERO);
+        assert!(
+            buffer
+                .lease_last(Duration::from_secs(30))
+                .expect("thirty seconds are held")
+                .is_complete(),
+            "the buffer never recovered from being told about a stall"
+        );
+    }
+
+    #[test]
+    fn a_named_range_is_leased_whatever_the_source_is_doing_now() {
+        // "The last thirty seconds" is the only request a silence moves, because
+        // it is the only one that means anything relative to now. A caller that
+        // named two instants asked for those instants, and the material is still
+        // there.
+        let buffer = buffer(30);
+        fill(&buffer, 40);
+        buffer.note_source_silence(Duration::from_secs(7200));
+
+        let lease = buffer
+            .lease(TimeRange::new(
+                Duration::from_secs(20),
+                Duration::from_secs(30),
+            ))
+            .expect("the range is held");
+
+        assert!(lease.is_complete(), "{lease:?}");
     }
 
     #[test]

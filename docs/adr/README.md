@@ -79,3 +79,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0014](0014-a-milestone-is-not-a-version.md) | A milestone is not a version, and the first release is v1.0.0 | Accepted |
 | [0015](0015-capture-holds-the-display-awake.md) | Capture holds the display awake, and says so when a source goes quiet anyway | Accepted |
 | [0016](0016-derived-pictures-cross-the-control-protocol.md) | A recording's thumbnail and its waveform cross the control protocol, and the window gains no file-system reach | Accepted |
+| [0017](0017-a-replay-save-does-not-reach-across-a-gap.md) | A replay save never reaches across a gap, and one that lands entirely inside one is refused | Accepted |

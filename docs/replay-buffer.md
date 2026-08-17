@@ -247,6 +247,11 @@ with `SavedClip::is_complete` false and `shortfall` saying what was missing.
 Refusing would be worse — there is a clip to be had, and it is the clip somebody
 asked for.
 
+There is one case where that reasoning does not hold and the lease is refused
+instead: when the source stopped producing pictures for longer than the request
+itself, so there is no clip to be had and only an older one wearing its name.
+"When the source stops producing pictures" below is the rule.
+
 ### Audio: every track the recording has
 
 A clip carries the same audio tracks the recording does
@@ -443,6 +448,100 @@ start-up; and nothing grows without bound, so there is no allocation to fail
 during a match. What a 30-minute window at 3.9 GiB does to a machine with 8 GB of
 RAM was a real problem, and the answer to it is "Keeping the window on disk"
 below: the same window, in about a megabyte of memory.
+
+## When the source stops producing pictures
+
+The ceiling is not the only way a gap gets into a buffer, and it is the rarer
+one. A capture backend hands over a frame when its source's content *changes*,
+so a window that stops drawing delivers nothing at all for as long as it lasts.
+There are two ordinary ways for that to happen and neither is a fault:
+
+- **The window is minimised.** Alt-tabbing out of an exclusive fullscreen game
+  minimises it, and the recording deliberately waits that out rather than ending
+  the session ([issue #383](https://github.com/wildware-uk/clipped/issues/383),
+  `docs/capture-pipeline.md`). This is the common case by a wide margin.
+- **The display has powered down**, which stops Desktop Duplication delivering
+  frames even though every handle it holds is still valid
+  ([issue #461](https://github.com/wildware-uk/clipped/issues/461)).
+
+That is fatal to "save the last thirty seconds" on its own, because the buffer
+resolves it against the newest **picture** rather than against a clock — nothing
+in `clipped-replay` reads a wall clock, deliberately, so that a test can push an
+hour of video in a millisecond (AGENTS.md section 25) — and eviction only runs
+when a packet arrives. A buffer whose source went quiet two hours ago therefore
+answered with the thirty seconds before it went quiet, `is_complete()` true and
+`shortfall()` zero, with nothing anywhere saying the footage was two hours old
+([issue #574](https://github.com/wildware-uk/clipped/issues/574)). That is worse
+than an empty buffer: an empty result is obviously wrong and a stale one is not.
+
+**A stretch with no picture for longer than one segment is a gap**, and the
+buffer learns about one two ways.
+
+**From the packets, once video comes back.** A picture whose presentation time is
+more than a segment beyond the newest one held cannot be continuous with it. The
+buffer then does exactly what it does at the ceiling: seals the open segment
+where it stands, discards packets until the encoder's next keyframe — there is
+nowhere decodable to put them — and drops everything it held from before the gap
+when that keyframe opens a segment. `Inner::resume_after_any_gap` is shared
+between the two causes, because what a gap does to a save does not depend on what
+made it. This needs nothing of a caller and no clock, so it cannot be forgotten.
+
+**From whoever is capturing, while it is still going on.** A buffer receiving
+nothing cannot tell an hour from an instant, and the recording loop can: it is
+the thing waiting for the frame that never came. `ReplayBuffer::note_source_silence`
+is how it says so, called from `crates/session/src/recording.rs` on every
+acquisition that found no frame and on every one that found the window
+minimised. A lease then measures "the last thirty seconds" back from **now** —
+the newest picture plus that silence — instead of from the newest picture.
+
+The threshold is one segment because that is where the tolerance this page
+already states breaks. A clip satisfies
+
+```text
+requested length  ≤  clip length  <  requested length + segment length
+```
+
+and a stretch without pictures inside the selection adds its own length to the
+clip, so anything longer than a segment puts the clip outside the bound its
+caller was given. Below that it is inside the slack a clip already carries, and
+letting go of the window over it would cost real history for nothing: a source
+delivers a frame when its content changes rather than on a schedule, so short
+stretches with no picture are ordinary in every recording, and a buffer that
+called those gaps would report a shortfall on nearly every save and mean nothing
+by any of them. It also has to stay above an encoder's reordering depth — a
+B-frame stream's consecutive presentation times hop by hundreds of milliseconds
+with no gap existing — and a segment is a keyframe interval, which is
+comfortably above it.
+
+### What a save gets
+
+The same two words the rest of this page uses, and no third way of saying it:
+
+| The request | What happens |
+| --- | --- |
+| Reaches back over a gap | Served from the resumed video only. `is_complete` false, `shortfall` the part that predates the gap. |
+| Partly inside a silence that is still going on | Served short. `shortfall` is the silence. |
+| Entirely inside one | Refused: `LeaseError::SourceSilent`, naming how long nothing has been captured and what is actually held. |
+| A named range (`lease`, not `lease_last`) | Unaffected. A caller that named two instants asked for those instants, and a silence since then does not move them. |
+
+Refusing the third is the one real decision here, and [ADR
+0010](adr/0017-a-replay-save-does-not-reach-across-a-gap.md) is where the
+alternatives are weighed. The short version: a clip containing nothing at all
+from the period asked for is not a short clip, it is a different clip wearing
+that clip's name — and **nothing is lost by refusing**, because a replay buffer
+only ever runs beside a recording and every packet in it was written to that
+file too, so the footage is still there to be cut out by hand.
+
+`ReplayStats` reports it rather than leaving somebody to infer it:
+`source_silence` is how long the source has been quiet, `source_gaps` counts the
+times video came back after one, `segments_dropped_after_a_source_gap` is the
+history that cost, and `packets_discarded_after_a_source_gap` is the video lost
+waiting for the keyframe to resume on. The last is zero whenever an encoder
+producing keyframes on a timer is used, which is every encoder here. Read
+`covered` beside `source_silence` and not on its own: a covered range ending at
+42 s means something different when nothing has been captured for two hours
+since, and a diagnostic showing the first without the second would call a buffer
+healthy while it held nothing anybody could use.
 
 ## Measured memory use
 
@@ -763,4 +862,6 @@ and a wrong number in a report is a smaller failure than a recording that stops
   clipping in M10. Both consume the same packets and neither has been written.
 
 Related decisions: [ADR 0001](adr/0001-mkv-archival-container.md), because
-segments are standard containers rather than an application-specific format.
+segments are standard containers rather than an application-specific format; and
+[ADR 0017](adr/0017-a-replay-save-does-not-reach-across-a-gap.md), for what a
+save does when the source stopped producing pictures.

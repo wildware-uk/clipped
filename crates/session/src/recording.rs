@@ -256,6 +256,14 @@ fn record_frames(
     let mut failure = None;
     let mut low_space_reported = false;
     let mut screenshots = outputs.screenshots.map(Screenshots::new);
+    // When the source last handed over a frame, so that a replay buffer can be
+    // told how long it has been since. Nothing in `clipped-replay` reads a
+    // clock, deliberately, and its media time only advances when a packet
+    // arrives — so a buffer whose source went quiet an hour ago would answer
+    // "the last thirty seconds" with the thirty before it went quiet, marked
+    // complete. This loop is the thing waiting for the frame that never came,
+    // and it is the only place that knows (issue #574).
+    let mut last_frame_at: Option<Instant> = None;
 
     while !stop.is_requested() {
         // Before the space check and before the acquisition: a copy issued on
@@ -307,6 +315,7 @@ fn record_frames(
                 counters.captured += 1;
                 counters.missed_by_source += u64::from(frame.frames_missed().unwrap_or(0));
                 counters.note_drawing();
+                last_frame_at = Some(Instant::now());
 
                 let clock = *clock.get_or_insert_with(|| {
                     // Beside the epoch, and nowhere else. This reading of *this
@@ -373,6 +382,7 @@ fn record_frames(
                 // section 20). It also makes the figure exactly reproducible in
                 // a test, which a wall clock would not.
                 counters.note_idle(ACQUIRE_TIMEOUT);
+                note_source_silence(replay_buffer, last_frame_at);
             }
             Ok(Acquisition::TargetMinimised) => {
                 // **The recording continues.** Alt-tabbing out of an exclusive
@@ -390,6 +400,12 @@ fn record_frames(
                 // That is issue #383: the pipeline was right that there was
                 // nothing to record and wrong to keep it to itself.
                 counters.note_minimised();
+
+                // The same silence as a timeout, with a name — and the common
+                // one: this is how a source most often stops producing frames,
+                // so a replay buffer told only about timeouts would be wrong in
+                // exactly the case it is wrong in most (issue #574).
+                note_source_silence(replay_buffer, last_frame_at);
             }
             Ok(Acquisition::SizeChanged(size)) => {
                 // Matroska fixes a track's dimensions in the header, and the
@@ -520,6 +536,12 @@ fn record_frames(
                 .map_or(0.0, |covered| covered.length().as_secs_f64()),
             segments_evicted_for_window = stats.segments_evicted_for_window(),
             segments_evicted_over_ceiling = stats.segments_evicted_over_ceiling(),
+            // A covered range that stops well short of the recording's length is
+            // explained by these two and by nothing else in the line: the source
+            // stopped producing pictures, and the buffer let go of everything
+            // from before each stretch rather than let a save reach across it.
+            source_gaps = stats.source_gaps(),
+            segments_dropped_after_a_source_gap = stats.segments_dropped_after_a_source_gap(),
             segments_sealed_at_the_ceiling = stats.segments_sealed_at_the_ceiling(),
             packets_discarded_over_ceiling = stats.packets_discarded_over_ceiling(),
             "replay buffer at the end of the recording"
@@ -797,6 +819,28 @@ fn reported_failure(loop_failure: Option<SessionError>, writer: SessionError) ->
         None | Some(SessionError::WriterLost) => writer,
         Some(error) => error,
     }
+}
+
+/// Tells the replay buffer how long the source has been producing nothing.
+///
+/// The join between an acquisition that found no frame and a buffer that cannot
+/// tell that from no time having passed. `clipped-replay` measures everything in
+/// media time, which only advances when a packet arrives, and reads no wall
+/// clock on purpose (`docs/replay-buffer.md`, AGENTS.md section 25) — so the
+/// stretch a minimised window or a sleeping display spends delivering nothing is
+/// invisible from inside it. Without this, "save the last thirty seconds" during
+/// such a stretch is answered with the thirty seconds before it began, marked
+/// complete and hours old (issue #574).
+///
+/// Whole stretch rather than an increment, so calling it on every acquisition
+/// that found nothing is correct. Nothing happens before the first frame: there
+/// is no buffer to mislead and no stretch to measure from.
+fn note_source_silence(replay: Option<&ReplayBuffer>, last_frame_at: Option<Instant>) {
+    let (Some(replay), Some(last_frame_at)) = (replay, last_frame_at) else {
+        return;
+    };
+
+    replay.note_source_silence(last_frame_at.elapsed());
 }
 
 /// What one recording lost, gained and did.
@@ -2346,6 +2390,54 @@ mod tests {
             stats.packets_discarded_before_first_keyframe(),
             0,
             "the buffer was attached after the recording's first keyframe: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn a_recording_whose_window_stops_drawing_tells_its_replay_buffer_how_long_for() {
+        // The other hand-off that is invisible when it goes missing, and the one
+        // issue #574 is about. `clipped-replay` reads no clock and its media
+        // time only advances when a packet arrives, so a buffer whose source
+        // went quiet cannot tell an hour from an instant: "save the last thirty
+        // seconds" is answered with the thirty before the window stopped
+        // drawing, marked complete, however long ago that was.
+        //
+        // Deleting the `note_source_silence` calls from the loop compiles, keeps
+        // every test in `clipped-replay` green — the buffer's own tests report
+        // the silence themselves — and puts the defect straight back. So the
+        // hand-off is asserted where it is made.
+        //
+        // A minimised window and a plain timeout are the same silence with
+        // different names, and both are scripted here for that reason. The
+        // assertion is that *something* was reported rather than a particular
+        // number, because the number is however long this machine took to run
+        // the loop.
+        let replay = crate::replay::ReplayRecording::new(Duration::from_secs(30))
+            .expect("thirty seconds is in range");
+
+        recording_into(
+            "replay-told-about-silence",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Nothing,
+                Step::Nothing,
+            ],
+            &crate::RecordingOutputs::default().with_replay(&replay),
+        );
+
+        let stats = replay
+            .stats()
+            .expect("the recording never started the replay buffer it was given");
+
+        assert!(
+            stats.source_silence() > Duration::ZERO,
+            "the loop waited out a minimised window and a stretch of nothing without telling the \
+             buffer, so a save during either would be answered with the video from before it: \
+             {stats:?}"
         );
     }
 

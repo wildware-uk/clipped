@@ -58,6 +58,12 @@
 //! Refusing would be worse: there is a clip to be had, and it is the clip
 //! somebody asked for.
 //!
+//! The exception is upstream of here rather than in this module: a request that
+//! falls entirely inside a stretch the source produced no pictures in never
+//! reaches a lease at all ([`LeaseError::SourceSilent`](crate::LeaseError), and
+//! `crate::buffer`). There is no clip to be had in that case — only an older one
+//! wearing its name.
+//!
 //! # Where the work happens
 //!
 //! Not on the capture thread, and nothing here makes that true by itself — the
