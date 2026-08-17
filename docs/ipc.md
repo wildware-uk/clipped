@@ -1428,11 +1428,30 @@ rather than the window's guess:
 - `choices` is the closed set of values, and is **absent** when the set is open
   — a frame rate, a size, a device name. That is how a list of options is told
   from a field without the window keeping a copy of either.
-- `applies` is whether anything in *this build* reads the setting when a
-  recording starts. `false` carries `unavailable`, the recorder's sentence
-  naming what would have to land, and a window draws the value and that sentence
-  rather than a control — a control that changed nothing being the defect
-  AGENTS.md section 27 is about. It is the same pair a `hotkeys` row carries.
+- `applies` is whether anything in *this build* acts on the setting. `false`
+  carries `unavailable`, the recorder's sentence naming what would have to land,
+  and a window draws the value and that sentence rather than a control — a
+  control that changed nothing being the defect AGENTS.md section 27 is about. It
+  is the same pair a `hotkeys` row carries.
+
+#### The switches the window itself acts on
+
+Four of the settings are read by nothing in the recorder: `recording_failed`,
+`recording_interrupted`, `recorder_unavailable` and `hotkey_unavailable`, which
+decide what Clipped interrupts somebody with (`docs/desktop-ui.md`). They cross
+as `true` or `false`, which is what the settings file holds, and `applies` is
+`true` for all four — the reader is the window rather than a recording, and the
+question a screen is asking is the same either way: would changing this change
+anything?
+
+They are on these two commands for the rule above read backwards. The window
+decides whether to show a toast, so the window needs the switch; the window may
+not open the settings file, so the recorder hands it over. Until [#252] the
+window kept them in a `notifications.json` of its own — a second store of user
+preferences with a second version field, a second missing-key policy and a
+second reader (AGENTS.md section 55) — and the file that exists on a machine
+which ran that build is migrated into `settings.json` and deleted the first time
+a link attaches.
 
 `apply_settings` sends only what changed. `null` clears a setting, which is
 Reset: it returns the setting to the value Clipped ships with *and* keeps

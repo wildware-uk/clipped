@@ -817,7 +817,7 @@ saved, or nothing behind it:
 | Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
 | Storage | The limits and the trash directory, which the file carries and the screen SPEC.md section 27 draws is #95; and per-game overrides, which the file carries and #63 draws |
 | Hotkeys | Binding a combination (#54). The section **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
-| Notifications | The four switches in `notifications.json`, which is a second store until [#252](https://github.com/wildware-uk/clipped/issues/252) folds it into the settings file |
+| Notifications | Nothing that has a key. The four switches are controls ([#252](https://github.com/wildware-uk/clipped/issues/252)); what is left is a toast for a replay that was saved, which needs an event from the recorder to be raised from (#110) |
 | Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |
 
 ### What is checked, and against what
@@ -831,7 +831,7 @@ out of the sources that hold them:
 | The screen says | Read from |
 | --- | --- |
 | These are the settings it draws controls for | `SettingKey::name` in `crates/session/src/config/value.rs` and `RECORDING_DIRECTORY` in `apps/recorder/src/settings.rs`, both directions — a setting the API gains and one the screen invented both fail |
-| These are the notification switches | `NotificationCategory::key` in `apps/desktop/src-tauri/src/notification_policy.rs` |
+| These are the notification switches | `NotificationCategory::key` in **both** `crates/session/src/config/notifications.rs`, which writes them into the settings file, and `apps/desktop/src-tauri/src/notification_policy.rs`, which matches on them when it decides about a toast. The two are in Cargo workspaces that may not link each other, so nothing but this holds them equal — and a rename on either side saves the switch, redraws it as saved and notifies anyway |
 | The settings file is at this path | `APPLICATION_DIRECTORY` in `clipped-logging` and `FILE_NAME` in `config::document` |
 | The notification file is at this path | The bundle identifier in `tauri.conf.json` and `SETTINGS_FILE` in `notifications.rs` |
 | The recorder reads and changes settings | The command names `Command::from_request` parses, and that `UNBUILT_COMMANDS` is gone from `crates/ipc/src/command.rs` |
@@ -1537,68 +1537,87 @@ until somebody has clicked one.
 
 ### Switching categories off
 
-Per-category switches, in `notifications.json` in Clipped's configuration
-directory — `%APPDATA%\uk.wildware.clipped\notifications.json`:
+Four switches on the Settings screen, kept in the `notifications` section of
+`%LOCALAPPDATA%\Clipped\settings.json` — the one settings file, the recorder's
+([configuration.md](configuration.md)):
 
 ```json
 {
   "version": 1,
-  "recording_failed": true,
-  "recording_interrupted": true,
-  "recorder_unavailable": true
+  "notifications": {
+    "recording_failed": false
+  }
 }
 ```
 
-Every category defaults to on, because all three are failures. A missing field
-takes its default and an unknown field is ignored, so a file written by an older
-or a newer Clipped still works; a `version` from the future is refused rather
-than guessed at (AGENTS.md sections 30 and 43). There is no file until somebody
-writes one, and that is the ordinary case rather than a fault.
+Every category defaults to on, because all four are failures. A key the file does
+not mention is on, and a key holding something that is not a boolean is kept and
+ignored rather than refused — silencing a failure is the wrong way for a settings
+file to fail (AGENTS.md sections 30 and 43). There is no `notifications` section
+until somebody switches something off.
 
-A leading byte-order mark is dropped before the file is parsed. JSON has no such
-thing, but this file is edited by hand on Windows and both Notepad and
-`Out-File -Encoding utf8` under Windows PowerShell write one — which is exactly
-how the first end-to-end run of this feature was done, and the notification it
-was supposed to switch off arrived. A settings file that looks right and does not
-work is not a trap worth keeping.
+The window does not open that file. It asks the recorder — `get_settings` when
+the link attaches, `apply_settings` when somebody moves a switch — for the reason
+every other setting is asked for ([ipc.md](ipc.md), and "Why the window asks"
+below). A change reaches the very next notification rather than the next launch,
+because the answer replaces a value the thread that decides shares with the
+window's Save.
 
-**The Settings screen is issue #51**, and until it exists this file is where the
-switches are. That is why a file which exists and cannot be read is reported
-through the startup notice — naming the file, what is wrong with it, and the
-categories it may contain — rather than ignored: somebody has switched something
-off and it has not taken effect. Clipped notifies about everything in the
-meantime, so a broken settings file can never be the reason a user is not told
-that nothing is being recorded.
+Two things follow from the switches living in the recorder's file, and both are
+stated rather than hidden:
+
+- **Until the link has attached once, everything is on.** That is a second at
+  start-up, and the direction to fail in.
+- **A recorder that never attaches at all cannot be asked**, so its own
+  `recorder_unavailable` notification is shown even if it was switched off. The
+  only way to close that gap would be a copy of the switches in the window, which
+  is the second store this arrangement removed.
 
 The other place these can be switched off is Windows' own Settings →
 Notifications page, which is per-application and not per-category. It is Windows'
 switch rather than Clipped's, and Clipped does not try to reflect or override it.
 
-#### This file is a second configuration store, and why
+#### Why the window asks rather than reading
 
-Clipped has a configuration API — `crates/session/src/config`, issue #108 — with
-defaults, types, validation, layered resolution and migrations, and it writes
-`%LOCALAPPDATA%\Clipped\settings.json`. Notification switches are settings and
-belong in it. Two preference files in two directories is the duplication AGENTS.md
-section 55 forbids.
-
-They are not in it because **the desktop application may not link the crate it
-lives in**, and that is a rule with a test behind it:
+Clipped's configuration API — `crates/session/src/config`, issue #108 — owns
+`settings.json`: its defaults, types, validation, layered resolution and
+migrations. The desktop application may not link the crate it lives in, and that
+is a rule with a test behind it:
 `tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
 permits this crate exactly one member of the repository's workspace,
 `clipped-ipc`. `clipped-session` sits above capture, audio, encoding, muxing and
 replay, so naming it here would put the recording engine inside the window's
 process — the separation [ADR 0002](adr/0002-separate-recorder-process.md) exists
 to make, and the reason closing or crashing a window cannot interrupt a
-recording. Reading `settings.json` from here directly would instead be a second
-implementation of that file's versioning, migration and validation, against the
-file the user's recording settings live in, which is worse than a second file.
+recording.
 
-**Issue #252** is the fix: move the configuration API to a crate at the
-protocol's layer that both ends may link, or serve it over IPC. Either makes
-these three booleans ordinary settings, migrates this file into `settings.json`
-and deletes it. That migration is why this file carries a `version`, and why a
-category's key is documented as stable above.
+Until **issue #252** the way round that was a `notifications.json` of this
+window's own, in `%APPDATA%\uk.wildware.clipped`: a second store of user
+preferences, with a version field, a missing-key policy and a reader of its own,
+which is the duplication AGENTS.md section 55 forbids. The other way round would
+have been reading `settings.json` from here, which is a second implementation of
+that file's versioning, migration and validation against the file the user's
+recording settings live in — worse than a second file. Asking the process that
+owns it is the third, and it is what issue #51's settings commands already do for
+everything else.
+
+#### An old `notifications.json`
+
+Carried into the settings file and deleted, the first time the link attaches
+(`migrate_legacy_switches` in `src/notifications.rs`). A user who switched a
+category off must not silently have it switched back on (AGENTS.md sections 43
+and 56), and there is nowhere else those switches exist.
+
+The order is read, save, delete, and a failure at any step leaves the file
+exactly where it is for the next attachment to try again; applying the same
+values twice is harmless, because they are the values rather than a change to
+them. A file this build cannot read — one that is not JSON, or that claims a
+version above 1 — is left alone and reported through the startup notice, which is
+why that file carried a `version` at all. A leading byte-order mark is dropped
+first, because editing by hand was the only way to set these switches and both
+Notepad and `Out-File -Encoding utf8` under Windows PowerShell write one; a
+migration that refused those would lose the switches from precisely the files
+most likely to have any.
 
 ### Why neither notification crate
 
@@ -1687,6 +1706,14 @@ switched on until that file is corrected or deleted.` The failure was reported
 rather than swallowed, which is what that path is for — and the mark is now
 dropped, which is why the table above reads 0.
 
+**Those runs read `notifications.json`, and nothing reads it as settings any
+more** (issue #252). What they established still stands where it is about the
+policy — a category switched off silences that category and leaves the others
+alone, which is asserted in `notification_policy.rs` over the recorder's answer
+rather than over a file — but the _source_ of the switches has changed, and the
+equivalent runs against the `notifications` section of `settings.json` have not
+been made. They are in the list below rather than assumed from these.
+
 **Those three runs predate `src/toast.rs`**, and were made through
 `tauri-winrt-notification`. What carries them across the rewrite is that the
 document above is composed byte for byte by the current code:
@@ -1698,8 +1725,7 @@ category-switch behaviour those runs established still stand, and the button's
 
 ### Still to be verified on a real desktop
 
-One thing, and it needs a machine nobody else is using, because it puts a toast
-on screen:
+Both need a machine nobody else is using, because both put a toast on screen.
 
 - **Click the button on each of the three notifications and confirm the action
   runs**: File Explorer opens with the recording selected, "Try again" restarts
@@ -1707,9 +1733,24 @@ on screen:
   sentence. Then dismiss a toast to the Action Centre and click it there, which
   is the case the retention in `src/toast.rs` exists for.
 
-Until that is done, acceptance criterion 3 of issue #110 — "error notifications
-lead to an action, not just a message" — is **not** met. A button in the XML is
-not an action; it is a button in the XML.
+  Until that is done, acceptance criterion 3 of issue #110 — "error
+  notifications lead to an action, not just a message" — is **not** met. A button
+  in the XML is not an action; it is a button in the XML.
+
+- **Switch a category off on the Settings screen and confirm the toast stops**
+  (issue #252), against a real recorder rather than a stub: with the same
+  `CLIPPED_RECORDER_EXE` arrangement as the runs above, but with the switch moved
+  in the window instead of a file edited by hand. The three runs recorded above
+  measured a `notifications.json` that nothing reads any more, and the path from
+  a switch to a toast now crosses two processes — `apply_settings`, the settings
+  file, and the value the event thread shares with the window. Each of those
+  links is asserted by a test on its own side; what nobody has watched is all of
+  them at once.
+
+  The other half is the migration: a `notifications.json` left in
+  `%APPDATA%\uk.wildware.clipped` should be gone after the next launch, with its
+  switches showing on the Settings screen. Its steps are tested over a real file
+  in `notifications::tests`, but not through a real recorder.
 
 ## Decisions
 

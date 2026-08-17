@@ -103,6 +103,7 @@ mod document;
 mod error;
 mod game;
 mod hotkeys;
+mod notifications;
 mod plugins;
 mod preferences;
 mod storage;
@@ -116,6 +117,7 @@ pub use document::{Loaded, FILE_NAME, SCHEMA_VERSION};
 pub use error::{ConfigurationError, Section, SettingError};
 pub use game::{GameKey, InvalidGameKey};
 pub use hotkeys::{HotkeyOverride, HotkeyOverrides, ResolvedHotkeys};
+pub use notifications::{NotTrueOrFalse, NotificationCategory, NotificationSettings};
 pub use plugins::{NotStarted, PluginConsent, PluginConsents};
 pub use preferences::{
     AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, DEFAULT_REPLAY_WINDOW,
@@ -151,6 +153,11 @@ pub struct Configuration {
     /// What the library is allowed to occupy. Global only, and a section of its
     /// own for the reason `storage` gives.
     storage: StorageSettings,
+    /// Which failures interrupt the user. Global only, and a section of its own
+    /// for the reason `notifications` gives; the recorder keeps them and the
+    /// desktop application is what reads them, over the protocol
+    /// ([issue #252](https://github.com/wildware-uk/clipped/issues/252)).
+    notifications: NotificationSettings,
     /// Top-level keys from a newer build, kept and written back (AGENTS.md
     /// section 56).
     unknown: BTreeMap<String, serde_json::Value>,
@@ -273,6 +280,7 @@ impl Configuration {
         hotkeys: HotkeyOverrides,
         plugins: PluginConsents,
         storage: StorageSettings,
+        notifications: NotificationSettings,
         unknown: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self {
@@ -281,6 +289,7 @@ impl Configuration {
             hotkeys,
             plugins,
             storage,
+            notifications,
             unknown,
         }
     }
@@ -297,6 +306,22 @@ impl Configuration {
     /// Replaces what the library is allowed to occupy.
     pub fn set_storage(&mut self, storage: StorageSettings) {
         self.storage = storage;
+    }
+
+    /// Which failures interrupt the user.
+    ///
+    /// Global, and deliberately not resolvable per game: the thing being
+    /// interrupted is a person rather than a recording, so "should
+    /// Counter-Strike's failures interrupt me" is the same question as "should
+    /// failures interrupt me" (`super::notifications`).
+    #[must_use]
+    pub const fn notifications(&self) -> &NotificationSettings {
+        &self.notifications
+    }
+
+    /// Replaces which failures interrupt the user.
+    pub fn set_notifications(&mut self, notifications: NotificationSettings) {
+        self.notifications = notifications;
     }
 
     /// The limits automatic cleanup enforces, which is unlimited unless the

@@ -23,12 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import {
-  NOTIFICATIONS_FILE,
-  SETTINGS_FILE,
-  SETTINGS_SECTIONS,
-  type SettingsFile,
-} from './settings';
+import { NOTIFICATION_KEYS, SETTINGS_FILE, SETTINGS_SECTIONS, type SettingsFile } from './settings';
 
 /** The repository root, from this file. */
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -47,8 +42,7 @@ const POLICY_RS = source('apps/desktop/src-tauri/src/notification_policy.rs');
 const RECORDER_SETTINGS_RS = source('apps/recorder/src/settings.rs');
 const MESSAGE_RS = source('crates/ipc/src/message.rs');
 const SERVE_RS = source('apps/recorder/src/serve.rs');
-const NOTIFICATIONS_RS = source('apps/desktop/src-tauri/src/notifications.rs');
-const TAURI_CONF = source('apps/desktop/src-tauri/tauri.conf.json');
+const NOTIFICATIONS_RS = source('crates/session/src/config/notifications.rs');
 
 /**
  * The braced block that follows `marker`, or a failure naming what has moved.
@@ -137,11 +131,28 @@ describe('the settings the screen names', () => {
       'RECORDING_DIRECTORY',
     );
 
+    // The notification switches are not `SettingKey`s either — they are
+    // global-only, in a `notifications` section — and the recorder puts them in
+    // the same list for the same reason (issue #252).
+    const notifications = quoted(
+      blockAfter(
+        'crates/session/src/config/notifications.rs',
+        NOTIFICATIONS_RS,
+        "pub const fn key(self) -> &'static str",
+      ),
+    );
+    expect(
+      notifications.length,
+      'NotificationCategory::key no longer returns any key',
+    ).toBeGreaterThan(0);
+
     // Both directions. A setting the configuration API gains and this screen
     // does not list is one nobody can change from the window, which is the
     // failure this whole issue was about; one the screen lists and the recorder
     // never sends is a control that would never be drawn.
-    expect([...KEYS_DRAWN_AS_CONTROLS].sort()).toEqual([...modelled, directory].sort());
+    expect([...KEYS_DRAWN_AS_CONTROLS].sort()).toEqual(
+      [...modelled, directory, ...notifications].sort(),
+    );
   });
 
   /*
@@ -164,15 +175,31 @@ describe('the settings the screen names', () => {
   });
 
   /*
-   * The three notification categories are the desktop host's own, in a second
-   * settings file until issue #252 folds them into the configuration API. Their
-   * keys are documented as stable, because renaming one would silently switch a
-   * category back on for somebody who had switched it off — so a rename has to
-   * fail something, and the screen is one of the things that would otherwise
-   * carry the old spelling.
+   * The notification switches are the one group of settings whose *reader* is
+   * the desktop host rather than the recorder (issue #252). Three separate lists
+   * of the same four keys therefore exist and all three have to agree:
+   *
+   * - `clipped_session::config::notifications`, which writes them into
+   *   `settings.json` and is what `get_settings` sends;
+   * - `notification_policy.rs`, which matches on them when it decides whether to
+   *   show a toast — it cannot import the first, because this window may link
+   *   only `clipped-ipc`;
+   * - this screen, which draws a switch per key.
+   *
+   * Any two of them drifting is silent and specific: the switch saves, the
+   * screen redraws it as saved, and the notification arrives anyway. Nothing
+   * else can catch it — the Rust halves are in two Cargo workspaces that may not
+   * link each other — so it is caught here, by reading both.
    */
-  it('include every notification category, spelled as its file spells it', () => {
-    const categories = quoted(
+  it('include every notification category, spelled as the settings file spells it', () => {
+    const configured = quoted(
+      blockAfter(
+        'crates/session/src/config/notifications.rs',
+        NOTIFICATIONS_RS,
+        "pub const fn key(self) -> &'static str",
+      ),
+    );
+    const actedOn = quoted(
       blockAfter(
         'apps/desktop/src-tauri/src/notification_policy.rs',
         POLICY_RS,
@@ -180,17 +207,28 @@ describe('the settings the screen names', () => {
       ),
     );
 
-    expect(categories.length, 'NotificationCategory::key returns no key').toBeGreaterThan(0);
-    expect([...keysNamedOnTheScreen('notifications.json')].sort()).toEqual([...categories].sort());
+    expect(configured.length, 'the settings file carries no notification key').toBeGreaterThan(0);
+    expect(
+      [...actedOn].sort(),
+      'the window acts on a different set of categories from the one the recorder keeps',
+    ).toEqual([...configured].sort());
+    expect(
+      [...NOTIFICATION_KEYS].sort(),
+      'the screen draws a switch for a different set again',
+    ).toEqual([...configured].sort());
   });
 });
 
-describe('the files the screen tells somebody to open', () => {
+describe('the file the screen tells somebody to open', () => {
   /*
    * `%LOCALAPPDATA%\Clipped\settings.json`, built from the two constants that
    * decide it rather than restated. A path is the one thing on this screen
    * anybody can act on directly (AGENTS.md section 28), so a path that has
    * quietly become wrong is worse than no path at all.
+   *
+   * There is one of these now. Until issue #252 there were two, and the second
+   * — the window's own `notifications.json`, under a different variable in a
+   * different directory — is what that issue removed.
    */
   it('name the settings file where the recorder actually keeps it', () => {
     const directory = constant(
@@ -204,25 +242,6 @@ describe('the files the screen tells somebody to open', () => {
     // an escape, so `String.raw` with a `\${…}` in it yields the substitution
     // unexpanded and the case compares the screen with a piece of source code.
     expect(SETTINGS_FILE).toBe(['%LOCALAPPDATA%', directory, file].join('\\'));
-  });
-
-  /*
-   * The notification switches are in the Tauri application configuration
-   * directory, which on Windows is `%APPDATA%\<bundle identifier>`. Both halves
-   * are read: changing the identifier moves every user's file, and it is the
-   * sort of change made for a reason that has nothing to do with this screen.
-   */
-  it('name the notification file where the window actually reads it', () => {
-    const identifier = /"identifier":\s*"([^"]+)"/.exec(TAURI_CONF);
-    expect(identifier, 'tauri.conf.json declares no identifier').not.toBeNull();
-
-    const file = constant(
-      'apps/desktop/src-tauri/src/notifications.rs',
-      NOTIFICATIONS_RS,
-      'SETTINGS_FILE',
-    );
-
-    expect(NOTIFICATIONS_FILE).toBe(['%APPDATA%', identifier?.[1] ?? '', file].join('\\'));
   });
 });
 

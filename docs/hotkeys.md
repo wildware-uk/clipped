@@ -223,7 +223,9 @@ with **Change the hotkey** as its button
 Once, not once per attachment: the link reports on every attachment because it
 cannot know what has already been said, and the notification policy is what
 remembers. A recorder that reconnects twice an hour does not toast twice an
-hour. `hotkey_unavailable` in `notifications.json` switches it off.
+hour. The Settings screen's "A hotkey is unavailable" switches it off, which is
+`notifications.hotkey_unavailable` in the settings file
+([configuration.md](configuration.md)).
 
 ## The actions
 

@@ -17,6 +17,17 @@
 //! - **the machine.** Which microphones exist is not configuration and cannot be
 //!   in the file at all.
 //!
+//! # A setting this recorder keeps and never reads
+//!
+//! The four notification switches. They are configuration — defaults, a file, a
+//! versioning policy — and the process that acts on them is the desktop
+//! application, which may link one crate of this workspace and so cannot open
+//! the settings file itself. Until
+//! [issue #252](https://github.com/wildware-uk/clipped/issues/252) they were a
+//! second store in a second file with a second versioning policy; now they cross
+//! the same two commands as everything else, and this module is where they join
+//! the list ([`notification_entries`]).
+//!
 //! # Why the file is read again on every change
 //!
 //! [`ConfigurationStore::store`] already refuses to replace a file this build
@@ -34,7 +45,8 @@ use clipped_ipc::settings::{
 };
 use clipped_ipc::{ErrorCode, ProtocolError};
 use clipped_session::config::{
-    Configuration, ConfigurationStore, Preferences, SettingKey, StorageSettings,
+    Configuration, ConfigurationStore, NotificationCategory, NotificationSettings, Preferences,
+    SettingKey, StorageSettings,
 };
 
 /// The key the recording directory has in the settings file.
@@ -45,8 +57,8 @@ use clipped_session::config::{
 /// others, so it is listed with them here.
 pub const RECORDING_DIRECTORY: &str = "recording_directory";
 
-/// Whether a setting is one this build reads when a recording starts, and what
-/// to say when it is not.
+/// Whether a per-game setting is one this build reads when a recording starts,
+/// and what to say when it is not.
 ///
 /// The sentence is shown in place of a control (`crate::serve`), so it names
 /// what would have to land rather than saying "not supported". A setting that
@@ -206,11 +218,16 @@ impl SettingsFile {
         let mut configuration = store.current().clone();
         let mut global = configuration.global().clone();
         let mut storage = configuration.storage().clone();
+        let mut notifications = configuration.notifications().clone();
 
         for (key, value) in &request.values {
             match key.as_str() {
                 RECORDING_DIRECTORY => set_recording_directory(&mut storage, value.as_deref())?,
                 name => {
+                    if let Some(category) = NotificationCategory::from_key(name) {
+                        set_notification(&mut notifications, category, value.as_deref())?;
+                        continue;
+                    }
                     let setting = SettingKey::from_name(name).ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::InvalidParameters,
@@ -224,6 +241,7 @@ impl SettingsFile {
 
         configuration.set_global(global);
         configuration.set_storage(storage);
+        configuration.set_notifications(notifications);
 
         store.store(configuration).map_err(|error| {
             ProtocolError::new(
@@ -279,6 +297,19 @@ fn set_setting(
     Ok(())
 }
 
+/// Switches one notification category on or off, or clears it.
+fn set_notification(
+    notifications: &mut NotificationSettings,
+    category: NotificationCategory,
+    value: Option<&str>,
+) -> Result<(), ProtocolError> {
+    notifications
+        .set_written(category, value)
+        // `clipped_session`'s own sentence, which already names the switch, the
+        // value and what would have been accepted (AGENTS.md section 45).
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
+}
+
 /// Sets the recording directory, or clears it.
 fn set_recording_directory(
     storage: &mut StorageSettings,
@@ -311,11 +342,42 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
         .collect();
 
     settings.push(recording_directory_entry(configuration.storage()));
+    settings.extend(notification_entries(configuration.notifications()));
 
     SettingsView {
         file: path.to_string_lossy().into_owned(),
         settings,
     }
+}
+
+/// The notification switches' rows.
+///
+/// `applies` is `true` for all four, and it is not a recording that reads them:
+/// the desktop application does, at the moment it decides whether to show a
+/// toast (`apps/desktop/src-tauri/src/notification_policy.rs`). That is what
+/// the field means — whether anything in this build acts on the setting — and
+/// these are the first settings where the reader is the window rather than a
+/// recording, which is why `crates/ipc/src/settings.rs` says so in as many
+/// words ([issue #252](https://github.com/wildware-uk/clipped/issues/252)).
+///
+/// This recorder keeps them and never reads them, deliberately: the process
+/// that reads them may link one crate of the workspace and so cannot open the
+/// settings file, and a second file for it to open was the duplication #252
+/// removed.
+fn notification_entries(notifications: &NotificationSettings) -> Vec<SettingEntry> {
+    NotificationCategory::ALL
+        .into_iter()
+        .map(|category| SettingEntry {
+            key: category.key().to_owned(),
+            label: category.label().to_owned(),
+            value: notifications.written_value(category),
+            overridden: notifications.configured(category).is_some(),
+            choices: NotificationCategory::choices(),
+            accepted: NotificationCategory::accepted(),
+            applies: true,
+            unavailable: None,
+        })
+        .collect()
 }
 
 /// The recording directory's row.
@@ -750,6 +812,88 @@ mod tests {
             Configuration::defaults(),
             "and the recorder still records, at the settings Clipped ships with",
         );
+    }
+
+    #[test]
+    fn a_notification_switched_off_in_the_window_is_kept_in_the_settings_file() {
+        // Issue #252's first acceptance criterion, at the seam it changed: the
+        // switches were a file of their own in the Tauri configuration
+        // directory, and they are now a section of the one settings file the
+        // recorder owns. Nothing here reads them — the window does — so what
+        // this asserts is that they survive the round trip and reach the file.
+        let directory = TestDirectory::new("notifications");
+        let settings = SettingsFile::at(directory.file());
+
+        let view = settings
+            .apply(&change("recording_failed", Some("false")))
+            .expect("a switch takes true or false");
+
+        assert_eq!(entry(&view, "recording_failed").value, "false");
+        assert!(entry(&view, "recording_failed").overridden);
+        assert!(
+            !settings
+                .configuration()
+                .notifications()
+                .is_enabled(NotificationCategory::RecordingFailed),
+            "the switch did not reach the configuration this recorder holds",
+        );
+        assert!(
+            fs::read_to_string(directory.file())
+                .expect("the file was written")
+                .contains("\"notifications\""),
+            "the switch has to be in the one settings file, not only in memory",
+        );
+
+        // And the other three are untouched, which is what a per-category
+        // switch means.
+        for category in NotificationCategory::ALL {
+            if category != NotificationCategory::RecordingFailed {
+                assert_eq!(
+                    entry(&view, category.key()).value,
+                    "true",
+                    "switching one category off also switched off {category}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_notification_switch_the_recorder_would_refuse_names_the_value_and_the_two_it_takes() {
+        let directory = TestDirectory::new("notification-refusal");
+        let refusal = SettingsFile::at(directory.file())
+            .apply(&change("recording_failed", Some("sometimes")))
+            .expect_err("a switch has two positions");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("sometimes") && refusal.message.contains("true or false"),
+            "the refusal should name the value and what would have been accepted: {}",
+            refusal.message,
+        );
+    }
+
+    #[test]
+    fn every_notification_category_is_a_row_the_window_can_draw_a_switch_from() {
+        // A category the recorder never sends is one the window cannot switch
+        // off, and it would fall back to notifying — which is the failure this
+        // issue is about, arrived at from the other end. Walked over `ALL` so
+        // that a category added without a row fails here.
+        let directory = TestDirectory::new("notification-rows");
+        let view = SettingsFile::at(directory.file())
+            .view()
+            .expect("a view of the defaults");
+
+        for category in NotificationCategory::ALL {
+            let row = entry(&view, category.key());
+            assert_eq!(row.label, category.label());
+            assert_eq!(row.value, "true", "{category} should default to on");
+            assert!(!row.overridden);
+            assert!(
+                row.applies && row.unavailable.is_none(),
+                "the window acts on {category}, so it must not be drawn as a dead control",
+            );
+            assert_eq!(row.choices, vec!["true".to_owned(), "false".to_owned()]);
+        }
     }
 
     #[test]

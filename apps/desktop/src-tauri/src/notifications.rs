@@ -19,12 +19,19 @@
 //!    with or without this — it was measured both ways, see
 //!    `docs/desktop-ui.md` — so a registration that fails costs the name and
 //!    nothing else.
-//! 2. **Reads `notifications.json`** from Clipped's configuration directory,
-//!    which is the per-category on/off switch until the Settings screen exists
-//!    ([issue #51](https://github.com/wildware-uk/clipped/issues/51)). A file
-//!    that cannot be read is reported through the startup notice rather than
-//!    ignored, and the defaults — everything on — apply.
-//! 3. **Decides and shows.** Every event the recorder link publishes is put to
+//! 2. **Asks the recorder which categories the user wants**, whenever the link
+//!    attaches ([`Notifier::refresh`]). They are settings like any other — the
+//!    `notifications` section of `settings.json` — and this window may not open
+//!    that file, so `get_settings` is how they arrive
+//!    ([issue #252](https://github.com/wildware-uk/clipped/issues/252)). Until
+//!    the first answer, and for a recorder too old to have them, everything is
+//!    on: all four categories are failures, so silence is the wrong way to fail.
+//! 3. **Carries an old `notifications.json` into that file and deletes it**
+//!    ([`migrate_legacy_switches`]). Before #252 those switches were a second
+//!    store in this window's own configuration directory, and a user who
+//!    switched a category off there must not silently have it switched back on
+//!    (AGENTS.md sections 43 and 56).
+//! 4. **Decides and shows.** Every event the recorder link publishes is put to
 //!    the policy, and what comes back is a toast with one button on it.
 //!
 //! # The button
@@ -55,15 +62,24 @@
 //!
 //! [`Notifier::consider`] is called from the thread that reads the recorder
 //! link's events, and it is the only caller — which is why the policy is owned
-//! here rather than shared behind a lock. `on_activated` runs on a thread of
-//! WinRT's choosing; everything it touches ([`crate::tray::show_window`],
-//! [`crate::tray::report`], `RecorderLink`) is safe to call from any thread.
+//! here rather than shared behind a lock. The one thing that *is* shared is the
+//! switches: a `#[tauri::command]` on the window's thread replaces them when
+//! somebody saves one, so [`NotificationPreferences`] is behind a lock and
+//! nothing else here is. `on_activated` runs on a thread of WinRT's choosing;
+//! everything it touches ([`crate::tray::show_window`], [`crate::tray::report`],
+//! `RecorderLink`) is safe to call from any thread.
+//!
+//! [`Notifier::refresh`] makes a blocking `get_settings` call on the event
+//! thread, which is allowed for the reason that thread exists: it may block, and
+//! the thread drawing the window may not.
 
+use std::collections::BTreeMap;
 use std::os::windows::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use clipped_ipc::{RecorderLink, RecorderLinkEvent};
+use clipped_ipc::{RecorderLink, RecorderLinkEvent, RecorderLinkState, SettingsView};
+use serde::Deserialize;
 use tauri::{AppHandle, Manager as _};
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -71,13 +87,24 @@ use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_S
 
 use crate::notification_policy::{
     Notification, NotificationAction, NotificationCategory, NotificationPolicy,
-    NotificationSettings, SETTINGS_VERSION,
+    NotificationPreferences,
 };
 use crate::toast::{ToastContent, Toaster};
 
-/// The file the per-category switches live in, in Clipped's configuration
-/// directory.
-const SETTINGS_FILE: &str = "notifications.json";
+/// The file the per-category switches lived in before issue #252, in Clipped's
+/// own configuration directory rather than the recorder's.
+///
+/// Read once more, to be carried into `settings.json` and removed. Nothing
+/// writes it.
+const LEGACY_SETTINGS_FILE: &str = "notifications.json";
+
+/// The only version of that file Clipped ever wrote.
+///
+/// A file claiming a higher one was written by a build this one does not
+/// understand, and is left exactly where it is rather than being flattened into
+/// the settings file at whatever this build guesses its fields mean (AGENTS.md
+/// section 56). That is the reason the file carried a version at all.
+const LEGACY_SETTINGS_VERSION: u32 = 1;
 
 /// The name Windows shows for Clipped's notifications.
 const DISPLAY_NAME: &str = "Clipped";
@@ -96,14 +123,29 @@ pub(crate) struct Notifier {
     toaster: Toaster,
     /// What to show, and what not to. See [`crate::notification_policy`].
     policy: NotificationPolicy,
+    /// Which categories the user wants, shared with the window's Save.
+    preferences: NotificationPreferences,
+    /// Whether the link was attached when the last state arrived.
+    ///
+    /// The settings are asked for when it *becomes* attached rather than on
+    /// every attached state, because the link republishes one every time a
+    /// recording starts or stops — and a `get_settings` round trip per recording
+    /// would be a question nobody asked.
+    attached: bool,
 }
 
 /// Prepares notifications, and says what could not be prepared.
 ///
-/// Never fails: a build that cannot register its name or read its settings can
-/// still notify, and refusing to notify at all because of either would trade a
-/// cosmetic problem for a silent one.
-pub(crate) fn install(app: &AppHandle, link: &RecorderLink) -> Notifier {
+/// Never fails: a build that cannot register its name can still notify, and
+/// refusing to notify at all because of it would trade a cosmetic problem for a
+/// silent one. The switches are not read here — there is no recorder to ask yet
+/// — so everything is on until the link attaches and [`Notifier::refresh`] has
+/// an answer.
+pub(crate) fn install(
+    app: &AppHandle,
+    link: &RecorderLink,
+    preferences: NotificationPreferences,
+) -> Notifier {
     let app_id = app.config().identifier.clone();
 
     if let Err(reason) = register_app_user_model_id(&app_id, DISPLAY_NAME) {
@@ -116,19 +158,29 @@ pub(crate) fn install(app: &AppHandle, link: &RecorderLink) -> Notifier {
     Notifier {
         toaster: Toaster::new(&app_id),
         policy: NotificationPolicy::new(
-            settings(app),
+            preferences.clone(),
             // "Try again" is only offered where there is something to try. A
             // link with no settings behind it never had a recorder to look for,
             // and `RecorderLink::retry` does nothing to one.
             link.endpoint().is_some(),
             &link.state(),
         ),
+        preferences,
+        attached: matches!(link.state(), RecorderLinkState::Attached { .. }),
     }
 }
 
 impl Notifier {
     /// Puts one event to the policy, and shows whatever comes back.
     pub(crate) fn consider(&mut self, app: &AppHandle, event: &RecorderLinkEvent) {
+        if let RecorderLinkEvent::State(state) = event {
+            let attached = matches!(state, RecorderLinkState::Attached { .. });
+            if attached && !self.attached {
+                self.refresh(app);
+            }
+            self.attached = attached;
+        }
+
         let Some(notification) = self.policy.decide(event) else {
             return;
         };
@@ -145,6 +197,46 @@ impl Notifier {
                 app,
                 &format!("{}. {}", notification.title, notification.body),
             );
+        }
+    }
+
+    /// Asks the recorder which categories the user wants.
+    ///
+    /// Called when the link attaches, which is the first moment there is
+    /// anything to ask and again after every recorder restart. A failure leaves
+    /// the switches as they are — the last answer, or everything on — because
+    /// the alternative to knowing is telling somebody about a failure, and that
+    /// is the direction to fail in.
+    ///
+    /// A recorder that never attaches is the one gap this leaves: its own
+    /// `recorder_unavailable` notification is shown even if it was switched off,
+    /// because the switch is in a file only that recorder may open. Keeping a
+    /// copy of it here to close that gap is exactly the second store issue #252
+    /// removed.
+    fn refresh(&self, app: &AppHandle) {
+        let Some(link) = app.try_state::<RecorderLink>() else {
+            return;
+        };
+
+        // The migration first, so that switches somebody moved before #252 are
+        // in the settings file before it is read back.
+        let view = match migrate_legacy_switches(app, &link) {
+            Some(view) => Some(view),
+            None => match link.call(&clipped_ipc::Command::GetSettings) {
+                Ok(clipped_ipc::Reply::Settings { settings }) => Some(settings),
+                Ok(_) => {
+                    eprintln!("clipped: the recorder answered `get_settings` with something else");
+                    None
+                }
+                Err(error) => {
+                    eprintln!("clipped: the notification settings could not be read: {error}");
+                    None
+                }
+            },
+        };
+
+        if let Some(view) = view {
+            self.preferences.adopt(&view);
         }
     }
 
@@ -249,70 +341,209 @@ fn explorer_argument(path: &str) -> Option<String> {
     Some(format!("/select,\"{path}\""))
 }
 
-/// Which notifications the user wants.
+/// A `notifications.json` as the build that shipped issue #110 wrote it.
 ///
-/// From `notifications.json` beside Clipped's other configuration. There is no
-/// file until somebody writes one, and that is the ordinary case rather than a
-/// fault: everything is on by default, because every category is a failure.
+/// Every switch is an [`Option`] rather than a `bool`, unlike the type that
+/// read this file before issue #252: what has to be carried across is what the
+/// file *said*, and an absent key said nothing. Reading one as `true` would turn
+/// three settings the user never touched into three settings they had
+/// configured, which is a different file from the one they had.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct LegacySwitches {
+    /// The shape of the file, which is the whole reason it carried one.
+    version: u32,
+    recording_failed: Option<bool>,
+    recording_interrupted: Option<bool>,
+    recorder_unavailable: Option<bool>,
+    hotkey_unavailable: Option<bool>,
+}
+
+impl LegacySwitches {
+    /// What this file says, as `apply_settings` takes it.
+    ///
+    /// The keys are [`NotificationCategory::key`], which are the same words the
+    /// old file spelled them with — that is what makes this a move rather than a
+    /// translation, and why renaming one would silently lose a switch (AGENTS.md
+    /// section 43).
+    fn changes(&self) -> BTreeMap<String, Option<String>> {
+        let mut values = BTreeMap::new();
+        for (category, switch) in [
+            (NotificationCategory::RecordingFailed, self.recording_failed),
+            (
+                NotificationCategory::RecordingInterrupted,
+                self.recording_interrupted,
+            ),
+            (
+                NotificationCategory::RecorderUnavailable,
+                self.recorder_unavailable,
+            ),
+            (
+                NotificationCategory::HotkeyUnavailable,
+                self.hotkey_unavailable,
+            ),
+        ] {
+            if let Some(enabled) = switch {
+                values.insert(category.key().to_owned(), Some(enabled.to_string()));
+            }
+        }
+        values
+    }
+}
+
+/// Reads a `notifications.json` this window wrote before issue #252.
 ///
-/// A file that exists and cannot be read is a different matter. Somebody
-/// switched something off and it has not taken effect, so it is said through the
-/// startup notice — the window asks for that when it mounts — rather than
-/// silently ignored (AGENTS.md section 15).
-fn settings(app: &AppHandle) -> NotificationSettings {
-    let path = match app.path().app_config_dir() {
-        Ok(directory) => directory.join(SETTINGS_FILE),
+/// A leading byte-order mark is dropped first. JSON has no such thing and serde
+/// rejects it, but this file was only ever edited by hand — there was no screen
+/// for it — and both Notepad and `Out-File -Encoding utf8` under Windows
+/// PowerShell put one there. That was not a guess: writing the file that way is
+/// what the first end-to-end run of issue #110 did, and the notification it was
+/// meant to switch off arrived (`docs/desktop-ui.md`). A migration that refused
+/// one would lose the switches from precisely the files most likely to have any.
+///
+/// # Errors
+///
+/// A sentence for the user when the file is not JSON, is not an object of the
+/// expected shape, or says it was written by a later version of Clipped than
+/// this one.
+fn read_legacy_switches(json: &str) -> Result<LegacySwitches, String> {
+    let json = json.strip_prefix('\u{feff}').unwrap_or(json);
+    let switches: LegacySwitches =
+        serde_json::from_str(json).map_err(|error| format!("it could not be read: {error}"))?;
+
+    if switches.version > LEGACY_SETTINGS_VERSION {
+        return Err(format!(
+            "it says version {} and this build of Clipped understands version \
+             {LEGACY_SETTINGS_VERSION}",
+            switches.version
+        ));
+    }
+
+    Ok(switches)
+}
+
+/// Carries an old `notifications.json` into the settings file and deletes it.
+///
+/// Answers the settings as they now stand when one was migrated, so the caller
+/// does not ask again, and [`None`] when there was no file — which is the
+/// ordinary case, and every case at all after the first successful run.
+///
+/// # What it will not do
+///
+/// **Delete a file it did not manage to save.** The order is read, save,
+/// delete, and a failure at any step leaves the file exactly where it is for the
+/// next attachment to try again. Deleting first would lose a switch to a
+/// recorder that went away mid-migration (AGENTS.md section 56). Applying the
+/// same values twice is harmless: they are the values, not a change to them.
+///
+/// **Guess at a file it cannot read.** One that is not JSON, or that claims a
+/// version this build does not know, is left alone and said out loud. There is
+/// nowhere better for it to go, and flattening it would destroy whatever it
+/// actually held.
+fn migrate_legacy_switches(app: &AppHandle, link: &RecorderLink) -> Option<SettingsView> {
+    let path = legacy_settings_path(app)?;
+
+    migrate_switches_at(&path, |request| {
+        match link.call(&clipped_ipc::Command::ApplySettings(request)) {
+            Ok(clipped_ipc::Reply::Settings { settings }) => Ok(settings),
+            Ok(_) => Err("the recorder answered `apply_settings` with something else".to_owned()),
+            Err(error) => Err(error.to_string()),
+        }
+    })
+}
+
+/// The migration itself, with saving left to the caller.
+///
+/// Separated from [`migrate_legacy_switches`] because everything that can go
+/// wrong here is about a *file* — one that is not there, one nobody can read,
+/// one that must survive a failed save — and none of it is about Tauri or a
+/// named pipe. A test can hand this a directory and a closure; it could not hand
+/// it an `AppHandle` and a recorder.
+fn migrate_switches_at(
+    path: &Path,
+    save: impl FnOnce(clipped_ipc::ApplySettings) -> Result<SettingsView, String>,
+) -> Option<SettingsView> {
+    let json = match std::fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            eprintln!(
+                "clipped: {} could not be read, so the switches in it have not been moved into \
+                 your settings: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+
+    let switches = match read_legacy_switches(&json) {
+        Ok(switches) => switches,
+        Err(reason) => {
+            crate::set_startup_notice(&unmigrated_switches(&path.display().to_string(), &reason));
+            return None;
+        }
+    };
+
+    let view = match save(clipped_ipc::ApplySettings {
+        values: switches.changes(),
+    }) {
+        Ok(view) => view,
+        Err(reason) => {
+            eprintln!(
+                "clipped: your notification switches could not be moved into your settings, so \
+                 {} has been left where it is: {reason}",
+                path.display()
+            );
+            return None;
+        }
+    };
+
+    if let Err(error) = std::fs::remove_file(path) {
+        // The switches are saved; only the empty husk is left. Said rather than
+        // swallowed, because the next attachment will read and apply it again
+        // and somebody editing it would be editing a file nothing reads.
+        eprintln!(
+            "clipped: your notification switches are now in your settings, but {} could not be \
+             removed: {error}",
+            path.display()
+        );
+    }
+
+    Some(view)
+}
+
+/// Where the switches were kept before issue #252.
+///
+/// Clipped's *own* configuration directory — `%APPDATA%\<identifier>` — which is
+/// not where the settings file is: that is the recorder's, under
+/// `%LOCALAPPDATA%\Clipped`. Two directories for one application's settings was
+/// half of what made this a second store.
+fn legacy_settings_path(app: &AppHandle) -> Option<PathBuf> {
+    match app.path().app_config_dir() {
+        Ok(directory) => Some(directory.join(LEGACY_SETTINGS_FILE)),
         Err(error) => {
             eprintln!("clipped: Clipped's configuration directory could not be named: {error}");
-            return NotificationSettings::default();
-        }
-    };
-
-    let json = match std::fs::read_to_string(&path) {
-        Ok(json) => json,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return NotificationSettings::default()
-        }
-        Err(error) => {
-            crate::set_startup_notice(&unreadable_settings(
-                &path.display().to_string(),
-                &error.to_string(),
-            ));
-            return NotificationSettings::default();
-        }
-    };
-
-    match NotificationSettings::from_json(&json) {
-        Ok(settings) => settings,
-        Err(reason) => {
-            crate::set_startup_notice(&unreadable_settings(&path.display().to_string(), &reason));
-            NotificationSettings::default()
+            None
         }
     }
 }
 
-/// The sentence shown when the notification settings could not be read.
+/// The sentence shown when an old `notifications.json` could not be moved.
 ///
-/// It says the four things that decide what happens next: which file, what is
-/// wrong with it, what Clipped is doing in the meantime — notifying about
-/// everything, so that a broken file cannot be the reason a user never hears
-/// that nothing is being recorded — and what a file that works looks like.
+/// It says the three things that decide what happens next: which file, what is
+/// wrong with it, and what Clipped is doing in the meantime — notifying about
+/// everything it has not been told otherwise about, so that a file nobody can
+/// read is never the reason somebody is not told that nothing is being recorded.
 ///
-/// The last of those is the useful action AGENTS.md section 45 asks for, and it
-/// is written from [`NotificationCategory::ALL`] rather than typed out, so a
-/// category added later cannot go unmentioned here. Until the Settings screen
-/// exists ([issue #51](https://github.com/wildware-uk/clipped/issues/51)) this
-/// file is the only place these switches are, which is exactly why a broken one
-/// has to explain itself.
-fn unreadable_settings(path: &str, reason: &str) -> String {
-    let categories = NotificationCategory::ALL
-        .map(NotificationCategory::key)
-        .join(", ");
-
+/// The useful action AGENTS.md section 45 asks for is the Settings screen, which
+/// is where these switches now are: whatever the old file said, they can be set
+/// again there, and the file can then be deleted.
+fn unmigrated_switches(path: &str, reason: &str) -> String {
     format!(
-        "Clipped could not read its notification settings at {path}: {reason}. Every notification \
-         is switched on until that file is corrected or deleted. It holds a JSON object of \
-         \"version\": {SETTINGS_VERSION} and any of {categories}, each true or false."
+        "Clipped could not move the notification switches in {path} into your settings: {reason}. \
+         That file is no longer read, and it has been left exactly as it is. Every notification is \
+         switched on unless you have said otherwise on the Settings screen, which is where these \
+         switches now are."
     )
 }
 
@@ -387,8 +618,218 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_settings_file_says_which_file_and_what_happens_now() {
-        let said = unreadable_settings(
+    fn a_switch_somebody_turned_off_before_252_is_what_the_migration_sends() {
+        // The acceptance criterion: a `notifications.json` written by the build
+        // that shipped #110 is migrated with its switches preserved. The keys it
+        // sends are the settings file's own, which is what makes this a move.
+        let switches = read_legacy_switches(r#"{"version":1,"recording_failed":false}"#)
+            .expect("the file the previous build wrote");
+
+        let changes = switches.changes();
+        assert_eq!(
+            changes.get("recording_failed"),
+            Some(&Some("false".to_owned())),
+            "the switch that was off has to arrive as off: {changes:?}",
+        );
+        assert_eq!(
+            changes.len(),
+            1,
+            "a category the file said nothing about must not be written as configured: {changes:?}",
+        );
+    }
+
+    #[test]
+    fn every_category_the_old_file_could_carry_is_one_the_migration_sends() {
+        // Walked over `ALL` so that a category the old file had and the
+        // migration drops fails here rather than being silently switched back
+        // on for whoever had turned it off.
+        let json = format!(
+            r#"{{"version":1,{}}}"#,
+            NotificationCategory::ALL
+                .map(|category| format!(r#""{}":false"#, category.key()))
+                .join(",")
+        );
+        let changes = read_legacy_switches(&json)
+            .expect("a file with every switch in it")
+            .changes();
+
+        for category in NotificationCategory::ALL {
+            assert_eq!(
+                changes.get(category.key()),
+                Some(&Some("false".to_owned())),
+                "{} was in the old file and the migration drops it",
+                category.key(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_a_windows_editor_saved_is_still_migrated() {
+        // Notepad and Windows PowerShell's `Out-File -Encoding utf8` both write
+        // a byte-order mark, which is not JSON. Editing by hand was the *only*
+        // way to set these switches, so refusing one would lose the switches
+        // from the files most likely to have any.
+        let switches = read_legacy_switches("\u{feff}{\"version\":1,\"recording_failed\":false}")
+            .expect("a byte-order mark must not cost somebody their switches");
+
+        assert_eq!(switches.recording_failed, Some(false));
+    }
+
+    #[test]
+    fn a_file_from_a_later_clipped_is_left_alone_rather_than_guessed_at() {
+        // The reason that file carried a version. Its fields may mean something
+        // else at version 2, and flattening it into the settings would destroy
+        // whatever it actually held (AGENTS.md section 56).
+        let error = read_legacy_switches(r#"{"version":2,"recording_failed":false}"#)
+            .expect_err("version 2 may mean something else by these fields");
+
+        assert!(error.contains("version 2"), "{error}");
+        assert!(error.contains("version 1"), "{error}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_is_refused_rather_than_ignored() {
+        let error = read_legacy_switches("recording_failed = false")
+            .expect_err("an INI file is not a settings file");
+        assert!(!error.is_empty(), "the user has to be told what is wrong");
+    }
+
+    /// A directory of this test's own, removed when it is dropped.
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn holding(label: &str, json: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "clipped-notifications-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("the temporary directory can be created");
+            std::fs::write(path.join(LEGACY_SETTINGS_FILE), json).expect("the file can be written");
+            Self(path)
+        }
+
+        fn file(&self) -> PathBuf {
+            self.0.join(LEGACY_SETTINGS_FILE)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What the recorder answers a successful `apply_settings` with.
+    fn saved() -> SettingsView {
+        SettingsView {
+            file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+            settings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_switches_are_saved_and_then_the_old_file_is_gone() {
+        // Issue #252's third acceptance criterion, end to end over the file: a
+        // `notifications.json` from the build that shipped #110 has its switches
+        // saved and is removed. Leaving it would leave a second store behind,
+        // which is what this issue is about.
+        let directory = TestDirectory::holding(
+            "migrated",
+            r#"{"version":1,"recording_failed":false,"hotkey_unavailable":false}"#,
+        );
+        let mut sent = None;
+
+        let view = migrate_switches_at(&directory.file(), |request| {
+            sent = Some(request);
+            Ok(saved())
+        });
+
+        assert!(view.is_some(), "the settings as they now stand come back");
+        let values = sent.expect("the switches were saved").values;
+        assert_eq!(
+            values.get("recording_failed"),
+            Some(&Some("false".to_owned()))
+        );
+        assert_eq!(
+            values.get("hotkey_unavailable"),
+            Some(&Some("false".to_owned()))
+        );
+        assert_eq!(
+            values.len(),
+            2,
+            "only what the file said may be written: {values:?}",
+        );
+        assert!(
+            !directory.file().exists(),
+            "the second store is still there after being migrated",
+        );
+    }
+
+    #[test]
+    fn a_save_that_failed_leaves_the_file_for_the_next_attempt() {
+        // The order that matters. Deleting first, or deleting anyway, would lose
+        // somebody's switches to a recorder that went away mid-migration
+        // (AGENTS.md section 56) — and there is nowhere else they exist.
+        let directory =
+            TestDirectory::holding("unsaved", r#"{"version":1,"recording_failed":false}"#);
+
+        let view = migrate_switches_at(&directory.file(), |_| {
+            Err("there was no recorder listening".to_owned())
+        });
+
+        assert!(
+            view.is_none(),
+            "nothing was saved, so there is nothing to draw"
+        );
+        assert!(
+            directory.file().exists(),
+            "the switches were not saved and the only copy of them has been deleted",
+        );
+    }
+
+    #[test]
+    fn a_file_from_a_later_clipped_is_neither_saved_nor_deleted() {
+        // The reason that file carried a version at all. Its fields may mean
+        // something else at version 2, so nothing is guessed and nothing is
+        // destroyed.
+        let directory =
+            TestDirectory::holding("newer", r#"{"version":2,"recording_failed":false}"#);
+        let mut asked = false;
+
+        let view = migrate_switches_at(&directory.file(), |_| {
+            asked = true;
+            Ok(saved())
+        });
+
+        assert!(view.is_none());
+        assert!(
+            !asked,
+            "a file this build cannot read must not be saved from"
+        );
+        assert!(directory.file().exists(), "nor deleted");
+    }
+
+    #[test]
+    fn there_being_no_old_file_is_the_ordinary_case_rather_than_a_failure() {
+        // Every launch after the first, and every machine that never had one.
+        let directory = TestDirectory::holding("absent", "{}");
+        std::fs::remove_file(directory.file()).expect("the file can be removed");
+        let mut asked = false;
+
+        let view = migrate_switches_at(&directory.file(), |_| {
+            asked = true;
+            Ok(saved())
+        });
+
+        assert!(view.is_none());
+        assert!(!asked, "nothing was migrated, so nothing should be saved");
+    }
+
+    #[test]
+    fn a_file_that_could_not_be_moved_says_which_file_and_what_happens_now() {
+        let said = unmigrated_switches(
             r"C:\Users\a\AppData\Roaming\x\notifications.json",
             "it is empty",
         );
@@ -399,14 +840,10 @@ mod tests {
             said.contains("switched on"),
             "a user whose file is broken has to know they will still be told: {said}"
         );
-        for category in NotificationCategory::ALL {
-            assert!(
-                said.contains(category.key()),
-                "the notice is the only documentation of this file the user has in front of \
-                 them, so it has to name {}: {said}",
-                category.key()
-            );
-        }
+        assert!(
+            said.contains("Settings"),
+            "and where the switches are now, which is the action they can take: {said}"
+        );
     }
 
     #[test]

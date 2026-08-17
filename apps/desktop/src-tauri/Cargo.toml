@@ -184,10 +184,16 @@ windows = { version = "0.62", features = [
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# The notification settings file: which categories the user wants. `serde` comes
-# with Tauri either way; naming both here is what deny.toml's `wildcards =
-# "deny"` asks of a dependency this crate actually uses. Dual MIT/Apache-2.0.
+# `serde` derives the types the `#[tauri::command]`s in `src/main.rs` answer
+# with. It comes with Tauri either way; naming it here is what deny.toml's
+# `wildcards = "deny"` asks of a dependency this crate actually uses. Dual
+# MIT/Apache-2.0.
 serde = { version = "1", features = ["derive"] }
+# `serde_json` has **one** use left, and it is temporary: reading the
+# `notifications.json` this window kept before issue #252 so that it can be
+# carried into the settings file and deleted (`src/notifications.rs`). Nothing
+# else here parses JSON — the settings themselves arrive over `clipped-ipc`,
+# which does its own — so when that migration is dropped this line goes with it.
 serde_json = "1"
 
 [dev-dependencies]

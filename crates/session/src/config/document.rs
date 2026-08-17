@@ -196,13 +196,32 @@ pub(crate) fn parse(
         source,
     })?;
 
+    // Kept rather than refused, like `plugins` above and unlike `storage`: a
+    // switch this build cannot read leaves that category interrupting, which is
+    // a nuisance, and refusing would mean a typo in a notification switch
+    // stopped the recording settings in the same file from loading
+    // (`super::notifications`).
+    let notifications = super::notifications::read(take_object(
+        path,
+        &mut document,
+        "notifications",
+        Section::Document,
+    )?);
+
     // Whatever is left is a key from a newer build, or the version, which is
     // rewritten rather than kept.
     document.remove("version");
     let unknown = document.into_iter().collect();
 
-    let configuration =
-        Configuration::from_parts(global, games, hotkeys, plugins, storage, unknown);
+    let configuration = Configuration::from_parts(
+        global,
+        games,
+        hotkeys,
+        plugins,
+        storage,
+        notifications,
+        unknown,
+    );
     let loaded = if version == SCHEMA_VERSION {
         Loaded::AsWritten
     } else {
@@ -242,6 +261,13 @@ pub(crate) fn render(configuration: &Configuration) -> String {
     let storage = super::storage::write(configuration.storage());
     if !storage.is_empty() {
         document.insert("storage".to_owned(), Value::Object(storage));
+    }
+    // Written only when something is set, for the same reason: a user who has
+    // never switched a notification off should not find a section explaining
+    // that everything is on.
+    let notifications = super::notifications::write(configuration.notifications());
+    if !notifications.is_empty() {
+        document.insert("notifications".to_owned(), Value::Object(notifications));
     }
 
     for (key, value) in configuration.unrecognised() {

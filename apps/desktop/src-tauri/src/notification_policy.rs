@@ -65,14 +65,12 @@
 //!   already in when it started is on screen in front of you. Without this, a
 //!   machine whose recorder is missing would toast on every launch.
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use clipped_ipc::{
     ActiveRecording, HotkeyBinding, HotkeyState, ProtocolError, RecorderLinkEvent,
-    RecorderLinkState, RecorderStatus,
+    RecorderLinkState, RecorderStatus, SettingsView,
 };
-use serde::Deserialize;
-
-/// The version this build writes and understands in the settings file.
-pub(crate) const SETTINGS_VERSION: u32 = 1;
 
 /// What a notification is about.
 ///
@@ -112,6 +110,13 @@ impl NotificationCategory {
     ];
 
     /// The name this category has in the settings file.
+    ///
+    /// The recorder's own spelling, in the `notifications` section of
+    /// `settings.json` (`clipped_session::config::notifications`). It is
+    /// repeated here rather than imported because this window may link one crate
+    /// of that workspace, `clipped-ipc`, and a settings key crosses that
+    /// protocol as text; `settingsConformance.test.ts` is what holds the two
+    /// lists equal, in both directions.
     ///
     /// Stable: renaming one would silently re-enable a category somebody had
     /// switched off (AGENTS.md section 43).
@@ -202,68 +207,40 @@ pub(crate) struct Notification {
 
 /// Which notifications the user wants.
 ///
-/// Read from `notifications.json` in Clipped's configuration directory;
-/// [`crate::notifications`] is what finds and reads it. Every category defaults
-/// to on, because all three are failures and a user who has not said otherwise
-/// wants to be told that nothing is being recorded.
+/// Every category defaults to on, because all four are failures and a user who
+/// has not said otherwise wants to be told that nothing is being recorded.
 ///
-/// # Why this is not Clipped's configuration API
+/// # Where these come from
 ///
-/// Clipped has one, in `crates/session/src/config` (issue #108), and settings
-/// with defaults, types and validation are exactly what it is for. This file is
-/// a second store of user preferences beside it, which is the duplication
-/// AGENTS.md section 55 forbids, and it is here because **the desktop
-/// application may not link the crate that API lives in**.
+/// The `notifications` section of `%LOCALAPPDATA%\Clipped\settings.json`, which
+/// the **recorder** owns — its defaults, its validation and its migrations are
+/// `clipped_session::config` (`docs/configuration.md`) — asked for over the
+/// protocol with `get_settings` and changed with `apply_settings`
+/// (`crate::notifications::refresh`).
 ///
-/// That is a rule with a test behind it rather than a preference:
-/// `tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
-/// allows this manifest exactly one member of the repository's workspace,
-/// `clipped-ipc`. `clipped-session` sits above capture, encoding and muxing, so
-/// naming it here would put the recording engine inside the window's process —
-/// which is the separation ADR 0002 exists to make, and the reason closing or
-/// crashing a window cannot interrupt a recording. Reading `settings.json`
-/// directly from here instead would be a second implementation of that file's
-/// versioning, migration and validation, which is worse than a second file.
-///
-/// So the switches stay here until one of two things changes, both of which are
-/// [issue #252](https://github.com/wildware-uk/clipped/issues/252): the
-/// configuration API moves to a crate at the protocol's layer that both ends may
-/// link, or the recorder serves it over IPC. At that point these three booleans
-/// become settings like any other, `notifications.json` is migrated into
-/// `settings.json` and deleted, and the Settings screen ([issue
-/// #51](https://github.com/wildware-uk/clipped/issues/51)) draws them from the
-/// same place it draws everything else. `version` is stamped into this file so
-/// that the migration can tell what it is reading.
-///
-/// `#[serde(default)]` is the whole of the compatibility policy for this file: a
-/// file written before a category existed is missing its field and gets the
-/// default, and a file written by a newer Clipped carries fields this build
-/// ignores. [`Self::from_json`] refuses a `version` from the future rather than
-/// guessing at what its fields mean (AGENTS.md sections 30 and 43).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+/// It is asked for rather than read because this window may link one crate of
+/// the repository's workspace, `clipped-ipc`, and
+/// `tests/integration/tests/workspace_layering.rs` enforces it: naming
+/// `clipped-session` here would put the recording engine inside the window's
+/// process, which is the separation ADR 0002 exists to make. Until
+/// [issue #252](https://github.com/wildware-uk/clipped/issues/252) the way round
+/// that was a `notifications.json` of this window's own — a second store of user
+/// preferences with a second version field, a second missing-key policy and a
+/// second reader, which is the duplication AGENTS.md section 55 forbids.
+/// `crate::notifications::migrate_legacy_switches` is what carries one of those
+/// files into the settings file and removes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NotificationSettings {
-    /// The shape of this file, so a later change can migrate rather than
-    /// misread.
-    version: u32,
-    /// Whether a recording that failed is worth a notification.
-    recording_failed: bool,
-    /// Whether a recorder that died mid-recording is.
-    recording_interrupted: bool,
-    /// Whether a link that gave up looking for a recorder is.
-    recorder_unavailable: bool,
-    /// Whether a global hotkey Windows refused is.
-    hotkey_unavailable: bool,
+    /// One switch per category, indexed as [`NotificationCategory::ALL`] orders
+    /// them — so a category added there has somewhere to be stored without
+    /// anybody remembering to add it.
+    enabled: [bool; NotificationCategory::ALL.len()],
 }
 
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
-            version: SETTINGS_VERSION,
-            recording_failed: true,
-            recording_interrupted: true,
-            recorder_unavailable: true,
-            hotkey_unavailable: true,
+            enabled: [true; NotificationCategory::ALL.len()],
         }
     }
 }
@@ -271,44 +248,64 @@ impl Default for NotificationSettings {
 impl NotificationSettings {
     /// Whether this category may interrupt the user.
     pub(crate) const fn allows(self, category: NotificationCategory) -> bool {
-        match category {
-            NotificationCategory::RecordingFailed => self.recording_failed,
-            NotificationCategory::RecordingInterrupted => self.recording_interrupted,
-            NotificationCategory::RecorderUnavailable => self.recorder_unavailable,
-            NotificationCategory::HotkeyUnavailable => self.hotkey_unavailable,
-        }
+        self.enabled[category as usize]
     }
 
-    /// Reads the settings file's contents.
+    /// The switches the recorder has just reported.
     ///
-    /// A leading byte-order mark is dropped first. JSON has no such thing and
-    /// serde rejects it, but this file is edited by hand on Windows and both
-    /// Notepad and `Out-File -Encoding utf8` under Windows PowerShell put one
-    /// there — so refusing it would mean a file that looks exactly right and
-    /// does not work. That was not a guess: writing the file that way is what
-    /// the first end-to-end run of this feature did, and the notification it was
-    /// meant to switch off arrived (`docs/desktop-ui.md`).
-    ///
-    /// # Errors
-    ///
-    /// A sentence for the user when the file is not JSON, is not an object of
-    /// the expected shape, or says it was written by a later version of Clipped
-    /// than this one. In every case the caller falls back to the defaults and
-    /// says so: silently ignoring a settings file somebody edited is worse than
-    /// either outcome (AGENTS.md section 15).
-    pub(crate) fn from_json(json: &str) -> Result<Self, String> {
-        let json = json.strip_prefix('\u{feff}').unwrap_or(json);
-        let settings: Self =
-            serde_json::from_str(json).map_err(|error| format!("it could not be read: {error}"))?;
-
-        if settings.version > SETTINGS_VERSION {
-            return Err(format!(
-                "it says version {} and this build of Clipped understands version {SETTINGS_VERSION}",
-                settings.version
-            ));
+    /// A category the view does not mention is **on**, which covers the two ways
+    /// that happens and wants the same answer for both: a recorder older than
+    /// this window, which has no such setting, and a value neither side could
+    /// make sense of. Everything is a failure, so the safe fallback is being
+    /// told about it — a window that read silence as "switched off" would stop
+    /// saying that nothing is being recorded.
+    pub(crate) fn from_view(view: &SettingsView) -> Self {
+        let mut settings = Self::default();
+        for category in NotificationCategory::ALL {
+            if let Some(entry) = view
+                .settings
+                .iter()
+                .find(|entry| entry.key == category.key())
+            {
+                // The words the settings file spells a boolean in, which is what
+                // every value on this protocol is (`clipped_ipc::settings`).
+                settings.enabled[category as usize] = !entry.value.eq_ignore_ascii_case("false");
+            }
         }
+        settings
+    }
+}
 
-        Ok(settings)
+/// The switches, shared between the window's Save and the thread that decides.
+///
+/// Two threads need them and neither owns them. The recorder link's event thread
+/// consults them for every notification, and a `#[tauri::command]` running on
+/// the window's thread replaces them the moment somebody changes one on the
+/// Settings screen — which is what makes a switch take effect immediately rather
+/// than at the next launch, and therefore what stops it being a control that
+/// silently does nothing until Clipped is restarted (AGENTS.md section 27).
+///
+/// A lock rather than a channel because the read is the hot side: it happens
+/// once per link event and is uncontended almost always, and a write is a person
+/// pressing Save.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NotificationPreferences(Arc<Mutex<NotificationSettings>>);
+
+impl NotificationPreferences {
+    /// The switches as they stand.
+    pub(crate) fn current(&self) -> NotificationSettings {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the switches from what the recorder has just answered.
+    ///
+    /// The whole view rather than a delta, for the reason the reply to
+    /// `apply_settings` is the settings as they now stand: what a window draws,
+    /// and what it acts on, is what the recorder holds rather than what the
+    /// window hoped had been saved (`crates/ipc/src/settings.rs`).
+    pub(crate) fn adopt(&self, view: &SettingsView) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) =
+            NotificationSettings::from_view(view);
     }
 }
 
@@ -321,7 +318,11 @@ impl NotificationSettings {
 #[derive(Debug)]
 pub(crate) struct NotificationPolicy {
     /// Which categories the user wants.
-    settings: NotificationSettings,
+    ///
+    /// Shared rather than owned, because the switches are the one thing here
+    /// that somebody can change while this is running: the Settings screen saves
+    /// one and the very next notification has to honour it.
+    preferences: NotificationPreferences,
     /// Whether this link has a recorder to look for again.
     ///
     /// False for a link that never had one — no endpoint could be named or no
@@ -360,12 +361,12 @@ impl NotificationPolicy {
     /// `opening_state` is not announced. See the module documentation: a
     /// notification is for something that happened while the user was away.
     pub(crate) fn new(
-        settings: NotificationSettings,
+        preferences: NotificationPreferences,
         can_retry: bool,
         opening_state: &RecorderLinkState,
     ) -> Self {
         Self {
-            settings,
+            preferences,
             can_retry,
             last_state: opening_state.clone(),
             recording: recording_in(opening_state).cloned(),
@@ -378,7 +379,8 @@ impl NotificationPolicy {
         // The bookkeeping happens whether or not the category is switched on, so
         // that switching one off cannot leave this unable to name a file later.
         let notification = self.consider(event);
-        notification.filter(|notification| self.settings.allows(notification.category))
+        let settings = self.preferences.current();
+        notification.filter(|notification| settings.allows(notification.category))
     }
 
     /// The decision itself, before the user's switches are applied.
@@ -589,7 +591,46 @@ fn as_sentence(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipped_ipc::ErrorCode;
+    use clipped_ipc::{ErrorCode, SettingEntry};
+
+    /// The settings as the recorder answers `get_settings`, with the categories
+    /// in `switched_off` set to `false` and the rest to `true`.
+    ///
+    /// Built as a whole `SettingsView` rather than by reaching into
+    /// [`NotificationSettings`], deliberately: what these tests are about is
+    /// whether a switch somebody moved on the Settings screen reaches the
+    /// decision, and the recorder's answer is the only thing that carries it.
+    /// A test that set the booleans directly would still pass if
+    /// [`NotificationSettings::from_view`] read the wrong key.
+    fn answered(switched_off: &[NotificationCategory]) -> SettingsView {
+        SettingsView {
+            file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+            settings: NotificationCategory::ALL
+                .into_iter()
+                .map(|category| SettingEntry {
+                    key: category.key().to_owned(),
+                    label: category.key().to_owned(),
+                    value: if switched_off.contains(&category) {
+                        "false".to_owned()
+                    } else {
+                        "true".to_owned()
+                    },
+                    overridden: switched_off.contains(&category),
+                    choices: vec!["true".to_owned(), "false".to_owned()],
+                    accepted: "true or false".to_owned(),
+                    applies: true,
+                    unavailable: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Preferences holding what a recorder answering `answered` would give.
+    fn switches(switched_off: &[NotificationCategory]) -> NotificationPreferences {
+        let preferences = NotificationPreferences::default();
+        preferences.adopt(&answered(switched_off));
+        preferences
+    }
 
     /// The state a healthy attached recorder is in.
     fn idle() -> RecorderLinkState {
@@ -634,11 +675,7 @@ mod tests {
 
     /// A policy that has been running since the application was connecting.
     fn policy() -> NotificationPolicy {
-        NotificationPolicy::new(
-            NotificationSettings::default(),
-            true,
-            &RecorderLinkState::Connecting,
-        )
+        NotificationPolicy::new(switches(&[]), true, &RecorderLinkState::Connecting)
     }
 
     #[test]
@@ -807,11 +844,8 @@ mod tests {
         // `RecorderLink::retry` does nothing to a link with no settings behind
         // it, and a button that does nothing is the failure AGENTS.md section 27
         // names. The window at least holds the reason.
-        let mut policy = NotificationPolicy::new(
-            NotificationSettings::default(),
-            false,
-            &RecorderLinkState::Connecting,
-        );
+        let mut policy =
+            NotificationPolicy::new(switches(&[]), false, &RecorderLinkState::Connecting);
 
         let notification = policy
             .decide(&RecorderLinkEvent::State(unavailable(
@@ -835,7 +869,7 @@ mod tests {
         // and a toast on every launch saying what is already on screen is how a
         // user learns to ignore them.
         let opening = unavailable("Clipped could not find clipped-recorder.exe");
-        let mut policy = NotificationPolicy::new(NotificationSettings::default(), true, &opening);
+        let mut policy = NotificationPolicy::new(switches(&[]), true, &opening);
 
         assert_eq!(
             policy.decide(&RecorderLinkEvent::State(opening)),
@@ -884,15 +918,12 @@ mod tests {
         // Acceptance criterion: disabled categories produce nothing. Walked over
         // `ALL` so that a category added without a switch fails here.
         for category in NotificationCategory::ALL {
-            let off = NotificationSettings::from_json(&format!(
-                r#"{{"version":1,"{}":false}}"#,
-                category.key()
-            ))
-            .expect("the settings parse");
+            let off = switches(&[category]);
 
             let mut raised = Vec::new();
             for event in every_notifiable_event() {
-                let mut policy = NotificationPolicy::new(off, true, &RecorderLinkState::Connecting);
+                let mut policy =
+                    NotificationPolicy::new(off.clone(), true, &RecorderLinkState::Connecting);
                 // The failure needs the status that names its recording first.
                 policy.decide(&RecorderLinkEvent::State(recording("r-1")));
                 if let Some(notification) = policy.decide(&event) {
@@ -969,7 +1000,7 @@ mod tests {
             for known_recording in [true, false] {
                 for event in every_notifiable_event() {
                     let mut policy = NotificationPolicy::new(
-                        NotificationSettings::default(),
+                        switches(&[]),
                         can_retry,
                         &RecorderLinkState::Connecting,
                     );
@@ -1059,11 +1090,8 @@ mod tests {
         // and watching nothing happen; the whole point of the notification is
         // that it says which key and which action, and offers the screen where
         // that can be changed.
-        let mut policy = NotificationPolicy::new(
-            NotificationSettings::default(),
-            true,
-            &RecorderLinkState::Connecting,
-        );
+        let mut policy =
+            NotificationPolicy::new(switches(&[]), true, &RecorderLinkState::Connecting);
 
         let notification = policy
             .decide(&RecorderLinkEvent::HotkeysUnavailable {
@@ -1099,11 +1127,8 @@ mod tests {
         // twice an hour about a combination the user has already decided to live
         // with.
         let conflicts = vec![refused("save_replay", "Save replay", "Ctrl+F10")];
-        let mut policy = NotificationPolicy::new(
-            NotificationSettings::default(),
-            true,
-            &RecorderLinkState::Connecting,
-        );
+        let mut policy =
+            NotificationPolicy::new(switches(&[]), true, &RecorderLinkState::Connecting);
 
         assert!(
             policy
@@ -1130,11 +1155,8 @@ mod tests {
         // combination has a new problem, and a policy that only remembered
         // "already told them once" would leave them with a control that silently
         // does nothing.
-        let mut policy = NotificationPolicy::new(
-            NotificationSettings::default(),
-            true,
-            &RecorderLinkState::Connecting,
-        );
+        let mut policy =
+            NotificationPolicy::new(switches(&[]), true, &RecorderLinkState::Connecting);
 
         policy
             .decide(&RecorderLinkEvent::HotkeysUnavailable {
@@ -1161,11 +1183,11 @@ mod tests {
         // walks `ALL` and covers this too; it is asserted here as well because
         // that test would still pass if this category never produced a
         // notification at all.
-        let settings = NotificationSettings {
-            hotkey_unavailable: false,
-            ..NotificationSettings::default()
-        };
-        let mut policy = NotificationPolicy::new(settings, true, &RecorderLinkState::Connecting);
+        let mut policy = NotificationPolicy::new(
+            switches(&[NotificationCategory::HotkeyUnavailable]),
+            true,
+            &RecorderLinkState::Connecting,
+        );
 
         assert!(
             policy
@@ -1178,7 +1200,38 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_saved_while_clipped_is_running_reaches_the_very_next_notification() {
+        // The half a settings screen depends on. The thread that decides holds
+        // the policy and the thread that saves is the window's, so a switch that
+        // only took effect at the next launch would be a control that does
+        // nothing for the rest of the session (AGENTS.md section 27).
+        let preferences = NotificationPreferences::default();
+        let mut policy =
+            NotificationPolicy::new(preferences.clone(), true, &RecorderLinkState::Connecting);
+
+        assert!(
+            policy
+                .decide(&RecorderLinkEvent::RecordingInterrupted(active("r-1")))
+                .is_some(),
+            "everything is on until somebody says otherwise"
+        );
+
+        // What `apply_settings` answers with, adopted the way
+        // `crate::main::apply_recorder_settings` adopts it.
+        preferences.adopt(&answered(&[NotificationCategory::RecordingInterrupted]));
+
+        assert_eq!(
+            policy.decide(&RecorderLinkEvent::RecordingInterrupted(active("r-2"))),
+            None,
+            "the switch was saved and the notification arrived anyway",
+        );
+    }
+
+    #[test]
     fn the_settings_default_to_telling_the_user_everything() {
+        // Before the recorder has answered — and for a recorder too old to have
+        // these settings at all — every category is on. Silence would be the
+        // wrong way to fail: all four are failures.
         let settings = NotificationSettings::default();
         for category in NotificationCategory::ALL {
             assert!(
@@ -1187,57 +1240,79 @@ mod tests {
                 category.key()
             );
         }
+
+        assert_eq!(
+            NotificationPreferences::default().current(),
+            settings,
+            "a window that has not asked yet must not have silenced anything",
+        );
     }
 
     #[test]
-    fn a_settings_file_missing_a_category_gets_the_default_for_it() {
-        // The additive half of the compatibility policy: a file written before a
-        // category existed must not silence it.
-        let settings = NotificationSettings::from_json(r#"{"version":1,"recording_failed":false}"#)
-            .expect("a partial file is a valid file");
+    fn a_category_the_recorder_did_not_send_is_left_on_rather_than_read_as_off() {
+        // A recorder older than this window has no such setting, and a window
+        // that read its silence as "switched off" would stop telling somebody
+        // that nothing is being recorded.
+        let mut view = answered(&NotificationCategory::ALL);
+        view.settings
+            .retain(|entry| entry.key != NotificationCategory::RecorderUnavailable.key());
 
-        assert!(!settings.allows(NotificationCategory::RecordingFailed));
-        assert!(settings.allows(NotificationCategory::RecordingInterrupted));
-        assert!(settings.allows(NotificationCategory::RecorderUnavailable));
+        let settings = NotificationSettings::from_view(&view);
+
+        assert!(
+            settings.allows(NotificationCategory::RecorderUnavailable),
+            "a category nothing was said about must not be silenced",
+        );
+        assert!(
+            !settings.allows(NotificationCategory::RecordingFailed),
+            "and the categories that were sent are still read",
+        );
     }
 
     #[test]
-    fn a_field_this_build_has_never_heard_of_is_ignored_rather_than_fatal() {
-        let settings = NotificationSettings::from_json(
-            r#"{"version":1,"recording_failed":false,"replay_saved":true}"#,
-        )
-        .expect("an unknown field must not cost the whole file");
+    fn every_category_is_read_from_the_key_the_settings_file_spells_it_with() {
+        // The join between the two halves of this: the recorder writes these
+        // keys into `settings.json` and this window matches on them. A rename on
+        // either side silently switches a category back on, which is why they
+        // are held equal by `settingsConformance.test.ts` as well.
+        for category in NotificationCategory::ALL {
+            let settings = NotificationSettings::from_view(&answered(&[category]));
 
-        assert!(!settings.allows(NotificationCategory::RecordingFailed));
+            assert!(
+                !settings.allows(category),
+                "{} was switched off in the recorder's answer and read as on",
+                category.key(),
+            );
+            for other in NotificationCategory::ALL {
+                if other != category {
+                    assert!(
+                        settings.allows(other),
+                        "{} was switched off by {}'s entry",
+                        other.key(),
+                        category.key(),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn a_settings_file_from_a_later_clipped_is_refused_rather_than_guessed_at() {
-        let error = NotificationSettings::from_json(r#"{"version":2,"recording_failed":false}"#)
-            .expect_err("version 2 may mean something else by these fields");
+    fn a_value_neither_side_can_make_sense_of_leaves_the_category_on() {
+        // The same rule as an absent key, and the same reason. `false` is the
+        // only thing that silences anything.
+        let mut view = answered(&[]);
+        for entry in &mut view.settings {
+            entry.value = "off".to_owned();
+        }
 
-        assert!(error.contains("version 2"), "{error}");
-        assert!(error.contains("version 1"), "{error}");
-    }
-
-    #[test]
-    fn a_settings_file_a_windows_editor_saved_is_still_a_settings_file() {
-        // Notepad and Windows PowerShell's `Out-File -Encoding utf8` both write
-        // a byte-order mark, which is not JSON. The first end-to-end run of this
-        // feature switched a category off exactly that way, and the notification
-        // arrived anyway.
-        let settings =
-            NotificationSettings::from_json("\u{feff}{\"version\":1,\"recording_failed\":false}")
-                .expect("a byte-order mark must not cost the whole file");
-
-        assert!(!settings.allows(NotificationCategory::RecordingFailed));
-    }
-
-    #[test]
-    fn a_settings_file_that_is_not_json_is_refused_rather_than_ignored() {
-        let error = NotificationSettings::from_json("recording_failed = false")
-            .expect_err("an INI file is not a settings file");
-        assert!(!error.is_empty(), "the user has to be told what is wrong");
+        let settings = NotificationSettings::from_view(&view);
+        for category in NotificationCategory::ALL {
+            assert!(
+                settings.allows(category),
+                "{} was silenced by a value that is not `false`",
+                category.key(),
+            );
+        }
     }
 
     #[test]

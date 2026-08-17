@@ -90,6 +90,37 @@ const SETTINGS: SettingsView = {
       value: String.raw`C:\Users\alex\Videos\Clipped`,
       accepted: 'a folder on this machine, such as D:\\Clips',
     }),
+    // The settings this window itself acts on, and the only booleans on the
+    // screen: a closed set of `true` and `false` is what makes one a switch
+    // rather than a two-option dropdown (issue #252).
+    entry({
+      key: 'recording_failed',
+      label: 'A recording failed',
+      value: 'true',
+      choices: ['true', 'false'],
+      accepted: 'true or false',
+    }),
+    entry({
+      key: 'recording_interrupted',
+      label: 'A recording was interrupted',
+      value: 'true',
+      choices: ['true', 'false'],
+      accepted: 'true or false',
+    }),
+    entry({
+      key: 'recorder_unavailable',
+      label: 'The recorder cannot be reached',
+      value: 'true',
+      choices: ['true', 'false'],
+      accepted: 'true or false',
+    }),
+    entry({
+      key: 'hotkey_unavailable',
+      label: 'A hotkey is unavailable',
+      value: 'true',
+      choices: ['true', 'false'],
+      accepted: 'true or false',
+    }),
   ],
 };
 
@@ -550,7 +581,7 @@ describe('the Settings screen', () => {
     ['Audio', 'A named playback device', /Windows is playing through/, /#316/],
     ['Storage', 'Maximum usage, minimum free space, maximum age', /by hand/, /#95/],
     ['Storage', 'Per-game settings', /section per game/, /#63/],
-    ['Notifications', 'A recording failed', /went wrong/, /#252/],
+    ['Notifications', 'Replay saved, bookmark added, screenshot taken', /nothing reports/, /#110/],
     ['Startup', 'Start Clipped’s window when I sign in', /the switch above/, /#308/],
   ])(
     'says, in %s, how "%s" is set today and what it is waiting for',
@@ -564,6 +595,76 @@ describe('the Settings screen', () => {
       expect(needsCell).toMatch(needs);
     },
   );
+});
+
+/*
+ * The notification switches (issue #252). They were four rows of an account
+ * until this issue — "edit this key in this other file, by hand" — because they
+ * lived in a second store this window kept for itself. They are settings now, so
+ * what has to be true of them is what has to be true of any control: it draws
+ * what the recorder said, and moving it sends something.
+ *
+ * The half these cases cannot reach is whether the switch then reaches the code
+ * that decides about a toast. That is in Rust, in this window's own process, and
+ * `notification_policy.rs` asserts it there.
+ */
+describe('the notification switches', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('draws a switch rather than a list of the words the file spells it with', async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await openSection(user, 'Notifications');
+
+    const toggle = await screen.findByLabelText('A recording failed');
+
+    expect(toggle).toBeChecked();
+    expect(toggle).toHaveProperty('type', 'checkbox');
+    // Every category, so that one the recorder sends and this screen never
+    // lists is a failure here rather than a switch nobody can find.
+    for (const label of [
+      'A recording was interrupted',
+      'The recorder cannot be reached',
+      'A hotkey is unavailable',
+    ]) {
+      expect(await screen.findByLabelText(label)).toBeChecked();
+    }
+  });
+
+  it('sends the switch somebody turned off to the recorder', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      applySettings: () => settingsWith('recording_failed', { value: 'false', overridden: true }),
+    });
+
+    await openSection(user, 'Notifications');
+    await user.click(await screen.findByLabelText('A recording failed'));
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(saved(runtime)).toEqual([{ recording_failed: 'false' }]);
+    });
+
+    // And it redraws from what came back, rather than from what it sent.
+    expect(await screen.findByLabelText('A recording failed')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Reset A recording failed' })).toBeVisible();
+  });
+
+  it('draws a category the recorder says is off as off', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      recorderSettings: () =>
+        settingsWith('hotkey_unavailable', { value: 'false', overridden: true }),
+    });
+
+    await openSection(user, 'Notifications');
+
+    expect(await screen.findByLabelText('A hotkey is unavailable')).not.toBeChecked();
+    expect(screen.getByLabelText('A recording failed')).toBeChecked();
+  });
 });
 
 /*

@@ -1079,6 +1079,118 @@ fn a_setting_this_build_has_never_heard_of_survives_being_read_and_saved() {
     assert!(saved.contains("\"framerate\": 90"));
 }
 
+// ------------------------------------------------------- the notifications
+
+#[test]
+fn a_notification_switched_off_survives_the_file() {
+    // Issue #252: the switches were a second store in a second directory with a
+    // version of their own, and they are a section of this file now. What has to
+    // hold is what holds for every other setting — it is saved, it is read back,
+    // and it does not disturb the recording settings beside it.
+    let directory = TestDirectory::new("notifications");
+    let mut store = ConfigurationStore::at(directory.file());
+
+    let mut configuration = store.current().clone();
+    let mut notifications = configuration.notifications().clone();
+    notifications.set(NotificationCategory::RecorderUnavailable, Some(false));
+    configuration.set_notifications(notifications);
+    configuration.set_global(framerate(90));
+    store.store(configuration).expect("saving works");
+
+    let saved = fs::read_to_string(directory.file()).expect("the file reads");
+    assert!(
+        saved.contains("\"notifications\"") && saved.contains("\"recorder_unavailable\": false"),
+        "the switch is not in the settings file: {saved}",
+    );
+
+    let mut read = ConfigurationStore::at(directory.file());
+    read.load().expect("what this build wrote, it reads");
+    let notifications = read.current().notifications();
+    assert!(!notifications.is_enabled(NotificationCategory::RecorderUnavailable));
+    assert_eq!(
+        notifications.configured(NotificationCategory::RecorderUnavailable),
+        Some(false),
+        "a switch somebody moved is one Reset is offered for",
+    );
+    for category in NotificationCategory::ALL {
+        if category != NotificationCategory::RecorderUnavailable {
+            assert!(
+                notifications.is_enabled(category),
+                "switching one category off silenced {category}",
+            );
+        }
+    }
+    assert_eq!(read.current().resolve_global().framerate().get(), 90);
+}
+
+#[test]
+fn a_settings_file_with_no_notifications_section_interrupts_about_everything() {
+    // The shipped default, and the shape of every file written before this
+    // section existed. Silence would be the wrong way to read one: all four
+    // categories are failures.
+    let directory = TestDirectory::new("notifications-absent");
+    fs::write(
+        directory.file(),
+        r#"{ "version": 1, "global": { "framerate": 120 } }"#,
+    )
+    .expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store.load().expect("a file with no such section is a file");
+
+    for category in NotificationCategory::ALL {
+        assert!(store.current().notifications().is_enabled(category));
+        assert_eq!(store.current().notifications().configured(category), None);
+    }
+
+    // And saving does not grow the section, so a user who has never switched
+    // anything off does not find a paragraph saying so.
+    let current = store.current().clone();
+    store.store(current).expect("saving works");
+    let saved = fs::read_to_string(directory.file()).expect("the file reads");
+    assert!(!saved.contains("notifications"), "{saved}");
+}
+
+#[test]
+fn a_notification_key_this_build_cannot_read_is_kept_and_leaves_the_category_on() {
+    // Deliberately the opposite of what `storage` does with a value it cannot
+    // read. A limit that is ignored leaves somebody believing their library is
+    // capped; a switch that is ignored leaves them being told about a failure,
+    // which is the direction to fail in — and refusing would mean a typo here
+    // stopped the recording settings in the same file from loading.
+    let directory = TestDirectory::new("notifications-unreadable");
+    fs::write(
+        directory.file(),
+        r#"{
+  "version": 1,
+  "global": { "framerate": 120 },
+  "notifications": { "recording_failed": "no", "replay_saved": true }
+}"#,
+    )
+    .expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store
+        .load()
+        .expect("a switch this build cannot read must not cost the whole file");
+
+    assert!(
+        store
+            .current()
+            .notifications()
+            .is_enabled(NotificationCategory::RecordingFailed),
+        "a value nobody could read silenced a failure",
+    );
+    assert_eq!(store.current().resolve_global().framerate().get(), 120);
+
+    let current = store.current().clone();
+    store.store(current).expect("saving works");
+    let saved = fs::read_to_string(directory.file()).expect("the file reads");
+    for kept in ["\"no\"", "replay_saved"] {
+        assert!(saved.contains(kept), "{kept} was dropped: {saved}");
+    }
+}
+
 // -------------------------------------------------------------- the store
 
 #[test]
