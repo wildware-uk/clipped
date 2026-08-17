@@ -26,7 +26,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use clipped_library::index::{reconcile, IndexControl, IndexPace, IndexSettings};
+use clipped_library::index::{
+    list_sessions, reconcile, IndexControl, IndexPace, IndexSettings, SessionListing,
+};
 use clipped_storage::Database;
 
 fn observed_at() -> SystemTime {
@@ -224,5 +226,77 @@ fn a_saved_replay_is_still_filed_as_one_and_still_found_by_its_file() {
     assert!(
         source.is_some(),
         "the recording it was cut from was not linked"
+    );
+}
+
+#[test]
+fn a_clip_with_no_file_is_listed_rather_than_failing_the_listing() {
+    // The read path, not the SQL. Every other test here asks the database for
+    // the pathless clip's columns directly, which is exactly why nothing caught
+    // that `clips_of` read `path` into a `String`: a `NULL` there is an error
+    // in `rusqlite`, not an empty string, and it fails the whole call rather
+    // than the one clip (issue #591). A library screen then shows an error
+    // instead of a library, for a highlight the application generated itself.
+    let directory = scratch_directory("listing");
+    let mut database = Database::open(directory.join("library.db")).expect("a database");
+
+    index(&directory, &mut database);
+
+    let page = list_sessions(
+        &database,
+        &SessionListing {
+            limit: 10,
+            after: None,
+            query: None,
+        },
+    )
+    .expect(
+        "listing a sitting with a clip nothing has exported failed the whole call — a clip with \
+         no file is a clip the user made, and it must not cost them their library (AGENTS.md \
+         section 56)",
+    );
+
+    let session = page
+        .sessions
+        .first()
+        .expect("the sitting is in the listing");
+
+    // Nothing else in the sitting may be lost by tolerating the pathless clip.
+    assert_eq!(
+        session.recordings.len(),
+        1,
+        "the recording went missing from the listing"
+    );
+    assert_eq!(
+        session.clips.len(),
+        2,
+        "a clip with no file is a clip somebody made and must be listed, not filtered away: \
+         {:?}",
+        session.clips
+    );
+
+    let saved = session
+        .clips
+        .iter()
+        .find(|clip| clip.path.is_some())
+        .expect("the saved replay still carries its file");
+    assert!(
+        saved
+            .path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("saved.mkv")),
+        "the saved replay's file was not the one the sidecar named: {:?}",
+        saved.path
+    );
+
+    let highlight = session
+        .clips
+        .iter()
+        .find(|clip| clip.path.is_none())
+        .expect("the generated highlight is listed, with no file rather than no clip");
+    assert_eq!(
+        highlight.missing_since, None,
+        "a clip nothing has exported has no file to have gone, and must not be shown as one \
+         whose file was lost"
     );
 }

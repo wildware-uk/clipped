@@ -973,13 +973,16 @@ function readLibraryRecording(value: JsonValue | undefined): LibraryRecording {
 function readLibraryClip(value: JsonValue | undefined): LibraryClip {
   const clip = object(value, 'a clip');
   const what = 'a clip';
+  const path = optionalStringField(clip, 'path', what);
   const title = optionalStringField(clip, 'title', what);
   const duration = optionalNumberField(clip, 'duration_seconds', what);
   const size = optionalNumberField(clip, 'size_bytes', what);
   const missing = optionalStringField(clip, 'missing_since', what);
   return {
     clip_id: numberField(clip, 'clip_id', what),
-    path: stringField(clip, 'path', what),
+    // Kept absent rather than defaulted to '': a clip nothing has exported has
+    // no file, and an empty string is a file name a screen would try to open.
+    ...(path === undefined ? {} : { path }),
     ...(title === undefined ? {} : { title }),
     created_at: stringField(clip, 'created_at', what),
     ...(duration === undefined ? {} : { duration_seconds: duration }),

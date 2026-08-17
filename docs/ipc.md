@@ -1038,6 +1038,25 @@ file had when it was last seen, so a drive coming back needs no re-measurement â
 but a screen must not add it into a total meanwhile, because that space is not
 being used.
 
+**A clip with no file is listed too, and carries no `path` at all.** That is the
+normal state of a generated highlight: it is a range of a recording until
+somebody exports it, which is the whole point of
+`0004_clips_without_a_file.sql` and [highlights.md](highlights.md) â€” twenty
+interesting moments cost no disk and no encoder time until one is asked for. It
+is still a clip the user made, so it is carried rather than filtered out; a page
+that hid them would draw an empty clip list for a sitting full of them, and
+nothing would tell the user which of the two they were looking at.
+
+Absent `path` is **not** `missing_since`. No path is "there is no file yet";
+`missing_since` is "there was one and it has gone", and a screen that conflated
+them would tell somebody a highlight had been lost when nothing had ever been
+written. The key is absent rather than `null` or `""`, because an empty string is
+a file name a window would try to open. Before
+[#591](https://github.com/wildware-uk/clipped/issues/591) the recorder read that
+column into a non-nullable field and one unexported highlight failed the whole
+`library_sessions` call, so the Library screen showed an error instead of a
+library.
+
 **`next_cursor` is present only when a further sitting was actually found**, so
 a caller stops on its absence rather than on an empty page. The cursor is a
 keyset rather than an offset, which is what makes page four hundred cost what

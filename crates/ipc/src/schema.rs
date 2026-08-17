@@ -1029,6 +1029,32 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a clip nothing has exported yet, which has no file",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Ok(Reply::LibrarySessions {
+                    page: LibrarySessionPage {
+                        sessions: vec![LibrarySession {
+                            recordings: vec![exemplar_library_recording()],
+                            clips: vec![LibraryClip {
+                                // The state a generated highlight is in until
+                                // somebody asks for a file. It is a clip the
+                                // user made, so the frame carries it — with no
+                                // `path` key rather than a null or a blank, and
+                                // with no `missing_since`, because nothing has
+                                // gone (issue #591).
+                                path: None,
+                                missing_since: None,
+                                ..exemplar_library_clip()
+                            }],
+                            ..exemplar_library_session()
+                        }],
+                        next_cursor: None,
+                    },
+                }),
+            }),
+        ),
+        (
             "the marks on one recording's timeline",
             ServerMessage::Response(Response {
                 id: 11,
@@ -2419,10 +2445,14 @@ fn exemplar_library_recording() -> LibraryRecording {
 }
 
 /// A clip in the library, with every optional field present.
+///
+/// `path` among them, and it is optional now: a clip nothing has exported has
+/// no file, and a mirror that made the field required would refuse the frame a
+/// generated highlight arrives in (issue #591).
 fn exemplar_library_clip() -> LibraryClip {
     LibraryClip {
         clip_id: 3,
-        path: r"D:\clips\ace-on-mirage.mkv".to_owned(),
+        path: Some(r"D:\clips\ace-on-mirage.mkv".to_owned()),
         title: Some("Ace on Mirage".to_owned()),
         created_at: "2026-08-11T21:02:00+01:00".to_owned(),
         duration_seconds: Some(30.0),

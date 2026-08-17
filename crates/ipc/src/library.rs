@@ -274,8 +274,20 @@ pub struct LibraryRecording {
 pub struct LibraryClip {
     /// The index's own identifier for it.
     pub clip_id: i64,
-    /// The file.
-    pub path: String,
+    /// The file, when there is one.
+    ///
+    /// **Absent for a clip nothing has exported yet**, which is the normal
+    /// state of a generated highlight: it is a range of a recording until
+    /// somebody asks for a file, and asking is what makes one. A window has to
+    /// draw that clip — it is a clip the user made — with whatever it offers
+    /// instead of "reveal in Explorer".
+    ///
+    /// Absent is **not** [`Self::missing_since`]. No path is "there is no file
+    /// yet"; `missing_since` is "there was one and it has gone". A screen that
+    /// conflated them would tell somebody a highlight had been lost when
+    /// nothing had ever been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// What it is called, if anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -444,7 +456,7 @@ mod tests {
                 }],
                 clips: vec![LibraryClip {
                     clip_id: 3,
-                    path: r"D:\clips\ace.mkv".to_owned(),
+                    path: Some(r"D:\clips\ace.mkv".to_owned()),
                     title: Some("Ace on Mirage".to_owned()),
                     created_at: "2026-08-11T21:02:00+01:00".to_owned(),
                     duration_seconds: Some(30.0),
