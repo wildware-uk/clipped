@@ -499,18 +499,43 @@ refuses to call it a game.
 
 **Verified against this machine**, by `examples/launchers_probe.rs`, which asks
 every launcher about every running process — or about one path, so that an
-answer costs nobody a game launch:
+answer costs nobody a game launch. All six launchers are installed on it, and
+every one of them now reaches a catalogue entry at the strongest rung:
 
 ```text
-portal2.exe      — Steam 620              → portal-2
-LeagueClient.exe — Riot league_of_legends → no catalogue entry names it
+portal2.exe              — Steam      620                                → portal-2                        (LauncherIdentity)
+League of Legends.exe    — Riot       league_of_legends                  → league-of-legends               (LauncherIdentity)
+FortniteBootstrapper.exe — Epic       Fortnite                           → fortnite                        (LauncherIdentity)
+Overwatch.exe            — BattleNet  prometheus                         → overwatch-2                     (LauncherIdentity)
+Trackmania.exe           — Ubisoft    5595                               → trackmania                      (LauncherIdentity)
+gamelaunchhelper.exe     — Xbox       38985CA0.COREBase_5bkah9njm3e9g    → call-of-duty                    (LauncherIdentity)
+gamelaunchhelper.exe     — Xbox       Microsoft.Limitless_8wekyb3d8bbwe  → microsoft-flight-simulator-2024 (LauncherIdentity)
+LeagueClient.exe         — Riot       league_of_legends                  → no catalogue entry names it
 ```
 
-The first line is the whole feature working from disk to game identity: Steam's
-own installation, a real path on a real drive, and the shipped catalogue placing
-it by the identity rather than by the executable's name. The second is exactly
-what [#514] describes — an identity produced with nothing to match it — which is
-what makes that decision the one blocking the other five launchers.
+The strength is printed because *placed by the catalogue* and *placed by the
+launcher rung* are different answers, and reading the first as the second is
+what [#514] was mis-diagnosed as: an entry whose executable name the catalogue
+already knows is placed at `ExecutableName` whether or not the identity matched
+anything, so the line looks the same either way without it.
+
+The three Xbox lines are the clearest case for the rung existing at all. Every
+packaged game declares `gamelaunchhelper.exe` as the program the Store starts,
+so on the name alone three different games are one process — see [Microsoft
+Store packaged apps](#microsoft-store-packaged-apps-and-what-they-cost) below.
+The last line is [#514]'s other half, still true and still deliberate: Riot
+claims the client, and the catalogue refuses to call it a game.
+
+Every identifier above was read off a real installation on this machine rather
+than recalled. What keeps that from silently rotting is a guard in
+`src/launcher/mod.rs`: it takes each launcher a provider here can produce,
+builds the candidate that provider would hand over, and requires
+`Catalogue::match_process` to answer with an entry at `LauncherIdentity` — or
+requires `PROVIDERS` to record why that launcher deliberately has none. It reads
+the `pub mod` declarations at the top of that file for its list, so adding a
+provider fails it until a catalogue entry arrives with it. Every test before it
+asserted that an identity was *produced*, and none that anything could *consume*
+one, which is how five providers were merged with nothing to match them.
 
 [#522]: https://github.com/wildware-uk/clipped/issues/522
 [#514]: https://github.com/wildware-uk/clipped/issues/514
@@ -779,6 +804,81 @@ cargo run -p clipped-game-detection --example steam_probe -- cs2.exe "B:\SteamLi
   wants to notice a game installed since start-up reads it again, which is a few
   dozen small files.
 
+### Epic
+
+Epic is the only launcher here that writes one file per installation and puts
+everything a provider needs in it. `%PROGRAMDATA%\Epic\EpicGamesLauncher\Data\
+Manifests` holds one `.item` of JSON per installed application:
+
+```text
+AppName          = Fortnite                     ─── the launcher identity
+DisplayName      = Fortnite
+InstallLocation  = B:\Epic Games\Fortnite
+LaunchExecutable = FortniteGame/Binaries/Win64/FortniteBootstrapper.exe
+```
+
+`AppName` is what reaches the catalogue, and it is not a name: it is `Fortnite`
+for Fortnite and `8769e24080ea413b8ebca3f1b8c50951` for Grand Theft Auto V
+Enhanced on the same machine. Both shapes are in that directory, which is why a
+catalogue entry copies the value rather than deriving it from the game's title.
+
+#### A directory does not identify an application
+
+This is the one thing about Epic worth knowing before writing an entry, and it
+is the finding that [#459] cost. **Several applications share one
+`InstallLocation`**, because Epic installs plugins and content packs *into* the
+thing they extend and gives each its own manifest. Of the ten manifests on the
+machine this was read from, seven shared a directory with another:
+
+```text
+B:\Epic Games\UE_5.8    ←  UE_5.8, QuixelBridge_5.8, FabPlugin_5.8
+B:\Epic Games\UE_5.3    ←  QuixelBridge_5.3, PluginDownloader_5.3
+B:\Epic Games\Fortnite  ←  Fortnite, aa31f9e94e844b299ca757d1d0b97a09
+```
+
+Depth cannot break that tie — the directories are the same directory — so
+`LaunchExecutable` does: the manifest Epic itself would start this program from
+is the one that owns it. **And when that still ties, or matches nothing, the
+answer is no launcher identity at all.** An arbitrary choice would hand the
+catalogue an identity for the wrong application and the catalogue believes an
+identity above every other rung, so a wrong answer here is a session filed under
+a game the user was not playing.
+
+#### What that costs Fortnite, measured
+
+The consequence is visible on the shipped catalogue entry and is worth stating
+rather than discovering:
+
+```text
+FortniteBootstrapper.exe            — Epic Fortnite → fortnite (LauncherIdentity)
+FortniteClient-Win64-Shipping.exe   — not claimed by any launcher
+```
+
+`aa31f9e94e844b299ca757d1d0b97a09` is the `Fortnite_StWContent` pack, installed
+into Fortnite's own directory and naming no `LaunchExecutable`. So Epic refuses
+the directory for every program in it *except* the bootstrapper the `Fortnite`
+manifest names. The game's own process reaches the catalogue by name, exactly as
+it did before Epic had a provider — which is the property that makes refusing a
+tie safe rather than a regression.
+
+#### Limitations
+
+- **An entitlement is not an installation.** A manifest Epic wrote for a game
+  that is owned and not installed carries no `InstallLocation`, and is skipped
+  rather than reported: a machine's Epic library is full of them and calling
+  each one a fault would put a warning on every machine with the launcher on it.
+- **Applications are not games**, the same as Steam. Unreal Engine, Quixel
+  Bridge, the Fab plugin and a plugin downloader are four of the ten manifests
+  above. Deciding which are worth recording is the catalogue's job.
+- **A game moved after installation is claimed at its old path** until Epic
+  rewrites the manifest, and a game installed after the recorder started is not
+  in the snapshot at all (see [Who asks them, and when](#who-asks-them-and-when)).
+- **Nothing reads `LaunchExecutable` as a list of the game's processes.** It is
+  a tie-breaker and only a tie-breaker; the anti-cheat and crash handler beside
+  a game are still that game.
+
+[#459]: https://github.com/wildware-uk/clipped/issues/459
+
 ### Ubisoft Connect
 
 Ubisoft records nothing in a file. It keeps one registry subkey per installed
@@ -860,6 +960,75 @@ wrong package — including the `_ww_` one and the one on the other drive.
 `WindowsApps` is not readable by an ordinary process, so the probe checks the two
 things that would silently produce nothing rather than walking executables the
 way `ubisoft_probe` does.
+
+#### Microsoft Store packaged apps, and what they cost
+
+An Xbox game is an MSIX package rather than a directory of files somebody chose
+the location of, and that changes four things detection has to know about. All
+four were measured on the machine described above, which has five packages from
+the Xbox app on it.
+
+**`WindowsApps` cannot be walked.** `C:\Program Files\WindowsApps` refuses
+enumeration to an unelevated process — the same process can read *inside* a
+package directory it names, but cannot list the parent to find one. A provider
+that scanned for games would therefore find none, which is the second reason the
+gaming services registry is the source and not the disk.
+
+**Every packaged game runs the same program.** The Store starts a package
+through the executable its manifest declares, and every game package here
+declares the same one:
+
+```text
+38985CA0.COREBase_5bkah9njm3e9g                gamelaunchhelper.exe   Call of Duty
+Microsoft.Limitless_8wekyb3d8bbwe              gamelaunchhelper.exe   Microsoft Flight Simulator 2024
+BethesdaSoftworks.ProjectAltar_3275kfvn8vcwc   gamelaunchhelper.exe   Oblivion Remastered
+```
+
+So on the executable name alone, three different games are one process, and the
+catalogue's `ExecutableName` rung cannot tell them apart at all. **This is the
+launcher rung's clearest case**: it is not an improvement on the name for Xbox
+titles, it is the only thing that works. It is also why the shipped Xbox entries
+carry an `app_id` and a game-specific executable that the rung never consults —
+the executable is there for the case where the package is claimed by nothing.
+
+**One package has two paths, and the process reports the one the registry does
+not.** A package installed to another drive is reachable under both, because
+Windows leaves a reparse point where the package would have been:
+
+```text
+C:\Program Files\WindowsApps\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g
+    ──▶ B:\WindowsApps\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g
+```
+
+The gaming services `Root` value holds whichever spelling that package was
+recorded with — three of the five here name the `B:` target and one names the
+`C:` reparse point — while all fourteen packaged processes running on the
+machine report their image path under `C:\Program Files\WindowsApps`, and none
+under any other spelling. Paths are compared as text throughout this crate, so
+**an Xbox game installed to a second drive is claimed at a path no running
+process reports**, and is identified by the catalogue's name and path rungs
+instead:
+
+```text
+B:\WindowsApps\…\cod.exe                     — Xbox 38985CA0.COREBase_5bkah9njm3e9g → call-of-duty
+C:\Program Files\WindowsApps\…\cod.exe       — not claimed
+```
+
+Both lines are the same file. This is a limitation of the provider rather than
+of the catalogue entries above, whose identifiers are correct either way, and it
+is [#616].
+
+**Nothing here has been captured yet.** Every Xbox entry says
+`compatibility = "unknown"`, which is the same thing every other entry in the
+file says and for the same reason: `compatibility` records what somebody ran a
+capture against and wrote down, and nobody has. A packaged game is worth
+verifying separately from an ordinary one rather than assumed to behave like it,
+because the process the watcher first sees is a Store shim rather than the game
+and the window that eventually appears belongs to a different process — but what
+that costs capture is a measurement nobody has taken, and guessing at it here
+would be the prediction rule 2 of `games.toml` exists to forbid.
+
+[#616]: https://github.com/wildware-uk/clipped/issues/616
 
 ### Battle.net
 

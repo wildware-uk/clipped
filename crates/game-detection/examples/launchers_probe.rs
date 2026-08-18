@@ -109,6 +109,13 @@ fn main() {
 /// Returns whether it was claimed and whether the catalogue placed it, which is
 /// the difference this probe exists to show: a claim nothing can match is an
 /// identity with no `app_id` behind it.
+///
+/// The strength is printed with the game because "the catalogue placed it" is
+/// not the same answer as "the launcher rung fired", and reading the first as
+/// the second is how this issue was mis-diagnosed. An entry whose executable
+/// name the catalogue happens to know is placed at `ExecutableName` whether or
+/// not the identity matched anything, so without the strength this line looks
+/// identical either way.
 fn report(
     launchers: &clipped_game_detection::launcher::Launchers,
     catalogue: &clipped_game_detection::catalogue::Catalogue,
@@ -121,15 +128,25 @@ fn report(
     };
 
     let outcome = catalogue.match_process(&candidate);
-    let entry = outcome
-        .entry()
-        .map(|entry| entry.game_id().as_str().to_owned());
+    let placed = match &outcome {
+        clipped_game_detection::catalogue::Match::One { entry, strength } => {
+            Some(format!("{} ({strength:?})", entry.game_id().as_str()))
+        }
+        clipped_game_detection::catalogue::Match::Ambiguous { entries, strength } => Some(format!(
+            "ambiguous between {:?} ({strength:?})",
+            entries
+                .iter()
+                .map(|entry| entry.game_id().as_str())
+                .collect::<Vec<_>>()
+        )),
+        clipped_game_detection::catalogue::Match::None => None,
+    };
 
     println!(
         "  {name} — {kind:?} {app_id} → {}",
-        entry
+        placed
             .clone()
             .unwrap_or_else(|| "no catalogue entry names it".to_owned())
     );
-    (true, entry.is_some())
+    (true, placed.is_some())
 }
