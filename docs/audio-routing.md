@@ -1311,13 +1311,22 @@ cargo test -p clipped-audio
   child the captured tree spawns *after* the capture is open, 1373 Hz from an
   unrelated process — and the recording has to contain the first as its
   strongest frequency, the second at least eight times down, and nothing at all
-  during the window before the child started. Run it with:
+  during the window before the child started.
+
+  Beside it, `mid_recording_joiner.rs` asks the same question of a tree that is
+  **already making a noise**: a third tone, 1699 Hz, from a second child started
+  a second into the run, with both sides of the tree open from one `open_pair`.
+  It measures when that tone reaches the tree's track, that it does not also
+  reach the complement's, and what the join costs the audio already flowing —
+  which is where the click above was found. It is `#[ignore]`d and prints its
+  measurements. Run them with:
 
   ```text
   cargo test -p clipped-process-tree-audio
+  cargo test -p clipped-process-tree-audio --test mid_recording_joiner -- --ignored --nocapture
   ```
 
-  `CLIPPED_SKIP_AUDIO` skips it; `CLIPPED_REQUIRE_AUDIO` turns the skip into a
+  `CLIPPED_SKIP_AUDIO` skips them; `CLIPPED_REQUIRE_AUDIO` turns the skip into a
   failure.
 - **What is not tested automatically**, and is the honest gap in issue #20: no
   test plays a known waveform *into* a microphone. Doing that needs a virtual
@@ -1429,10 +1438,28 @@ into failures on a machine that is supposed to have one.
   a process the game starts afterwards is included without the client being
   activated again. That is what
   `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` is documented to do, and
-  the isolation test asserts it by starting the process that makes the noise
-  only after the capture is open — but it has been seen on one build of Windows,
-  and a build where it does not hold would need the capture to activate again
-  whenever the tree gains a member.
+  it is now measured rather than assumed: `mid_recording_joiner.rs` starts a
+  process in a tree that is **already audible** and times how long its tone takes
+  to appear on that tree's track. **50–75 ms** from the moment the root was asked
+  to start it, which includes starting the process and opening its render
+  stream, and 30–45 ms from the moment it said the stream was open. It arrives
+  on that track *only*: on the complement's it measures 0.00016 against 0.029,
+  so the audio moves rather than doubling. Still one build of Windows (11 Pro
+  26200), and a build where it does not hold would need the capture to activate
+  again whenever the tree gains a member.
+
+  **The join is not free**, which is the half of
+  [issue #27](https://github.com/wildware-uk/clipped/issues/27)'s second
+  acceptance criterion that is not met. Each one costs the track a single 25 ms
+  window: usually a discontinuity in the waveform at full amplitude — audibly a
+  click — and occasionally an actual hole, once 990 frames the audio engine
+  delivered nothing for. It belongs to whichever tap **gained** a stream: a
+  client starting outside the tree leaves the tree's track untouched and puts
+  the same click in the complement's, which means every application that starts
+  playing costs one click on the other-system-audio track. Nothing flags it —
+  `CaptureStats::discontinuities` stays at zero through all of them.
+  [Issue #626](https://github.com/wildware-uk/clipped/issues/626) is the defect,
+  and the test pins its size so it cannot grow unnoticed.
 - **A process-scoped client reports performance-counter positions.** Measured on
   Windows 11 build 26200, where a silent tree produced exactly its sample rate
   in frames per second with no silence synthesised, which only happens if the

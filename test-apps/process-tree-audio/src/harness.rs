@@ -22,6 +22,15 @@
 //! # Ok::<(), String>(())
 //! ```
 //!
+//! # Skipping
+//!
+//! Every test here needs a machine that can play a sound, and every one of them
+//! makes one. [`suppressed`] and [`skipped`] are the two environment variables
+//! that decide what happens on a machine that cannot, or that has been asked
+//! for quiet — they live here rather than in a test file because there is more
+//! than one test file and a second copy of a skip is a skip that stops matching
+//! (AGENTS.md section 55).
+//!
 //! # Ownership
 //!
 //! [`ToneSubject`] owns the process and its pipes. [`Drop`] closes standard
@@ -123,7 +132,35 @@ impl ToneSubject {
     /// A sentence saying why there is no child playing anything, which for a
     /// machine that cannot render a tone is a reason to skip.
     pub fn spawn_child(&mut self, patience: Duration) -> Result<(u32, PlayingTone), String> {
-        self.send("spawn")?;
+        self.request_child("spawn", patience)
+    }
+
+    /// Asks a parent to start another child, playing `frequency`.
+    ///
+    /// The same thing as [`spawn_child`](Self::spawn_child) with the tone
+    /// named, and a parent takes as many as it is sent. It is what a test asks
+    /// for when a tree is **already** making a noise and something new has to
+    /// join it: the joiner's audio can only be found in a track that already
+    /// holds its sibling's if the two are at different frequencies.
+    ///
+    /// # Errors
+    ///
+    /// [`spawn_child`](Self::spawn_child)'s.
+    pub fn spawn_child_playing(
+        &mut self,
+        frequency: f32,
+        patience: Duration,
+    ) -> Result<(u32, PlayingTone), String> {
+        self.request_child(&format!("spawn {frequency}"), patience)
+    }
+
+    /// Sends one spawn command and waits for the child it produces.
+    fn request_child(
+        &mut self,
+        command: &str,
+        patience: Duration,
+    ) -> Result<(u32, PlayingTone), String> {
+        self.send(command)?;
 
         let deadline = Instant::now() + patience;
         loop {
@@ -205,6 +242,65 @@ fn field<'line>(line: &'line str, name: &str) -> Option<&'line str> {
         .filter_map(|part| part.split_once('='))
         .find(|(key, _)| *key == name)
         .map(|(_, value)| value)
+}
+
+/// The environment variable that turns "this machine cannot do this" from a
+/// skip into a failure.
+const REQUIRE_AUDIO: &str = "CLIPPED_REQUIRE_AUDIO";
+
+/// The environment variable that asks the tests which make a noise not to.
+const SKIP_AUDIO: &str = "CLIPPED_SKIP_AUDIO";
+
+/// Whether `name` is set to anything at all.
+fn is_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// Whether the caller should skip because the machine has been asked for quiet.
+///
+/// Consulted before anything is started, which is the difference between this
+/// and [`skipped`]: by the time a test has discovered it cannot run, it has
+/// already made whatever noise it was going to make.
+///
+/// # Panics
+///
+/// When `CLIPPED_SKIP_AUDIO` and `CLIPPED_REQUIRE_AUDIO` are both set. One says
+/// these tests must not run and the other says they must not be skipped; there
+/// is no behaviour that satisfies both, so neither is guessed at.
+#[must_use]
+pub fn suppressed() -> bool {
+    if !is_set(SKIP_AUDIO) {
+        return false;
+    }
+    assert!(
+        !is_set(REQUIRE_AUDIO),
+        "{SKIP_AUDIO} and {REQUIRE_AUDIO} are both set. One says these tests must not run and \
+         the other says they must not be skipped; there is no behaviour that satisfies both, so \
+         neither is being guessed at."
+    );
+    skipped(&format!("{SKIP_AUDIO} is set"));
+    true
+}
+
+/// Reports that the test could not run here.
+///
+/// Written through `std::io::stderr()` rather than with `eprintln!` because
+/// libtest captures the macros, and a skip nobody can see is how a test quietly
+/// stops testing anything.
+///
+/// # Panics
+///
+/// When `CLIPPED_REQUIRE_AUDIO` is set, which is what a run whose numbers are
+/// being recorded should use: a test that decided for itself it could not run
+/// reads as a pass, and this is the only thing that stops it.
+pub fn skipped(reason: &str) {
+    use std::io::Write as _;
+
+    assert!(
+        !is_set(REQUIRE_AUDIO),
+        "{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}"
+    );
+    let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
 }
 
 /// What a `role=player` line says is being played.

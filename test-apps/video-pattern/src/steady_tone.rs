@@ -70,6 +70,23 @@ pub const FREQUENCY: f32 = 997.0;
 /// — are the second and third harmonics of 440 Hz, which is exactly the trap.
 pub const SECOND_FREQUENCY: f32 = 1373.0;
 
+/// A third tone, for a source that arrives while a measurement is running.
+///
+/// 1699 Hz, and prime like the other two, so it is neither a harmonic nor a
+/// subharmonic of [`FREQUENCY`] or [`SECOND_FREQUENCY`] and is not a musical
+/// note either. Three tones have to be mutually unrelated for the reason two
+/// do: every assertion made with them is either "this tone is here" or "this
+/// tone is not", and a frequency that was a harmonic of one of the others would
+/// put energy in the bin being measured for a reason that has nothing to do
+/// with which process played it.
+///
+/// `test-apps/process-tree-audio/tests/mid_recording_joiner.rs` gives this one
+/// to the process that joins a captured tree *after* the capture is running, so
+/// that its tone can be told apart both from the sibling that was already
+/// playing ([`FREQUENCY`]) and from the tree next door
+/// ([`SECOND_FREQUENCY`]).
+pub const THIRD_FREQUENCY: f32 = 1699.0;
+
 /// The peak amplitude of a rendered tone, as a fraction of full scale.
 ///
 /// About −28 dBFS. A Goertzel filter finds a tone far below this; the volume is

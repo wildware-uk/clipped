@@ -232,10 +232,29 @@ applications and asks what landed on each of its tracks:
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both. Also **where the tracks end** — within a packet of the picture, which nothing had measured against a produced recording before [#320](https://github.com/wildware-uk/clipped/issues/320) |
 
-`test-apps/process-tree-audio` has one of its own,
-`tests/process_loopback_isolation.rs`, which asks a narrower question with no
-recording involved: that a capture scoped to a *parent* picks up a tone played by
-a child it started afterwards, and not one played by an unrelated tree.
+`test-apps/process-tree-audio` has two of its own, which ask narrower questions
+with no recording involved:
+
+| Test                              | What it decides                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `process_loopback_isolation.rs`   | That a capture scoped to a *parent* picks up a tone played by a child it started afterwards, and not one played by an unrelated tree                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `mid_recording_joiner.rs`         | Issue [#27](https://github.com/wildware-uk/clipped/issues/27)'s second acceptance criterion, against a tree that is **already audible**: that a process joining it mid-recording is heard on the game's track within a bounded time, that it is *not* also on the complement's — both sides are opened from one `open_pair` — and what the join costs the audio that was already flowing. It is what found [#626](https://github.com/wildware-uk/clipped/issues/626), the click every join puts in the track of whichever tap gained the stream, and it pins its size |
+
+Both need an output endpoint and a Windows that can scope a capture to a
+process. The first runs by default; the second is `#[ignore]`d, because it takes
+four seconds and its answer is a set of numbers somebody should read rather than
+a green tick:
+
+```text
+cargo test -p clipped-process-tree-audio
+cargo test -p clipped-process-tree-audio --test mid_recording_joiner -- --ignored --nocapture
+```
+
+`CLIPPED_SKIP_AUDIO` skips them; `CLIPPED_REQUIRE_AUDIO` turns any skip into a
+failure, which is what a run whose numbers are being recorded should use.
+`--nocapture` is not optional on the second one in practice: it prints the
+arrival, the continuity and what each track held, and those measurements are the
+point of it.
 
 ## The end-to-end recorder tests
 
@@ -954,7 +973,11 @@ AGENTS.md section 26 names four test applications. **Three exist.**
 plays nothing and a child that plays a tone, so that scoping can be proved
 against a known shape rather than against Discord. Its
 `tests/process_loopback_isolation.rs` starts it, records it and analyses the
-result, with nobody watching.
+result, with nobody watching; `tests/mid_recording_joiner.rs` does the same for a
+tree that gains a second noisy member while the capture is running, which is
+[issue #27](https://github.com/wildware-uk/clipped/issues/27)'s second criterion.
+The parent takes as many children as it is sent, each on a frequency the caller
+names, which is what makes the second of those measurable at all.
 
 The one still missing is `test-apps/audio-generator`, which was left out on
 purpose rather than stubbed:
