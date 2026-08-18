@@ -246,10 +246,15 @@ Alt-tabbing out of an exclusive fullscreen game minimises it, and stopping there
 would cost the rest of the session for two keystrokes; everything before the
 minimise and everything after the restore is in the one file, on one timeline.
 
-A window **resized** is the other answer, and the sentence says so:
+A window **resized** is the other answer, and it gets a block of its own rather
+than a clause:
 
 ```text
 Recorded 229 frames of 1282x752 AV1 in 7.66s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 29.8 fps sustained; 0 frames dropped). Stopped because the recorded window changed size, which one file cannot follow.
+The recorded window changed size, so this recording was finished where it was and nothing after the change was recorded.
+Everything up to the change is in D:\clips\session.mkv.
+  - Record again to capture the window at its new size
+  - Or use `clipped-recorder watch`, which follows a size change with a second file in the same sitting rather than stopping
 ```
 
 Dragging a window's edge, a game changing resolution and a borderless window
@@ -267,6 +272,15 @@ next recording of the same sitting immediately — a resize is proof that the
 window is still there, so it does not wait out the delay that exists for a game
 that may have quit. Two files, one sitting, joined by the session record
 ([sessions.md](sessions.md), [ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+
+That difference is why the block above names `watch` by name. The same action —
+dragging a window's edge — has two outcomes depending on how the recording was
+started, and the terminal is the only place a `record` user could be told which
+of the two they are in
+([#625](https://github.com/wildware-uk/clipped/issues/625)). A recording started
+from the desktop application stops here too, for the same reason and with the
+same file; what that user is told arrives over the protocol instead, on the
+`session_ended` event's `end_reason` ([ipc.md](ipc.md)).
 
 Clipped does **not** scale the new size back to the old one to keep a single
 file. Doing so would put a resample on the frame path the game is paying for, and
@@ -1195,6 +1209,16 @@ GPU, an encoder and a desktop session, so it is `#[ignore]`d:
 ```text
 cargo test -p clipped-recorder --test record_end_to_end -- --ignored --nocapture --test-threads=1
 ```
+
+The same file holds `a_resize_ends_a_command_line_recording_and_says_which_file_it_left`,
+which is the block above checked rather than asserted in prose. It puts the same
+window on screen, records it, and changes its size with a real `SetWindowPos`
+from outside the process that owns it — which is what a user dragging an edge is
+— then reads back what the run printed: that a size change is why it stopped,
+which file it left, and that `watch` would have carried on. It also decodes that
+file at the size the window was, because "the file it did produce" is only worth
+saying if the file plays. It needs the same GPU, encoder and desktop session, and
+is `#[ignore]`d with the rest.
 
 What is **not** asserted is that the decoded pictures are the frames the source
 drew, in order. The video pattern carries a decodable counter for exactly that,

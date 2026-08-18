@@ -17,7 +17,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use clipped_media_validation::TemporaryDirectory;
+use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::System::Console::{AllocConsole, GenerateConsoleCtrlEvent, CTRL_C_EVENT};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+};
 
 /// <https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags>
 pub(crate) const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -368,6 +373,7 @@ pub(crate) fn video_pattern_binary() -> PathBuf {
 pub(crate) struct PatternApp {
     child: Child,
     process_id: u32,
+    window: usize,
     client: (u32, u32),
 }
 
@@ -411,11 +417,12 @@ impl PatternApp {
             .read_line(&mut line)
             .expect("the pattern application announces itself before rendering");
 
-        let client = client_size(&line);
+        let (window, client) = ready_line(&line);
         let process_id = child.id();
         Self {
             child,
             process_id,
+            window,
             client,
         }
     }
@@ -432,6 +439,21 @@ impl PatternApp {
     /// borderless window's capture is.
     pub(crate) fn client_size(&self) -> (u32, u32) {
         self.client
+    }
+
+    /// The window itself, for a test that has to do something to it from
+    /// outside the process that owns it — which is what [`resize`] is for.
+    pub(crate) fn window(&self) -> usize {
+        self.window
+    }
+
+    /// Whether the subject is still on screen.
+    ///
+    /// A test that changed a window's size and then saw a recording end needs
+    /// this to say the ending was about the *resize*: a subject that had exited
+    /// would end the recording too, and for a different reason.
+    pub(crate) fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Waits for the application to stop on its own.
@@ -459,8 +481,61 @@ impl Drop for PatternApp {
     }
 }
 
-/// The `client=WIDTHxHEIGHT` field of the application's `ready` line.
-fn client_size(line: &str) -> (u32, u32) {
+/// A temporary directory that survives a failure.
+///
+/// `clipped_media_validation::TemporaryDirectory` removes itself
+/// unconditionally, and [`Drop`] runs while a panicking thread unwinds — so a
+/// failed assertion takes the recordings and the session records with it, which
+/// are the only evidence of what the run saw. Asking
+/// [`std::thread::panicking`] separates the two cases, the same way
+/// `crates/library/tests/support`'s `Scratch` does: a passing run's directory is
+/// worth nothing and goes, a failing run's stays, with the path printed so
+/// whoever reads the failure knows where to look.
+#[derive(Debug)]
+pub(crate) struct Scratch(Option<TemporaryDirectory>);
+
+impl Scratch {
+    /// A directory named after this process and `purpose`.
+    pub(crate) fn new(purpose: &str) -> Self {
+        Self(Some(TemporaryDirectory::new(purpose)))
+    }
+
+    /// A path inside it. Nothing is created.
+    pub(crate) fn file(&self, name: &str) -> PathBuf {
+        self.directory().file(name)
+    }
+
+    /// The directory itself.
+    pub(crate) fn path(&self) -> &Path {
+        self.directory().path()
+    }
+
+    fn directory(&self) -> &TemporaryDirectory {
+        self.0
+            .as_ref()
+            .expect("the directory is taken only as the scratch is dropped")
+    }
+}
+
+impl Drop for Scratch {
+    /// Removes the run's files, unless the test failed.
+    ///
+    /// Forgetting the `TemporaryDirectory` is what declines the removal; there
+    /// is nothing else in it to run.
+    fn drop(&mut self) {
+        let Some(directory) = self.0.take() else {
+            return;
+        };
+        if std::thread::panicking() {
+            eprintln!("scratch kept for diagnosis: {}", directory.path().display());
+            std::mem::forget(directory);
+        }
+    }
+}
+
+/// The `hwnd=0x` and `client=WIDTHxHEIGHT` fields of the application's `ready`
+/// line.
+pub(crate) fn ready_line(line: &str) -> (usize, (u32, u32)) {
     let field = line
         .split_whitespace()
         .find_map(|field| field.strip_prefix("client="))
@@ -468,9 +543,84 @@ fn client_size(line: &str) -> (u32, u32) {
     let (width, height) = field
         .split_once('x')
         .unwrap_or_else(|| panic!("the client size is not WIDTHxHEIGHT: {field}"));
+
+    let handle = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("hwnd=0x"))
+        .unwrap_or_else(|| panic!("the ready line has no window handle: {line}"));
+    let window = usize::from_str_radix(handle, 16)
+        .unwrap_or_else(|error| panic!("the window handle is not hexadecimal: {handle} {error}"));
+
     (
-        width.parse().expect("the client width is a number"),
-        height.parse().expect("the client height is a number"),
+        window,
+        (
+            width.parse().expect("the client width is a number"),
+            height.parse().expect("the client height is a number"),
+        ),
+    )
+}
+
+/// Changes a window's size, as a user dragging its edge does.
+///
+/// The position and the Z order are left alone so that the one thing that
+/// changes is the size, and the window is not activated: the subject is
+/// deliberately never focused (`docs/testing.md`), and taking the foreground
+/// here would change what the compositor is doing as well as what size it is
+/// doing it at.
+///
+/// Here rather than in one test binary because three of them now change a
+/// window's size underneath a running recording — the automatic path's
+/// successor, the command line's ending, and the ending of one a desktop asked
+/// for — and three copies of a `SetWindowPos` call is three places for the flags
+/// to drift apart (AGENTS.md section 55).
+pub(crate) fn resize(window: usize, (width, height): (u32, u32)) {
+    // SAFETY: `window` is the handle the subject printed on its `ready` line and
+    // the process that owns it is still running — the `PatternApp` outlives this
+    // call. `SetWindowPos` takes no pointer, and the null second argument is the
+    // documented value for "leave the Z order alone", which `SWP_NOZORDER` also
+    // asks for.
+    let changed = unsafe {
+        SetWindowPos(
+            window as *mut core::ffi::c_void,
+            core::ptr::null_mut(),
+            0,
+            0,
+            width as i32,
+            height as i32,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    assert!(
+        changed != 0,
+        "SetWindowPos({window:#x}, {width}x{height}) failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// A window's client area, read back from Windows.
+///
+/// The subject is borderless, so this is also the size a capture of it produces,
+/// and it is asked of Windows rather than assumed because `SetWindowPos`
+/// returning true says the call was accepted and not that the window ended up
+/// the size that was asked for.
+pub(crate) fn client_area(window: usize) -> (u32, u32) {
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: as above for the handle; `client` is a live local of the right
+    // type and Windows retains nothing.
+    let read = unsafe { GetClientRect(window as *mut core::ffi::c_void, &raw mut client) };
+    assert!(
+        read != 0,
+        "GetClientRect({window:#x}) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    (
+        (client.right - client.left) as u32,
+        (client.bottom - client.top) as u32,
     )
 }
 

@@ -73,8 +73,8 @@ use std::time::Duration;
 use clipped_media_validation::{require_media_tools, Media, TemporaryDirectory, VideoStream};
 
 use support::{
-    collected_stderr, ensure_console, read_stderr, recorder_binary, send_ctrl_c, wait_for_exit,
-    PatternApp, CREATE_NEW_PROCESS_GROUP,
+    client_area, collected_stderr, ensure_console, read_stderr, recorder_binary, resize,
+    send_ctrl_c, wait_for_exit, PatternApp, Scratch, CREATE_NEW_PROCESS_GROUP,
 };
 
 /// The rate the pattern application presents at.
@@ -117,6 +117,25 @@ const DURATION_TOLERANCE: f64 = 0.2;
 /// the application presents — which is exactly what this fails on. Wake the
 /// display and run it again; if it still fails, the pipeline is losing frames.
 const MINIMUM_SUSTAINED_FRAMERATE: f64 = SOURCE_FPS as f64 / 2.0;
+
+/// How long the resize test records before it changes the window's size.
+///
+/// Long enough that the file it leaves is unambiguously a recording — several
+/// seconds of pictures, past the first keyframe and into a second cluster —
+/// rather than a header and a trailer with nothing between them, which is the
+/// thing "the file it did produce" has to distinguish itself from.
+const RECORD_BEFORE_RESIZE: Duration = Duration::from_secs(5);
+
+/// The size the subject's window is dragged to, mid-recording.
+///
+/// The same figure `tests/automatic_sessions.rs` uses, and for the same two
+/// reasons: it differs from the 1280x720 the subject starts at, so the recording
+/// is told apart by its own dimensions, and it is **even in both dimensions**
+/// because an odd client area is a defect of its own
+/// ([issue #561](https://github.com/wildware-uk/clipped/issues/561),
+/// [ADR 0013](../../../docs/adr/0013-capture-rounds-an-odd-dimension-away.md))
+/// and a resize into one would have this test measuring that instead of this.
+const RESIZED_TO: (u32, u32) = (1024, 576);
 
 #[test]
 #[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
@@ -222,6 +241,124 @@ fn a_recording_ends_when_the_window_closes_and_leaves_valid_media() {
     assert!(
         summary.seconds >= 3.0,
         "the pattern rendered for {PATTERN_SECONDS}s and only {:.2}s was recorded:\n{diagnostics}",
+        summary.seconds
+    );
+}
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
+fn a_resize_ends_a_command_line_recording_and_says_which_file_it_left() {
+    // [Issue #625](https://github.com/wildware-uk/clipped/issues/625), against a
+    // resize this test really makes rather than one it tells the recorder about.
+    //
+    // ADR 0012 decided that a size change finishes the file and the *session*
+    // starts the next one, and `record` is the path with no session to do that:
+    // it was given one path to write and it writes that file. The decision for
+    // this command is therefore that it keeps stopping — and that the person
+    // watching the terminal is told, in words, that a size change is why and
+    // which file they have. `tests/automatic_sessions.rs` proves the other half
+    // of the same ADR, that `watch` follows the resize with a second file.
+    //
+    // Nothing here touches `EndReason` or `report_resize` by name: the window
+    // changes size, the recorder exits on its own, and every assertion below is
+    // read out of what it printed and what it left on disk.
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+
+    let directory = Scratch::new("recorder-resized");
+    let output = directory.file("until-resized.mkv");
+    let mut pattern = PatternApp::start(SOURCE_FPS, 300);
+    let before = pattern.client_size();
+    assert_ne!(
+        before, RESIZED_TO,
+        "the subject already has the size this test resizes it to, so the resize would change \
+         nothing and the recording would not end"
+    );
+
+    let mut recorder = Command::new(recorder_binary())
+        .args(record_arguments(pattern.process_id(), &output))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the recorder binary can be started");
+    let diagnostics = read_stderr(&mut recorder);
+
+    thread::sleep(RECORD_BEFORE_RESIZE);
+
+    // A real `SetWindowPos` on the subject's real window, from outside the
+    // process that owns it — which is what a user dragging an edge is. The
+    // recorder is not told; it finds out through capture.
+    resize(pattern.window(), RESIZED_TO);
+    assert_eq!(
+        client_area(pattern.window()),
+        RESIZED_TO,
+        "the window did not actually change size, so nothing below would be about a resize"
+    );
+
+    let status = wait_for_exit(&mut recorder, "the recorder");
+    let diagnostics = collected_stderr(&diagnostics);
+
+    assert!(
+        pattern.is_running(),
+        "the subject must still have been running when the recorder gave up, or the recording \
+         ended because its window went rather than because it changed size:
+{diagnostics}"
+    );
+    assert!(
+        status.success(),
+        "a window changing size ends a recording; it is not a failure. Exit status was \
+         {status}.
+{diagnostics}"
+    );
+
+    // **The three things the person watching is told**, and the reason this
+    // test exists. Each is asserted separately so that a run which loses one of
+    // them says which, rather than failing on a single string that could have
+    // gone missing at either end.
+    //
+    // The first two are the issue's own words — "a recording that stops because
+    // the window changed size should tell the user that, naming the file it did
+    // produce".
+    assert!(
+        diagnostics.contains(
+            "The recorded window changed size, so this recording was finished where it was \
+             and nothing after the change was recorded."
+        ),
+        "the run never said that a size change is what ended it, so somebody who dragged a \
+         window's edge is left to work out why their recording stopped:
+{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains(&format!(
+            "Everything up to the change is in {}.",
+            output.display()
+        )),
+        "the run never named the file it did produce, which is the only thing on the screen \
+         anybody can act on:
+{diagnostics}"
+    );
+    // And the third, which is what the issue is actually about: the same action
+    // has two outcomes depending on how the recording started, and this is the
+    // one place a `record` user finds out which of the two they are in.
+    assert!(
+        diagnostics.contains("clipped-recorder watch"),
+        "the run never said that the other mode follows a size change instead of stopping, so \
+         nothing tells a `record` user that the two behave differently at all:
+{diagnostics}"
+    );
+
+    // And the file itself, at the size the window was: finished on purpose
+    // rather than abandoned, which is the whole reason ending here is honest.
+    let summary = Summary::parse(&diagnostics);
+    assert_playable(&output, &summary, before);
+    assert!(
+        summary.seconds >= 2.0,
+        "the recorder ran for about {:.1}s before the resize and the file holds {:.2}s; a \
+         header and a trailer with nothing between them is not the file this claims to \
+         leave:
+{diagnostics}",
+        RECORD_BEFORE_RESIZE.as_secs_f64(),
         summary.seconds
     );
 }

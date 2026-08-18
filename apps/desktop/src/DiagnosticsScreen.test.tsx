@@ -133,6 +133,7 @@ function view(overrides: Partial<RecorderLinkView> = {}): RecorderLinkView {
     observedAt: null,
     interrupted: null,
     failed: null,
+    ended: null,
     ...overrides,
   };
 }
@@ -377,6 +378,9 @@ const LEAKY: DiagnosticsReportInput = {
       output: String.raw`C:\Users\alice\Videos\Clipped\match.mkv`,
       seenAt: new Date('2026-08-12T09:13:12.000Z'),
     },
+    // No sitting has ended in this fixture. The support report says nothing
+    // about one, so there is nothing here for the redaction below to catch.
+    ended: null,
   },
   notice: String.raw`the recorder was not found at C:\Users\alice\AppData\Local\Clipped\clipped-recorder.exe`,
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/141.0.0.0',

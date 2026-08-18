@@ -1247,6 +1247,7 @@ mod tests {
                 session_index: 1,
                 output: r"D:\clips\cs2-1.mkv".to_owned(),
                 outcome: Some("recorded".to_owned()),
+                end_reason: Some("stopped".to_owned()),
                 duration_ms: Some(2_891_000),
             }],
         }

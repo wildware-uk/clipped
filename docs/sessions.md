@@ -831,7 +831,7 @@ Three mechanisms carry most of it, and none of them is new to this section:
 | An audio device is unplugged mid-recording | Everything, including the track: it becomes silence of the right length | A warning, and how much of the track was silence when the recording ends | Plug it back in; the capture picks it up again |
 | An audio device cannot be opened at the start | Nothing was recorded; it failed before the file existed | `audio-unavailable`, naming the track | Connect the device, choose another, or record with that source turned off |
 | The recorder process is killed | Everything up to the last closed cluster | Nothing at the time. `clipped-recorder recover` finds it on the next launch | Keep it or discard it — see below |
-| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session, at once ([ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)) | Nothing |
+| The window changes size | Everything up to the change | `end_reason=target-resized`. An **automatic** session follows it with a second recording, at once; a recording somebody asked for is the whole of its session and stops, saying so ([ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md), [#625](https://github.com/wildware-uk/clipped/issues/625)) | Nothing, or record again if you asked for this one |
 | The machine sleeps | Everything up to the suspend | `system-resumed` in the session's events; a second recording follows | Nothing |
 | A metadata write fails | The video, always | A warning; the session is in memory until the next change | Nothing |
 

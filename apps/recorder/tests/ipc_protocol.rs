@@ -2224,6 +2224,181 @@ fn a_recording_names_the_game_it_is_of_and_its_sitting_is_announced_when_it_ends
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The size the subject's window is dragged to, mid-recording.
+///
+/// The same figure `tests/automatic_sessions.rs` and
+/// `tests/record_end_to_end.rs` use, and for the same two reasons: it differs
+/// from the size the subject starts at, so the file is told apart by its own
+/// dimensions, and it is **even in both dimensions** because an odd client area
+/// is a defect of its own
+/// ([issue #561](https://github.com/wildware-uk/clipped/issues/561),
+/// [ADR 0013](../../../docs/adr/0013-capture-rounds-an-odd-dimension-away.md)).
+const RESIZED_TO: (u32, u32) = (1024, 576);
+
+/// How long a recording that is expected to end by itself is given to do so.
+///
+/// Generous on purpose: the capture has to see a frame of the new size, discard
+/// it and report the change, and the recording then has to flush an encoder and
+/// write a Matroska trailer. A bound tight enough to trip on a busy machine is a
+/// failure nobody can tell from a real one (AGENTS.md section 25).
+const ENDING_PATIENCE: Duration = Duration::from_secs(30);
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see tests/record_end_to_end.rs"]
+fn a_resize_ends_a_recording_the_desktop_asked_for_and_the_sitting_says_why() {
+    // [Issue #625](https://github.com/wildware-uk/clipped/issues/625)'s second
+    // path, against a resize this test really makes.
+    //
+    // ADR 0012 has an automatic session follow a size change with a second file;
+    // a recording somebody asked for over this protocol keeps stopping, because
+    // `ManualSession` is one recording by construction and the file it produces
+    // is the one path the request named. The decision this checks is that the
+    // stopping is no longer *silent*: the recorder announces the sitting, and
+    // the announcement now carries **why each file ended**, so a window can say
+    // "a size change finished this, and here is the file" rather than going from
+    // "Recording" to "not recording" with nothing in between.
+    //
+    // The load-bearing assertion is `end_reason`. Every other one below — that
+    // the event arrives, that it names the file, that the outcome is `recorded`,
+    // that the recorder went idle, that the media decodes — passes unchanged on
+    // a build that never puts the reason on the wire, which is exactly the shape
+    // issue #624 warned about: the structure being right is not evidence the
+    // decision is implemented.
+    let Some(_tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let home = scratch_home("resized-sitting");
+    overlay_naming_the_pattern(&home);
+    let output = home.join("until-resized.mkv");
+    let mut pattern = support::PatternApp::start(SOURCE_FPS, 300);
+    let before = pattern.client_size();
+    assert_ne!(
+        before, RESIZED_TO,
+        "the subject already has the size this test resizes it to, so the resize would change \
+         nothing and the recording would not end"
+    );
+
+    let recorder = ServedRecorder::start_under("resized-sitting", Some(&home));
+    let reader = collecting_events(&recorder);
+    let mut client = recorder.client();
+
+    let started = client
+        .call(&IpcCommand::StartRecording(StartRecording {
+            pid: Some(pattern.process_id()),
+            output: Some(output.to_string_lossy().into_owned()),
+            overwrite: true,
+            microphone: Some("none".to_owned()),
+            system_audio: Some("none".to_owned()),
+            ..StartRecording::default()
+        }))
+        .expect("the recording starts");
+    let recording_id = match started {
+        Reply::RecordingStarted { recording_id, .. } => recording_id,
+        other => panic!("expected a started recording, got {other:?}"),
+    };
+
+    std::thread::sleep(RECORD_FOR);
+    match status_of(&mut client) {
+        RecorderStatus::Recording(active) => assert_eq!(
+            active.recording_id, recording_id,
+            "some other recording was running when the window was resized",
+        ),
+        other => panic!("the recording should still have been running, not {other:?}"),
+    }
+
+    // A real `SetWindowPos` on the subject's real window, from outside the
+    // process that owns it — which is what a user dragging an edge is. Nothing
+    // tells the recorder; it finds out through capture.
+    support::resize(pattern.window(), RESIZED_TO);
+    assert_eq!(
+        support::client_area(pattern.window()),
+        RESIZED_TO,
+        "the window did not actually change size, so nothing below would be about a resize"
+    );
+
+    // The recording ends **by itself**, which is the case with no reply to carry
+    // a reason: nothing here asks it to stop.
+    let deadline = std::time::Instant::now() + ENDING_PATIENCE;
+    while status_of(&mut client).is_recording() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recording was still running {:.0}s after the window changed size; ADR 0012 has \
+             a size change finish the file where it is",
+            ENDING_PATIENCE.as_secs_f64()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(
+        pattern.is_running(),
+        "the subject must still have been running when the recording ended, or it ended because \
+         its window went rather than because it changed size"
+    );
+
+    drop(client);
+    drop(pattern);
+    let diagnostics = recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+    let ended = the_sitting_that_ended(&seen, &diagnostics);
+
+    assert_eq!(
+        ended.recordings.len(),
+        1,
+        "a recording somebody asked for is the whole of its sitting, and a resize does not give \
+         it a second file: {:?}\n{diagnostics}",
+        ended.recordings,
+    );
+    assert_eq!(
+        ended.recordings[0].output,
+        output.to_string_lossy(),
+        "the file the sitting names is not the one that was asked for:\n{diagnostics}"
+    );
+    assert_eq!(
+        ended.recordings[0].outcome.as_deref(),
+        Some("recorded"),
+        "the file was finished on purpose rather than abandoned:\n{diagnostics}"
+    );
+
+    // **The assertion this test exists for.** Everything above is true of a
+    // build that says nothing at all about why the recording stopped.
+    assert_eq!(
+        ended.recordings[0].end_reason.as_deref(),
+        Some("target-resized"),
+        "the sitting says nothing about why its file ended, so a window watching this recording \
+         finish can name the file and cannot say that a size change is what finished it — which \
+         leaves a recording cut short by somebody dragging a window's edge looking exactly like \
+         one that ran to the end: {:?}\n{diagnostics}",
+        ended.recordings[0],
+    );
+
+    // And the file itself, at the size the window was: finished rather than
+    // abandoned, which is what makes ending here an honest answer rather than a
+    // loss.
+    clipped_media_validation::Media::open(&output)
+        .unwrap_or_else(|error| {
+            panic!("the recording is not usable at all: {error}\n{diagnostics}")
+        })
+        .validate()
+        .stream_count(1)
+        .video_stream_count(1)
+        .video(
+            clipped_media_validation::VideoStream::default()
+                .resolution(before.0, before.1)
+                // Pictures out of a decoder, not packets in a container: a file
+                // that lists packets, declares one video stream and has
+                // monotonic timestamps can still decode to nothing at all, and
+                // every other assertion here passes on that file. The floor is
+                // low because the exact count depends on when the resize
+                // landed.
+                .decoded_frames_at_least(30),
+        )
+        .monotonic_timestamps()
+        .assert_valid();
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 #[ignore = "needs a GPU, an encoder, a desktop session and process detection; see the module docs"]
 fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {

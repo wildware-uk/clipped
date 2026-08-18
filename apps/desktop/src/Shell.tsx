@@ -69,7 +69,7 @@ function titleFor(pathname: string, screen: Screen | undefined): string {
 function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
   switch (screen.id) {
     case 'home':
-      return <HomeScreen link={view.link} />;
+      return <HomeScreen link={view.link} ended={view.ended} />;
     case 'library':
       return <LibraryScreen link={view.link} />;
     case 'games':

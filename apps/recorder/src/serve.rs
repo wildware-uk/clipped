@@ -3298,6 +3298,7 @@ mod tests {
                         .to_string_lossy()
                         .into_owned(),
                     outcome: Some("recorded".to_owned()),
+                    end_reason: Some("target-resized".to_owned()),
                     duration_ms: Some(600_000),
                 },
                 clipped_ipc::SessionRecording {

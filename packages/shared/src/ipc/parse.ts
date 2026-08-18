@@ -513,6 +513,7 @@ function readSessionRecording(value: JsonValue | undefined): SessionRecording {
   const recording = object(value, 'a recording of a sitting');
   const what = 'a recording of a sitting';
   const outcome = optionalStringField(recording, 'outcome', what);
+  const endReason = optionalStringField(recording, 'end_reason', what);
   const duration = optionalNumberField(recording, 'duration_ms', what);
   return {
     session_index: numberField(recording, 'session_index', what),
@@ -520,6 +521,11 @@ function readSessionRecording(value: JsonValue | undefined): SessionRecording {
     // Absent is "still running", which is what the last entry of an open
     // sitting reports.
     ...(outcome === undefined ? {} : { outcome }),
+    // Kept as it arrived, including a reason invented after this build: nothing
+    // here branches on it, and this is the only place a recording that ended by
+    // itself ever says why — there is no reply to a stop to carry one
+    // (issue #625).
+    ...(endReason === undefined ? {} : { end_reason: endReason }),
     ...(duration === undefined ? {} : { duration_ms: duration }),
   };
 }

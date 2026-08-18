@@ -151,15 +151,28 @@ below that is worth watching.
   recording and says so. The cap is a loop guard and this decision is the thing
   most likely to make it bite; if it does, the answer is to coalesce a run of
   resizes rather than to raise the number.
-- **`clipped-recorder record` and `serve` still end.** The CLI records to one
-  named path, which is the contract of that subcommand. A recording started from
-  the desktop window ends too, because `ManualSession` holds exactly one
-  recording by construction (`crates/session/src/automatic/manual.rs`) — so a
-  user who drags the edge of a window they are recording from the desktop gets
-  the file they had and no successor. That is a gap this decision creates the
-  obligation to close, and it belongs with
-  [#241](https://github.com/wildware-uk/clipped/issues/241), which is giving the
-  protocol the words for a sitting with more than one file in it.
+- **`clipped-recorder record` and `serve` still end, and now say so.** The CLI
+  records to one named path, which is the contract of that subcommand. A
+  recording started from the desktop window ends too, because `ManualSession`
+  holds exactly one recording by construction
+  (`crates/session/src/automatic/manual.rs`) — so a user who drags the edge of a
+  window they are recording from the desktop gets the file they had and no
+  successor.
+
+  [Issue #625](https://github.com/wildware-uk/clipped/issues/625) settled that
+  gap by **keeping the ending and closing the silence** rather than by giving
+  `ManualSession` a second recording. The arguments are that a successor needs a
+  name, and `record`'s contract is the one path `--output` gave it; that the
+  single-recording invariant is what a saved replay clip's `source_index` and
+  `serve`'s `ActiveRecording` are built on; and that a manual recording is one
+  the person is present for, so a sentence at the moment it happens is the
+  answer, where the automatic path's user is away at a game. What changed is that
+  `record` now prints why it stopped, which file it left and that `watch` would
+  have carried on; and `clipped_ipc::SessionRecording` gained `end_reason`, so
+  the `session_ended` event a window receives when a recording ends **by itself**
+  carries the same word the sidecar and the index already held. Before that, a
+  recording finished by a resize was indistinguishable, on the wire, from one
+  that ran to the end.
 - **`CaptureFallback` can relax its committed-format rule.** `crates/capture`'s
   fallback refuses a replacement backend whose frames are a different size,
   explicitly deferring to this issue. Under this decision the rule stands for a

@@ -744,7 +744,8 @@ carries it, which is what a `watching` status is for:
              "started_at":"2026-08-11T20:14:00+01:00",
              "recordings":[{"session_index":1,
                             "output":"D:\\clips\\clipped-cs2-20260811-201400.mkv",
-                            "outcome":"recorded","duration_ms":6540000}]}}}}}
+                            "outcome":"recorded","end_reason":"target-lost",
+                            "duration_ms":6540000}]}}}}}
 ```
 
 A game that exits keeps its sitting open for the restart grace, so that the same
@@ -769,7 +770,8 @@ the catalogue what that window was.
              "started_at":"2026-08-11T20:14:00+01:00",
              "recordings":[{"session_index":1,
                             "output":"D:\\clips\\clipped-cs2-20260811-201400-01.mkv",
-                            "outcome":"recorded","duration_ms":600000},
+                            "outcome":"recorded","end_reason":"target-resized",
+                            "duration_ms":600000},
                            {"session_index":2,
                             "output":"D:\\clips\\clipped-cs2-20260811-201400-02.mkv"}]}}}}}
 ```
@@ -783,6 +785,22 @@ status carries a moment later — and a `start_recording` is the whole of a sitt
 of its own, opened when it started. A recorder that is watching and is then asked
 for a recording of something else reports **that** recording's sitting, not the
 game it was waiting for.
+
+**A finished file carries why it ended**, in `end_reason`, absent while it is
+still being written and for an entry that produced no file at all. The words are
+the sidecar's and the index's — `stopped`, `target-lost`, `target-resized`,
+`disk-space-low`, `output-unavailable` — the same ones
+`library_sessions` returns for the same file minutes later, and the field is open
+for the same reason that one is.
+
+It is here because a recording that ended **by itself** has no reply to say so
+in. `stop_recording` answers with a whole `recording_summary`; a recording that
+ended because its window was dragged to a new size, or because the window closed,
+is announced only by `session_ended` — so without this a window could name the
+file and could not say why it stopped, and a sitting cut short by a resize looked
+exactly like one that ran to the end
+([#625](https://github.com/wildware-uk/clipped/issues/625),
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
 
 `session` is omitted rather than sent empty for a recording that belongs to no
 sitting. Nothing this build records is one — every recording opens a sitting,
@@ -2173,7 +2191,8 @@ Sent on an `events` connection, unprompted:
             "end_reason":"disk_full",
             "recordings":[{"session_index":1,
                            "output":"D:\\clips\\cs2-20260811-201400-01.mkv",
-                           "outcome":"recorded","duration_ms":1800000}]}}
+                           "outcome":"recorded","end_reason":"disk-space-low",
+                           "duration_ms":1800000}]}}
 ```
 
 ```json

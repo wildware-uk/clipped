@@ -1,8 +1,9 @@
+import type { SessionSummary } from '@clipped/shared';
 import type { ReactNode } from 'react';
 
 import { describeProblem, formatBytes, useGames, useSessions } from './library';
 import { describeRecordControl } from './recording';
-import { describeRecordingNow, WHERE_RECORDINGS_GO } from './recordingNow';
+import { describeRecordingNow, describeResizeEnding, WHERE_RECORDINGS_GO } from './recordingNow';
 import { SessionList } from './SessionList';
 import type { RecorderLinkState } from './useRecorderLink';
 import { useRecording } from './useRecording';
@@ -79,12 +80,23 @@ export interface HomeScreenProps {
    * open, so that leaving it stops the asking.
    */
   readonly link: RecorderLinkState | null;
+  /**
+   * The last sitting the recorder announced the end of, or `null` if none has
+   * ended since this window opened.
+   *
+   * Passed in from the shell's one subscription, for the reason {@link link} is.
+   * It is what a recording that ended *by itself* is made of: `useRecording`
+   * only learns of an ending it asked for, so without this the panel has nothing
+   * to say about a recording a size change stopped (issue #625).
+   */
+  readonly ended: SessionSummary | null;
 }
 
 /** The Home screen. */
-export function HomeScreen({ link }: HomeScreenProps): ReactNode {
+export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
   const recording = useRecording(link);
   const now = describeRecordingNow(link, recording.status, recording.problem);
+  const resized = describeResizeEnding(ended);
   const control = describeRecordControl(link, recording.status, recording.target);
   const { read: sessions } = useSessions('', RECENT);
   const games = useGames();
@@ -167,6 +179,21 @@ export function HomeScreen({ link }: HomeScreenProps): ReactNode {
           <>
             <p className="clipped-panel__body">Recording finished, and its file is closed.</p>
             <p className="clipped-panel__body clipped-path">{recording.finished.output}</p>
+          </>
+        )}
+
+        {/*
+         * The same courtesy for a recording that ended without being asked to.
+         * `recording.finished` is set from the reply to a stop this window sent,
+         * so a recording a size change stopped never reaches it — the state went
+         * from "recording" to "idle" and the panel took the path with it,
+         * leaving somebody with a file, no path to it, and nothing said about
+         * why their recording had stopped (issue #625, ADR 0012).
+         */}
+        {resized !== undefined && (
+          <>
+            <p className="clipped-panel__body">{resized.detail}</p>
+            <p className="clipped-panel__body clipped-path">{resized.output}</p>
           </>
         )}
 

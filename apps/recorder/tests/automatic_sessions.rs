@@ -123,14 +123,9 @@ use std::time::{Duration, Instant};
 
 use clipped_media_validation::{require_media_tools, Media, TemporaryDirectory, VideoStream};
 use serde_json::Value;
-use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-};
-
 use support::{
-    ensure_console, example_binary, read_stderr, recorder_binary, send_ctrl_c, terminate,
-    video_pattern_binary, wait_for_exit, CREATE_NEW_PROCESS_GROUP,
+    client_area, ensure_console, example_binary, read_stderr, ready_line, recorder_binary, resize,
+    send_ctrl_c, terminate, video_pattern_binary, wait_for_exit, CREATE_NEW_PROCESS_GROUP,
 };
 
 /// The rate the pattern application presents at.
@@ -970,6 +965,10 @@ fn spawn(mut command: Command, what: &Path) -> Child {
 
 /// The `hwnd=0x…` and `client=WIDTHxHEIGHT` the pattern announces before it
 /// renders.
+///
+/// The parsing is [`ready_line`]'s, which `support::PatternApp` uses for the
+/// same line: what is here is only the reading of it, because this file starts
+/// the subject itself rather than through that type.
 fn read_ready_line(child: &mut Child) -> (usize, (u32, u32)) {
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut line = String::new();
@@ -977,28 +976,7 @@ fn read_ready_line(child: &mut Child) -> (usize, (u32, u32)) {
         .read_line(&mut line)
         .expect("the pattern application announces itself before rendering");
 
-    let field = line
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("client="))
-        .unwrap_or_else(|| panic!("the ready line has no client size: {line}"));
-    let (width, height) = field
-        .split_once('x')
-        .unwrap_or_else(|| panic!("the client size is not WIDTHxHEIGHT: {field}"));
-
-    let handle = line
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("hwnd=0x"))
-        .unwrap_or_else(|| panic!("the ready line has no window handle: {line}"));
-    let window = usize::from_str_radix(handle, 16)
-        .unwrap_or_else(|error| panic!("the window handle is not hexadecimal: {handle} {error}"));
-
-    (
-        window,
-        (
-            width.parse().expect("the client width is a number"),
-            height.parse().expect("the client height is a number"),
-        ),
-    )
+    ready_line(&line)
 }
 
 /// The one recording of the session that produced a file.
@@ -1110,64 +1088,6 @@ fn seam_between(first: &Value, second: &Value, diagnostics: &str) -> Duration {
 
     let ends = nanos(first) as f64 + seconds(first) * 1e9;
     Duration::from_secs_f64(((nanos(second) as f64 - ends) / 1e9).max(0.0))
-}
-
-/// Changes a window's size, as a user dragging its edge does.
-///
-/// The position and the Z order are left alone so that the one thing that
-/// changes is the size, and the window is not activated: the subject is
-/// deliberately never focused (`docs/testing.md`), and taking the foreground
-/// here would change what the compositor is doing as well as what size it is
-/// doing it at.
-fn resize(window: usize, (width, height): (u32, u32)) {
-    // SAFETY: `window` is the handle the subject printed on its `ready` line and
-    // the process that owns it is still running — `LaunchedPattern` outlives
-    // this call. `SetWindowPos` takes no pointer, and the null second argument
-    // is the documented value for "leave the Z order alone", which
-    // `SWP_NOZORDER` also asks for.
-    let changed = unsafe {
-        SetWindowPos(
-            window as *mut core::ffi::c_void,
-            core::ptr::null_mut(),
-            0,
-            0,
-            width as i32,
-            height as i32,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    };
-    assert!(
-        changed != 0,
-        "SetWindowPos({window:#x}, {width}x{height}) failed: {}",
-        std::io::Error::last_os_error()
-    );
-}
-
-/// A window's client area, read back from Windows.
-///
-/// The subject is borderless, so this is also the size a capture of it produces,
-/// and it is asked of Windows rather than assumed because `SetWindowPos`
-/// returning true says the call was accepted and not that the window ended up
-/// the size that was asked for.
-fn client_area(window: usize) -> (u32, u32) {
-    let mut client = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    // SAFETY: as above for the handle; `client` is a live local of the right
-    // type and Windows retains nothing.
-    let read = unsafe { GetClientRect(window as *mut core::ffi::c_void, &raw mut client) };
-    assert!(
-        read != 0,
-        "GetClientRect({window:#x}) failed: {}",
-        std::io::Error::last_os_error()
-    );
-    (
-        (client.right - client.left) as u32,
-        (client.bottom - client.top) as u32,
-    )
 }
 
 /// Asserts the file the session names is one that plays.
