@@ -373,6 +373,32 @@ fn count_broken_references(connection: &Connection) -> rusqlite::Result<usize> {
 /// is the one further from whatever went wrong. Anything at that path that is
 /// not a file is not a backup and is not treated as one: `VACUUM INTO` is asked
 /// to write it, fails, and the migration stops.
+///
+/// # Two connections arriving together
+///
+/// The check above and the write below are not one operation, and
+/// `apps/recorder` holds two connections that open the same database at the
+/// same moment. Both can find no backup, both can ask for one, and the second
+/// `VACUUM INTO` then fails — not with anything resembling "the file is
+/// there", but with `table schema_migrations already exists`, because it
+/// starts creating tables in a destination that turns out not to be empty.
+///
+/// Propagating that failed the migration, which reached the window as "the
+/// recording library could not be opened" — the same sentence, and the same
+/// cause, as the race
+/// [`two_connections_opening_the_same_new_database_both_get_a_working_schema`]
+/// was written for, arrived at through the copy rather than through the schema
+/// ([issue #635](https://github.com/wildware-uk/clipped/issues/635)). It needs
+/// a *pending* migration to reach, so the people it happened to were not
+/// first-run users but everyone upgrading across a schema version.
+///
+/// The recovery asks the same question again rather than reading the message:
+/// if the destination is a file **now** and was not before, a peer wrote it
+/// while this thread was asking, which is the case the paragraph above already
+/// decides — keep it. If it still is not a file, the failure is a real one and
+/// is propagated. Matching on SQLite's wording would break the day it changes,
+/// and would also swallow a genuine "that table exists" from a destination
+/// somebody else's program is writing.
 fn back_up(connection: &Connection, path: &Path) -> Result<Option<PathBuf>, StorageError> {
     let from = schema_version(connection)?;
     let destination = backup_path(path, from);
@@ -386,12 +412,24 @@ fn back_up(connection: &Connection, path: &Path) -> Result<Option<PathBuf>, Stor
         return Ok(Some(destination));
     }
 
-    connection
-        .execute("VACUUM INTO ?1", [&destination.to_string_lossy()])
-        .map_err(|source| StorageError::Backup {
-            destination: destination.clone(),
+    if let Err(source) = connection.execute("VACUUM INTO ?1", [&destination.to_string_lossy()]) {
+        // `is_file` rather than `exists`: a directory that appeared at this
+        // path is not a backup, and the doc comment above says so. It has to
+        // fail here exactly as it would have failed above.
+        if destination.is_file() {
+            warn!(
+                backup = %destination.display(),
+                "another connection copied the database from this schema version while this one \
+                 was asking, and its copy was kept"
+            );
+            return Ok(Some(destination));
+        }
+
+        return Err(StorageError::Backup {
+            destination,
             source,
-        })?;
+        });
+    }
 
     info!(backup = %destination.display(), from, "copied the database before migrating it");
     Ok(Some(destination))
@@ -901,6 +939,73 @@ mod tests {
         assert!(
             !table_names(&connection).contains(&"second".to_owned()),
             "the migration ran despite the copy failing"
+        );
+    }
+
+    #[test]
+    fn two_connections_migrating_the_same_database_share_one_backup() {
+        // The other half of the race
+        // `two_connections_opening_the_same_new_database_both_get_a_working_schema`
+        // holds. That one opens a database with no schema, so `back_up` returns
+        // before it writes anything and the copy is never contended. This one
+        // gives them a database at version 1 with version 2 pending, which is
+        // the only way to reach the copy at all — and therefore what every user
+        // upgrading across a schema version does, with the two connections
+        // `apps/recorder` holds.
+        //
+        // Before this was fixed the loser's `VACUUM INTO` failed with
+        // `table schema_migrations already exists`, because it starts creating
+        // tables in a destination another thread had just filled. That became
+        // `StorageError::Backup`, which failed the migration, which reached the
+        // window as "the recording library could not be opened" — the same
+        // sentence the sibling test exists to prevent (issue #635).
+        let directory = scratch_directory("concurrent-backup");
+        let path = directory.join("library.db");
+        let list = fixture();
+
+        let mut first = Connection::open(&path).expect("the database can be created");
+        migrate(&mut first, Some(&path), &list[..1]).expect("version 1 applies");
+        drop(first);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let openers: Vec<std::thread::JoinHandle<Result<MigrationOutcome, StorageError>>> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                let list = list.clone();
+                std::thread::spawn(move || {
+                    let mut connection = Connection::open(&path).expect("the file can be opened");
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(30))
+                        .expect("a busy timeout can be set");
+                    barrier.wait();
+                    migrate(&mut connection, Some(&path), &list[..2])
+                })
+            })
+            .collect();
+
+        for opener in openers {
+            let outcome = opener
+                .join()
+                .expect("the thread did not panic")
+                .expect("a connection that lost the race still has to end up migrated");
+            assert_eq!(
+                outcome.to, 2,
+                "every connection ends at the version it was given"
+            );
+            assert_eq!(
+                outcome.backup.as_deref(),
+                Some(backup_path(&path, 1).as_path()),
+                "every connection names the one copy, whether it wrote it or found it"
+            );
+        }
+
+        // One copy, of the database as it was before the migration.
+        let copy = Connection::open(backup_path(&path, 1)).expect("the copy opens as a database");
+        assert_eq!(
+            schema_version(&copy).expect("the copy has a version"),
+            1,
+            "the copy is of the database before migrating, not after"
         );
     }
 
