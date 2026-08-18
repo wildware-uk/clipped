@@ -1555,6 +1555,42 @@ into failures on a machine that is supposed to have one.
   seen from the other end.
   [Issue #626](https://github.com/wildware-uk/clipped/issues/626) is the defect,
   and the tests pin its size so it cannot grow unnoticed.
+
+  **What is counted, since the hole cannot be closed.**
+  `CaptureStats::unflagged_dropouts` counts the runs and
+  `CaptureStats::unflagged_dropout_frames` the frames they held, so a recording
+  can say "31 ms lost, fourteen times" where it used to say nothing: the engine
+  flags none of this, and `discontinuities` reads zero through all of it. Both
+  figures rather than either, because the two together give the average run
+  length, and 31 ms is what says *this* defect rather than another. They reach
+  a recording's `AudioTrackReport`, the line the recorder prints when a
+  recording ends, and the `an audio source finished` log line. Carrying them to
+  the Diagnostics window is
+  [issue #633](https://github.com/wildware-uk/clipped/issues/633), which waits in
+  turn on the `metrics` stream
+  ([issue #100](https://github.com/wildware-uk/clipped/issues/100)).
+
+  A run is recognised as loss when it is **bounded by delivered audio on both
+  sides** and lasts between 5 ms and 50 ms. Both conditions are needed and
+  neither is sufficient. A tap whose processes are all quiet produces exact
+  zeros legitimately and indefinitely, and it is being audible either side of
+  the run that distinguishes a rebuild — which lands while the tap's other
+  streams carry on playing — from a source that simply stopped. Zeros at the
+  front of a track are therefore never counted, even though an activation costs
+  the same 1,504 frames, because from inside the capture that is
+  indistinguishable from a tap that had not started making a sound. Silence
+  this crate synthesised is never any part of it: it is a different failure with
+  a different cause and its own counter, and every interruption resolves in the
+  direction of counting nothing.
+
+  It is a heuristic and `crates/audio/src/dropout.rs` says so: a game that
+  writes 20 ms of exact zeros between two sound effects with its stream open is
+  counted, and a loss that fell outside the window is not. The count is a
+  diagnostic and nothing in a recording decides anything by it.
+
+  Measured on this machine, examining one 480-frame stereo packet — a device
+  period — costs **360 ns in a release build**, 0.0036% of the 10 ms that packet
+  represents, and 7.8 µs in debug. `docs/testing.md` has the command.
 - **A process-scoped client reports performance-counter positions.** Measured on
   Windows 11 build 26200, where a silent tree produced exactly its sample rate
   in frames per second with no silence synthesised, which only happens if the

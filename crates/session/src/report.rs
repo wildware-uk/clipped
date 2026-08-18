@@ -174,6 +174,8 @@ pub struct AudioTrackReport {
     pub(crate) buffers: u64,
     pub(crate) frames: u64,
     pub(crate) synthesised_silence_frames: u64,
+    pub(crate) unflagged_dropouts: u64,
+    pub(crate) unflagged_dropout_frames: u64,
     pub(crate) frames_before_the_recording: u64,
     pub(crate) buffers_dropped_writer_behind: u64,
     pub(crate) format_changes: u64,
@@ -196,6 +198,8 @@ impl AudioTrackReport {
             buffers: 0,
             frames: 0,
             synthesised_silence_frames: 0,
+            unflagged_dropouts: 0,
+            unflagged_dropout_frames: 0,
             frames_before_the_recording: 0,
             buffers_dropped_writer_behind: 0,
             format_changes: 0,
@@ -221,6 +225,18 @@ impl AudioTrackReport {
     /// Records a buffer the writer had no room for.
     pub(crate) fn note_dropped(&mut self) {
         self.buffers_dropped_writer_behind += 1;
+    }
+
+    /// Takes what the capture counted about itself, once its thread has
+    /// finished.
+    ///
+    /// Only the figures nothing out here can count. The frames and the
+    /// synthesised silence are counted from the buffers as they arrive, because
+    /// that is where trimming and placement happen and a second account of them
+    /// could only ever disagree.
+    pub(crate) fn note_capture_stats(&mut self, stats: clipped_audio::windows::CaptureStats) {
+        self.unflagged_dropouts = stats.unflagged_dropouts;
+        self.unflagged_dropout_frames = stats.unflagged_dropout_frames;
     }
 
     /// Records the endpoint being replaced by one of a different shape.
@@ -278,6 +294,35 @@ impl AudioTrackReport {
     #[must_use]
     pub const fn synthesised_silence_frames(&self) -> u64 {
         self.synthesised_silence_frames
+    }
+
+    /// Runs of audio the tap lost that the audio engine flagged as nothing.
+    ///
+    /// **This one is a fault**, and one no build before this could see. A
+    /// process-scoped tap — the Game track, and Other System Audio — loses
+    /// about 31 ms of audio every time its set of contributing streams changes,
+    /// which is every time an application on that side of the tree starts or
+    /// stops playing. The zeros arrive inside ordinary packets the audio engine
+    /// marks as neither silent nor discontinuous, so this is the only account
+    /// of them there is
+    /// ([issue #626](https://github.com/wildware-uk/clipped/issues/626)).
+    ///
+    /// Not something a user can act on — nothing on the client side of WASAPI
+    /// avoids it — and not a reason to distrust a recording. It is here so that
+    /// "the game's audio clicks when the launcher starts" has a number beside
+    /// it in a support conversation instead of nothing at all. Read it with
+    /// [`unflagged_dropout_frames`](Self::unflagged_dropout_frames): the two
+    /// together give the length of the average run, which is what says this
+    /// defect rather than another.
+    #[must_use]
+    pub const fn unflagged_dropouts(&self) -> u64 {
+        self.unflagged_dropouts
+    }
+
+    /// How much audio those runs cost the track, in frames.
+    #[must_use]
+    pub const fn unflagged_dropout_frames(&self) -> u64 {
+        self.unflagged_dropout_frames
     }
 
     /// Frames dropped for describing a moment before the first video frame.
@@ -343,6 +388,25 @@ impl fmt::Display for AudioTrackReport {
                 formatter,
                 " — {} buffers were lost because the disk could not keep up",
                 self.buffers_dropped_writer_behind
+            )?;
+        }
+        // Said in milliseconds rather than frames because the question it
+        // answers is "how much did I lose", and said at all because before this
+        // the answer was silence in both senses (issue #626).
+        if self.unflagged_dropouts > 0 {
+            write!(
+                formatter,
+                " — Windows dropped {ms} ms of this track's audio without reporting it, in \
+                 {times} while applications started or stopped playing",
+                ms = if self.sample_rate == 0 {
+                    0
+                } else {
+                    self.unflagged_dropout_frames * 1_000 / u64::from(self.sample_rate)
+                },
+                times = match self.unflagged_dropouts {
+                    1 => "one run".to_owned(),
+                    runs => format!("{runs} runs"),
+                },
             )?;
         }
         Ok(())
@@ -853,6 +917,8 @@ mod tests {
             buffers: frames / 480,
             frames,
             synthesised_silence_frames: 0,
+            unflagged_dropouts: 0,
+            unflagged_dropout_frames: 0,
             frames_before_the_recording: 0,
             buffers_dropped_writer_behind: 0,
             format_changes: 0,

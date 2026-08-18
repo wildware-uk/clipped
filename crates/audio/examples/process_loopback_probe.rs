@@ -73,6 +73,11 @@ struct Side {
     silence: AtomicU64,
     reopened: AtomicU64,
     discontinuities: AtomicU64,
+    /// Runs of audio this tap lost when its stream set changed, and the frames
+    /// they held (issue #626). The one figure this probe exists to watch go up
+    /// while nothing else in the recorder reacts at all.
+    dropouts: AtomicU64,
+    dropout_frames: AtomicU64,
     scoped_to: AtomicU32,
     running: AtomicBool,
     /// Frames handed over by the drain after the capture was told to finish.
@@ -93,12 +98,15 @@ impl Side {
     fn column(&self, rate: f64) -> String {
         let frames = self.frames.load(Ordering::Relaxed);
         format!(
-            "{:>9} {:>6.2}s  silence {:>9}  reopened {:>3}  disc {:>3}  peak {:.4}",
+            "{:>9} {:>6.2}s  silence {:>9}  reopened {:>3}  disc {:>3}  lost {:>3} ({:>6.2}s)  \
+             peak {:.4}",
             frames,
             frames as f64 / rate,
             self.silence.load(Ordering::Relaxed),
             self.reopened.load(Ordering::Relaxed),
             self.discontinuities.load(Ordering::Relaxed),
+            self.dropouts.load(Ordering::Relaxed),
+            self.dropout_frames.load(Ordering::Relaxed) as f64 / rate,
             self.take_peak(),
         )
     }
@@ -135,6 +143,10 @@ fn pump(mut capture: ProcessLoopbackCapture, side: &Side, stop: &AtomicBool) {
             .store(stats.endpoint_changes, Ordering::Relaxed);
         side.discontinuities
             .store(stats.discontinuities, Ordering::Relaxed);
+        side.dropouts
+            .store(stats.unflagged_dropouts, Ordering::Relaxed);
+        side.dropout_frames
+            .store(stats.unflagged_dropout_frames, Ordering::Relaxed);
         side.scoped_to.store(capture.scoped_to(), Ordering::Relaxed);
         side.running
             .store(capture.target_is_running(), Ordering::Relaxed);

@@ -55,6 +55,7 @@
 //! | Arrival | The first 25 ms slice in which the joiner's tone reaches half the strength it settles at, against the moment the root was asked for it |
 //! | Continuity | The strength of the tone that was **already** playing, in the same slices, across the join |
 //! | Dropouts | Frames of silence the capture synthesised, and packets the audio engine flagged as following lost data, from the baseline to the end |
+//! | The loss | The longest run of exact zeros among the frames the audio engine *delivered*, and what `CaptureStats::unflagged_dropouts` made of it |
 //! | Isolation | What each of the two tracks holds and what it must not, at [`MINIMUM_RATIO`] apart |
 //!
 //! Two window lengths, deliberately. The isolation assertions are made over
@@ -118,6 +119,16 @@
 //! grow past 40 ms, [`DISTURBANCE_NEAR`] fails if they move away from the
 //! change that caused them, and [`MAXIMUM_DISTURBED`] keeps the older,
 //! coarser bound on how much of the tone is lost.
+//!
+//! **And that the recorder now counts it.** The hole cannot be closed — nothing
+//! on the client side of WASAPI avoids it, see the table below — so what issue
+//! #626 asks for is that it stops being invisible, and
+//! `CaptureStats::unflagged_dropouts` is that count. Both halves are asserted
+//! here, because either alone is worth nothing: the tap whose stream set
+//! changed reports at least one run accounting for the zeros this file measured
+//! in the samples, and the tap beside it, carrying audio over the same window
+//! and losing none of it, reports **zero**. A counter that always says
+//! something is as useless as one that never does.
 //!
 //! # What was tried against it, and did not help
 //!
@@ -281,6 +292,19 @@ const MAXIMUM_HOLE: Duration = Duration::from_millis(40);
 /// not the cost of a join — it is a capture that drops audio for reasons nothing
 /// here has identified, and it should fail rather than be absorbed by a count.
 const DISTURBANCE_NEAR: Duration = Duration::from_millis(100);
+
+/// How far the capture's own count of the frames it lost may sit from the count
+/// made here over the samples it handed back.
+///
+/// The two are the same measurement made twice, so they agree exactly on this
+/// machine run after run — but they are not made on the same samples. The
+/// capture counts as the packet goes past, after drift correction has nudged its
+/// frame count; the count here is made over what the reader kept, and a run
+/// whose first or last frame the resampler interpolated against its neighbour is
+/// one frame shorter or longer on one side than the other. Four frames is 83
+/// microseconds and cannot hide a disagreement worth knowing about: the runs
+/// being compared are 1,504 frames each.
+const FRAMES_EITHER_EDGE: u64 = 4;
 
 /// The longest the joiner's audio may take to reach the tree's track, measured
 /// from the moment the root was asked to start it.
@@ -548,6 +572,21 @@ fn a_process_joining_the_tree_mid_recording_moves_onto_the_trees_track_without_a
         arrival.map_or(f64::NAN, |at| tree.millis_between(at, hole_at)),
     );
 
+    // And what the recorder itself made of it, which before issue #626 was
+    // nothing at all.
+    let (counted, counted_frames) = tree.dropouts_since(baseline_from);
+    let (elsewhere_counted, _) =
+        complement.dropouts_since(complement.frame_at(script.baseline_from));
+    let _ = writeln!(
+        out,
+        "the count: the capture reported {counted} run(s) totalling {counted_frames} frames \
+         ({:.2} ms) as lost without the audio engine flagging it, against the {:.2} ms the \
+         samples show; the complement's capture reported {elsewhere_counted} over the same \
+         window",
+        tree.millis_between(0, counted_frames as usize),
+        tree.millis_between(hole_at, hole_at + hole),
+    );
+
     // -- 1. the tree was audible before the joiner, and only the tree ---------
 
     let (peak, _) = before.dominant_frequency();
@@ -675,6 +714,31 @@ fn a_process_joining_the_tree_mid_recording_moves_onto_the_trees_track_without_a
          including across the joins that cost the click issue #626 describes — so this is new \
          information rather than that defect, and the flag is the only account of audio the \
          engine captured and threw away"
+    );
+
+    // -- 5. and the recorder counted it, which is what issue #626 asks for ----
+
+    let measured: usize = holes.iter().map(|(_, length)| length).sum();
+    assert_eq!(
+        counted,
+        holes.len() as u64,
+        "the tree's track lost {:.2} ms of audio to a join ({hole} frames of exact zeros at \
+         {:.0} ms from the arrival) in {} run(s), and the capture reported {counted}. The loss \
+         cannot be fixed and this count is the whole of what a diagnostics screen has to say \
+         about it: a count of zero means the recording lost audio and nothing anywhere knows, \
+         and a count above the runs the samples hold is a number a support conversation would \
+         act on that does not describe the track",
+        tree.millis_between(hole_at, hole_at + hole),
+        tree.millis_between(arrival, hole_at),
+        holes.len(),
+    );
+    assert!(
+        counted_frames.abs_diff(measured as u64) <= FRAMES_EITHER_EDGE,
+        "the capture counted {counted_frames} frames lost where the samples show {measured}. \
+         The two are the same measurement made twice — here over the samples the reader kept, \
+         and there on the capture thread as they went past — so anything but agreement to \
+         within an edge frame or two of drift correction means one of them is measuring \
+         something else"
     );
 }
 
@@ -821,6 +885,19 @@ fn audio_starting_and_stopping_outside_the_tree_costs_the_complements_track_a_ho
         complement.discontinuities_since(watched),
     );
 
+    // The recorder's own account of both sides. The tree's is the half that
+    // makes this measurement worth anything: a counter that reports a loss on a
+    // track that lost nothing says nothing at all when it reports one on a
+    // track that did.
+    let (counted, counted_frames) = complement.dropouts_since(watched);
+    let (tree_counted, tree_counted_frames) = tree.dropouts_since(tree_from);
+    let _ = writeln!(
+        out,
+        "the count: the complement's capture reported {counted} run(s) totalling \
+         {counted_frames} frames as lost without the audio engine flagging it; the tree's \
+         capture reported {tree_counted} ({tree_counted_frames} frames) over the same window"
+    );
+
     assert!(
         outsider_during >= outsider_before * MINIMUM_RATIO,
         "the process that started outside the tree has to be audible on the complement's track \
@@ -864,6 +941,37 @@ fn audio_starting_and_stopping_outside_the_tree_costs_the_complements_track_a_ho
          mean it is endpoint-wide after all",
         tree.millis_between(tree_hole_at, tree_hole_at + tree_hole),
         tree.millis_between(tree_from, tree_hole_at),
+    );
+
+    // -- and that the count says both of those things ------------------------
+
+    let measured: usize = holes.iter().map(|(_, length)| length).sum();
+    assert_eq!(
+        counted,
+        holes.len() as u64,
+        "an application outside the game's tree started and stopped, which cost the \
+         other-system-audio track {} run(s) of exact zeros — the longest {:.2} ms — and the \
+         capture reported {counted}. This is the common case: a browser tab, a notification, a \
+         voice call. A count below it leaves every recording ever made saying nothing happened, \
+         and a count above it says something happened that did not",
+        holes.len(),
+        complement.millis_between(hole_at, hole_at + hole),
+    );
+    assert!(
+        counted_frames.abs_diff(measured as u64) <= FRAMES_EITHER_EDGE,
+        "the capture counted {counted_frames} frames lost where the samples show {measured}. \
+         The two are the same measurement made twice and have to agree"
+    );
+    assert_eq!(
+        (tree_counted, tree_counted_frames),
+        (0, 0),
+        "the game's track lost nothing while a process outside the tree started and stopped — \
+         its longest run of zeros was {:.2} ms — and the capture reported {tree_counted} runs \
+         of {tree_counted_frames} frames anyway. A counter that reports something on a track \
+         that lost nothing is worth exactly as little as one that reports nothing on a track \
+         that did, and it would put the two process-scoped tracks' losses on whichever one a \
+         reader happened to look at",
+        tree.millis_between(tree_hole_at, tree_hole_at + tree_hole),
     );
 }
 
@@ -997,6 +1105,15 @@ struct Block {
     /// The capture's running count of packets the audio engine flagged as
     /// following lost data, as of this block.
     discontinuities: u64,
+    /// The capture's running count of the runs of zeros issue #626 is, as of
+    /// this block, and the frames they held.
+    ///
+    /// The recorder's own account of the loss this file measures directly, and
+    /// the two are asserted against each other below: a counter that reports a
+    /// hole where the samples show none, or none where the samples show one, is
+    /// a counter nobody could act on.
+    dropouts: u64,
+    dropout_frames: u64,
 }
 
 impl Track {
@@ -1115,6 +1232,23 @@ impl Track {
             .saturating_sub(before)
     }
 
+    /// What the capture itself counted as lost between `from` and the end, as
+    /// `(runs, frames)`.
+    ///
+    /// The same delta as [`discontinuities_since`](Self::discontinuities_since)
+    /// and for the same reason: the capture counts from the moment it was
+    /// opened, and the moment worth measuring from is the baseline.
+    fn dropouts_since(&self, from: usize) -> (u64, u64) {
+        let before = self.blocks.iter().rev().find(|block| block.at < from);
+        let last = self.blocks.last();
+        (
+            last.map_or(0, |block| block.dropouts)
+                .saturating_sub(before.map_or(0, |block| block.dropouts)),
+            last.map_or(0, |block| block.dropout_frames)
+                .saturating_sub(before.map_or(0, |block| block.dropout_frames)),
+        )
+    }
+
     /// When the block holding `index` was read.
     fn instant_at(&self, index: usize) -> Option<Instant> {
         let after = self.blocks.partition_point(|block| block.at <= index);
@@ -1173,6 +1307,8 @@ fn collect(mut capture: ProcessLoopbackCapture, stop: &AtomicBool) -> Track {
                 frames,
                 origin,
                 discontinuities: capture.stats().discontinuities,
+                dropouts: capture.stats().unflagged_dropouts,
+                dropout_frames: capture.stats().unflagged_dropout_frames,
             });
         }
     }

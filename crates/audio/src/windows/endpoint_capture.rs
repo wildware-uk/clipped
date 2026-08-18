@@ -105,6 +105,7 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use clipped_logging::AudioSource;
 
 use crate::buffer::{CapturedAudio, SampleOrigin};
+use crate::dropout::DropoutWatch;
 use crate::error::{AudioError, Capture};
 use crate::format::{append_as_f32, AudioFormat};
 use crate::resample::LinearResampler;
@@ -731,6 +732,26 @@ pub struct CaptureStats {
     pub endpoint_changes: u64,
     /// Packets the audio engine flagged as following lost data.
     pub discontinuities: u64,
+    /// Runs of audio the capture lost without the audio engine saying so.
+    ///
+    /// A **process-scoped** tap loses 1,504 frames — 31.33 ms — of exact
+    /// digital zeros every time its set of contributing streams changes, which
+    /// is every time any process starts or stops playing on that side of the
+    /// tree. The zeros arrive inside ordinary packets whose flags are `0`, so
+    /// [`discontinuities`](Self::discontinuities) reads zero through all of it
+    /// and nothing else in the recorder can notice
+    /// ([issue #626](https://github.com/wildware-uk/clipped/issues/626)). The
+    /// hole cannot be avoided; this is the count that stops it being invisible.
+    ///
+    /// Read beside [`unflagged_dropout_frames`](Self::unflagged_dropout_frames)
+    /// rather than alone: the two together give the shape as well as the
+    /// amount, which is what says whether a recording met this defect or
+    /// something else. Recognising a run is a heuristic and `crate::dropout`
+    /// is explicit about what it can and cannot tell apart; silence this crate
+    /// synthesised is never any part of it.
+    pub unflagged_dropouts: u64,
+    /// The frames those runs held, which at 48 kHz is 1,504 apiece.
+    pub unflagged_dropout_frames: u64,
 }
 
 /// What [`EndpointCapture::read`] has decided to return, without borrowing
@@ -893,6 +914,11 @@ pub(super) struct EndpointCapture {
     packet_device: AudioTimestamp,
     /// Zeroes, long enough for one instalment of silence.
     silence: Vec<f32>,
+    /// Looks for the audio a process-scoped tap loses whenever its set of
+    /// contributing streams changes, which the audio engine flags as nothing at
+    /// all (`crate::dropout`, issue #626). Fed the samples the caller is
+    /// given, in the order they are given them.
+    dropouts: DropoutWatch,
     /// When to look for the endpoint again, when there is no stream.
     retry_at: Option<Instant>,
     /// Whether the last endpoint found was unusable, in which case there is no
@@ -998,6 +1024,7 @@ impl EndpointCapture {
             packet_pending: false,
             packet_device: opened,
             silence: Vec::new(),
+            dropouts: DropoutWatch::new(format.sample_rate(), format.channels()),
             retry_at: None,
             awaiting_change: false,
             format_change: None,
@@ -1068,6 +1095,12 @@ impl EndpointCapture {
         }
     }
 
+    /// Adds what `crate::dropout` found to the counters it belongs to.
+    fn note_dropouts(&mut self, found: crate::dropout::Dropouts) {
+        self.stats.unflagged_dropouts += found.count;
+        self.stats.unflagged_dropout_frames += found.frames;
+    }
+
     /// Reads the next block of audio, waiting up to `timeout` for one.
     ///
     /// Consecutive buffers are exactly contiguous: each one's timestamp is the
@@ -1130,6 +1163,8 @@ impl EndpointCapture {
                 synthesised_silence_frames = self.stats.synthesised_silence_frames,
                 endpoint_changes = self.stats.endpoint_changes,
                 discontinuities = self.stats.discontinuities,
+                unflagged_dropouts = self.stats.unflagged_dropouts,
+                unflagged_dropout_frames = self.stats.unflagged_dropout_frames,
                 "audio capture stopped"
             );
         }
@@ -1265,6 +1300,15 @@ impl EndpointCapture {
         }
         let timestamp = self.timeline.emit(instalment);
         self.stats.synthesised_silence_frames += instalment;
+        // Zeros this crate invented are a different failure with a different
+        // cause, and none of them is ever handed to the watch. What is handed
+        // over is the interruption: the delivered samples either side of a
+        // period the engine described nothing of are not adjacent in time, so
+        // the run so far is judged here and a new one begins. Throwing it away
+        // instead missed the hole on five real joins out of five, because the
+        // engine stalls while it rebuilds a tap's mix (`crate::dropout`).
+        let found = self.dropouts.interrupt();
+        self.note_dropouts(found);
         Some(Ready::Silence { samples, timestamp })
     }
 
@@ -1277,6 +1321,16 @@ impl EndpointCapture {
         let channels = usize::from(self.format.channels().get());
         let start = self.packet_offset * channels;
         let frames = ((self.packet.len() - start) / channels) as u64;
+        // Here rather than where the packet was accepted, because these are the
+        // samples the caller is really given: a packet the timeline discarded
+        // entirely never reaches this, one it trimmed is examined from the
+        // frame that survived, and silence owed in front of it has already gone
+        // past `silence_instalment` and interrupted the run. The order this
+        // sees is exactly the order the track is written in, which is what lets
+        // a run span the packet boundary it always spans.
+        let found = self.dropouts.examine(&self.packet[start..]);
+        self.note_dropouts(found);
+
         let timestamp = self.timeline.emit(frames);
         Some(Ready::Packet {
             start,
@@ -1323,6 +1377,11 @@ impl EndpointCapture {
     fn accept_packet(&mut self, arrived: AudioTimestamp, discontinuity: bool) {
         if discontinuity {
             self.stats.discontinuities += 1;
+            // This packet is not adjacent to the last one, by the engine's
+            // own account, so the run of zeros before it ends here
+            // (`crate::dropout`).
+            let found = self.dropouts.interrupt();
+            self.note_dropouts(found);
             // The audio engine has already said this packet is not adjacent,
             // in time, to the last one it delivered, so interpolating between
             // them would blend two moments that were never next to each
@@ -1363,6 +1422,11 @@ impl EndpointCapture {
                 );
                 self.packet_offset = overlap as usize;
                 self.packet_pending = true;
+                // Frames at the front of this packet are being discarded, so
+                // what survives is not adjacent to the last packet handed over
+                // (`crate::dropout`).
+                let found = self.dropouts.interrupt();
+                self.note_dropouts(found);
                 // The endpoint's position is for the frame at the front of the
                 // packet, and that frame is being discarded, so the position
                 // reported to the caller has to advance by the frames dropped.
@@ -1386,6 +1450,11 @@ impl EndpointCapture {
                     "discarding audio that lies entirely inside a period already reported"
                 );
                 self.drift.reset();
+                // Nothing of this packet reaches the caller, so what does
+                // reach it next is not adjacent to what came before
+                // (`crate::dropout`).
+                let found = self.dropouts.interrupt();
+                self.note_dropouts(found);
             }
         }
     }
@@ -1454,6 +1523,11 @@ impl EndpointCapture {
             self.awaiting_change = false;
             self.retry_at = failed_at_once.then(|| Instant::now() + ENDPOINT_RETRY);
             self.stats.endpoint_changes += 1;
+            // A different stream. Nothing the last one delivered says
+            // anything about this one, including whether it is audible at all,
+            // so the zeros at the front of it are treated like the zeros at the
+            // front of a track (`crate::dropout`).
+            self.dropouts.restarted();
 
             if failed_at_once {
                 tracing::warn!(

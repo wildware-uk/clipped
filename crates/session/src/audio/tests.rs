@@ -125,6 +125,11 @@ struct ScriptedCapture {
     /// Whether the capture has let go, which a real one does by itself once a
     /// drain has handed over everything.
     closed: bool,
+    /// What this capture will say it counted, which a script sets so that a
+    /// figure only the capture can know — the audio a process-scoped tap loses
+    /// without the engine saying so (issue #626) — can be followed from where
+    /// it is produced to where somebody reads it.
+    stats: clipped_audio::windows::CaptureStats,
 }
 
 impl AudioCapture for ScriptedCapture {
@@ -169,6 +174,10 @@ impl AudioCapture for ScriptedCapture {
     fn close(&mut self) {
         self.closed = true;
     }
+
+    fn stats(&self) -> clipped_audio::windows::CaptureStats {
+        self.stats
+    }
 }
 
 /// A source scripted to hand over `buffers`, and the flag raised when it has.
@@ -181,6 +190,34 @@ fn scripted(source: AudioSource, channels: u16, buffers: Vec<ScriptedBuffer>) ->
     scripted_holding(source, channels, buffers, Vec::new())
 }
 
+/// [`scripted`], with a capture that will report having lost `dropouts` runs of
+/// `frames` frames the way a process-scoped tap does when its stream set
+/// changes (issue #626).
+///
+/// The loss itself is `clipped-audio`'s to find, and `crate::dropout` and
+/// `mid_recording_joiner.rs` are where it is found. What this drives is the
+/// half nothing else covers: that a figure only the capture can know reaches
+/// the report the recorder prints and logs.
+fn scripted_losing(
+    source: AudioSource,
+    channels: u16,
+    buffers: Vec<ScriptedBuffer>,
+    dropouts: u64,
+    frames: u64,
+) -> Scripted {
+    scripted_counting(
+        source,
+        channels,
+        buffers,
+        Vec::new(),
+        clipped_audio::windows::CaptureStats {
+            unflagged_dropouts: dropouts,
+            unflagged_dropout_frames: frames,
+            ..clipped_audio::windows::CaptureStats::default()
+        },
+    )
+}
+
 /// [`scripted`], with `held` standing for the audio the engine has captured and
 /// nobody has collected when the recording is stopped.
 fn scripted_holding(
@@ -188,6 +225,24 @@ fn scripted_holding(
     channels: u16,
     buffers: Vec<ScriptedBuffer>,
     held: Vec<ScriptedBuffer>,
+) -> Scripted {
+    scripted_counting(
+        source,
+        channels,
+        buffers,
+        held,
+        clipped_audio::windows::CaptureStats::default(),
+    )
+}
+
+/// [`scripted_holding`], with what the capture will say it counted about
+/// itself.
+fn scripted_counting(
+    source: AudioSource,
+    channels: u16,
+    buffers: Vec<ScriptedBuffer>,
+    held: Vec<ScriptedBuffer>,
+    stats: clipped_audio::windows::CaptureStats,
 ) -> Scripted {
     let exhausted = Arc::new(AtomicBool::new(false));
     Scripted {
@@ -203,6 +258,7 @@ fn scripted_holding(
                 exhausted: Arc::clone(&exhausted),
                 draining: false,
                 closed: false,
+                stats,
             }),
         },
         exhausted,
@@ -1085,6 +1141,91 @@ fn a_source_that_produced_only_silence_leaves_a_declared_track_and_says_so() {
         report.to_string().contains("the device produced nothing"),
         "{report}"
     );
+}
+
+#[test]
+fn what_a_tap_lost_without_the_engine_saying_so_reaches_the_recordings_report() {
+    // [Issue #626](https://github.com/wildware-uk/clipped/issues/626), the
+    // consuming half. `clipped-audio` counts the audio a process-scoped tap
+    // loses when its stream set changes; the count is worth nothing if it stops
+    // at the capture, which is the defect this repository keeps finding — a
+    // producer nothing was rewired to read.
+    //
+    // Fourteen runs of 1,504 frames is what fourteen applications starting or
+    // stopping costs a track on this machine.
+    const RUNS: u64 = 14;
+    const FRAMES: u64 = 14 * 1_504;
+
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("session-audio-dropouts");
+    let path = directory.file("recording.mkv");
+    let reports = record(
+        video,
+        &path,
+        vec![scripted_losing(
+            AudioSource::OtherSystemAudio,
+            2,
+            tone(SYSTEM_TONE, 2, 2.0, 0),
+            RUNS,
+            FRAMES,
+        )],
+        1.0,
+    );
+
+    let report = &reports[0];
+    assert_eq!(
+        (
+            report.unflagged_dropouts(),
+            report.unflagged_dropout_frames()
+        ),
+        (RUNS, FRAMES),
+        "a recording has to carry what its capture lost. Both figures, because 438 ms in \
+         fourteen runs is the 31 ms rebuild this defect is and 438 ms in one run is something \
+         else entirely"
+    );
+    assert!(
+        report.to_string().contains(
+            "Windows dropped 438 ms of this track's audio without reporting it, in 14 runs"
+        ),
+        "the person who ran the recording is told, in the line the recorder prints, rather than \
+         having to ask the report for a number: {report}"
+    );
+}
+
+#[test]
+fn a_recording_that_lost_nothing_says_nothing_about_losing_anything() {
+    // The other half, and the one that stops the sentence above being noise on
+    // every recording ever made: a track with no loss must not mention loss,
+    // and its counters must read zero rather than a plausible-looking figure.
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("session-audio-no-dropouts");
+    let path = directory.file("recording.mkv");
+    let reports = record(
+        video,
+        &path,
+        vec![scripted(
+            AudioSource::OtherSystemAudio,
+            2,
+            tone(SYSTEM_TONE, 2, 2.0, 0),
+        )],
+        1.0,
+    );
+
+    let report = &reports[0];
+    assert_eq!(
+        (
+            report.unflagged_dropouts(),
+            report.unflagged_dropout_frames()
+        ),
+        (0, 0),
+        "nothing was lost, and a counter that reports something anyway is worth as little as \
+         one that never reports anything"
+    );
+    assert!(!report.to_string().contains("Windows dropped"), "{report}");
 }
 
 #[test]
