@@ -980,6 +980,7 @@
       ],
       "optional": [
         "duration_ms",
+        "end_reason",
         "outcome"
       ]
     },
@@ -1584,6 +1585,7 @@
                 "recordings": [
                   {
                     "duration_ms": 1800000,
+                    "end_reason": "stopped",
                     "outcome": "recorded",
                     "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
                     "session_index": 1
@@ -1624,6 +1626,7 @@
                 "recordings": [
                   {
                     "duration_ms": 1800000,
+                    "end_reason": "stopped",
                     "outcome": "recorded",
                     "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
                     "session_index": 1
@@ -2845,6 +2848,7 @@
                 "recordings": [
                   {
                     "duration_ms": 1800000,
+                    "end_reason": "stopped",
                     "outcome": "recorded",
                     "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
                     "session_index": 1
@@ -3119,6 +3123,7 @@
             "recordings": [
               {
                 "duration_ms": 1800000,
+                "end_reason": "stopped",
                 "outcome": "recorded",
                 "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
                 "session_index": 1
@@ -3151,6 +3156,7 @@
             "recordings": [
               {
                 "duration_ms": 1800000,
+                "end_reason": "stopped",
                 "outcome": "recorded",
                 "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
                 "session_index": 1
@@ -3183,12 +3189,14 @@
           "recordings": [
             {
               "duration_ms": 1800000,
+              "end_reason": "stopped",
               "outcome": "recorded",
               "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
               "session_index": 1
             },
             {
               "duration_ms": 1140000,
+              "end_reason": "target-resized",
               "outcome": "recorded",
               "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "session_index": 2
@@ -3213,12 +3221,14 @@
           "recordings": [
             {
               "duration_ms": 1800000,
+              "end_reason": "stopped",
               "outcome": "recorded",
               "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
               "session_index": 1
             },
             {
               "duration_ms": 1140000,
+              "end_reason": "target-resized",
               "outcome": "recorded",
               "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "session_index": 2

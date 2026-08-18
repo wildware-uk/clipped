@@ -258,6 +258,34 @@ pub struct SessionRecording {
     /// (AGENTS.md section 27).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Why it ended: `stopped`, `target-lost`, `target-resized`,
+    /// `disk-space-low` or `output-unavailable`.
+    ///
+    /// The vocabulary of
+    /// [`LibraryRecording::end_reason`](crate::LibraryRecording::end_reason),
+    /// spelled the way the sidecar writes it and the index stores it, and a
+    /// string for the same reason that one is: it is open, and a reason this
+    /// build has never heard of is kept and shown rather than failing the frame
+    /// that carried it.
+    ///
+    /// **Why a live sitting needs it at all.** A recording that somebody stopped
+    /// answers this in the reply to that stop
+    /// ([`RecordingSummary::end_reason`]). A recording that ended *by itself*
+    /// has no reply to carry one, and the only thing the recorder sends is
+    /// [`Event::SessionEnded`](crate::Event::SessionEnded) — so without this
+    /// field a window watching a recording end can name the file and cannot say
+    /// why it stopped, and a recording finished by a window being dragged looks
+    /// exactly like one that ran to the end
+    /// ([issue #625](https://github.com/wildware-uk/clipped/issues/625),
+    /// [ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+    /// The indexed view of the same file has carried the word all along; this is
+    /// the announcement catching up with it, minutes earlier.
+    ///
+    /// Absent while the recording is still being written, and for one that
+    /// produced no file — a `no-window` or `failed` entry never reached an
+    /// ending to have a reason for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
     /// How long it runs for. Absent while it is still running, and for one that
     /// produced no file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -610,12 +638,14 @@ mod tests {
                     session_index: 1,
                     output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
                     outcome: Some("recorded".to_owned()),
+                    end_reason: Some("stopped".to_owned()),
                     duration_ms: Some(1_800_000),
                 },
                 SessionRecording {
                     session_index: 2,
                     output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
                     outcome: None,
+                    end_reason: None,
                     duration_ms: None,
                 },
             ],
@@ -709,9 +739,16 @@ mod tests {
         // The absence is the state, exactly as `LibrarySession` has it: a null
         // `ended_at` would make every open sitting look like it carried the
         // field, and a window reading truthiness would call it ended.
-        let json = serde_json::to_string(&a_sitting()).expect("it serialises");
-        assert!(!json.contains("ended_at"), "{json}");
-        assert!(!json.contains("end_reason"), "{json}");
+        //
+        // Asked of the sitting's **own** keys rather than of the whole frame as
+        // a string. `SessionRecording` has an `end_reason` of its own — why one
+        // *file* ended, which a finished file of an open sitting has and the
+        // sitting itself does not — so a substring search now finds the wrong
+        // one and would pass for a sitting that really had ended.
+        let json: serde_json::Value = serde_json::to_value(a_sitting()).expect("it serialises");
+        let sitting = json.as_object().expect("a sitting is an object");
+        assert!(!sitting.contains_key("ended_at"), "{json}");
+        assert!(!sitting.contains_key("end_reason"), "{json}");
     }
 
     #[test]
@@ -720,6 +757,7 @@ mod tests {
         ended.ended_at = Some("2026-08-11T22:03:00+01:00".to_owned());
         ended.end_reason = Some("game-exited".to_owned());
         ended.recordings[1].outcome = Some("recorded".to_owned());
+        ended.recordings[1].end_reason = Some("target-resized".to_owned());
         ended.recordings[1].duration_ms = Some(1_140_000);
 
         let json = serde_json::to_string(&ended).expect("it serialises");
@@ -735,6 +773,14 @@ mod tests {
                 r"D:\clips\cs2-20260811-201400-02.mkv"
             ],
             "a sitting that ended without naming its files leaves a window with nothing to offer"
+        );
+        assert_eq!(
+            back.recordings
+                .iter()
+                .map(|recording| recording.end_reason.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("stopped"), Some("target-resized")],
+            "and a sitting whose files do not say why they ended leaves a window unable to tell              a recording somebody stopped from one a size change finished (issue #625)"
         );
     }
 

@@ -362,6 +362,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     session_index: 'required',
     output: 'required',
     outcome: 'optional',
+    end_reason: 'optional',
     duration_ms: 'optional',
   }),
   recording_summary: fields<RecordingSummary>({
@@ -1426,6 +1427,70 @@ describe('a thing in the trash that has no file', () => {
     expect(reply.restored).not.toHaveProperty('path');
     expect(reply.restored.file_restored).toBe(false);
     expect(reply.restored.id).toBe(7);
+  });
+});
+
+describe('a sitting that has ended', () => {
+  /**
+   * Issue #625, at the layer that decides whether a window can say anything.
+   *
+   * A recording somebody stopped explains itself in the `recording_summary` the
+   * stop is answered with. A recording that ended *by itself* has no reply, and
+   * this event is the only thing the recorder ever sends about it — so a reader
+   * that dropped `end_reason` from each file would leave a window able to name
+   * the file and unable to say why it stopped, and a sitting cut short by a
+   * window being dragged to a new size would look exactly like one that ran to
+   * the end (ADR 0012).
+   *
+   * Not covered by the discriminant check above, which reads the *sitting's*
+   * reason: both files here belong to one sitting that ended `game-exited`, and
+   * a reader that kept that and lost the two below would reach the same answer.
+   */
+  const frame = sampleNamed('a sitting ending, with the files it produced').frame;
+
+  it('says why each of its files ended, and not only why the sitting did', () => {
+    const result = parseServerMessage(frame);
+    expect(result.ok, result.ok ? '' : `a sitting that ended was rejected: ${result.problem}`).toBe(
+      true,
+    );
+    if (!result.ok || result.message.type !== 'event' || result.message.event !== 'session_ended') {
+      throw new Error('the sample is a session_ended event');
+    }
+
+    const { session } = result.message;
+    expect(session.end_reason).toBe('game-exited');
+    expect(session.recordings.map((recording) => recording.end_reason)).toEqual([
+      'stopped',
+      // The word this whole field exists for. Hyphenated, because this is the
+      // sidecar's and the index's vocabulary rather than the underscored
+      // `EndReason` a `stop_recording` is answered with.
+      'target-resized',
+    ]);
+  });
+
+  it('leaves the reason off a file it has none for, rather than inventing one', () => {
+    // The last entry of an open sitting is the file being written now, which has
+    // not ended and therefore has no reason to have ended. An empty string here
+    // would be a screen drawing a sentence about a recording still running.
+    const running = parseServerMessage(
+      sampleNamed('the status of a recorder that is recording').frame,
+    );
+    if (
+      !running.ok ||
+      running.message.type !== 'response' ||
+      !('ok' in running.message.outcome) ||
+      running.message.outcome.ok.reply !== 'status'
+    ) {
+      throw new Error('the sample is a status');
+    }
+
+    const status = running.message.outcome.ok.status;
+    if (status.state !== 'recording') {
+      throw new Error('the sample is a recording status');
+    }
+    const open = status.session?.recordings.at(-1);
+    expect(open?.output).toBeTypeOf('string');
+    expect(open).not.toHaveProperty('end_reason');
   });
 });
 

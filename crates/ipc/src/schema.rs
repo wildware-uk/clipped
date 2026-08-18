@@ -2443,6 +2443,7 @@ fn exemplar_session() -> SessionSummary {
                 session_index: 2,
                 output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
                 outcome: None,
+                end_reason: None,
                 duration_ms: None,
             },
         ],
@@ -2465,6 +2466,7 @@ fn exemplar_ended_session() -> SessionSummary {
                 session_index: 2,
                 output: r"D:\clips\cs2-20260811-201400-02.mkv".to_owned(),
                 outcome: Some("recorded".to_owned()),
+                end_reason: Some("target-resized".to_owned()),
                 duration_ms: Some(1_140_000),
             },
         ],
@@ -2478,6 +2480,7 @@ fn exemplar_session_recording() -> SessionRecording {
         session_index: 1,
         output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
         outcome: Some("recorded".to_owned()),
+        end_reason: Some("stopped".to_owned()),
         duration_ms: Some(1_800_000),
     }
 }

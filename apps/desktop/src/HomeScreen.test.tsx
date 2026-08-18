@@ -1,4 +1,4 @@
-import type { RecorderStatus } from '@clipped/shared';
+import type { RecorderStatus, SessionRecording, SessionSummary } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { HomeScreen } from './HomeScreen';
 import type { RecorderProblem, RecordTarget } from './recording';
-import { describeRecordingNow } from './recordingNow';
+import { describeRecordingNow, describeResizeEnding } from './recordingNow';
 import { A_COUNT, textRuns } from './test/counts';
 import { stubRecorderLinkRuntime, type Invocation } from './test/recorderLinkRuntime';
 import type { RecorderLinkState } from './useRecorderLink';
@@ -65,6 +65,46 @@ const OUTPUT = 'D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv';
 
 /** What the window would record: the application the user was last in. */
 const TARGET: RecordTarget = { process_id: 4_242, process_name: 'cs2.exe' };
+
+/**
+ * The file left by a recording a size change ended.
+ *
+ * Deliberately not {@link OUTPUT}: the path the screen has to show is the one
+ * inside the sitting the recorder announced, and a screen that went on showing
+ * the path it already had would pass a test that reused the same string.
+ */
+const RESIZED_OUTPUT = 'D:\\clips\\clipped-cs2-2026-08-16T20-14-00.mkv';
+
+/**
+ * The sitting the recorder announces when a window it was recording is dragged
+ * to a new size (issue #625).
+ *
+ * One recording, and no successor after it. That is what ADR 0012 settled a
+ * recording *somebody asked for* does with a resize: the file is finished and
+ * the sitting stops there, where an automatic one would have opened a second
+ * file at the new size. The shape is what tells the two apart, so the absent
+ * second entry is the load-bearing part of this value.
+ *
+ * The fields sit beside the tag rather than under a `session` key, because
+ * `RecorderLinkEvent::SessionEnded` is a newtype in an internally tagged
+ * enumeration (`crates/ipc/src/supervisor/link.rs`).
+ */
+const RESIZED_FILE: SessionRecording = {
+  session_index: 1,
+  output: RESIZED_OUTPUT,
+  outcome: 'recorded',
+  end_reason: 'target-resized',
+  duration_ms: 600_000,
+};
+
+const ENDED_BY_RESIZE: SessionSummary = {
+  session_id: 'cs2-20260816-201400',
+  game_name: 'Counter-Strike 2',
+  started_at: '2026-08-16T20:14:00+01:00',
+  ended_at: '2026-08-16T20:24:00+01:00',
+  end_reason: 'recording-ended',
+  recordings: [RESIZED_FILE],
+};
 
 /**
  * A recorder attached, whose *link* says it is idle.
@@ -371,6 +411,82 @@ describe('what the Home screen says about the recording now', () => {
     expect(describeRecordingNow(ATTACHED, recordingFor(5_000), null).elapsed).toBe('0:05');
     expect(describeRecordingNow(ATTACHED, recordingFor(65_000), null).elapsed).toBe('1:05');
     expect(describeRecordingNow(ATTACHED, recordingFor(3_671_000), null).elapsed).toBe('1:01:11');
+  });
+});
+
+/**
+ * What the Home screen says about a sitting a size change ended (issue #625).
+ *
+ * ADR 0012 gives two outcomes for the same event, and the whole value of this
+ * wording is that it belongs to one of them. A recording somebody asked for
+ * stops at the resize; an automatic sitting opens the next file immediately. The
+ * shape of the sitting is what tells them apart — whether anything follows the
+ * resized file — so these cases are about that discrimination rather than about
+ * the sentence, which the screen's own case asserts.
+ */
+describe('what the Home screen says about a sitting a resize ended', () => {
+  /** The sitting `ENDED_BY_RESIZE` would have been, had a successor followed. */
+  const withSuccessor: SessionSummary = {
+    ...ENDED_BY_RESIZE,
+    recordings: [
+      ...ENDED_BY_RESIZE.recordings,
+      {
+        session_index: 2,
+        output: 'D:\\clips\\clipped-cs2-2026-08-16T20-24-00.mkv',
+        outcome: 'recorded',
+        end_reason: 'stopped',
+        duration_ms: 120_000,
+      },
+    ],
+  };
+
+  it('says nothing at all when no sitting has ended', () => {
+    // Not an empty sentence: the panel draws nothing rather than a blank line.
+    expect(describeResizeEnding(null)).toBeUndefined();
+  });
+
+  it('names the size change and the file that resize left', () => {
+    const shown = describeResizeEnding(ENDED_BY_RESIZE);
+
+    expect(shown?.detail).toMatch(/changed size/);
+    expect(shown?.output).toBe(RESIZED_OUTPUT);
+  });
+
+  it('says nothing about a sitting that ended any other way', () => {
+    // A recording somebody stopped has already been answered, in the reply to
+    // their stop. Saying a resize ended it would be a sentence about something
+    // that did not happen.
+    expect(
+      describeResizeEnding({
+        ...ENDED_BY_RESIZE,
+        recordings: [{ ...RESIZED_FILE, end_reason: 'stopped' }],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about an automatic sitting whose last file a resize ended', () => {
+    // The case the shape alone cannot answer, and the reason the sitting's own
+    // `end_reason` is asked first. A game that exits in the seconds after a
+    // resize leaves an *automatic* sitting whose last file also ended
+    // `target-resized` and which has no successor — identical in shape to the
+    // one above, and the opposite in meaning: that sitting was carried on for as
+    // long as there was a game to carry on for. Only a sitting somebody asked
+    // for ends `recording-ended`
+    // (`clipped_session::automatic::SessionEndReason::RecordingEnded`).
+    expect(
+      describeResizeEnding({ ...ENDED_BY_RESIZE, end_reason: 'game-exited' }),
+      'an automatic sitting is being told that a recording it asked for was not carried on',
+    ).toBeUndefined();
+  });
+
+  it('says nothing when the resize did start a second file', () => {
+    // The automatic case, which is the wording's opposite: a sitting that was
+    // carried on has not lost anything, and telling somebody no second file was
+    // started while one sits in the same sitting would be plainly false.
+    expect(
+      describeResizeEnding(withSuccessor),
+      'the automatic case is being told it got no successor, over a sitting that has one',
+    ).toBeUndefined();
   });
 });
 
@@ -767,6 +883,63 @@ describe('the Home screen', () => {
   });
 
   /*
+   * Issue #625, and the reason the field it reads was added to the protocol.
+   *
+   * A recording somebody stopped explains itself in the reply to their stop,
+   * which is what the case above draws. A recording ended by its window being
+   * dragged to a new size has no reply: `useRecording` is never told, the status
+   * goes from `recording` to `idle`, and the panel dropped the path with it. So
+   * the only thing the window ever hears about it is the sitting the recorder
+   * announces as it closes — and ADR 0012 makes that sitting one file with no
+   * successor, because a recording somebody asked for is not carried on.
+   *
+   * Two assertions, because losing either one is a different failure. Without
+   * the cause, a sitting cut short by a dragged window reads exactly like one
+   * that ran to the end. Without the path, somebody is holding a finished
+   * recording and has no idea where it is — which is the same harm the case
+   * above exists to prevent, arriving by the door nobody watched.
+   */
+  it('says a size change ended the recording, and names the file it left', async () => {
+    let running = true;
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => (running ? recordingFor(600_000) : IDLE),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Stop recording');
+    });
+
+    // The resize, as the machine delivers it: the recorder stops the recording
+    // on its own, and announces the sitting it closed. The status it answers
+    // with afterwards is "idle", which is true and says nothing.
+    running = false;
+    runtime.emit({ event: 'session_ended', ...ENDED_BY_RESIZE });
+
+    await waitFor(() => {
+      expect(
+        recordingPanel().textContent ?? '',
+        'the screen no longer names the size change as why the recording ended, so a sitting ' +
+          'somebody cut short by dragging a window reads exactly like one that ran to the end ' +
+          '(issue #625)',
+      ).toMatch(/changed size/);
+    });
+
+    await waitFor(() => {
+      expect(
+        recordingPanel().textContent ?? '',
+        'the screen no longer names the file the recording left, so somebody is holding a ' +
+          'finished recording with no path to it (issue #625)',
+      ).toContain(RESIZED_OUTPUT);
+    });
+
+    // And it says which mode this was, because the answer to "why did it not
+    // just carry on?" is that an automatic sitting would have (ADR 0012).
+    expect(within(recordingPanel()).getByText(/automatic recording is/i)).toBeVisible();
+  });
+
+  /*
    * The duration changes every second, and a screen reader reading a new one
    * aloud every second would drown the announcement the live region exists for
    * and make the screen unusable (AGENTS.md section 46). It stays in the
@@ -1039,7 +1212,7 @@ describe('the Home screen', () => {
    * gives a screen-reader user nothing to navigate between.
    */
   it('has a heading for each of its two parts', () => {
-    render(<HomeScreen link={null} />);
+    render(<HomeScreen link={null} ended={null} />);
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Home');
     expect(

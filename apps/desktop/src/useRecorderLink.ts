@@ -3,6 +3,7 @@ import {
   type ProtocolError,
   type RecorderStatus,
   type RecordingStatus,
+  type SessionSummary,
 } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -89,6 +90,15 @@ export interface RecordingFailure {
 type RecorderLinkEvent =
   | { readonly event: 'state'; readonly [key: string]: unknown }
   | ({ readonly event: 'recording_interrupted' } & InterruptedRecording)
+  /*
+   * The sitting's own fields sit *beside* the tag rather than under a `session`
+   * key: `RecorderLinkEvent::SessionEnded` is a newtype in an internally tagged
+   * enumeration, and `a_sitting_that_ended_survives_the_journey_into_a_window`
+   * in `crates/ipc/src/supervisor/link.rs` is what holds that shape still. The
+   * protocol's own `session_ended` frame nests it; this is the link's
+   * re-announcement of it into the webview, and they are not the same shape.
+   */
+  | ({ readonly event: 'session_ended' } & SessionSummary)
   | {
       readonly event: 'recording_failed';
       readonly recording_id: string;
@@ -109,15 +119,23 @@ type RecorderLinkEvent =
  * change; what the Diagnostics screen needs is not a fresher figure but an honest
  * label on the one there is.
  *
- * `interrupted` and `failed` are things that *happened*, stay true afterwards,
- * and are each dropped by the state that follows them about a second later.
- * `interrupted` is the whole of what
+ * `interrupted`, `failed` and `ended` are things that *happened*, stay true
+ * afterwards, and are each dropped by the state that follows them about a second
+ * later. `interrupted` is the whole of what
  * [ADR 0006](../../../docs/adr/0006-recorder-lifetime-and-supervision.md)'s
  * recovery produces — "recovery names the file; it does not resume the
  * recording". `failed` is the one thing a support report about a failed recording
  * is for: a recorder that stayed up reports the failure once and then reports
  * "idle", and after that nothing in the window remembers that anything went wrong
  * (issue #101).
+ *
+ * `ended` is the third of that kind. A recording somebody stopped explains itself
+ * in the reply to their stop; a recording that ended *by itself* has no reply,
+ * and the sitting the recorder announces as it closes is the only thing the
+ * window is ever told about it. Without it the panel goes from "Recording cs2.exe"
+ * to "not recording" and takes the file with it, saying nothing about why — which
+ * is what a recording cut short by its window being dragged to a new size looked
+ * like (issue #625, ADR 0012).
  */
 export interface RecorderLinkView {
   /** Where the link with the recorder stands, or `null` outside the window. */
@@ -128,6 +146,15 @@ export interface RecorderLinkView {
   readonly interrupted: InterruptedRecording | null;
   /** The most recent recording that ended because something failed, if any. */
   readonly failed: RecordingFailure | null;
+  /**
+   * The most recent sitting the recorder announced the end of, if any.
+   *
+   * The whole sitting rather than a verdict about it, because which of its files
+   * is being talked about, and why that one ended, are both inside it — and a
+   * screen that was handed a verdict could not tell a sitting that ended in one
+   * file from one that went on into a second (ADR 0012).
+   */
+  readonly ended: SessionSummary | null;
 }
 
 /** The name the Rust side emits under. */
@@ -176,6 +203,7 @@ export function useRecorderLink(): RecorderLinkView {
   const [observedAt, setObservedAt] = useState<Date | null>(null);
   const [interrupted, setInterrupted] = useState<InterruptedRecording | null>(null);
   const [failed, setFailed] = useState<RecordingFailure | null>(null);
+  const [ended, setEnded] = useState<SessionSummary | null>(null);
   /*
    * The last recording this window saw the recorder running, which is the only
    * way a `recording_failed` can be given a file: the event carries an
@@ -238,6 +266,17 @@ export function useRecorderLink(): RecorderLinkView {
         return;
       }
 
+      if (payload.event === 'session_ended') {
+        // A sitting the recorder has closed, kept for the same reason the two
+        // above are: the state that follows it a moment later is "idle", which
+        // is true and says nothing about what just happened. It is the only
+        // thing this window is ever told about a recording that ended without
+        // being asked to, and it carries each file's own reason for ending
+        // (issue #625).
+        setEnded(withoutTag<SessionSummary>(payload));
+        return;
+      }
+
       if (payload.event === 'recording_failed') {
         // A recording that failed while the recorder stayed up. The state that
         // follows it a moment later is "idle", which is true and says nothing
@@ -283,7 +322,7 @@ export function useRecorderLink(): RecorderLinkView {
     };
   }, []);
 
-  return { link: state, observedAt, interrupted, failed };
+  return { link: state, observedAt, interrupted, failed, ended };
 }
 
 /** The two or three words shown as the recorder's state, and one sentence. */

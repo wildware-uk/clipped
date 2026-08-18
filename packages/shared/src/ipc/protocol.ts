@@ -2196,6 +2196,36 @@ export interface SessionRecording {
    * fewer recording.
    */
   readonly outcome?: string;
+  /**
+   * Why it ended: `stopped`, `target-lost`, `target-resized`, `disk-space-low`
+   * or `output-unavailable`.
+   *
+   * The vocabulary of {@link LibraryRecording.end_reason} — the hyphenated one
+   * the sidecar writes and the index stores — and open for the same reason that
+   * one is: a reason invented after this build is kept and shown rather than
+   * failing the frame that carried it. It is deliberately not
+   * {@link RecordingSummary.end_reason}, which is the underscored
+   * {@link EndReason} the reply to a `stop_recording` carries; the two spellings
+   * are the two halves of the protocol they belong to, and collapsing them here
+   * would make this field lie about what arrived.
+   *
+   * **Why a sitting that has just ended needs it at all.** A recording somebody
+   * stopped answers "why did it end" in the reply to their stop. A recording
+   * that ended *by itself* has no reply to answer in, and
+   * {@link SessionEndedEvent} is the only thing the recorder sends about it — so
+   * without this a window could name the file and could not say why it stopped,
+   * and a sitting cut short by a window being dragged to a new size looked
+   * exactly like one that ran to the end
+   * ([#625](https://github.com/wildware-uk/clipped/issues/625),
+   * [ADR 0012](../../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+   * The library row for the same file has carried the word all along; this is
+   * the announcement catching up with it, minutes earlier.
+   *
+   * Absent while the recording is still being written, and for an entry that
+   * produced no file: a `no-window` or a `failed` never reached an ending to
+   * have a reason for.
+   */
+  readonly end_reason?: string;
   /** How long it runs for. Absent while running, and for one with no file. */
   readonly duration_ms?: number;
 }

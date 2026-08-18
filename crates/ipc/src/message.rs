@@ -896,6 +896,7 @@ mod tests {
                     session_index: 1,
                     output: r"D:\clips\cs2-20260811-201400-01.mkv".to_owned(),
                     outcome: Some("recorded".to_owned()),
+                    end_reason: Some("target-lost".to_owned()),
                     duration_ms: Some(6_540_000),
                 }],
             },

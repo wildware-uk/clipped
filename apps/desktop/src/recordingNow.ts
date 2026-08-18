@@ -1,4 +1,4 @@
-import type { RecorderStatus } from '@clipped/shared';
+import type { RecorderStatus, SessionSummary } from '@clipped/shared';
 
 import { formatElapsed, type RecorderProblem } from './recording';
 import type { RecorderLinkState } from './useRecorderLink';
@@ -171,6 +171,92 @@ function whatTheRecorderSaid(
       'until it is asked. A recorder started elsewhere — clipped-recorder watch, from a ' +
       'terminal — serves no protocol and is invisible here, so this says nothing about the rest ' +
       'of the machine.',
+  };
+}
+
+/**
+ * The word the recorder uses for a recording its capture target changed size
+ * under.
+ *
+ * The hyphenated spelling, because that is what `SessionRecording.end_reason`
+ * carries: the sidecar's and the index's vocabulary rather than the underscored
+ * `EndReason` a `stop_recording` replies with. Written out here so the one place
+ * that compares it is the one place that has to be changed if it ever moves.
+ */
+const ENDED_BY_RESIZE = 'target-resized';
+
+/**
+ * The word the recorder uses for a sitting that was one recording somebody asked
+ * for.
+ *
+ * Only a sitting a `start_recording` opened ends this way: it has no game whose
+ * exit could end it and no grace period to wait through, so it is over when its
+ * recording is (`clipped_session::automatic::SessionEndReason::RecordingEnded`).
+ * An automatic sitting ends `game-exited`, `system-resumed` or
+ * `recorder-stopping`, which is what makes this an exact test rather than a
+ * guess at which kind of sitting arrived.
+ */
+const A_RECORDING_SOMEBODY_ASKED_FOR = 'recording-ended';
+
+/** What to say about a sitting a size change brought to an end, and its file. */
+export interface ResizeEndingText {
+  /** The sentences: why it ended, and what this mode does about it. */
+  readonly detail: string;
+  /**
+   * The file that exists, in full.
+   *
+   * Never abbreviated, for the reason {@link RecordingNowText.output} is not: it
+   * is the only thing here anybody can act on, and a path with a middle ellipsis
+   * cannot be typed into Explorer (AGENTS.md sections 28 and 45).
+   */
+  readonly output: string;
+}
+
+/**
+ * What to say about a sitting that ended because its window changed size.
+ *
+ * [ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)
+ * settled that one file cannot hold two sizes, so a size change finishes the
+ * file it happens in. What follows depends on who asked for the recording: an
+ * *automatic* sitting starts the next file immediately, and a recording somebody
+ * asked for — a `clipped-recorder record`, or this window's own record control —
+ * stops there. [Issue #625](https://github.com/wildware-uk/clipped/issues/625)
+ * is that the second case said nothing at all: the panel went from "Recording
+ * cs2.exe" to "not recording" and took the path with it, so a sitting cut short
+ * by somebody dragging a window looked exactly like one that ran to the end.
+ *
+ * Two things are asked, and both are needed. The sitting must be one somebody
+ * asked for, which its own `end_reason` says exactly; and its **last** file must
+ * be the one the resize finished. The first is what stops this sentence being
+ * drawn over an automatic sitting, where "not carried on into a second one"
+ * would be the opposite of the truth — a game that exits in the seconds after a
+ * resize leaves an automatic sitting whose last file also ended
+ * `target-resized`, and the shape alone cannot tell the two apart. The second is
+ * what makes it about the resize rather than about the sitting: a recording
+ * somebody stopped, or one whose window closed, ends the same sitting the same
+ * way and says something else entirely.
+ *
+ * `undefined` for every other sitting, including one still open. A sentence
+ * about a resize over a recording somebody stopped would be the invented state
+ * AGENTS.md section 27 forbids.
+ */
+export function describeResizeEnding(ended: SessionSummary | null): ResizeEndingText | undefined {
+  if (ended?.end_reason !== A_RECORDING_SOMEBODY_ASKED_FOR) {
+    return undefined;
+  }
+
+  const last = ended.recordings.at(-1);
+  if (last === undefined || last.end_reason !== ENDED_BY_RESIZE) {
+    return undefined;
+  }
+
+  return {
+    detail:
+      'Recording ended because the window changed size. Clipped cannot put two sizes in one ' +
+      'file, and a recording you asked for is not carried on into a second one — automatic ' +
+      'recording is, and would have started a new file at the new size. Everything up to the ' +
+      'change is in the file below, finished and playable.',
+    output: last.output,
   };
 }
 

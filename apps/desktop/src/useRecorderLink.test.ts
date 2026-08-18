@@ -1,3 +1,4 @@
+import type { SessionSummary } from '@clipped/shared';
 import { renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -198,6 +199,31 @@ describe('what the status block says about the recorder', () => {
   });
 });
 
+/**
+ * A sitting the recorder closed because the window it was recording changed
+ * size, with the one file it left.
+ *
+ * One recording and no successor: that is what ADR 0012 says a recording
+ * somebody *asked for* does with a resize, and it is the case issue #625 is
+ * about. An automatic sitting would have a second entry after this one.
+ */
+const ENDED_BY_RESIZE: SessionSummary = {
+  session_id: 'cs2-20260816-201400',
+  game_name: 'Counter-Strike 2',
+  started_at: '2026-08-16T20:14:00+01:00',
+  ended_at: '2026-08-16T20:24:00+01:00',
+  end_reason: 'recording-ended',
+  recordings: [
+    {
+      session_index: 1,
+      output: 'D:\\clips\\clipped-cs2-20260816-201400.mkv',
+      outcome: 'recorded',
+      end_reason: 'target-resized',
+      duration_ms: 600_000,
+    },
+  ],
+};
+
 /** A recording a recorder was killed in the middle of. */
 const INTERRUPTED: InterruptedRecording = {
   recording_id: 'r-7',
@@ -260,6 +286,7 @@ describe('following the recorder link inside the window', () => {
       observedAt: null,
       interrupted: null,
       failed: null,
+      ended: null,
     });
   });
 
@@ -349,6 +376,55 @@ describe('following the recorder link inside the window', () => {
       expect(result.current.failed?.recording_id).toBe('r-9');
     });
     expect(result.current.failed?.output).toBeNull();
+  });
+
+  /*
+   * The sitting a recording that ended by itself is announced in (issue #625).
+   * `useRecording` only ever learns of an ending this window asked for, from the
+   * reply to its own `stop_recording`; a recording finished by its window being
+   * dragged to a new size has no such reply, so this event is the only thing the
+   * window is told — and the "idle" state a moment later is true and silent, in
+   * exactly the way the failure above is.
+   *
+   * The payload is flattened beside the tag rather than nested under a `session`
+   * key, because `RecorderLinkEvent::SessionEnded` is a newtype in an internally
+   * tagged enumeration. `a_sitting_that_ended_survives_the_journey_into_a_window`
+   * in `crates/ipc/src/supervisor/link.rs` is the other half of this: it holds
+   * that shape still on the Rust side, and this reads it on the TypeScript one.
+   */
+  it('keeps the sitting that ended, which the idle state that follows it does not carry', async () => {
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    const { result } = renderHook(() => useRecorderLink());
+
+    runtime.emit({ event: 'session_ended', ...ENDED_BY_RESIZE });
+    await waitFor(() => {
+      expect(result.current.ended).toEqual(ENDED_BY_RESIZE);
+    });
+
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 91,
+      features: [],
+      status: { state: 'idle' },
+    });
+    await waitFor(() => {
+      expect(result.current.link).toEqual({
+        link: 'attached',
+        recorder_process_id: 91,
+        features: [],
+        status: { state: 'idle' },
+      });
+    });
+
+    expect(
+      result.current.ended,
+      'the sitting is dropped by the idle state that follows it, so nothing in the window is ' +
+        'left to say why the recording stopped',
+    ).toEqual(ENDED_BY_RESIZE);
+    // The reason travels with the file rather than beside the sitting: it is
+    // per-recording, and it is the whole of what the screen has to work with.
+    expect(result.current.ended?.recordings.at(-1)?.end_reason).toBe('target-resized');
   });
 
   /*

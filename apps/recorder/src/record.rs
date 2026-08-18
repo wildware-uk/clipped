@@ -30,7 +30,8 @@ use std::path::Path;
 use clipped_logging::RedactedPath;
 use clipped_session::{
     record, AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
-    RecordingFailure, RecordingReport, RecordingSettings, ResolutionSetting, SessionError,
+    EndReason, RecordingFailure, RecordingReport, RecordingSettings, ResolutionSetting,
+    SessionError,
 };
 use clipped_windows::{
     enumerate_windows, resolve, DpiAwareness, ResolveError, TargetSelector, WindowInfo,
@@ -515,6 +516,49 @@ fn report_completion(report: &RecordingReport) {
             report.frames_dropped_writer_behind()
         );
     }
+
+    if report.end_reason() == EndReason::TargetResized {
+        report_resize(report.output());
+    }
+}
+
+/// Says that a size change ended the recording, which file it left, and what to
+/// do about the rest of the sitting.
+///
+/// The summary line above already carries the reason and the path, and that is
+/// not enough on its own. A recording ending because the drive filled up gets a
+/// headline, the footage it saved and a list of actions
+/// ([`report_failure`]); a recording ending because somebody dragged a window's
+/// edge got one clause at the end of a hundred-character line, and the thing it
+/// left unsaid is the thing the person needs — **nothing after the change was
+/// recorded, and this mode will not start a second file**. `watch` will, and
+/// naming it here is the only place a `record` user finds out that the two modes
+/// answer a resize differently
+/// ([issue #625](https://github.com/wildware-uk/clipped/issues/625),
+/// [ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+///
+/// The path is printed in full, like [`report_failure`]'s and unlike the log's:
+/// this goes to the console of whoever asked for the recording and the file is
+/// the only thing on the screen they can act on (docs/logging.md).
+///
+/// The file is named only when there is one, exactly as the summary line above
+/// names one only when there is one: a capture that wrote no continuous file is
+/// SPEC.md section 4's Manual/Replay mode, whose only files are the clips
+/// somebody saved (ADR 0018), and naming a path nothing was written to would be
+/// worse than saying nothing (AGENTS.md section 54).
+fn report_resize(output: Option<&Path>) {
+    eprintln!(
+        "The recorded window changed size, so this recording was finished where it was and \
+         nothing after the change was recorded."
+    );
+    if let Some(output) = output {
+        eprintln!("Everything up to the change is in {}.", output.display());
+    }
+    eprintln!("  - Record again to capture the window at its new size");
+    eprintln!(
+        "  - Or use `clipped-recorder watch`, which follows a size change with a second file in \
+         the same sitting rather than stopping"
+    );
 }
 
 #[cfg(test)]

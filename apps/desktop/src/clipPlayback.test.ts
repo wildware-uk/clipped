@@ -35,6 +35,7 @@ const NOTHING: RecorderLinkView = {
   observedAt: null,
   interrupted: null,
   failed: null,
+  ended: null,
 };
 
 /** When a link in these fixtures was observed. Fixed, so nothing here is clock-dependent. */

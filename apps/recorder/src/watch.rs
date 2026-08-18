@@ -1662,7 +1662,32 @@ fn file_of(recording: &SessionRecording) -> clipped_ipc::SessionRecording {
         outcome: recording
             .outcome()
             .map(|outcome| outcome.token().to_owned()),
+        // **Why the file ended, and not only that it did.** A recording
+        // somebody stopped answers this in the reply to their stop; a recording
+        // that ended by itself has no reply, and this event is the only thing
+        // the recorder sends about it. Without the reason on here, a window
+        // watching a recording finish because its window was dragged to a new
+        // size cannot tell that from one that ran to the end — which is the
+        // silence [issue #625](https://github.com/wildware-uk/clipped/issues/625)
+        // is about. The word is the sidecar's own and the index's own
+        // (`EndReason::token`, `clipped_ipc::LibraryRecording::end_reason`), so
+        // the announcement and the library row a minute later say the same
+        // thing (AGENTS.md section 55).
+        end_reason: recording.outcome().and_then(ended_because),
         duration_ms: recording.outcome().and_then(recorded_length),
+    }
+}
+
+/// Why a finished recording ended, for one that reached an ending.
+///
+/// [`None`] for `no-window` and `failed`: neither ever opened a file it could
+/// finish, so there is no ending to give a reason for, and inventing one would
+/// be a window drawing a sentence about a recording that never happened
+/// (AGENTS.md section 27).
+fn ended_because(outcome: &RecordingOutcomeSummary) -> Option<String> {
+    match outcome {
+        RecordingOutcomeSummary::Recorded { end_reason, .. } => Some(end_reason.token().to_owned()),
+        RecordingOutcomeSummary::NoWindow { .. } | RecordingOutcomeSummary::Failed { .. } => None,
     }
 }
 
