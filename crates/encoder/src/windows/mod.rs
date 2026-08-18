@@ -25,6 +25,7 @@
 //! them, so a probe leaves the process's apartment state as it found it.
 
 mod amf;
+mod bridge;
 mod device;
 mod dxgi;
 #[cfg(test)]
@@ -35,6 +36,7 @@ mod quicksync;
 mod runtime;
 
 pub use amf::AmfEncoder;
+pub use bridge::open_across_adapters;
 pub use nvenc::NvencEncoder;
 pub use quicksync::QuickSyncEncoder;
 

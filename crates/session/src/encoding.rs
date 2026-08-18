@@ -31,10 +31,10 @@
 
 use clipped_capture::PixelFormat;
 use clipped_encoder::{
-    detect_cached, measured_codecs, recommend, AmfEncoder, BitRate, CapabilityCache,
-    CapabilityReport, Codec, EncodeError, EncoderConfig, EncoderKind, FrameRate, GraphicsDevice,
-    KeyframeInterval, NvencEncoder, Probing, QuickSyncEncoder, RateControl, Resolution,
-    SoftwareEncoder, SurfaceFormat, SystemProbe, VideoEncoder, WindowsProbe,
+    detect_cached, measured_codecs, open_across_adapters, recommend, AmfEncoder, BitRate,
+    CapabilityCache, CapabilityReport, Codec, EncodeError, EncoderConfig, EncoderKind, FrameRate,
+    GraphicsDevice, KeyframeInterval, NvencEncoder, Probing, QuickSyncEncoder, RateControl,
+    Resolution, SoftwareEncoder, SurfaceFormat, SystemProbe, VideoEncoder, WindowsProbe,
 };
 
 use crate::error::SessionError;
@@ -111,7 +111,7 @@ pub(crate) fn open(
     let bitrate = bitrate_for(size, frame_rate);
 
     let mut attempts = Vec::new();
-    for (kind, codec) in candidates(settings, detection.report()) {
+    for (kind, codec, across) in candidates(settings, detection.report()) {
         let config = EncoderConfig::new(
             codec,
             resolution,
@@ -124,7 +124,7 @@ pub(crate) fn open(
         ))
         .with_source_format(source_format);
 
-        match open_one(kind, device, config) {
+        match open_one(kind, device, config, across) {
             Ok(encoder) => {
                 tracing::info!(
                     encoder = %kind.log_encoder_family(),
@@ -177,24 +177,49 @@ fn capability_cache() -> CapabilityCache {
     CapabilityCache::default_path().map_or_else(CapabilityCache::disabled, CapabilityCache::at)
 }
 
+/// Whether a candidate may be opened on an adapter other than the one capture
+/// created its device on.
+///
+/// The copy that costs is a copy of every frame through system memory
+/// (`clipped_encoder::open_across_adapters`), so it is spent only where the
+/// alternative is not recording at all — which is exactly one case: a user who
+/// named an encoder and asked for no substitute.
+///
+/// It is deliberately *not* spent on the ranked candidates of an automatic
+/// choice. On a machine with an NVIDIA card and integrated AMD graphics, the
+/// ranking offers NVENC first and NVENC is on capture's own adapter; letting the
+/// list bridge would let a worse-placed encoder that ranks higher win a copy per
+/// frame it did not need. A candidate that refuses a foreign device is a
+/// candidate the loop moves past, which is the behaviour that already works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrossAdapter {
+    /// No. The backend refuses a device from another vendor by name and the
+    /// next candidate is tried.
+    Refuse,
+    /// Yes, copying each frame onto the encoder's adapter, because there is no
+    /// next candidate.
+    Copy,
+}
+
 /// The encoders to try, most preferred first, each with the codec to ask it
-/// for.
+/// for and whether it may reach across adapters to do it.
 fn candidates(
     settings: &RecordingSettings,
     report: &CapabilityReport,
-) -> Vec<(EncoderKind, Codec)> {
+) -> Vec<(EncoderKind, Codec, CrossAdapter)> {
     let requested = match settings.codec() {
         CodecPreference::Automatic => None,
         CodecPreference::Fixed(codec) => Some(codec),
     };
 
-    let ranked = || -> Vec<(EncoderKind, Codec)> {
+    let ranked = || -> Vec<(EncoderKind, Codec, CrossAdapter)> {
         recommend(report)
             .into_iter()
             .map(|recommendation| {
                 (
                     recommendation.encoder(),
                     requested.unwrap_or_else(|| recommendation.codec()),
+                    CrossAdapter::Refuse,
                 )
             })
             .collect()
@@ -202,18 +227,22 @@ fn candidates(
 
     match settings.encoder() {
         EncoderPreference::Fixed(kind) => {
-            let named = (
-                kind,
-                requested.unwrap_or_else(|| best_codec_for(kind, report)),
-            );
+            let codec = requested.unwrap_or_else(|| best_codec_for(kind, report));
             match settings.unavailable_choice() {
-                UnavailableChoice::Refuse => vec![named],
+                // Nothing follows this one, so a machine whose capture is on
+                // another adapter records with a copy per frame or does not
+                // record ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+                UnavailableChoice::Refuse => vec![(kind, codec, CrossAdapter::Copy)],
                 // The named encoder first, so a machine that has it still uses
                 // it, and the ranked list behind it so a machine that no longer
-                // has it still records.
-                UnavailableChoice::Substitute => std::iter::once(named)
-                    .chain(ranked().into_iter().filter(|(other, _)| *other != kind))
-                    .collect(),
+                // has it still records. No copy here: substituting to an encoder
+                // on capture's own adapter is cheaper than bridging to this one,
+                // and the substitution is already logged.
+                UnavailableChoice::Substitute => {
+                    std::iter::once((kind, codec, CrossAdapter::Refuse))
+                        .chain(ranked().into_iter().filter(|(other, _, _)| *other != kind))
+                        .collect()
+                }
             }
         }
         EncoderPreference::Automatic => ranked(),
@@ -246,13 +275,24 @@ fn open_one(
     kind: EncoderKind,
     device: &GraphicsDevice,
     config: EncoderConfig,
+    across: CrossAdapter,
 ) -> Result<Box<dyn VideoEncoder>, EncodeError> {
-    Ok(match kind {
-        EncoderKind::Nvenc => Box::new(NvencEncoder::open(device, config)?),
-        EncoderKind::Amf => Box::new(AmfEncoder::open(device, config)?),
-        EncoderKind::QuickSync => Box::new(QuickSyncEncoder::open(device, config)?),
-        EncoderKind::Software => Box::new(SoftwareEncoder::open(device, config)?),
-    })
+    let open = |device: &GraphicsDevice| -> Result<Box<dyn VideoEncoder>, EncodeError> {
+        Ok(match kind {
+            EncoderKind::Nvenc => Box::new(NvencEncoder::open(device, config)?),
+            EncoderKind::Amf => Box::new(AmfEncoder::open(device, config)?),
+            EncoderKind::QuickSync => Box::new(QuickSyncEncoder::open(device, config)?),
+            EncoderKind::Software => Box::new(SoftwareEncoder::open(device, config)?),
+        })
+    };
+
+    match across {
+        CrossAdapter::Refuse => open(device),
+        // Opens on `device` too whenever the encoder is already on its adapter;
+        // the copy only appears where it is the difference between recording
+        // and not.
+        CrossAdapter::Copy => open_across_adapters(device, kind, config, open),
+    }
 }
 
 /// How many bits a second a recording of this size and rate is given.
@@ -372,7 +412,7 @@ mod tests {
 
         assert_eq!(
             candidates(&settings, &bare_machine()),
-            vec![(EncoderKind::Nvenc, Codec::Av1)]
+            vec![(EncoderKind::Nvenc, Codec::Av1, CrossAdapter::Copy)]
         );
     }
 
@@ -390,7 +430,7 @@ mod tests {
 
         let offered: Vec<EncoderKind> = candidates(&settings, &report)
             .into_iter()
-            .map(|(kind, _)| kind)
+            .map(|(kind, _, _)| kind)
             .collect();
 
         assert_eq!(
@@ -420,7 +460,7 @@ mod tests {
 
         assert_eq!(
             candidates(&settings, &bare_machine()),
-            vec![(EncoderKind::Software, Codec::H264)]
+            vec![(EncoderKind::Software, Codec::H264, CrossAdapter::Copy)]
         );
     }
 
@@ -438,7 +478,7 @@ mod tests {
 
         let offered: Vec<EncoderKind> = candidates(&settings(), &report)
             .into_iter()
-            .map(|(kind, _)| kind)
+            .map(|(kind, _, _)| kind)
             .collect();
         assert_eq!(offered, ranked);
     }
@@ -448,7 +488,7 @@ mod tests {
         // Otherwise a fallback would silently change the codec as well as the
         // encoder, and a recording made with `--codec hevc` would be H.264.
         let settings = settings().with_codec(CodecPreference::Fixed(Codec::Hevc));
-        for (_, codec) in candidates(&settings, &bare_machine()) {
+        for (_, codec, _) in candidates(&settings, &bare_machine()) {
             assert_eq!(codec, Codec::Hevc);
         }
     }
@@ -531,16 +571,37 @@ mod tests {
                     opened.kind.log_encoder_family()
                 ));
 
-                // The half that stops this passing for the wrong reason. If the
-                // same request refuses to substitute, it has to fail — otherwise
-                // the encoder was available all along and nothing was
-                // substituted.
+                // The half that stops this passing for the wrong reason. Being
+                // in this branch already proves the named encoder did not open
+                // on the capture device — `Substitute` tries it first, and
+                // tries it with `CrossAdapter::Refuse`. What the same request
+                // must never do when it is told not to substitute is substitute
+                // anyway, so that is what is asserted here.
+                //
+                // It may now *succeed* where it used to fail, on a machine
+                // whose named encoder is on another adapter: refusing a
+                // substitute is what buys the copy per frame
+                // ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
                 let refusing = settings.with_unavailable_choice(UnavailableChoice::Refuse);
-                assert!(
-                    open(&graphics, &refusing, (1280, 720), PixelFormat::Bgra8Unorm).is_err(),
-                    "{} opened when it was told not to substitute, so the fallback above                      proved nothing",
-                    kind.log_encoder_family()
-                );
+                match open(&graphics, &refusing, (1280, 720), PixelFormat::Bgra8Unorm) {
+                    Err(_) => note(&format!(
+                        "{} refused to substitute and did not record",
+                        kind.log_encoder_family()
+                    )),
+                    Ok(direct) => {
+                        assert_eq!(
+                            direct.kind,
+                            kind,
+                            "{} was told not to substitute and recorded with {} anyway",
+                            kind.log_encoder_family(),
+                            direct.kind.log_encoder_family()
+                        );
+                        note(&format!(
+                            "{} recorded only by carrying frames onto its own adapter",
+                            kind.log_encoder_family()
+                        ));
+                    }
+                }
             }
         }
 

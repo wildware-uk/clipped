@@ -179,6 +179,85 @@ backend selectable is a change to `is_implemented` and nothing else; the ranking
 and the report both follow it
 ([#175](https://github.com/wildware-uk/clipped/issues/175)).
 
+## Encoding from another adapter
+
+**Only when the alternative is not recording at all.**
+
+The rule above — a family on an adapter the frames will not be captured on is
+ranked below the software fallback and never chosen automatically — leaves one
+case unanswered: a user who typed `--encoder amf` on a machine whose capture
+device is NVIDIA's. Ranking it last does not help them; there is nothing after
+it. Until
+[#443](https://github.com/wildware-uk/clipped/issues/443) that recording simply
+failed.
+
+`clipped_encoder::open_across_adapters` is the way out.
+`crates/session/src/encoding.rs` calls it for exactly one candidate — an encoder
+the user *named*, with `UnavailableChoice::Refuse`, so there is no substitute
+behind it — and for no other. Everything else keeps the refusal, because a
+machine with a hardware encoder on capture's own adapter must use that one for
+nothing rather than this one for a copy per frame.
+
+What it does when the vendors differ: creates a Direct3D 11 device on the
+encoder's own adapter, opens the backend against *that*, and copies each frame
+across before submitting it. `crates/encoder/src/windows/bridge.rs`.
+
+### The copy goes through system memory, because Direct3D 11 has no other route
+
+```text
+capture's ID3D11Texture2D  (video memory, adapter A)
+        │  CopyResource + Map          crates/encoder/src/readback.rs
+system memory
+        │  UpdateSubresource           bridge.rs
+the encoder's ID3D11Texture2D (video memory, adapter B)
+```
+
+A shared NT handle is how one device hands a texture to another, and it was
+measured on the two-GPU development machine before this was built: a texture
+created on the NVIDIA adapter with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`, whose
+handle `ID3D11Device1::OpenSharedResource1` on the AMD adapter refuses with
+`E_INVALIDARG`. Cross-adapter sharing is a Direct3D 12 heap flag with no
+Direct3D 11 equivalent, and reaching for it would mean a second graphics API
+inside the encoder. So the pixels go through the CPU — the same readback the
+software encoder pays, reused rather than written twice.
+
+### What it costs
+
+Measured, not estimated, on the machine issue #443 was reported from — an RTX
+4090 (the default adapter, where capture lands) and integrated AMD Radeon
+Graphics — by recording `test-apps/video-pattern` with `--encoder amf` in a
+release build. The figure is what the bridge itself logs when the session
+closes:
+
+| Picture | Carried per frame | Frames dropped |
+| --- | --- | --- |
+| 1280x720 | 2.97 ms | 0 |
+| 1920x1080 | 5.82 ms | 0 |
+| 3840x2160 | 7.84 ms | 0 |
+
+It is not proportional to the pixels — 4K is nine times 720p and costs under
+three times as much — because most of it is the `Map` that waits for the GPU to
+finish the copy rather than the bytes crossing the bus. Read it as a fixed
+couple of milliseconds plus a small per-pixel term.
+
+Against a 60 fps budget of 16.7 ms that is 18% at 1080p and 47% at 4K, on the
+encoding thread rather than the game's. It is a real cost, which is why it is
+spent only where the alternative is no recording, and why it is in the log at
+`info` rather than left for somebody to discover.
+
+### What is still true afterwards
+
+- **`recorder capabilities` does not call such an encoder available.** It reads
+  *present, and usable only if asked for by name*, naming the adapter the frames
+  will be captured on. `Availability::is_available` stays `false`, so `recommend`
+  still will not offer it.
+- **A machine with no adapter from that vendor still refuses**, by name: "…and
+  this machine has no AMD adapter to carry them to". A copy has somewhere to go
+  or it does not happen.
+- **A device that will not say which adapter it is on is not bridged.** An
+  unanswered question is not evidence of a mismatch, and the backend's own
+  refusal is the better answer.
+
 ## Ownership: who owns what, and for how long
 
 1. **The encoder owns its session and everything allocated from it** — output
@@ -788,17 +867,20 @@ than about how encoding is configured:
   device with a status that names no adapter.
 
 - On such a machine `recommend` will not offer Quick Sync as a choice at all:
-  detection reports it as *present, and not usable for recording here*, and
+  detection reports it as *present, and usable only if asked for by name*, and
   `Recommendation::for_opening` cannot return it (see
   [encoder-capabilities.md](encoder-capabilities.md)). That used to be true only
   by luck — the ranking happened to put the discrete GPU's encoder first — and
-  [#443](https://github.com/wildware-uk/clipped/issues/443) made it the rule. A
-  user who pins Quick Sync anyway gets the sentence above rather than a failure
-  inside the runtime.
-- Deliberately encoding on the Intel GPU while the game renders on the discrete
-  one — which some recorders offer, to keep the encode off the busy adapter — is
-  not supported, because it needs a per-frame cross-adapter copy the capture
-  layer cannot yet express.
+  [#443](https://github.com/wildware-uk/clipped/issues/443) made it the rule.
+- A user who pins Quick Sync anyway — `--encoder quicksync`, which refuses a
+  substitute — gets the copy described in
+  [Encoding from another adapter](#encoding-from-another-adapter) rather than
+  the sentence above, on a machine that has an Intel adapter to copy to. That
+  path has **not** been exercised on Intel hardware, which nobody working on
+  this has; the two directions that were measured are AMF from an NVIDIA capture
+  device and NVENC from an AMD one. Quick Sync reaches it through the same one
+  function, and until [#160](https://github.com/wildware-uk/clipped/issues/160)
+  that is a claim about shared code rather than about a run.
 
 This is the part of the backend that *is* exercised on the development machine:
 a Direct3D 11 device on the NVIDIA adapter is refused with the message above, in

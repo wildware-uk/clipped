@@ -62,24 +62,28 @@ pub enum Availability {
     /// tell.
     Available,
     /// The hardware is here and working, and it is on an adapter no recording
-    /// made on this machine will hand it a frame from.
+    /// made on this machine will capture a frame on.
     ///
     /// A machine with a discrete NVIDIA card and integrated AMD graphics — the
     /// ordinary gaming laptop — has an AMD encoder whose runtime loads and whose
-    /// transforms Windows lists, and `--encoder amf` on it cannot open a
-    /// session at all: capture creates its Direct3D device on the default
-    /// adapter, and every vendor runtime here refuses a device belonging to
-    /// somebody else's silicon
+    /// transforms Windows lists, while capture creates its Direct3D device on
+    /// the default adapter and every vendor runtime here refuses a device
+    /// belonging to somebody else's silicon
     /// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
     ///
     /// Deliberately neither [`Available`](Self::Available) nor
-    /// [`Unavailable`](Self::Unavailable). It is not available: no recording
-    /// can use it, so [`is_available`](Self::is_available) is `false` and
-    /// [`crate::recommend`] will not offer it as a choice. It is not
-    /// unavailable either: the encoder is real, the capability probe opens a
-    /// session on it and measures its limits, and blanking those out would
-    /// throw away a true answer about the machine to make a sentence simpler.
-    /// [`is_present`](Self::is_present) is the question that separates the two.
+    /// [`Unavailable`](Self::Unavailable), and the middle ground is not "cannot
+    /// be used" but "costs something to use". A recording that names this
+    /// encoder and refuses a substitute records with it, by copying every frame
+    /// onto its adapter through system memory
+    /// ([`crate::open_across_adapters`]); a recording that would have been
+    /// content with any encoder must not, because one on capture's own adapter
+    /// costs nothing. So [`is_available`](Self::is_available) is `false` and
+    /// [`crate::recommend`] does not offer it as a choice, while
+    /// [`is_present`](Self::is_present) is `true`: the encoder is real, the
+    /// capability probe opens a session on it and measures its limits, and
+    /// blanking those out would throw away a true answer about the machine to
+    /// make a sentence simpler.
     OnAnotherAdapter {
         /// Which vendor's adapter capture will create its device on. Named
         /// rather than identified, because the reason this encoder is out is
@@ -120,8 +124,8 @@ impl fmt::Display for Availability {
             // column of them must not take this for one that records.
             Self::OnAnotherAdapter { capture } => write!(
                 formatter,
-                "present, and not usable for recording here: frames are captured on the \
-                 {capture} adapter"
+                "present, and usable only if asked for by name: frames are captured on the \
+                 {capture} adapter, so each one would be copied across"
             ),
             Self::Unavailable(reason) => write!(formatter, "unavailable: {reason}"),
         }
