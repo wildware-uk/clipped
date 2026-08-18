@@ -134,6 +134,40 @@ impl ServedRecorder {
             .expect("the recorder that just said it was listening accepts a connection")
     }
 
+    /// Waits for a line containing `needle` on standard error.
+    ///
+    /// The ready line is not enough for everything. It is written as soon as
+    /// the protocol is being served, which is *before* the watcher thread has
+    /// built the session manager that automatic recordings are resolved
+    /// through — and that manager takes its copy of the settings when it is
+    /// built. A test that saved a setting on the strength of the ready line
+    /// alone would be racing that copy, and would pass whether or not anything
+    /// ever replaced it (`crate::watch::announce`, issue #51).
+    ///
+    /// Lines read on the way are returned rather than dropped, so that a test
+    /// can put them in an assertion message; `stop` still collects everything
+    /// written after this point.
+    fn wait_for(&self, needle: &str) -> String {
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let mut read = String::new();
+        loop {
+            match self
+                .diagnostics
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(line) => {
+                    let found = line.contains(needle);
+                    read.push_str(&line);
+                    read.push('\n');
+                    if found {
+                        return read;
+                    }
+                }
+                Err(error) => panic!("the recorder never said `{needle}` ({error}):\n{read}"),
+            }
+        }
+    }
+
     /// Stops the recorder with a real Ctrl+C and asserts it exited cleanly.
     fn stop(mut self) -> String {
         send_ctrl_c(&self.child);
@@ -2062,6 +2096,229 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
     drop(client);
     drop(pattern);
     recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The microphone this test saves from the Settings screen.
+///
+/// Nothing on any machine is called this, and it never has to be: a name is
+/// stored as it was written and resolved against the machine only when a
+/// recording opens a device, which this one never reaches. What matters is that
+/// it is not the default, so that a session record saying `default` is
+/// unambiguously the answer the recorder booted with rather than a coincidence.
+const CHOSEN_MICROPHONE: &str = "name:Issue 51 Microphone";
+
+/// An overlay entry naming something that will never put a window on screen.
+///
+/// `shutdown_fixture` is the recorder's own Ctrl+C fixture: it starts, says
+/// `ready`, and waits. That makes it a real process the watcher really reports
+/// and really starts a recording of, on a machine with no GPU, no encoder and
+/// no display — the recording ends as `no-window`, and the settings it was made
+/// with are on disk long before that, because they are written when it *starts*
+/// (`clipped_session::automatic::SessionManager::begin_recording`).
+/// `tests/automatic_sessions.rs` uses the same fixture for the same reason.
+const WINDOWLESS_OVERLAY: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "clipped-windowless"
+name = "Clipped Windowless"
+[[game.executables]]
+name = "shutdown_fixture.exe"
+"#;
+
+/// Writes that overlay into a scratch home, where the recorder reads one.
+fn overlay_naming_the_windowless_fixture(home: &Path) {
+    let application_directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+    std::fs::write(application_directory.join("games.toml"), WINDOWLESS_OVERLAY)
+        .expect("the games file can be written");
+}
+
+/// A process the watcher will report, which never shows a window.
+///
+/// In a process group of its own, so that the `CTRL_C_EVENT` that stops the
+/// recorder cannot reach it and end this test's subject early.
+#[derive(Debug)]
+struct WindowlessSubject {
+    child: Child,
+}
+
+impl WindowlessSubject {
+    fn start(marker: &Path) -> Self {
+        let mut child = Command::new(support::fixture_binary())
+            .arg(marker)
+            .stdout(Stdio::piped())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .expect("the shutdown fixture can be started");
+
+        // It says `ready` once it is up, which is what makes the wait that
+        // follows a wait on the recorder noticing it rather than on this
+        // process starting.
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("the fixture announces itself");
+        assert_eq!(
+            line.trim(),
+            "ready",
+            "the fixture should have said it was ready",
+        );
+
+        Self { child }
+    }
+}
+
+impl Drop for WindowlessSubject {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The first recording of the one sitting under `home`, once there is one.
+///
+/// Polled, because the session record appears in two steps: it is written when
+/// the game is noticed, and the recording — carrying the settings it was
+/// resolved at — is added to it when the recording starts. A reader that took
+/// the first file it saw would read a sitting with nothing in it, which is not
+/// the state this is about.
+fn the_recording_the_watcher_started(home: &Path, within: Duration) -> serde_json::Value {
+    let clips = home.join("Videos").join("Clipped");
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let why = match first_recording_in(&clips) {
+            Ok(recording) => return recording,
+            Err(why) => why,
+        };
+        assert!(
+            std::time::Instant::now() < deadline,
+            "detection started no recording within {within:?}: {why}",
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The first recording of the one session record in `clips`, or why not yet.
+fn first_recording_in(clips: &Path) -> Result<serde_json::Value, String> {
+    let entries = std::fs::read_dir(clips)
+        .map_err(|error| format!("{} cannot be listed: {error}", clips.display()))?;
+    let mut sidecars: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.to_string_lossy()
+                .to_lowercase()
+                .ends_with(".session.json")
+        })
+        .collect();
+    sidecars.sort();
+
+    let [sidecar] = sidecars.as_slice() else {
+        return Err(format!(
+            "expected one session record in {}, found {sidecars:?}",
+            clips.display()
+        ));
+    };
+    let text = std::fs::read_to_string(sidecar)
+        .map_err(|error| format!("the session record cannot be read: {error}"))?;
+    let session: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("the session record is not JSON: {error}\n{text}"))?;
+
+    session["recordings"]
+        .as_array()
+        .and_then(|recordings| recordings.first())
+        .cloned()
+        .ok_or_else(|| format!("the sitting has no recording in it yet:\n{session:#}"))
+}
+
+#[test]
+#[ignore = "needs a desktop session and process detection; see the module docs"]
+fn a_microphone_saved_over_the_protocol_reaches_the_next_automatic_recording() {
+    // SPEC.md section 45, step 3: a fresh user selects a microphone. Step 15:
+    // they do the whole thing again without reconfiguring. And the sentence
+    // that ends the section — "if any of those steps require ... restarting the
+    // recorder, the MVP is not finished".
+    //
+    // Nothing here restarts anything. One recorder is started and told to
+    // watch, and it is asked over the protocol to save a microphone exactly as
+    // the Settings screen asks. Then a game launches and *detection* starts a
+    // recording of it — nobody asks for that recording, which is the half of
+    // the path that was broken: a recording the window asks for reads the
+    // settings state at the moment it starts, but the session manager on the
+    // watcher's thread owns a copy of the configuration, and until issue #51
+    // nothing replaced that copy.
+    //
+    // What is asserted is the value the recording was actually made with, read
+    // out of the session record the recorder itself wrote. Not a getter, and
+    // not the reply to the save: `SessionManager::set_configuration` has always
+    // passed a test that set a configuration and read it back, and that test
+    // went on passing for as long as nothing in the product called it.
+    let home = scratch_home("settings-reach-detection");
+    overlay_naming_the_windowless_fixture(&home);
+
+    let recorder = ServedRecorder::started_with(
+        "settings-reach-detection",
+        Some(&home),
+        &["--watch-for-games"],
+    );
+    // Before the save, and this is the line the test turns on. `announce` is
+    // written after the watcher thread has built its session manager, and the
+    // manager takes its copy of the configuration when it is built. Waiting for
+    // it is what makes the save below land *after* that copy was taken — which
+    // is the only arrangement in which the assertion at the end means anything.
+    // On the ready line alone this test passed with the propagation removed.
+    let watching = recorder.wait_for("Watching for games.");
+    let mut client = recorder.client();
+
+    // What that copy holds is `default`, because this scratch home had no
+    // settings file in it at all.
+    let saved = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "microphone",
+                Some(CHOSEN_MICROPHONE),
+            )))
+            .expect("a device name is a value the settings file can hold"),
+    );
+    assert_eq!(
+        setting(&saved, "microphone").value,
+        CHOSEN_MICROPHONE,
+        "the save itself has to land before anything can be said about what reads it",
+    );
+
+    // A process that starts between the watcher's baseline snapshot and its
+    // subscription is invisible to it for its lifetime, and that window is a
+    // few tens of milliseconds (`tests/automatic_sessions.rs` says the same).
+    std::thread::sleep(Duration::from_secs(1));
+    let subject = WindowlessSubject::start(&home.join("marker"));
+
+    let recording = the_recording_the_watcher_started(&home, DETECTION_PATIENCE);
+    let microphone = &recording["settings"]["microphone"];
+
+    assert_eq!(
+        microphone["value"].as_str(),
+        Some(CHOSEN_MICROPHONE),
+        "the recording detection started was made with the microphone this recorder held when it \
+         booted rather than the one saved from the Settings screen a moment earlier, so the \
+         Settings screen is a control that does nothing until the recorder is restarted — which \
+         is what SPEC.md section 45 rules out.\n\nThe recording:\n{recording:#}\n\nWhat the \
+         recorder said before the save:\n{watching}",
+    );
+    assert_eq!(
+        microphone["source"].as_str(),
+        Some("global"),
+        "and it should be recorded as having come from the user's own settings rather than from \
+         what Clipped ships with:\n{recording:#}",
+    );
+
+    drop(client);
+    drop(subject);
+    recorder.stop();
+    // On the way out only. A run that failed keeps the home directory, and the
+    // session record in it, for whoever has to read the assertion above.
     let _ = std::fs::remove_dir_all(&home);
 }
 

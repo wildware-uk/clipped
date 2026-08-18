@@ -442,12 +442,21 @@ fn watch_for_games(
         // once, on a thread nothing is waiting on (issue #522).
         Launchers::discover(),
         AutomaticSettings::new(directory.to_path_buf()),
-        // The settings the service holds, not a second read of the file. The
-        // manager needs them for the per-game settings it resolves, and taking
-        // them from the one state this process keeps them in means a directory
-        // or a microphone saved from the Settings screen means the same thing
-        // to an automatic recording as it does to one the window asked for
-        // (`crate::settings`, issues #51 and #421).
+        // The settings the service holds, not a second read of the file — and
+        // only the value this driver *starts* with.
+        //
+        // Taking them from the one state this process keeps them in is
+        // necessary and was never sufficient. The manager owns the
+        // configuration it resolves per-game settings from, so what is passed
+        // here is a copy, and a copy goes stale the moment the Settings screen
+        // saves. Until issue #51 nothing replaced it: a microphone chosen in
+        // the window reached automatic recordings only after the recorder was
+        // restarted, which is exactly what SPEC.md section 45 rules out.
+        //
+        // `Driver::take_the_settings_the_user_saved` is what keeps it current
+        // from here on, once a pass, through `SessionManager::set_configuration`.
+        // This line is only where it begins (`crate::settings`, issues #51 and
+        // #421).
         recordings.configuration(),
         RecordingPlan::default(),
         plugins,
@@ -809,6 +818,20 @@ struct Driver {
     /// ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
     session_epoch: Option<Instant>,
     running: Option<Running>,
+    /// The settings generation the manager's configuration was taken at, or
+    /// [`None`] before the first pass has taken one.
+    ///
+    /// Compared against `RecordingState::settings_generation` once a pass. When
+    /// they differ the user has saved something since the manager was last
+    /// told, and only then is the settings lock taken and the configuration
+    /// cloned — see [`Self::take_the_settings_the_user_saved`].
+    ///
+    /// [`None`] rather than the generation read beside the configuration in
+    /// [`Self::new`], so that there is no window between the two reads for a
+    /// save to fall down. The first pass refreshes unconditionally, which
+    /// re-sets the configuration the manager already has, and after that the
+    /// comparison is exact.
+    settings_generation: Option<u64>,
     /// Where a recording this driver starts makes itself reachable over the
     /// protocol, when there is a protocol.
     ///
@@ -901,6 +924,7 @@ impl Driver {
             plugin_consents,
             session_epoch: None,
             running: None,
+            settings_generation: None,
             recordings,
         }
     }
@@ -911,6 +935,12 @@ impl Driver {
         let mut detection_stopped: Option<String> = None;
 
         loop {
+            // Before anything in this pass can ask the manager for a recording:
+            // an action produced below carries the settings the manager
+            // resolved, so a save that has landed since the last pass has to be
+            // in the manager before `observe` or `poll` are called, not after.
+            self.take_the_settings_the_user_saved();
+
             // The sitting this recorder is in, before anything in this pass can
             // change it, so that what the protocol reports is never more than
             // one pass — about a second — behind what the manager holds. A
@@ -977,6 +1007,96 @@ impl Driver {
                 }
             }
         }
+    }
+
+    /// Gives the manager the settings as the Settings screen last saved them,
+    /// if it has not already got them.
+    ///
+    /// # Why this exists
+    ///
+    /// The manager owns the configuration it resolves each game's settings
+    /// from, and it is handed one copy when this driver is built. Nothing used
+    /// to replace that copy, so a microphone saved from the window meant one
+    /// thing to a recording the window asked for — which reads the settings
+    /// state at the moment it starts (`crate::serve::RecordingState::start`) —
+    /// and another to a recording detection started, until the recorder was
+    /// restarted. SPEC.md section 45 says in as many words that an MVP
+    /// requiring a restart is not finished, and this is the seam that was
+    /// missing: `set_configuration` existed and had no production caller.
+    ///
+    /// # The next recording, not the running one
+    ///
+    /// Deliberately the next one. `SessionManager::set_configuration` says the
+    /// same thing from its own side: a recording resolves its settings once,
+    /// when it starts, and nothing here reaches into one that is running. A
+    /// user who changes the frame rate mid-game gets it on the next recording
+    /// rather than a re-opened encoder halfway through a file — which would
+    /// mean a file whose second half does not match its first, and is a
+    /// different question from the one the MVP asks. This call cannot do
+    /// otherwise even by accident: the running recording's settings were
+    /// resolved and handed to its thread before this ran, and `self.running` is
+    /// not touched here.
+    ///
+    /// # What it costs
+    ///
+    /// One relaxed atomic load per pass — about one a second — and nothing
+    /// else on the passes where nothing was saved, which is nearly all of them.
+    /// The settings lock is taken and the configuration cloned only on a pass
+    /// that follows a save. Neither happens on a capture thread: this is the
+    /// watcher's loop, which already sleeps a second at a time waiting on
+    /// process events, and the recording's own thread never reads settings
+    /// after it starts (AGENTS.md section 20).
+    ///
+    /// # What it does not touch
+    ///
+    /// `installed_plugins` and `plugin_consents`, both of which are read once
+    /// at start-up and documented as such on the fields. Consents are cloned
+    /// out of the configuration *before* it moves into the manager precisely so
+    /// that `attach_plugins` never goes looking for a settings file, and
+    /// replacing what the manager holds leaves that clone alone. A plugin
+    /// enabled from the window still arrives on the next run of the recorder,
+    /// which is what the plugins are documented to do and is not what issue #51
+    /// is about.
+    ///
+    /// Per-game overrides survive, because what is replaced is the whole
+    /// `Configuration` — global settings and per-game layers together, as
+    /// `apply_settings` last wrote them — rather than a global half laid over
+    /// per-game entries this driver had been carrying (AGENTS.md section 30).
+    ///
+    /// And **not the recording directory**, which is not in the configuration
+    /// this replaces. Where automatic recordings are written is resolved once
+    /// by [`recordings_directory`] before this thread starts and frozen into
+    /// the manager's `AutomaticSettings`, which has no setter; a directory
+    /// saved from the Settings screen therefore still reaches automatic
+    /// recordings only after a restart. That is the same criterion — SPEC.md
+    /// section 45 names the directory beside the microphone in step 3 — but it
+    /// is different state with a question of its own attached: the session
+    /// sidecar is written next to the recordings it describes, so moving the
+    /// directory while a sitting is open would leave a session record in one
+    /// folder and its own files in another (AGENTS.md section 56). It wants
+    /// deciding rather than assuming, and is deliberately left for an issue of
+    /// its own rather than ridden in on this one.
+    ///
+    /// Nothing happens under `watch`, which serves no protocol: there is no
+    /// Settings screen to save from, so the start-up configuration is still the
+    /// only one there has ever been.
+    fn take_the_settings_the_user_saved(&mut self) {
+        let Some(recordings) = self.recordings.as_ref() else {
+            return;
+        };
+
+        // Before the configuration is asked for, never after. A save landing
+        // between the two must leave this driver believing it is behind — one
+        // redundant refresh on the next pass, costing a clone — rather than
+        // believing it is current with a configuration that predates the save,
+        // which would strand that setting until the next save after it.
+        let generation = recordings.settings_generation();
+        if self.settings_generation == Some(generation) {
+            return;
+        }
+
+        self.manager.set_configuration(recordings.configuration());
+        self.settings_generation = Some(generation);
     }
 
     /// Puts the sitting this recorder is in on the status the protocol reports,

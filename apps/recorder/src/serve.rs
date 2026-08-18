@@ -1523,6 +1523,20 @@ impl RecordingState {
         self.settings.configuration()
     }
 
+    /// How many times `apply_settings` has saved, for the automatic recorder to
+    /// compare against the generation it took its copy at.
+    ///
+    /// It holds a copy because its session manager owns the configuration it
+    /// resolves per-game settings from, and it cannot call
+    /// [`Self::configuration`] every pass of its loop without taking the
+    /// settings lock and cloning the configuration once a second for the life
+    /// of the process. This is the cheap half of that question — one relaxed
+    /// atomic load — and the expensive half only runs when the answer changes
+    /// (`crate::settings`, `crate::watch`, AGENTS.md section 20, issue #51).
+    pub(crate) fn settings_generation(&self) -> u64 {
+        self.settings.generation()
+    }
+
     /// Validates the request, resolves the target, opens a session and starts
     /// recording.
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
