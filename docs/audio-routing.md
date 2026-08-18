@@ -1522,16 +1522,39 @@ into failures on a machine that is supposed to have one.
 
   **The join is not free**, which is the half of
   [issue #27](https://github.com/wildware-uk/clipped/issues/27)'s second
-  acceptance criterion that is not met. Each one costs the track a single 25 ms
-  window: usually a discontinuity in the waveform at full amplitude — audibly a
-  click — and occasionally an actual hole, once 990 frames the audio engine
-  delivered nothing for. It belongs to whichever tap **gained** a stream: a
-  client starting outside the tree leaves the tree's track untouched and puts
-  the same click in the complement's, which means every application that starts
-  playing costs one click on the other-system-audio track. Nothing flags it —
-  `CaptureStats::discontinuities` stays at zero through all of them.
+  acceptance criterion that is not met. Each one costs the track **1,504 frames
+  — 31.33 ms — of exact digital zeros**, delivered inside ordinary packets whose
+  flags are `0`: no `AUDCLNT_BUFFERFLAGS_SILENT`, no
+  `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`, and `CaptureStats::discontinuities`
+  at zero throughout. Both edges step straight from signal to zero and back,
+  which is what makes it audible: two clicks with a dropout between them.
+
+  It was first read as a *splice at full amplitude*, because the 25 ms window
+  holding it measured 0.008 of a 0.0400 tone while its peak stayed at 0.0400.
+  That peak is the 5 ms of the window the zeros do not cover — 0.00801/0.04000
+  is 0.2003, and the window's root-mean-square falls by exactly its square root.
+  Dumping the samples shows 1,504 consecutive `0.0` between one at −0.0215 and
+  the next at +0.0308. The three shapes originally reported are one shape.
+
+  **It belongs to whichever tap's stream set changed**, and a stream *leaving*
+  costs the same as one joining — so every application that starts playing and
+  every one that stops costs the other-system-audio track 31 ms. **The
+  whole-endpoint tap is immune**: an ordinary `AUDCLNT_STREAMFLAGS_LOOPBACK`
+  capture watched across the same join and leave produced no run of zeros longer
+  than a millisecond. This is process-scoped taps specifically.
+
+  **Nothing on the client side of WASAPI avoids it.** Polling instead of
+  event-driven, buffer durations from 10 ms to 1,000 ms, `AUTOCONVERTPCM`,
+  `SRC_DEFAULT_QUALITY` and a release build all produce the same 1,504 frames;
+  `NOPERSIST`, `RATEADJUST` and `CROSSPROCESS` are refused outright with
+  `AUDCLNT_E_INVALID_STREAM_FLAG`. Two `IAudioClient`s activated separately
+  against the same tree produce **sample-identical** tracks — a sum of squared
+  differences of exactly 0.0 over 6,000 aligned samples — with holes at the same
+  sample, so there is no second copy to splice over the first. Every activation
+  also costs 1,504 frames at the *front* of its track, which is the same rebuild
+  seen from the other end.
   [Issue #626](https://github.com/wildware-uk/clipped/issues/626) is the defect,
-  and the test pins its size so it cannot grow unnoticed.
+  and the tests pin its size so it cannot grow unnoticed.
 - **A process-scoped client reports performance-counter positions.** Measured on
   Windows 11 build 26200, where a silent tree produced exactly its sample rate
   in frames per second with no silence synthesised, which only happens if the
