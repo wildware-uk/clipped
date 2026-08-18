@@ -349,6 +349,98 @@ impl fmt::Display for AudioTrackReport {
     }
 }
 
+/// Why a recording holds one undivided system-audio track where two were
+/// planned.
+///
+/// A recording of a window scopes its system audio to that window's process
+/// tree, twice — the tree, and everything except it (SPEC.md section 11). A
+/// machine that cannot do that at all records one track of everything instead
+/// of failing, because a degraded recording is worth more than no recording
+/// ([issue #604](https://github.com/wildware-uk/clipped/issues/604)).
+///
+/// The substitution is never silent, and this is the machine-readable half of
+/// saying so. The other halves are the file itself — the track is named
+/// `System Audio` rather than `Game` and `Other System Audio`, so an editor
+/// shows what happened without anything to read it — a `warn` line, the
+/// sentence [`RecordingReport`] prints, and the session's own record
+/// (`crate::automatic::sidecar`). #61 is the counter-example this exists not to
+/// repeat: a substituted encoder is visible only in a log line that has since
+/// rotated away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SystemAudioFallbackCause {
+    /// This machine cannot scope an audio capture to a process at all.
+    ///
+    /// `AudioError::ProcessLoopbackUnavailable`: Windows exposes process
+    /// loopback from build 20348 and no shipping Windows 10 release reaches it
+    /// (ADR 0003). A capability, not a mishap — the same recording made again
+    /// on the same machine falls back again.
+    ProcessScopingUnavailable,
+    /// The game's process could not be followed when the recording started.
+    ///
+    /// `AudioError::ProcessUnavailable`: every process of the tree had already
+    /// exited, or the game runs at a higher integrity level than Clipped and
+    /// Windows will not open it. Either way there is no tree to scope to, and
+    /// the answer `ProcessLoopbackCapture::open_excluding` documents for an
+    /// already-empty tree is this one.
+    GameProcessUnavailable,
+}
+
+impl SystemAudioFallbackCause {
+    /// The token this cause is written as in the session's record and in logs.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::ProcessScopingUnavailable => "process-scoping-unavailable",
+            Self::GameProcessUnavailable => "game-process-unavailable",
+        }
+    }
+}
+
+impl fmt::Display for SystemAudioFallbackCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// What a recording recorded instead of a separated pair, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemAudioFallback {
+    pub(crate) cause: SystemAudioFallbackCause,
+    pub(crate) detail: String,
+}
+
+impl SystemAudioFallback {
+    /// Which of the two situations this was.
+    #[must_use]
+    pub const fn cause(&self) -> SystemAudioFallbackCause {
+        self.cause
+    }
+
+    /// What the audio capture said, in its own words.
+    ///
+    /// Kept verbatim rather than re-phrased, because the numbers in it — the
+    /// `HRESULT` Windows refused the activation with, the process that could
+    /// not be opened — are the whole diagnostic value (AGENTS.md section 15).
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for SystemAudioFallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the game's audio could not be recorded separately from the rest of the \
+             machine's, so this recording has one System Audio track holding \
+             everything it played instead of separate Game and Other System Audio \
+             tracks ({detail})",
+            detail = self.detail,
+        )
+    }
+}
+
 /// What one recording contained, and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingReport {
@@ -372,6 +464,7 @@ pub struct RecordingReport {
     pub(crate) end_reason: EndReason,
     pub(crate) audio_tracks: Vec<AudioTrackReport>,
     pub(crate) capture_changes: Vec<MethodChange>,
+    pub(crate) audio_fallback: Option<SystemAudioFallback>,
 }
 
 impl RecordingReport {
@@ -414,6 +507,18 @@ impl RecordingReport {
     #[must_use]
     pub fn capture_changes(&self) -> &[MethodChange] {
         &self.capture_changes
+    }
+
+    /// What this recording recorded instead of separated system-audio tracks,
+    /// or [`None`] for the recording that got what it asked for.
+    ///
+    /// [`Some`] is not a failure: the recording ran, and its one `System Audio`
+    /// track holds everything the machine played. It is [`Some`] on every
+    /// Windows 10 machine, which is why it is a field of the report rather than
+    /// only a log line (issue #604).
+    #[must_use]
+    pub const fn audio_fallback(&self) -> Option<&SystemAudioFallback> {
+        self.audio_fallback.as_ref()
     }
 
     /// Which encoder family encoded them.
@@ -630,6 +735,14 @@ impl fmt::Display for RecordingReport {
             reason = self.end_reason,
         )?;
 
+        // Before the two sentences below because it is about what the file
+        // *is* rather than about how much of it there is, and because somebody
+        // who asked for a Game track and did not get one should not have to
+        // read to the end of the line to find that out (AGENTS.md section 45).
+        if let Some(fallback) = &self.audio_fallback {
+            write!(formatter, " {fallback}")?;
+        }
+
         // Said here rather than only in the log because it is the answer to the
         // question this line otherwise provokes — "why is a ten-minute recording
         // ninety seconds long?" — and because a recording nobody was watching is
@@ -669,6 +782,42 @@ impl fmt::Display for RecordingReport {
 mod tests {
     use super::*;
 
+    /// What the person who ran the recording is told when its tracks are not
+    /// the ones they asked for.
+    ///
+    /// The file's own track names are the evidence an editor shows, but somebody
+    /// watching a terminal should not have to open the file to find out that a
+    /// layout they asked for is not the one they got (AGENTS.md section 45).
+    #[test]
+    fn a_recording_that_could_not_separate_the_game_says_so_in_its_own_summary() {
+        let ordinary = report();
+        assert!(
+            !ordinary.to_string().contains("System Audio"),
+            "the ordinary recording says nothing about a fallback: {ordinary}"
+        );
+
+        let mut fell_back = report();
+        fell_back.audio_fallback = Some(SystemAudioFallback {
+            cause: SystemAudioFallbackCause::ProcessScopingUnavailable,
+            detail: "needs Windows build 20348 or later".to_owned(),
+        });
+
+        let printed = fell_back.to_string();
+        assert!(
+            printed.contains("one System Audio track"),
+            "the line names the track the file has: {printed}"
+        );
+        assert!(
+            printed.contains("needs Windows build 20348 or later"),
+            "and why, in the words the audio capture used: {printed}"
+        );
+        assert_eq!(
+            fell_back.audio_fallback().map(SystemAudioFallback::cause),
+            Some(SystemAudioFallbackCause::ProcessScopingUnavailable),
+            "and a caller that wants to act on it rather than print it can"
+        );
+    }
+
     fn report() -> RecordingReport {
         RecordingReport {
             output: Some(PathBuf::from(r"D:\clips\session.mkv")),
@@ -691,6 +840,7 @@ mod tests {
             end_reason: EndReason::Stopped,
             audio_tracks: Vec::new(),
             capture_changes: Vec::new(),
+            audio_fallback: None,
         }
     }
 

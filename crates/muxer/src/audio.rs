@@ -18,6 +18,10 @@
 //! - **The order.** [`AudioSource::ordering_rank`] fixes it: the compatibility
 //!   mix first (SPEC.md section 13), then game, other system audio, microphone,
 //!   voice chat, and per-application tracks in the order they were configured.
+//!   [`AudioSource::SystemAudio`] — everything the machine played, on one track,
+//!   which is what a recording that could not separate the game from the rest
+//!   produces — takes the game's place, because a recording has the pair or the
+//!   undivided track and never both.
 //!   [`RecordingLayout`](crate::RecordingLayout) inserts by that rank, so a
 //!   caller that declares the microphone before the game still gets the standard
 //!   file.
@@ -79,6 +83,30 @@ pub enum AudioSource {
     /// casually is a recording people conclude is broken. It is first, and it
     /// carries the default-track flag.
     CompatibilityMix,
+    /// Everything the machine played, undivided.
+    ///
+    /// **Not [`OtherSystemAudio`](Self::OtherSystemAudio) and not
+    /// [`Game`](Self::Game).** SPEC.md section 11 defines the other-system track
+    /// as all system audio *minus* the game's process tree, so a track carrying
+    /// the game as well is not that track under a different name: somebody who
+    /// mutes "Other System Audio" expecting the game to stay audible would lose
+    /// the game, which is the failure AGENTS.md section 21 exists to prevent.
+    /// Calling it "Game" would be the same lie the other way round.
+    ///
+    /// Two recordings produce it. A capture with no process to scope to — a
+    /// monitor, or a window whose process has gone — has nothing to separate, so
+    /// one endpoint capture is the whole of its system audio. And a machine that
+    /// **cannot** scope a capture to a process at all, which is every Windows 10
+    /// build below 20348, records this instead of the pair it was asked for
+    /// (`AudioError::ProcessLoopbackUnavailable`, ADR 0003,
+    /// [issue #604](https://github.com/wildware-uk/clipped/issues/604)). In both
+    /// cases the name is the honest one: an editor shows a track that says it
+    /// holds everything, and it does.
+    ///
+    /// It never appears beside [`Game`](Self::Game) or
+    /// [`OtherSystemAudio`](Self::OtherSystemAudio). A recording either
+    /// separated the two or it did not.
+    SystemAudio,
     /// The detected game's process tree.
     Game,
     /// Everything the machine played that was not the game.
@@ -108,6 +136,7 @@ impl AudioSource {
     pub fn track_name(&self) -> &str {
         match self {
             Self::CompatibilityMix => "Compatibility Mix",
+            Self::SystemAudio => "System Audio",
             Self::Game => "Game",
             Self::OtherSystemAudio => "Other System Audio",
             Self::Microphone => "Microphone",
@@ -134,7 +163,11 @@ impl AudioSource {
     pub const fn ordering_rank(&self) -> u8 {
         match self {
             Self::CompatibilityMix => 0,
-            Self::Game => 1,
+            // One rank for the system side however it was captured. A recording
+            // has either the pair or the undivided track and never both, so
+            // sharing the first of the two ranks with `Game` costs nothing and
+            // keeps the microphone in the same place in every file.
+            Self::SystemAudio | Self::Game => 1,
             Self::OtherSystemAudio => 2,
             Self::Microphone => 3,
             Self::VoiceChat => 4,
@@ -424,11 +457,37 @@ mod tests {
     }
 
     #[test]
+    fn an_undivided_system_track_takes_the_place_the_game_track_would_have_had() {
+        // The layout of a recording made on a machine that cannot scope a
+        // capture to a process (issue #604). The microphone has to stay where it
+        // is: a support instruction that says "track 3 is the microphone" is
+        // true of a recording with the pair, and has to stay true of one
+        // without it.
+        let mut sources = [
+            AudioSource::Microphone,
+            AudioSource::CompatibilityMix,
+            AudioSource::SystemAudio,
+        ];
+        sources.sort_by_key(AudioSource::ordering_rank);
+
+        let names: Vec<_> = sources.iter().map(AudioSource::track_name).collect();
+        assert_eq!(names, ["Compatibility Mix", "System Audio", "Microphone"]);
+        assert_ne!(
+            AudioSource::SystemAudio.track_name(),
+            AudioSource::OtherSystemAudio.track_name(),
+            "everything the machine played and everything-except-the-game are \
+             different claims, and a track that makes the wrong one is worse than a \
+             refusal (SPEC.md section 11)"
+        );
+    }
+
+    #[test]
     fn only_the_compatibility_mix_is_the_track_a_player_picks() {
         // Two default tracks is a file whose player chooses between them, which
         // is the situation the flag exists to end (SPEC.md section 13).
         assert!(AudioSource::CompatibilityMix.is_default_track());
         for source in [
+            AudioSource::SystemAudio,
             AudioSource::Game,
             AudioSource::OtherSystemAudio,
             AudioSource::Microphone,

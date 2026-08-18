@@ -6,6 +6,7 @@ which are meant to stay separate really are separate (AGENTS.md section 21).
 | File | What it is |
 | --- | --- |
 | `track_isolation.rs` | Records `test-apps/video-pattern` playing one tone and this test process playing another, then measures every track of the resulting file by frequency: the game's track holds the game's tone and not the neighbour's, the complement's track holds the neighbour's and not the game's, and the compatibility mix holds both ([issue #34](https://github.com/wildware-uk/clipped/issues/34)). It also measures where the tracks *end*, within a packet of the picture ([issue #320](https://github.com/wildware-uk/clipped/issues/320)) |
+| `system_audio_fallback.rs` | The same window and the same two tones, recorded with process scoping **forced to fail**: the recording happens rather than failing, its one track holds *both* tones — everything the machine played — and that track is called `System Audio` and not `Game` or `Other System Audio`. In the same run, a failure this build cannot classify still refuses the recording ([issue #604](https://github.com/wildware-uk/clipped/issues/604)) |
 
 The test belongs to the package that owns the application it starts — Cargo only
 sets `CARGO_BIN_EXE_…` for a test in the binary's own package — so it is declared
@@ -24,7 +25,15 @@ the displays have to be awake before a run means anything.
 ```powershell
 $env:CLIPPED_REQUIRE_AUDIO = "1"
 cargo test -p clipped-video-pattern --test track_isolation -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test system_audio_fallback -- --ignored --nocapture
 ```
+
+The second forces process-scoped capture to fail with
+`CLIPPED_FORCE_AUDIO_SCOPING_FAILURE`, which `clipped_session::audio` reads. It
+sets and clears the variable itself, and it is deliberately one `#[test]` making
+two recordings rather than two tests: the variable is process-wide, and a
+recording made while another test had it set would measure the wrong build and
+pass.
 
 `CLIPPED_REQUIRE_AUDIO` is not optional when the result is being recorded as
 evidence. Without it, a machine with no output endpoint prints
@@ -47,6 +56,7 @@ directory's test involves Windows.
 | `crates/muxer/tests/multi_track_audio.rs` | The **writer** keeps five tracks apart, from synthesised samples | Anywhere |
 | `crates/session/src/audio/tests.rs` | The **routing** declares a track per source and puts each source on its own, from scripted captures | Anywhere |
 | `tests/audio/track_isolation.rs` | **Windows** really partitions the machine's audio: the include mode hands over one process tree and the exclude mode hands over everything else | A machine with a GPU, a display and an output endpoint |
+| `tests/audio/system_audio_fallback.rs` | What a machine that **cannot** partition it records instead, and that the track says so | The same, with the failure forced |
 
 The rejection threshold is `clipped_media_validation::Tone`'s default and is the
 same in all three: a track's own tone must measure at least **eight times** — about

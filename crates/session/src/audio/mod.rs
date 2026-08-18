@@ -93,7 +93,9 @@ use crate::error::SessionError;
 use clipped_replay::ReplayBuffer;
 
 use crate::muxing::{AudioQueue, AudioQueued, MuxingThread};
-use crate::report::{AudioSyncReport, AudioTrackReport};
+use crate::report::{
+    AudioSyncReport, AudioTrackReport, SystemAudioFallback, SystemAudioFallbackCause,
+};
 use crate::settings::{AudioSourceSetting, RecordingSettings};
 
 use placement::{place, AUDIO_CLOCK};
@@ -264,12 +266,52 @@ impl core::fmt::Debug for OpenSource {
     }
 }
 
+/// Every audio source a recording opened, and what it had to settle for.
+///
+/// A pair rather than a bare `Vec` because the second half has nowhere else to
+/// live: a recording that could not separate the game's audio from the rest
+/// recorded something different from what it was asked for, and the fact has to
+/// reach the report and the session's record rather than only a log line
+/// ([issue #604](https://github.com/wildware-uk/clipped/issues/604), and
+/// [issue #61](https://github.com/wildware-uk/clipped/issues/61) for the reason
+/// a log line is not enough).
+#[derive(Debug)]
+pub(crate) struct OpenAudio {
+    pub(crate) sources: Vec<OpenSource>,
+    /// [`None`] for the recording that got the layout it asked for, which is
+    /// every recording on a machine at Windows build 20348 or above.
+    pub(crate) fallback: Option<SystemAudioFallback>,
+}
+
 /// Opens every audio source `settings` asked for.
 ///
 /// Nothing is opened for a source set to [`AudioSourceSetting::Off`]: no device,
 /// no thread and no track. That is what makes `--microphone none
 /// --system-audio none` a video-only recording rather than a recording with two
 /// empty tracks in it.
+///
+/// # When the game cannot be separated from everything else
+///
+/// A machine below Windows build 20348 cannot scope an audio capture to a
+/// process at all, and that is the whole population of shipping Windows 10
+/// (ADR 0003). Such a machine records **one** system-audio track of everything
+/// it played rather than failing the recording, which is what
+/// [`AudioError::ProcessLoopbackUnavailable`]'s message has promised since it
+/// was written and what nothing implemented until
+/// [issue #604](https://github.com/wildware-uk/clipped/issues/604).
+///
+/// It is not a quiet substitution, and that difference matters more than the
+/// fallback does. The track is [`AudioSource::SystemAudio`] — "System Audio" —
+/// and never [`AudioSource::Game`] or [`AudioSource::OtherSystemAudio`]: a
+/// track named for everything-except-the-game that in fact holds the game is
+/// the exact failure AGENTS.md section 21 forbids, and somebody who muted it in
+/// an editor expecting to still hear the game would not. Beside the file's own
+/// evidence the recording says so in a `warn` line, in the sentence
+/// [`RecordingReport`](crate::RecordingReport) prints, and in the session's
+/// record (`crate::automatic::sidecar`).
+///
+/// [`SystemAudioFallbackCause::of`] is the list of failures that take this
+/// path, and why everything else still refuses.
 ///
 /// # Errors
 ///
@@ -281,58 +323,74 @@ impl core::fmt::Debug for OpenSource {
 ///
 /// [`SessionError::AudioDeviceNotSelectable`] for a named system-audio device,
 /// which this build cannot honour.
-pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, SessionError> {
-    use clipped_audio::windows::{MicrophoneCapture, ProcessLoopbackCapture, SystemAudioCapture};
+pub(crate) fn open(settings: &RecordingSettings) -> Result<OpenAudio, SessionError> {
+    use clipped_audio::windows::MicrophoneCapture;
 
     let mut sources = Vec::new();
+    let mut fallback = None;
 
     for planned in plan_system_audio(settings.system_audio(), settings.target().game_process())? {
         match planned {
             PlannedSource::WholeEndpoint => {
-                let capture = SystemAudioCapture::open().map_err(|source| SessionError::Audio {
-                    track: AudioSource::OtherSystemAudio.track_name(),
-                    source,
-                })?;
-                sources.push(OpenSource {
-                    source: AudioSource::OtherSystemAudio,
-                    device: capture.endpoint_name().map(str::to_owned),
-                    format: capture.format(),
-                    capture: Box::new(capture),
-                });
+                // Nothing to separate: a monitor capture, or a window whose
+                // process has already gone. "Other System Audio" is true of it —
+                // the game's tree is empty, so all system audio minus that tree
+                // is all system audio — and it is the name this has carried
+                // since the plan existed.
+                sources.push(whole_endpoint(AudioSource::OtherSystemAudio)?);
             }
-            PlannedSource::ScopedPair(root) => {
-                // One call, and one agreement between the two captures it
-                // returns. `open` and `open_excluding` are the same two
-                // activations without it, and a recording that made them
-                // separately would put a process that is in one side's tree and
-                // not the other's onto both tracks or onto neither, whenever a
-                // game's launcher exits partway through (issues #27 and #581).
-                let (game, other) = ProcessLoopbackCapture::open_pair(root).map_err(|source| {
-                    SessionError::Audio {
-                        // Named for the track a user would notice missing.
-                        // Either side failing means neither capture exists,
-                        // so there is one failure here rather than two.
-                        track: AudioSource::Game.track_name(),
-                        source,
-                    }
-                })?;
-                sources.push(OpenSource {
-                    source: AudioSource::Game,
-                    // A process-scoped capture is not opened against an endpoint
-                    // the user chose, so there is no device name to report. The
-                    // field says which device somebody would go and unplug, and
-                    // for this source the answer is "none of them".
-                    device: None,
-                    format: game.format(),
-                    capture: Box::new(game),
-                });
-                sources.push(OpenSource {
-                    source: AudioSource::OtherSystemAudio,
-                    device: None,
-                    format: other.format(),
-                    capture: Box::new(other),
-                });
-            }
+            PlannedSource::ScopedPair(root) => match open_scoped_pair(root) {
+                Ok((game, other)) => {
+                    sources.push(OpenSource {
+                        source: AudioSource::Game,
+                        // A process-scoped capture is not opened against an
+                        // endpoint the user chose, so there is no device name to
+                        // report. The field says which device somebody would go
+                        // and unplug, and for this source the answer is "none of
+                        // them".
+                        device: None,
+                        format: game.format(),
+                        capture: Box::new(game),
+                    });
+                    sources.push(OpenSource {
+                        source: AudioSource::OtherSystemAudio,
+                        device: None,
+                        format: other.format(),
+                        capture: Box::new(other),
+                    });
+                }
+                Err(source) => {
+                    let Some(cause) = SystemAudioFallbackCause::of(&source) else {
+                        return Err(SessionError::Audio {
+                            // Named for the track a user would notice missing.
+                            // Either side failing means neither capture exists,
+                            // so there is one failure here rather than two.
+                            track: AudioSource::Game.track_name(),
+                            source,
+                        });
+                    };
+
+                    // Before the endpoint is opened, so that the reason survives
+                    // even when the fallback itself then fails: a machine with
+                    // no output device would otherwise report only "no default
+                    // audio output device" and lose the fact that it was
+                    // recovering from something else.
+                    tracing::warn!(
+                        audio_fallback = cause.token(),
+                        game_process = root,
+                        reason = %source,
+                        "this machine cannot record the game's audio separately from the rest, \
+                         so the recording has one System Audio track of everything it plays \
+                         instead of separate Game and Other System Audio tracks"
+                    );
+
+                    sources.push(whole_endpoint(AudioSource::SystemAudio)?);
+                    fallback = Some(SystemAudioFallback {
+                        cause,
+                        detail: source.to_string(),
+                    });
+                }
+            },
         }
     }
 
@@ -350,7 +408,174 @@ pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, Sess
         });
     }
 
-    Ok(sources)
+    Ok(OpenAudio { sources, fallback })
+}
+
+/// Loopback of the endpoint Windows is playing through, filed as `source`.
+///
+/// One capture, two callers and two different track names, which is the whole
+/// reason the name is a parameter: the same samples are "Other System Audio"
+/// when there was no game to separate out, and "System Audio" when there was one
+/// and this machine could not (see [`open`]). Getting that wrong in either
+/// direction is a track whose contents differ from what it declares.
+fn whole_endpoint(source: AudioSource) -> Result<OpenSource, SessionError> {
+    // Taken from the variant rather than from `source`, because
+    // `SessionError::Audio` carries a `&'static str` and a name borrowed from a
+    // local cannot be one. There are two callers and two possible sources, both
+    // in `open`, so this is a two-way choice rather than a match with a hole in
+    // it.
+    let track = if matches!(source, AudioSource::SystemAudio) {
+        AudioSource::SystemAudio.track_name()
+    } else {
+        AudioSource::OtherSystemAudio.track_name()
+    };
+    let capture = clipped_audio::windows::SystemAudioCapture::open().map_err(|error| {
+        SessionError::Audio {
+            track,
+            source: error,
+        }
+    })?;
+    Ok(OpenSource {
+        source,
+        device: capture.endpoint_name().map(str::to_owned),
+        format: capture.format(),
+        capture: Box::new(capture),
+    })
+}
+
+/// Both sides of one process tree, or the reason there are none.
+///
+/// One call, and one agreement between the two captures it returns. `open` and
+/// `open_excluding` are the same two activations without it, and a recording
+/// that made them separately would put a process that is in one side's tree and
+/// not the other's onto both tracks or onto neither, whenever a game's launcher
+/// exits partway through (issues #27 and #581).
+///
+/// **It is also the seam a test breaks**; see [`FORCE_SCOPING_FAILURE`].
+fn open_scoped_pair(
+    root: u32,
+) -> Result<
+    (
+        clipped_audio::windows::ProcessLoopbackCapture,
+        clipped_audio::windows::ProcessLoopbackCapture,
+    ),
+    AudioError,
+> {
+    if let Some(forced) = forced_scoping_failure() {
+        return Err(forced);
+    }
+    clipped_audio::windows::ProcessLoopbackCapture::open_pair(root)
+}
+
+/// The variable that makes this build behave as a machine without
+/// process-scoped audio capture.
+///
+/// **Why product code reads an environment variable at all.** The fallback in
+/// [`open`] is the path every shipping Windows 10 machine takes and the path no
+/// machine in this project — or on a hosted runner — can reach, because all of
+/// them are far past build 20348. A branch that cannot be executed is a branch
+/// that is not tested, and the way this workspace answers that elsewhere is to
+/// substitute the thing that fails and let everything downstream of it be real:
+/// `crate::recording`'s `ScriptedFactory` replaces the capture backend list, and
+/// then the real fallback policy, the real encoder and the real Matroska writer
+/// all run (issue #285's proof). This is the same trick one layer down. What is
+/// injected is the **error**, not the outcome — [`open`] sees a genuine
+/// [`AudioError`], classifies it with the same code a Windows 10 machine's
+/// failure goes through, and opens a genuine endpoint capture into a genuine
+/// file.
+///
+/// It has to be process-wide rather than an argument because the measurement
+/// that matters is made through `record_into` — a real window, a real encoder,
+/// two real tones — from a test binary that has only the public API
+/// (`tests/audio/system_audio_fallback.rs`), and threading a fault injector
+/// through the recording API would put a test seam in the product's signature
+/// where a user could reach it by accident. An environment variable is reached
+/// deliberately or not at all, and `CLIPPED_LOG` is the precedent for one being
+/// read by product code here (`docs/logging.md`).
+///
+/// It is a support tool as well as a test hook: somebody who wants to see what
+/// this build does on the older-Windows path — before shipping to a machine
+/// that has no choice about it — sets it and records.
+const FORCE_SCOPING_FAILURE: &str = "CLIPPED_FORCE_AUDIO_SCOPING_FAILURE";
+
+/// The failure [`FORCE_SCOPING_FAILURE`] asks for, if it asks for one.
+///
+/// Three values, and an unrecognised one **refuses the recording** rather than
+/// being ignored. A typo that quietly restored the ordinary behaviour would
+/// make a run that proved nothing look exactly like a run that proved the
+/// fallback, which is the one outcome a fault injector must not have.
+fn forced_scoping_failure() -> Option<AudioError> {
+    let requested = std::env::var(FORCE_SCOPING_FAILURE).ok()?;
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+
+    let reason = format!("forced by {FORCE_SCOPING_FAILURE}={requested}");
+    match requested {
+        // What a machine below Windows build 20348 answers.
+        "unavailable" => Some(AudioError::process_loopback_unavailable(reason)),
+        // What a game that has already exited — or one running elevated —
+        // answers. Process 0 is not a real process and never will be: it is the
+        // value `clipped-windows` itself uses for "no process".
+        "process-gone" => Some(AudioError::ProcessUnavailable { process_id: 0 }),
+        // A failure this build does not classify, which is the other half of the
+        // guard: it must still refuse the recording.
+        "platform" => Some(AudioError::Platform {
+            operation: "activating a process-scoped audio client",
+            source: reason.into(),
+        }),
+        _ => Some(AudioError::Platform {
+            operation: "interpreting CLIPPED_FORCE_AUDIO_SCOPING_FAILURE",
+            source: format!(
+                "{requested:?} is not one of \"unavailable\", \"process-gone\" or \"platform\""
+            )
+            .into(),
+        }),
+    }
+}
+
+impl SystemAudioFallbackCause {
+    /// Whether `error` is a failure a recording carries on through, and which.
+    ///
+    /// **The decision issue #604 exists to make is here.** Two failures say the
+    /// same thing — there is no way to scope this recording's audio to a
+    /// process — and for both the alternative to one undivided track is no
+    /// recording at all, which is worse for the user by every measure.
+    /// Everything else refuses.
+    ///
+    /// The line between them is not "capability against transient". It is
+    /// whether the fallback would do anything the failed attempt would not:
+    ///
+    /// - [`AudioError::NoEndpoint`] and [`AudioError::UnsupportedFormat`] are
+    ///   about the **endpoint**, and the fallback opens that same endpoint.
+    ///   Falling back would fail again a moment later and replace a precise
+    ///   message with a vaguer one.
+    /// - [`AudioError::Platform`] is a failure nothing classified. Recording
+    ///   something different from what was asked for because of a failure
+    ///   nobody understood is guessing, and the user is better told (AGENTS.md
+    ///   section 27).
+    /// - [`AudioError::NoMicrophone`], [`AudioError::MicrophoneUnavailable`] and
+    ///   [`AudioError::NotOpen`] cannot arrive here — `open_pair` does not
+    ///   produce them — and are listed rather than swept into the wildcard so
+    ///   that reading this is enough to know what happens to each.
+    fn of(error: &AudioError) -> Option<Self> {
+        match error {
+            AudioError::ProcessLoopbackUnavailable { .. } => Some(Self::ProcessScopingUnavailable),
+            AudioError::ProcessUnavailable { .. } => Some(Self::GameProcessUnavailable),
+            AudioError::NoEndpoint
+            | AudioError::NoMicrophone
+            | AudioError::MicrophoneUnavailable { .. }
+            | AudioError::UnsupportedFormat { .. }
+            | AudioError::NotOpen
+            | AudioError::Platform { .. } => None,
+            // `AudioError` is `#[non_exhaustive]`, so this arm is required. A
+            // variant added later refuses until somebody decides otherwise,
+            // which is the safe direction: a refusal is visible to the person
+            // who asked for the recording, and a wrong track layout is not.
+            _ => None,
+        }
+    }
 }
 
 /// One system-audio capture a recording will open.
@@ -846,7 +1071,7 @@ fn track_thread_name(source: &AudioSource) -> &'static str {
     match source {
         AudioSource::CompatibilityMix => "mix",
         AudioSource::Game => "game",
-        AudioSource::OtherSystemAudio => "system",
+        AudioSource::SystemAudio | AudioSource::OtherSystemAudio => "system",
         AudioSource::Microphone => "microphone",
         AudioSource::VoiceChat => "voice",
         _ => "application",

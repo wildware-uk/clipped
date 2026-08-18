@@ -74,6 +74,14 @@ pub enum AudioError {
     /// is a track labelled "Game" that is really everything the machine played
     /// (AGENTS.md section 27).
     ///
+    /// `clipped_session::audio::open` is where that happens, and the track it
+    /// declares is `System Audio` — not `Game` and not `Other System Audio`,
+    /// both of which would be labels an editor acts on and neither of which
+    /// would be true. It was a promise this message made and nothing kept until
+    /// [issue #604](https://github.com/wildware-uk/clipped/issues/604), which is
+    /// the argument for writing messages like this one: **a message that
+    /// describes behaviour is a specification, and it is worth keeping as one.**
+    ///
     /// Its own variant rather than [`Platform`](Self::Platform) precisely
     /// because a caller has to be able to tell this one apart and take that
     /// path.
@@ -87,6 +95,15 @@ pub enum AudioError {
     /// Either it has already exited, or it runs at a higher integrity level
     /// than Clipped — a game started as an administrator, say — and Windows
     /// will not open it. There is then no process tree to scope a capture to.
+    ///
+    /// The caller takes the same fallback as for
+    /// [`ProcessLoopbackUnavailable`](Self::ProcessLoopbackUnavailable), and for
+    /// the same reason: there is no way to scope *this* recording's audio to a
+    /// process, so the alternative to one undivided track is no recording at
+    /// all. It is the answer
+    /// [`open_excluding`](crate::windows::ProcessLoopbackCapture::open_excluding)
+    /// already documented for a tree that is empty before the capture is opened
+    /// (issue #604).
     ProcessUnavailable {
         /// The process that could not be opened.
         process_id: u32,
@@ -145,13 +162,16 @@ impl fmt::Display for AudioError {
             Self::ProcessLoopbackUnavailable { reason } => write!(
                 f,
                 "this machine cannot record a game's audio separately from everything else, \
-                 which needs Windows build 20348 or later ({reason}). Clipped can still record \
-                 one system audio track containing everything the machine plays"
+                 which needs Windows build 20348 or later ({reason}). Clipped records one \
+                 System Audio track holding everything the machine plays instead, in \
+                 place of the separate Game and Other System Audio tracks"
             ),
             Self::ProcessUnavailable { process_id } => write!(
                 f,
                 "the game (process {process_id}) is no longer running, or is running with \
-                 privileges Clipped does not have, so its audio cannot be recorded on its own"
+                 privileges Clipped does not have, so its audio cannot be recorded on its own. \
+                 Clipped records one System Audio track holding everything the machine \
+                 plays instead"
             ),
             Self::NotOpen => f.write_str("this audio capture has been closed"),
             Self::Platform { operation, source } => {

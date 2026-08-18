@@ -38,7 +38,7 @@ use clipped_events::GameEvent;
 use clipped_library::virtual_clip::VirtualClip;
 
 use crate::config::ResolvedSettings;
-use crate::report::{EndReason, RecordingReport};
+use crate::report::{EndReason, RecordingReport, SystemAudioFallback};
 
 /// The `game_id` a session is filed under when the catalogue would not choose.
 ///
@@ -344,6 +344,18 @@ pub enum RecordingOutcomeSummary {
         size: (u32, u32),
         /// Why it ended.
         end_reason: EndReason,
+        /// What the recording had to settle for instead of separate game and
+        /// other-system-audio tracks, or [`None`] when it got both.
+        ///
+        /// Kept in the outcome rather than only in the log because it is a fact
+        /// about the **file** — its audio layout differs from the one the
+        /// settings beside it describe — and a session's record is where a
+        /// question about a file months later is answered
+        /// ([issue #604](https://github.com/wildware-uk/clipped/issues/604)).
+        /// [Issue #61](https://github.com/wildware-uk/clipped/issues/61) is the
+        /// same gap for a substituted encoder, and this is deliberately not a
+        /// second instance of it.
+        audio_fallback: Option<SystemAudioFallback>,
     },
 
     /// No capturable window belonging to the game appeared, so nothing was
@@ -386,6 +398,7 @@ impl RecordingOutcomeSummary {
             duration: report.duration(),
             size: report.size(),
             end_reason: report.end_reason(),
+            audio_fallback: report.audio_fallback().cloned(),
         }
     }
 }

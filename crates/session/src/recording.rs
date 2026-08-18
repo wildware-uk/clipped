@@ -284,7 +284,10 @@ fn record_frames(
     // the container's header and only the device knows them. A source that
     // cannot be opened fails the recording here, while nothing has been
     // created and while the user can still act on it.
-    let sources = audio::open(settings)?;
+    let audio::OpenAudio {
+        sources,
+        fallback: audio_fallback,
+    } = audio::open(settings)?;
     let layout = audio::declare(
         video_track(encoder.as_ref(), opened.codec, encode_size),
         &sources,
@@ -760,6 +763,12 @@ fn record_frames(
         // than surprising (issue #285's third criterion).
         capture_method: status.current_method(),
         capture_changes: status.changes().to_vec(),
+        // Carried out of `audio::open` rather than re-derived here: by the time
+        // the file is finished the only trace of a machine that could not scope
+        // its audio would be the track names, and a caller comparing a
+        // recording against the settings that produced it should not have to
+        // infer it from those (issue #604).
+        audio_fallback,
         // The same rule for the encoder: a replacement backend's device may be
         // one this machine's preferred encoder cannot open a session on, and
         // the family that actually encoded the last stretch is the one the
@@ -2549,6 +2558,7 @@ mod tests {
             end_reason: EndReason::Stopped,
             audio_tracks: Vec::new(),
             capture_changes: Vec::new(),
+            audio_fallback: None,
         }
     }
 

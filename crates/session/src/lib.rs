@@ -277,7 +277,10 @@ pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
 pub use replay::{start_buffer, ReplayRecording, ReplaySaveError};
-pub use report::{AudioSyncReport, AudioTrackReport, EndReason, RecordingReport};
+pub use report::{
+    AudioSyncReport, AudioTrackReport, EndReason, RecordingReport, SystemAudioFallback,
+    SystemAudioFallbackCause,
+};
 pub use settings::{
     AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
     RecordingSettings, ResolutionSetting, UnavailableChoice, DEFAULT_FRAMERATE,

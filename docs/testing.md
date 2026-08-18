@@ -225,12 +225,13 @@ applications:
 | `av_sync.rs`             | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the _absolute_ A/V offset of a capture is ([av-sync.md](av-sync.md))                 |
 | `readback.rs`            | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it                                                                                                                                                                                                                          |
 
-`tests/audio/` holds the one test that points a real _recording_ at these
-applications and asks what landed on each of its tracks:
+`tests/audio/` holds the tests that point a real _recording_ at these
+applications and ask what landed on each of its tracks:
 
 | Test                  | What it decides                                                                                                                                                                                                                                                    |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both. Also **where the tracks end** — within a packet of the picture, which nothing had measured against a produced recording before [#320](https://github.com/wildware-uk/clipped/issues/320) |
+| `system_audio_fallback.rs` | What a machine that **cannot** scope a capture to a process records: that it records at all rather than failing, that its one track holds both tones — everything the machine played — and that the track is called `System Audio` and not `Game` or `Other System Audio`, neither of which would be true of it. In the same run, that a failure this build cannot classify still refuses the recording. The failure is forced with `CLIPPED_FORCE_AUDIO_SCOPING_FAILURE`, because every machine here is far past the Windows build where scoping stopped being optional ([#604](https://github.com/wildware-uk/clipped/issues/604)) |
 
 `test-apps/process-tree-audio` has two of its own, which ask narrower questions
 with no recording involved:
@@ -396,6 +397,7 @@ cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --noca
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-video-pattern --test track_isolation -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test system_audio_fallback -- --ignored --nocapture
 cargo test -p clipped-video-pattern --test odd_client_area -- --ignored --nocapture
 cargo test -p clipped-capture -- --ignored --nocapture --test-threads=1
 ```
