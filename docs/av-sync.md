@@ -364,27 +364,29 @@ over a sixty-minute recording, and the correction it added is what a sixty-minut
 recording now measures. Same machine, same endpoint, same subject as the table
 above, `CLIPPED_AV_SYNC_SECONDS=3600`:
 
-| | |
-| --- | --- |
-| Audio | 3600.062 s, 172,802,996 frames, 0 synthesised |
-| Video | 3599.687 s, 107,989 frames, 0 restarts, 0 missed, 1 acquisition timeout |
-| Endpoint buffers | 360,006, with 0 discontinuities and 0 step corrections |
-| Final A/V offset | **−2.387 ms** |
-| Peak A/V offset | −2.956 ms |
-| Drift rate | **−0.656 ppm (−0.039 ms/min)**, standard error 0.0003 ppm |
+| Run | Endpoint buffers | Peak A/V offset | Final A/V offset | Drift rate | Standard error | Discontinuities | Synthesised |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **60 min** | 360,006 | −2.956 ms | **−2.387 ms** | **−0.656 ppm (−0.039 ms/min)** | 0.0003 ppm | 0 | 0 |
+| **60 min** | 360,009 | −3.357 ms | **−2.780 ms** | **−0.787 ppm (−0.047 ms/min)** | 0.0003 ppm | 0 | 0 |
+
+The first captured 3600.062 s of audio beside 107,989 video frames covering
+3599.687 s; the second, 3600.093 s beside 107,993 frames covering 3599.703 s.
+Neither restarted its subject or missed a video frame. The two rates agree to
+0.13 ppm, comfortably inside the run-to-run spread recorded above.
 
 Against the −4.346 ppm the same endpoint measured uncorrected, that is about six
-sevenths of the drift removed. Left alone the hour would have ended roughly
+sevenths of the drift removed. Left alone an hour would have ended roughly
 16 ms out and would have crossed the 20 ms deadband — and taken a 20 ms step —
-about eighty minutes in; corrected, it ends 2.4 ms out with nothing to step.
+about eighty minutes in; corrected, an hour ends under 3 ms out with nothing to
+step.
 
 **And it is a rate rather than an event.** The run also prints sixty separate
 fits, one per minute, which is the only way to tell a steadily wrong clock from
 one that was right and then jumped: both produce the same slope over an hour,
-and they want different fixes. All sixty have the same sign and lie between
-−0.43 and −0.91 ppm against a per-minute standard error of 0.12 ppm, and the
-offset walks from 0 to −2.4 ms with no jump in it. That is a crystal, which is
-what resampling corrects.
+and they want different fixes. In both runs all sixty have the same sign — −0.43
+to −0.91 ppm in the first, −0.31 to −0.87 ppm in the second — against a
+per-minute standard error of 0.12 ppm, and the offset walks to its final value
+with no jump in it. That is a crystal, which is what resampling corrects.
 
 The caveats above still apply in full: it is relative, no file is written, the
 run-to-run spread is far wider than any single run's standard error, and it is

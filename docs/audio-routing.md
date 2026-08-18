@@ -153,24 +153,36 @@ sixty separate fits, one per minute. The per-minute report is the part that
 answers a question the single fit cannot: whether the drift is a rate or an
 event.
 
-| | |
-| --- | --- |
-| Audio captured | 3600.062 s, 172,802,996 frames, **0 synthesised** |
-| Video captured | 3599.687 s, 107,989 frames, 0 restarts, 0 frames missed |
-| Observations | 360,006, with **0 discontinuities** and 0 step corrections |
-| A/V offset after an hour | **−2.387 ms** (audio leading the picture) |
-| Worst it reached | −2.956 ms |
-| Fitted drift rate | **−0.656 ppm, −0.039 ms/min** (standard error 0.0003 ppm) |
-| Tolerance | −40 ms to +60 ms (EBU R37); at this rate it would be reached after 17 hours |
+**Two hours were run, not one**, because a single number from a single hour
+cannot be told apart from an accident of that hour.
 
-**It is linear, not stepped.** Every one of the sixty per-minute fits has the
-same sign and they sit between −0.43 and −0.91 ppm, against a per-minute
-standard error of 0.12 ppm — so the minute-to-minute variation is barely outside
-the noise of measuring a minute. The offset walks steadily from 0 to −2.4 ms
-with no jump anywhere in it, and the run recorded no discontinuities and no
-deadband corrections at all. That is a residual crystal error being tracked, not
-an event: it is the shape resampling is the right answer to, and the shape that
-says nothing else went wrong for an hour.
+| | First hour | Second hour |
+| --- | --- | --- |
+| Audio captured | 3600.062 s, 172,802,996 frames, **0 synthesised** | 3600.093 s, 172,804,454 frames, **0 synthesised** |
+| Video captured | 3599.687 s, 107,989 frames, 0 restarts, 0 missed | 3599.703 s, 107,993 frames, 0 restarts, 0 missed |
+| Observations | 360,006, **0 discontinuities**, 0 step corrections | 360,009, **0 discontinuities**, 0 step corrections |
+| A/V offset after an hour | **−2.387 ms** (audio leading the picture) | **−2.780 ms** |
+| Worst it reached | −2.956 ms | −3.357 ms |
+| Fitted drift rate | **−0.656 ppm, −0.039 ms/min** (standard error 0.0003 ppm) | **−0.787 ppm, −0.047 ms/min** (standard error 0.0003 ppm) |
+| Tolerance | −40 ms to +60 ms (EBU R37), 17 hours away at this rate | 14 hours away |
+
+The two agree to 0.13 ppm, which is well inside the third-of-a-part-per-million
+spread `docs/av-sync.md` records between repeat runs on this endpoint, and both
+are six or seven times smaller than what the same endpoint measured before the
+correction existed. The second hour was deliberately run with the machine
+compiling and running tests throughout: it still synthesised no silence, missed
+no video frame and recorded no discontinuity, which is worth knowing separately
+from the rate.
+
+**It is linear, not stepped.** In both hours every one of the sixty per-minute
+fits has the same sign, and they sit between −0.43 and −0.91 ppm in the first
+and between −0.31 and −0.87 ppm in the second, against a per-minute standard
+error of 0.12 ppm — so the minute-to-minute variation is barely outside the
+noise of measuring a minute. The offset walks steadily to its final value with
+no jump anywhere in it, and neither run recorded a discontinuity or a deadband
+correction. That is a residual crystal error being tracked, not an event: it is
+the shape resampling is the right answer to, and the shape that says nothing
+else went wrong for an hour.
 
 **What it is worth against the correction being off.** The same endpoint,
 measured before the continuous correction existed, drifted at −4.35 ppm
@@ -181,9 +193,9 @@ one step. Corrected, the hour ends 2.4 ms out with nothing to step. So the
 correction removes about **six sevenths** of this endpoint's drift, and what is
 left is a seventh of a frame of video.
 
-**What this does not say.** It is one hour on one crystal in one machine, and
+**What this does not say.** It is two hours on one crystal in one machine, and
 the run-to-run spread on this endpoint is about a third of a part per million —
-a ninety-second run on the same build measured −0.75 ppm — so the honest
+a three-minute run on the same build measured −0.75 ppm — so the honest
 precision is a tenth of a part per million and the fourth digit of any single
 run is noise. It is also a measurement of the *timestamps the pipeline
 produces*, not of a finished file; what a muxer does with them afterwards is
