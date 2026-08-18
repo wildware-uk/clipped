@@ -172,6 +172,17 @@ pub(crate) trait AudioCapture: Send {
     /// is what releases the device once there is nothing left to hand over.
     fn close(&mut self);
 
+    /// What the capture counted about itself while it ran.
+    ///
+    /// Read once, when the source's thread has finished, so that the figures
+    /// the recorder prints and logs come from the capture rather than from a
+    /// second count kept out here that could disagree with it. The one this
+    /// exists for is the audio a process-scoped tap loses whenever its stream
+    /// set changes, which the audio engine flags as nothing at all and which
+    /// nothing in a recording could see before
+    /// ([issue #626](https://github.com/wildware-uk/clipped/issues/626)).
+    fn stats(&self) -> clipped_audio::windows::CaptureStats;
+
     /// Which agreement this capture scopes itself through, for the
     /// process-scoped captures that have one.
     ///
@@ -200,6 +211,10 @@ impl AudioCapture for clipped_audio::windows::SystemAudioCapture {
         Self::read(self, timeout)
     }
 
+    fn stats(&self) -> clipped_audio::windows::CaptureStats {
+        Self::stats(self)
+    }
+
     fn finish(&mut self) {
         Self::finish(self);
     }
@@ -214,6 +229,10 @@ impl AudioCapture for clipped_audio::windows::MicrophoneCapture {
         Self::read(self, timeout)
     }
 
+    fn stats(&self) -> clipped_audio::windows::CaptureStats {
+        Self::stats(self)
+    }
+
     fn finish(&mut self) {
         Self::finish(self);
     }
@@ -226,6 +245,10 @@ impl AudioCapture for clipped_audio::windows::MicrophoneCapture {
 impl AudioCapture for clipped_audio::windows::ProcessLoopbackCapture {
     fn read(&mut self, timeout: Duration) -> Result<Capture<'_>, AudioError> {
         Self::read(self, timeout)
+    }
+
+    fn stats(&self) -> clipped_audio::windows::CaptureStats {
+        Self::stats(self)
     }
 
     fn finish(&mut self) {
@@ -1259,6 +1282,11 @@ fn pump(
         }
     }
 
+    // Before `close`, though the capture keeps its counters across one: what
+    // it counted is what goes in the report, and reading it here keeps the
+    // order of that obvious.
+    report.note_capture_stats(open.capture.stats());
+
     open.capture.close();
     report.with_sync(sync_report(&drift));
     report_what_the_source_did(&report, &open.source);
@@ -1289,6 +1317,8 @@ fn report_what_the_source_did(report: &AudioTrackReport, source: &AudioSource) {
         buffers = report.buffers(),
         frames = report.frames(),
         synthesised_silence_frames = report.synthesised_silence_frames(),
+        unflagged_dropouts = report.unflagged_dropouts(),
+        unflagged_dropout_frames = report.unflagged_dropout_frames(),
         frames_before_the_recording = report.frames_before_the_recording(),
         buffers_dropped_writer_behind = report.buffers_dropped_writer_behind(),
         format_changes = report.format_changes(),

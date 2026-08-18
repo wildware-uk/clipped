@@ -239,7 +239,7 @@ with no recording involved:
 | Test                              | What it decides                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `process_loopback_isolation.rs`   | That a capture scoped to a *parent* picks up a tone played by a child it started afterwards, and not one played by an unrelated tree                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `mid_recording_joiner.rs`         | Issue [#27](https://github.com/wildware-uk/clipped/issues/27)'s second acceptance criterion, against a tree that is **already audible**: that a process joining it mid-recording is heard on the game's track within a bounded time, that it is *not* also on the complement's — both sides are opened from one `open_pair` — and what the join costs the audio that was already flowing. It is what found [#626](https://github.com/wildware-uk/clipped/issues/626) and then what characterised it: the cost is **1,504 frames of exact digital zeros** — 31.33 ms — in the track of whichever tap's stream set changed, and a stream *leaving* costs the same as one joining. Two tests now: the joiner, and audio starting and stopping outside the tree. Both pin the size so it cannot creep |
+| `mid_recording_joiner.rs`         | Issue [#27](https://github.com/wildware-uk/clipped/issues/27)'s second acceptance criterion, against a tree that is **already audible**: that a process joining it mid-recording is heard on the game's track within a bounded time, that it is *not* also on the complement's — both sides are opened from one `open_pair` — and what the join costs the audio that was already flowing. It is what found [#626](https://github.com/wildware-uk/clipped/issues/626) and then what characterised it: the cost is **1,504 frames of exact digital zeros** — 31.33 ms — in the track of whichever tap's stream set changed, and a stream *leaving* costs the same as one joining. Two tests now: the joiner, and audio starting and stopping outside the tree. Both pin the size so it cannot creep, and both now check the **count** `CaptureStats::unflagged_dropouts` keeps of it — non-zero on the tap whose stream set changed, and zero on the tap beside it that lost nothing over the same window |
 
 Both need an output endpoint and a Windows that can scope a capture to a
 process. The first runs by default; the second is `#[ignore]`d, because it takes
@@ -256,6 +256,26 @@ failure, which is what a run whose numbers are being recorded should use.
 `--nocapture` is not optional on the second one in practice: it prints the
 arrival, the continuity and what each track held, and those measurements are the
 point of it.
+
+### What the loss detection costs the capture thread
+
+Recognising the loss those two tests measure runs on a capture thread, where
+diagnostics must never take priority over recording (AGENTS.md sections 17
+and 20). What it costs is measured rather than asserted, by an `#[ignore]`d test
+in `clipped-audio` that prints its reading:
+
+```text
+cargo test -p clipped-audio --lib dropout::tests::the_cost_of_examining_a_packet   -- --ignored --nocapture
+cargo test --release -p clipped-audio --lib dropout::tests::the_cost_of_examining_a_packet   -- --ignored --nocapture
+```
+
+It needs no audio device and no window; it is `#[ignore]`d because a timing
+measurement on a loaded machine has no useful answer, not because it needs
+hardware. On this project's development machine (Ryzen 9 9950X3D) a 480-frame
+stereo packet — one device period — costs **360 ns in release** and 7.8 µs in
+debug, against the 10 ms of real time that packet represents: 0.0036% and 0.078%
+of one core. The reading is in
+[audio-routing.md](audio-routing.md).
 
 ## The end-to-end recorder tests
 

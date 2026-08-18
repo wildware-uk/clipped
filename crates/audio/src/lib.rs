@@ -138,6 +138,7 @@
 //! ```
 
 mod buffer;
+mod dropout;
 mod error;
 mod format;
 mod mix;
