@@ -1729,6 +1729,21 @@ export interface SettingEntry {
   readonly applies: boolean;
   /** Why changing it would not change a recording, when that is the case. */
   readonly unavailable?: string;
+  /**
+   * What is still in force, for a value that is saved and not yet the one being
+   * used.
+   *
+   * A different question from {@link unavailable}: that is a setting nothing
+   * reads at all, this is one that is read and has not got there yet. Absent for
+   * every setting the next recording uses, which is all of them but the
+   * recording directory — where automatic recordings are written moves between
+   * sittings and never during one, so that a sitting's session record is never
+   * separated from the files it names (AGENTS.md section 56, issue #609).
+   *
+   * Drawn beside the control rather than in place of it: the value is what was
+   * saved, and this says when it starts counting (AGENTS.md section 27).
+   */
+  readonly not_yet_in_force?: string;
 }
 
 /** The settings, and the file they came from. */

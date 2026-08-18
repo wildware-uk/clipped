@@ -108,7 +108,19 @@ impl TestDirectory {
 }
 
 impl Drop for TestDirectory {
+    /// Removed on the way out of a test that passed, and kept by one that did
+    /// not.
+    ///
+    /// [`Drop`] runs while a panicking thread unwinds, and a failed assertion in
+    /// a `#[test]` is a panic, so removing unconditionally would take the
+    /// evidence with it — which for these tests is the session records and the
+    /// folders they are in, the whole of what the assertion was about. The same
+    /// split `crates/library/tests/support/mod.rs` makes, for the same reason.
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("scratch directory kept for diagnosis: {}", self.0.display());
+            return;
+        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -1780,4 +1792,268 @@ fn events_reported_after_the_session_closed_are_refused_rather_than_swallowed() 
 
     assert_eq!(kept, 0, "an event was accepted with no session open");
     assert!(harness.manager.active_session().is_none());
+}
+
+/// Where a directory a test moves recordings *to* lives.
+///
+/// A second [`TestDirectory`], so that both folders are real and both are
+/// listed: "the sitting's records are still in the first one" and "the next
+/// sitting's are in the second" are two halves of one assertion and neither is
+/// worth anything alone.
+fn elsewhere(label: &str) -> TestDirectory {
+    TestDirectory::new(&format!("{label}-elsewhere"))
+}
+
+#[test]
+fn a_recording_directory_saved_with_no_sitting_open_is_in_force_for_the_next_one() {
+    // The case that is nearly all of them: nobody is playing, so there is
+    // nothing to keep together and nothing to wait for. This is also the answer
+    // to "what if they change it and then do not play for a week" — the change
+    // is not pending at all, it is simply in force, and the week has nothing to
+    // do with it (issue #609).
+    let mut harness = Harness::new("directory-no-sitting");
+    let moved = elsewhere("directory-no-sitting");
+
+    assert!(
+        harness
+            .manager
+            .set_recording_directory(moved.path().to_path_buf()),
+        "with no sitting open there is nothing to hold the change back",
+    );
+    assert_eq!(harness.manager.recording_directory(), moved.path());
+    assert!(harness.manager.pending_recording_directory().is_none());
+
+    let actions = harness.observe(&launch(&[(11, "test-game.exe")]), t(0));
+    assert!(
+        one_start(&actions).output.starts_with(moved.path()),
+        "the first recording of the next sitting is written where the user said: {:?}",
+        one_start(&actions).output,
+    );
+    assert_eq!(
+        moved.sidecars().len(),
+        1,
+        "and so is the record of that sitting: {:?}",
+        moved.sidecars(),
+    );
+    assert!(
+        harness.directory.sidecars().is_empty(),
+        "nothing should have been written to the folder that was left: {:?}",
+        harness.directory.sidecars(),
+    );
+}
+
+#[test]
+fn a_recording_directory_saved_during_a_sitting_leaves_that_sitting_where_it_is() {
+    // The guard this design exists for, and the reason it is between sittings
+    // rather than immediate. A sitting is a sequence of recordings held together
+    // by one session record, and that record is written next to the files it
+    // names. Move the directory half way through and the record lists files that
+    // are no longer beside it — and nothing fails, nothing is logged as lost
+    // and every file is still on disk, so the only thing that has gone is the
+    // ability to say which sitting they belonged to (AGENTS.md section 56).
+    //
+    // The second recording is what makes this a test rather than an assertion
+    // about a getter: the sitting carries on and asks for another file *after*
+    // the save, and it is that file which would land in the wrong folder.
+    let mut harness = Harness::new("directory-mid-sitting");
+    let moved = elsewhere("directory-mid-sitting");
+    let first = started(&mut harness, 11, t(0));
+
+    assert!(
+        !harness
+            .manager
+            .set_recording_directory(moved.path().to_path_buf()),
+        "a sitting is open, so the change has to be held back and the caller told",
+    );
+    assert_eq!(
+        harness.manager.pending_recording_directory(),
+        Some(moved.path()),
+        "and held where somebody can be told about it",
+    );
+    assert_eq!(
+        harness.manager.recording_directory(),
+        harness.directory.path(),
+        "while the sitting keeps writing where it started",
+    );
+
+    // The window went, the game did not: the same sitting asks for another file
+    // once the restart delay has run.
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(10),
+    );
+    let restarted = harness.poll(t(16));
+    let second = one_start(&restarted);
+
+    assert_eq!(
+        second.recording.session, first.session,
+        "the second file belongs to the same sitting: {second:?}",
+    );
+    assert!(
+        second.output.starts_with(harness.directory.path()),
+        "and it must be written beside the first one and beside their session record, or the \
+         record names files that are not there: {:?}",
+        second.output,
+    );
+    assert_eq!(
+        harness.directory.sidecars().len(),
+        1,
+        "the sitting's record stays where its recordings are: {:?}",
+        harness.directory.sidecars(),
+    );
+    assert!(
+        moved.sidecars().is_empty(),
+        "and nothing of this sitting reaches the new folder: {:?}",
+        moved.sidecars(),
+    );
+}
+
+#[test]
+fn the_directory_a_sitting_held_back_is_taken_up_when_that_sitting_ends() {
+    // The other half: held is not dropped. The sitting ends, its record is
+    // written and handed over where its files are, and only then does the
+    // folder move — so the next sitting is whole in the new one, exactly as
+    // this one is whole in the old.
+    let mut harness = Harness::new("directory-between-sittings");
+    let moved = elsewhere("directory-between-sittings");
+    let first = started(&mut harness, 11, t(0));
+    harness
+        .manager
+        .set_recording_directory(moved.path().to_path_buf());
+
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(11),
+    );
+    let closed = harness.poll(t(42));
+    let ended = ended_session(&closed).expect("the sitting ends when the grace expires");
+
+    assert!(
+        ended.recordings()[0]
+            .output()
+            .starts_with(harness.directory.path()),
+        "the sitting that ended keeps its files where it made them: {:?}",
+        ended.recordings()[0].output(),
+    );
+    assert_eq!(
+        harness.directory.sidecars().len(),
+        1,
+        "beside its own record: {:?}",
+        harness.directory.sidecars(),
+    );
+    assert_eq!(
+        harness.manager.recording_directory(),
+        moved.path(),
+        "and now that it is over, the directory the user saved is in force",
+    );
+    assert!(harness.manager.pending_recording_directory().is_none());
+
+    // A game launching after the grace is a sitting of its own, and it is the
+    // one the change was for.
+    let next = harness.observe(&launch(&[(12, "test-game.exe")]), t(50));
+    assert!(
+        one_start(&next).output.starts_with(moved.path()),
+        "the next sitting records where the user said: {:?}",
+        one_start(&next).output,
+    );
+    assert_eq!(
+        moved.sidecars().len(),
+        1,
+        "with a record of its own beside it: {:?}",
+        moved.sidecars(),
+    );
+    assert_eq!(
+        harness.directory.sidecars().len(),
+        1,
+        "and the sitting that ended is untouched: {:?}",
+        harness.directory.sidecars(),
+    );
+}
+
+#[test]
+fn a_deferred_game_opens_its_own_sitting_in_the_directory_the_user_saved() {
+    // The one path that starts a sitting *inside* `close_active`: a game that
+    // launched while another was being recorded becomes a sitting of its own the
+    // moment that one ends. It is a new sitting, so it belongs in the new
+    // folder — which is what fixes the order of the two steps, since a swap
+    // that ran after it would file the first sitting of the new folder in the
+    // old one.
+    let mut harness = Harness::new("directory-deferred");
+    let moved = elsewhere("directory-deferred");
+    let first = started(&mut harness, 11, t(0));
+    harness.observe(&launch(&[(21, "other-game.exe")]), t(2));
+    harness
+        .manager
+        .set_recording_directory(moved.path().to_path_buf());
+
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(11),
+    );
+    let closed = harness.poll(t(42));
+
+    let ended = ended_session(&closed).expect("the first sitting ends");
+    assert_eq!(ended.game().slug(), "test-game");
+    let deferred = one_start(&closed);
+    assert_eq!(deferred.game.slug(), "other-game");
+    assert!(
+        deferred.output.starts_with(moved.path()),
+        "the sitting that opened after the change belongs in the new folder: {:?}",
+        deferred.output,
+    );
+    assert_eq!(
+        harness.directory.sidecars().len(),
+        1,
+        "and the sitting that closed is still whole where it was: {:?}",
+        harness.directory.sidecars(),
+    );
+    assert_eq!(
+        moved.sidecars().len(),
+        1,
+        "with the new one beside its own recording: {:?}",
+        moved.sidecars(),
+    );
+}
+
+#[test]
+fn saving_back_the_directory_in_use_cancels_a_change_a_sitting_was_holding() {
+    // Somebody picks a folder, thinks better of it and picks the old one again,
+    // all while a game is running. What must not happen is the first choice
+    // arriving anyway when the sitting ends: the setting says one thing and the
+    // recordings would go somewhere else, which is the same defect this whole
+    // change is about seen from the other side.
+    let mut harness = Harness::new("directory-cancelled");
+    let moved = elsewhere("directory-cancelled");
+    let original = harness.directory.path().to_path_buf();
+    let first = started(&mut harness, 11, t(0));
+
+    assert!(!harness
+        .manager
+        .set_recording_directory(moved.path().to_path_buf()));
+    assert!(
+        harness.manager.set_recording_directory(original.clone()),
+        "saving the folder recordings already go to changes nothing, so nothing is pending",
+    );
+    assert!(harness.manager.pending_recording_directory().is_none());
+
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(11),
+    );
+    let closed = harness.poll(t(42));
+    ended_session(&closed).expect("the sitting ends");
+
+    assert_eq!(
+        harness.manager.recording_directory(),
+        original,
+        "the change that was withdrawn must not arrive when the sitting ends",
+    );
+    assert!(moved.sidecars().is_empty(), "{:?}", moved.sidecars());
 }

@@ -712,6 +712,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     accepted: 'required',
     applies: 'required',
     unavailable: 'optional',
+    not_yet_in_force: 'optional',
   }),
   settings_view: fields<SettingsView>({ file: 'required', settings: 'required' }),
   'reply.settings': fields<SettingsReply>({ reply: 'required', settings: 'required' }),

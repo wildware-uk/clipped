@@ -393,6 +393,11 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
                 accepted: accepted_for(key),
                 applies: unavailable.is_none(),
                 unavailable: unavailable.map(str::to_owned),
+                // Every per-game setting reaches the next recording, so none of
+                // them is ever waiting on anything. Only the recording
+                // directory can be, and only for the length of a sitting
+                // ([`note_where_recordings_still_go`]).
+                not_yet_in_force: None,
             }
         })
         .collect();
@@ -432,6 +437,7 @@ fn notification_entries(notifications: &NotificationSettings) -> Vec<SettingEntr
             accepted: NotificationCategory::accepted(),
             applies: true,
             unavailable: None,
+            not_yet_in_force: None,
         })
         .collect()
 }
@@ -458,7 +464,67 @@ fn recording_directory_entry(storage: &StorageSettings) -> SettingEntry {
         accepted: "a folder on this machine, such as D:\\Clips".to_owned(),
         applies: true,
         unavailable: None,
+        // Filled in by [`note_where_recordings_still_go`] where there is a
+        // launch watcher to be behind. This module reads the settings file and
+        // the file holds what was *saved*; whether the launch watcher has taken
+        // it up yet is a fact about the recorder, and only the recorder has it.
+        not_yet_in_force: None,
     }
+}
+
+/// Says where automatic recordings are still going, when the directory that was
+/// saved is not the one they are going to yet.
+///
+/// # Why this is not something the file can answer
+///
+/// Where automatic recordings are written moves **between sittings and never
+/// during one**. A sitting's session record is written next to the recordings it
+/// names, so a directory that moved half way through would leave the record in
+/// one folder and some of its own files in another — and the failure is silent,
+/// because every file is still on disk and nothing is left able to say which
+/// sitting they belonged to (AGENTS.md section 56,
+/// `clipped_session::automatic::SessionManager::set_recording_directory`).
+///
+/// So for the length of one sitting the settings file holds a folder the
+/// recorder is not using. That is a saved setting whose effect is not yet
+/// visible, which is a control that looks as though it did nothing (AGENTS.md
+/// section 27) unless the screen is given the sentence — and the sentence is
+/// the recorder's, because only the recorder knows what is in force.
+///
+/// # How long that is
+///
+/// Bounded by the sitting, not by how often somebody plays. `in_force` differs
+/// from what was saved only while a game is running or inside its restart grace;
+/// a directory saved with nothing being recorded is taken up on the launch
+/// watcher's next pass, about a second later, and this says nothing.
+///
+/// `in_force` is [`None`] for a recorder that watches for no games, which has no
+/// automatic recordings to be behind: nothing is said then either.
+pub(crate) fn note_where_recordings_still_go(view: &mut SettingsView, in_force: Option<&Path>) {
+    let Some(in_force) = in_force else {
+        return;
+    };
+    let Some(entry) = view
+        .settings
+        .iter_mut()
+        .find(|entry| entry.key == RECORDING_DIRECTORY)
+    else {
+        return;
+    };
+
+    // Compared as the same text the entry carries, which is what the window
+    // draws and what `apply_settings` took: the recorder resolved `in_force`
+    // from that same value through `watch::chosen_recordings_directory`, so
+    // equal text is the same folder and unequal text is a change that has not
+    // landed.
+    if entry.value == in_force.to_string_lossy() {
+        return;
+    }
+
+    entry.not_yet_in_force = Some(format!(
+        "Automatic recordings still go to {}. They go here from the next session.",
+        in_force.display()
+    ));
 }
 
 /// The values a setting offers, where the set is closed.
@@ -683,6 +749,64 @@ mod tests {
                 .map(Path::to_path_buf),
             Some(PathBuf::from(r"D:\Clips")),
         );
+    }
+
+    #[test]
+    fn a_directory_the_launch_watcher_has_not_taken_up_yet_says_where_recordings_still_go() {
+        // Where automatic recordings are written moves between sittings and
+        // never during one, so that a sitting's session record is never
+        // separated from the files it names (AGENTS.md section 56, issue #609).
+        // For the length of that sitting the file holds a folder the recorder is
+        // not using, and a screen drawing the file's answer alone would say
+        // something untrue about where the next few minutes of footage is going.
+        let directory = TestDirectory::new("directory-pending");
+        let settings = SettingsFile::at(directory.file());
+        let mut view = settings
+            .apply(&change(RECORDING_DIRECTORY, Some(r"D:\Clips")))
+            .expect("an absolute path is accepted");
+
+        note_where_recordings_still_go(&mut view, Some(Path::new(r"C:\Users\alex\Videos\Clipped")));
+
+        let row = entry(&view, RECORDING_DIRECTORY);
+        assert_eq!(
+            row.value, r"D:\Clips",
+            "the saved value is still what the control holds, because it is what was saved",
+        );
+        assert!(row.applies, "and it is a setting this build reads");
+        assert_eq!(
+            row.unavailable, None,
+            "which is what `unavailable` would deny"
+        );
+        assert_eq!(
+            row.not_yet_in_force.as_deref(),
+            Some(
+                "Automatic recordings still go to C:\\Users\\alex\\Videos\\Clipped. They go \
+                 here from the next session."
+            ),
+            "a saved value that is not yet in use has to say so, and say where the footage is \
+             going in the meantime",
+        );
+    }
+
+    #[test]
+    fn a_directory_the_launch_watcher_is_already_using_says_nothing_about_waiting() {
+        // The half that keeps the sentence honest. A delay that is described
+        // when there is none is the same defect as one that is not described
+        // when there is: both leave somebody unable to tell what the control
+        // did (AGENTS.md section 27).
+        let directory = TestDirectory::new("directory-in-force");
+        let settings = SettingsFile::at(directory.file());
+        let mut view = settings
+            .apply(&change(RECORDING_DIRECTORY, Some(r"D:\Clips")))
+            .expect("an absolute path is accepted");
+
+        note_where_recordings_still_go(&mut view, Some(Path::new(r"D:\Clips")));
+        assert_eq!(entry(&view, RECORDING_DIRECTORY).not_yet_in_force, None);
+
+        // And a recorder that watches for no games has no automatic recordings
+        // to be behind, so it says nothing either.
+        note_where_recordings_still_go(&mut view, None);
+        assert_eq!(entry(&view, RECORDING_DIRECTORY).not_yet_in_force, None);
     }
 
     #[test]

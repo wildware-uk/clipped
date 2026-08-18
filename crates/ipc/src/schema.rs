@@ -2260,10 +2260,20 @@ fn exemplar_setting_entry() -> crate::settings::SettingEntry {
              recording starts is issue #61"
                 .to_owned(),
         ),
+        // Populated so that the schema sees the field, like every other field
+        // on this exemplar. No real row carries both sentences at once — one
+        // is a setting nothing reads and the other is a setting that is read
+        // and has not got there yet — and `exemplar_settings_view` below is
+        // where each of them is shown on the row it belongs to.
+        not_yet_in_force: Some(
+            "Automatic recordings still go to the previous folder until the next session"
+                .to_owned(),
+        ),
     }
 }
 
-/// The settings a window is sent: one that is in force, and one that is not.
+/// The settings a window is sent: one in force, one that is saved and not yet
+/// used, and one nothing reads at all.
 fn exemplar_settings_view() -> crate::settings::SettingsView {
     crate::settings::SettingsView {
         file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
@@ -2277,6 +2287,26 @@ fn exemplar_settings_view() -> crate::settings::SettingsView {
                 accepted: "\"default\", \"none\" or a device name".to_owned(),
                 applies: true,
                 unavailable: None,
+                not_yet_in_force: None,
+            },
+            // The saved-but-not-yet-used row, which only the recording
+            // directory can be: it moves between sittings and never during one,
+            // so a directory saved while a game is being recorded is in the
+            // file and is not yet where the next few minutes of footage is
+            // going (issue #609).
+            crate::settings::SettingEntry {
+                key: "recording_directory".to_owned(),
+                label: "Recording directory".to_owned(),
+                value: r"D:\Clips".to_owned(),
+                overridden: true,
+                choices: Vec::new(),
+                accepted: r"a folder on this machine, such as D:\Clips".to_owned(),
+                applies: true,
+                unavailable: None,
+                not_yet_in_force: Some(
+                    r"Automatic recordings still go to C:\Users\alex\Videos\Clipped. They go here from the next session."
+                        .to_owned(),
+                ),
             },
             exemplar_setting_entry(),
         ],

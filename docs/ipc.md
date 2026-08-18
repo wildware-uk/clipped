@@ -1881,6 +1881,10 @@ somebody's settings live in (AGENTS.md section 55, [#252]).
     {"key":"microphone","label":"Microphone","value":"name:Shure MV7",
      "overridden":true,"accepted":"\"default\", \"none\" or a device name",
      "applies":true},
+    {"key":"recording_directory","label":"Recording directory","value":"D:\\Clips",
+     "overridden":true,"accepted":"a folder on this machine, such as D:\\Clips",
+     "applies":true,
+     "not_yet_in_force":"Automatic recordings still go to C:\\Users\\alex\\Videos\\Clipped. They go here from the next session."},
     {"key":"capture_target","label":"Capture target","value":"game-window",
      "overridden":false,"choices":["game-window","display"],
      "accepted":"\"game-window\" or \"display\"","applies":false,
@@ -1894,8 +1898,8 @@ protocol change for every setting added; instead the recorder parses what comes
 back with the file reader's own parsers, so a value a window can save is exactly
 a value the file would accept.
 
-Two fields decide what a screen may draw, and both are the recorder's answer
-rather than the window's guess:
+Three fields decide what a screen may draw, and all three are the recorder's
+answer rather than the window's guess:
 
 - `choices` is the closed set of values, and is **absent** when the set is open
   — a frame rate, a size, a device name. That is how a list of options is told
@@ -1905,6 +1909,21 @@ rather than the window's guess:
   and a window draws the value and that sentence rather than a control — a
   control that changed nothing being the defect AGENTS.md section 27 is about. It
   is the same pair a `hotkeys` row carries.
+- `not_yet_in_force` is a value that is **saved and not yet the one being
+  used**, which is a different thing from one nothing reads at all. It is drawn
+  beside the control, not in place of it: what is on screen is what was saved,
+  and this says when it starts counting.
+
+Only `recording_directory` can carry `not_yet_in_force`, and only while a
+sitting is open. Where automatic recordings are written moves between sittings
+and never during one, because a sitting's session record is written next to the
+files it names and the two must not be separated (AGENTS.md section 56,
+[#609](https://github.com/wildware-uk/clipped/issues/609)). It is answered from
+what the launch watcher is *using*, which only the recorder knows — the settings
+file holds what was *saved*, and for every other setting the two are the same
+thing — and it is absent for a recorder that watches for no games, which has no
+automatic recordings to be behind. `docs/configuration.md` has the rule and how
+long the wait is.
 
 #### The switches the window itself acts on
 

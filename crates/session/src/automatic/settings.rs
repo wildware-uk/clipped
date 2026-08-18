@@ -105,6 +105,29 @@ impl AutomaticSettings {
         &self.directory
     }
 
+    /// Points later recordings and sidecars at `directory`.
+    ///
+    /// A setter rather than a `with_*` builder, because unlike every other
+    /// field this one is changed on settings a [`SessionManager`] is already
+    /// running with: a directory chosen in the Settings screen has to reach
+    /// automatic recordings without the recorder being restarted (SPEC.md
+    /// section 45, [issue
+    /// #609](https://github.com/wildware-uk/clipped/issues/609)).
+    ///
+    /// **It is not a thing to call while a sitting is open.** A session's
+    /// sidecar is written next to the recordings it names, so a directory that
+    /// moved half way through would leave the record in one folder and the
+    /// files it lists in another, with nothing left able to say which sitting
+    /// they belonged to (AGENTS.md section 56). The one caller that decides
+    /// *when* is
+    /// [`SessionManager::set_recording_directory`](super::SessionManager::set_recording_directory),
+    /// which holds a change until the sitting ends.
+    ///
+    /// [`SessionManager`]: super::SessionManager
+    pub fn set_directory(&mut self, directory: PathBuf) {
+        self.directory = directory;
+    }
+
     /// How long a session stays open for the same game to come back.
     #[must_use]
     pub const fn restart_grace(&self) -> Duration {

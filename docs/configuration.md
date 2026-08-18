@@ -622,23 +622,74 @@ out of the configuration *before* it moves into the manager, so that
 `attach_plugins` never goes looking for a settings file, and they remain a
 start-up snapshot (`docs/plugin-api.md`).
 
-### What still needs a restart: the recording directory
+### The recording directory: between sittings, never during one
 
-**Where** automatic recordings are written is not in the configuration this
-path replaces. `watch::recordings_directory` resolves it once, before the
-watcher thread starts, and it is frozen into the manager's `AutomaticSettings`,
-which has no setter. A recording directory saved from the Settings screen
-therefore still reaches automatic recordings only after a restart, even though
-a recording the *window* asks for honours it immediately.
+**Where** automatic recordings are written is not in the configuration
+`set_configuration` replaces. It is resolved by `watch::recordings_directory`
+before the watcher thread starts and held in the session manager's
+`AutomaticSettings`. It travels the same pass and the same generation check —
+one mechanism, not two — through
+`Driver::take_the_directory_the_user_saved`, and it lands differently:
 
-That is the same criterion — SPEC.md section 45 names the directory beside the
-microphone in step 3 — but it is different state, and it carries a question the
-configuration does not. A session's sidecar is written next to the recordings
-it describes (`SessionManager::begin_recording` persists to
-`AutomaticSettings::directory`), so moving the directory while a sitting is
-open would leave a session record in one folder and the files it names in
-another (AGENTS.md section 56). Applying it only between sittings is probably
-the answer, and it wants deciding rather than assuming.
+| What was saved | Reaches |
+| --- | --- |
+| any recording setting | the next **recording** |
+| the recording directory | the next **sitting** |
+
+A sitting is a sequence of recordings held together by one session record, and
+`SessionManager::begin_recording` writes that record *next to the files it
+names*. Moving the directory half way through would leave the record in one
+folder and some of its own recordings in another — and the failure is silent,
+because every file is still on disk and nothing is left able to say which
+sitting they belonged to (AGENTS.md section 56). So
+`SessionManager::set_recording_directory` holds the change, and
+`close_active` takes it up after the ended sitting has been written where its
+files are and handed over, and before any deferred game opens a sitting of its
+own.
+
+The two rejected answers, for the record. **Applying it immediately and moving
+the sidecar with it** keeps the record and the files together, but rewrites
+user data as a side effect of a settings change — a much larger promise than a
+folder picker makes. **Refusing while a sitting is open** is honest and makes
+the Settings screen a control that sometimes says no, for a wait that ends by
+itself within seconds of the game closing.
+
+#### What the user sees between saving and it taking effect
+
+The wait is bounded by the sitting, not by how often somebody plays. A
+directory saved with nothing being recorded is in force on the watcher's next
+pass — about a second — so the user who changes it and then does not launch a
+game for a week has nothing pending at all. A change only waits while a game is
+running or inside its restart grace, and it is taken up the moment that sitting
+ends.
+
+For the sitting that is waiting, two things say so.
+
+- **The recorder logs it**, at `info`, both when a change is held and when it
+  is taken up. A change nobody can see happening is indistinguishable from one
+  that never did (AGENTS.md sections 27 and 35).
+- **`get_settings` and `apply_settings` say it**, on the `recording_directory`
+  row: `not_yet_in_force` carries "Automatic recordings still go to …. They go
+  here from the next session." It is answered from what the launch watcher is
+  *using*, which only the recorder knows — the settings file holds what was
+  *saved*, and for every other setting the two are the same thing. It is absent
+  for a recorder that watches for no games, which has no automatic recordings to
+  be behind.
+
+#### A folder that cannot be used
+
+Nothing new checks one. The path is validated when it is saved — blank and
+non-absolute are refused — and the folder is created when the change arrives,
+for the reason it is created at start-up: this recorder runs for days before it
+writes anything, and "the drive you named is not there" is not a thing to find
+out at the moment a game launches (AGENTS.md section 17).
+
+A folder that could not be created is still taken, and the failure lands where
+it already did: a recording starting into a directory that is missing, is not a
+directory or cannot be written to fails naming it
+(`ConfigError::OutputDirectoryMissing` and its neighbours). The alternative —
+keeping the old folder — would be a setting the user saved, saw accepted, and
+which silently does not apply.
 
 ### Which layer a game is resolved against
 

@@ -51,6 +51,8 @@ use clipped_ipc::{
     PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 
+use clipped_recorder::settings::RECORDING_DIRECTORY;
+
 use support::{
     collected_stderr, ensure_console, read_stderr, recorder_binary, send_ctrl_c, wait_for_exit,
     CREATE_NEW_PROCESS_GROUP,
@@ -2402,22 +2404,76 @@ impl Drop for WindowlessSubject {
 /// the state this is about.
 fn the_recording_the_watcher_started(home: &Path, within: Duration) -> serde_json::Value {
     let clips = home.join("Videos").join("Clipped");
+    the_sitting_with_recordings_in(&[&clips], 1, within).1["recordings"][0].clone()
+}
+
+/// The one sitting under any of `folders`, once it holds `count` recordings, and
+/// which folder it turned up in.
+///
+/// Polled, because a sitting appears on disk when the game is noticed and grows
+/// a recording each time one starts, so a reader that took the first file it saw
+/// would read a state that is not the one the test is about.
+///
+/// **Several folders, and the answer says which.** A test about where recordings
+/// go has two ways to fail and they are different defects: the folder moved when
+/// it should not have, and detection never started anything at all. Watching one
+/// folder cannot tell them apart — both are a poller that times out — so this
+/// watches every folder the recording could be in and hands back the one it
+/// found, leaving the test to assert which. A guard that fails on "nothing ever
+/// happened" is one nobody has seen fail for its own reason.
+fn the_sitting_with_recordings_in(
+    folders: &[&Path],
+    count: usize,
+    within: Duration,
+) -> (std::path::PathBuf, serde_json::Value) {
     let deadline = std::time::Instant::now() + within;
     loop {
-        let why = match first_recording_in(&clips) {
-            Ok(recording) => return recording,
-            Err(why) => why,
-        };
+        let mut why = Vec::new();
+        for folder in folders {
+            match the_sitting_in(folder) {
+                Ok(session) => {
+                    let so_far = session["recordings"].as_array().map_or(0, Vec::len);
+                    if so_far >= count {
+                        return ((*folder).to_path_buf(), session);
+                    }
+                    why.push(format!(
+                        "{} holds a sitting with {so_far} recording(s):\n{session:#}",
+                        folder.display()
+                    ));
+                }
+                Err(reason) => why.push(reason),
+            }
+        }
         assert!(
             std::time::Instant::now() < deadline,
-            "detection started no recording within {within:?}: {why}",
+            "no folder held a sitting with {count} recording(s) within {within:?}: {}",
+            why.join("; "),
         );
         std::thread::sleep(Duration::from_millis(250));
     }
 }
 
-/// The first recording of the one session record in `clips`, or why not yet.
-fn first_recording_in(clips: &Path) -> Result<serde_json::Value, String> {
+/// Every session record in `clips`, by file name.
+///
+/// Empty for a folder that is not there, which is the honest answer for a
+/// directory nothing has recorded into: a test asserting that a folder holds no
+/// sitting must not be satisfied by a folder that could not be listed for some
+/// other reason, and must not fail because nothing created it.
+fn sittings_in(clips: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(clips) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.to_lowercase().ends_with(".session.json"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The one session record in `clips`, or why there is not one yet.
+fn the_sitting_in(clips: &Path) -> Result<serde_json::Value, String> {
     let entries = std::fs::read_dir(clips)
         .map_err(|error| format!("{} cannot be listed: {error}", clips.display()))?;
     let mut sidecars: Vec<std::path::PathBuf> = entries
@@ -2442,11 +2498,7 @@ fn first_recording_in(clips: &Path) -> Result<serde_json::Value, String> {
     let session: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| format!("the session record is not JSON: {error}\n{text}"))?;
 
-    session["recordings"]
-        .as_array()
-        .and_then(|recordings| recordings.first())
-        .cloned()
-        .ok_or_else(|| format!("the sitting has no recording in it yet:\n{session:#}"))
+    Ok(session)
 }
 
 #[test]
@@ -2534,6 +2586,227 @@ fn a_microphone_saved_over_the_protocol_reaches_the_next_automatic_recording() {
     recorder.stop();
     // On the way out only. A run that failed keeps the home directory, and the
     // session record in it, for whoever has to read the assertion above.
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+#[ignore = "needs a desktop session and process detection; see the module docs"]
+fn a_recording_directory_saved_over_the_protocol_reaches_the_next_automatic_recording() {
+    // SPEC.md section 45 step 3 names two things — "select microphone **and
+    // recording directory**" — and the section ends "if any of those steps
+    // require ... restarting the recorder, the MVP is not finished". PR #608
+    // fixed the microphone half and could not reach this one: the directory is
+    // not in the `Configuration` that `set_configuration` replaces, it is frozen
+    // into the session manager's `AutomaticSettings` before the watcher thread
+    // starts.
+    //
+    // Nothing here restarts anything. One recorder is started and told to watch,
+    // it is asked over the protocol to save a folder exactly as the Settings
+    // screen asks, and then a game launches and *detection* starts a recording
+    // of it. What is asserted is where the recorder itself wrote the session
+    // record and the file it names — not a getter, and not the reply to the
+    // save.
+    let home = scratch_home("directory-reaches-detection");
+    overlay_naming_the_windowless_fixture(&home);
+    let chosen = home.join("Chosen Clips");
+
+    let recorder = ServedRecorder::started_with(
+        "directory-reaches-detection",
+        Some(&home),
+        &["--watch-for-games"],
+    );
+    // Not the ready line. `announce` is written after the watcher thread has
+    // built its session manager, and that manager takes the directory when it is
+    // built; a save on the strength of the ready line alone would race the very
+    // snapshot this test exists to defeat, and would pass with the fix removed.
+    let watching = recorder.wait_for("Watching for games.");
+    let mut client = recorder.client();
+
+    let saved = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                RECORDING_DIRECTORY,
+                Some(&chosen.to_string_lossy()),
+            )))
+            .expect("an absolute folder is a value the settings file can hold"),
+    );
+    assert_eq!(
+        setting(&saved, RECORDING_DIRECTORY).value,
+        chosen.to_string_lossy(),
+        "the save itself has to land before anything can be said about what reads it",
+    );
+
+    // No game is running, so there is no sitting to keep together and the change
+    // is in force on the watcher's next pass — about a second. This is also the
+    // answer to "what if they change it and then do not play for a week": the
+    // change is not pending at all, and the week has nothing to do with it.
+    std::thread::sleep(Duration::from_secs(2));
+    let now = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read"),
+    );
+    assert_eq!(
+        setting(&now, RECORDING_DIRECTORY).not_yet_in_force,
+        None,
+        "with nothing being recorded the folder is simply in force, and a screen that said it \
+         was still waiting on something would be describing a delay that is not there:\n{now:#?}",
+    );
+
+    let subject = WindowlessSubject::start(&home.join("marker"));
+
+    // Both folders are watched, so that a failure says *where the recording
+    // went* rather than only that nothing turned up in the one this test wants.
+    let was = home.join("Videos").join("Clipped");
+    let (folder, sitting) = the_sitting_with_recordings_in(&[&chosen, &was], 1, DETECTION_PATIENCE);
+
+    assert_eq!(
+        folder, chosen,
+        "the recording detection started was written to the folder this recorder booted with \
+         rather than the one saved from the Settings screen a moment earlier, so choosing a \
+         folder is a control that does nothing until the recorder is restarted — which is what \
+         SPEC.md section 45 rules out.\n\nThe sitting:\n{sitting:#}\n\nWhat the recorder said \
+         before the save:\n{watching}",
+    );
+    assert!(
+        sitting["recordings"][0]["output"]
+            .as_str()
+            .is_some_and(|output| Path::new(output).starts_with(&chosen)),
+        "and the file it names has to be in it, not merely the record of it:\n{sitting:#}",
+    );
+    assert!(
+        sittings_in(&was).is_empty(),
+        "and nothing should have been written to the folder that was left behind: {:?}",
+        sittings_in(&was),
+    );
+
+    drop(client);
+    drop(subject);
+    recorder.stop();
+    // On the way out only. A run that failed keeps the home directory, and both
+    // folders in it, for whoever has to read the assertion above.
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+#[ignore = "needs a desktop session and process detection; see the module docs"]
+fn a_recording_directory_saved_during_a_sitting_does_not_move_that_sitting() {
+    // The guard the whole design is chosen for, and the one that fails silently
+    // if it is wrong. A sitting is a sequence of recordings held together by one
+    // session record, and `SessionManager::begin_recording` writes that record
+    // *next to the files it names*. Move the directory half way through and the
+    // record lists files that are no longer beside it — and nothing errors,
+    // nothing is logged as lost and every file is still on disk, so the only
+    // thing that has gone is the ability to say which sitting they belonged to
+    // (AGENTS.md section 56).
+    //
+    // So: a sitting is opened, the folder is changed while it is open, and then
+    // the same sitting is made to ask for a second file. Both files and the
+    // record naming them have to be in the folder the sitting started in.
+    let home = scratch_home("directory-mid-sitting");
+    overlay_naming_the_windowless_fixture(&home);
+    let clips = home.join("Videos").join("Clipped");
+    let chosen = home.join("Chosen Clips");
+
+    let recorder =
+        ServedRecorder::started_with("directory-mid-sitting", Some(&home), &["--watch-for-games"]);
+    recorder.wait_for("Watching for games.");
+    let mut client = recorder.client();
+
+    // A process that starts between the watcher's baseline snapshot and its
+    // subscription is invisible to it for its lifetime, and that window is a few
+    // tens of milliseconds (`tests/automatic_sessions.rs` says the same).
+    std::thread::sleep(Duration::from_secs(1));
+    let mut subject = Some(WindowlessSubject::start(&home.join("marker")));
+    let (_, opened) = the_sitting_with_recordings_in(&[&clips], 1, DETECTION_PATIENCE);
+
+    // Saved with the sitting open, which is the only state in which this
+    // setting waits for anything.
+    let saved = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                RECORDING_DIRECTORY,
+                Some(&chosen.to_string_lossy()),
+            )))
+            .expect("an absolute folder is a value the settings file can hold"),
+    );
+    let entry = setting(&saved, RECORDING_DIRECTORY);
+    assert_eq!(
+        entry.value,
+        chosen.to_string_lossy(),
+        "the folder is saved either way; what differs is when it is used",
+    );
+    assert!(
+        entry
+            .not_yet_in_force
+            .as_deref()
+            .is_some_and(|sentence| sentence.contains(&*clips.to_string_lossy())),
+        "a saved value that is not yet the one being used has to say so, and say where the \
+         footage is going in the meantime — otherwise the folder picker is a control whose \
+         effect is invisible (AGENTS.md section 27):\n{entry:#?}",
+    );
+
+    // The game goes and comes back inside the restart grace, which is one
+    // sitting with two files in it (`docs/sessions.md`). The second file is what
+    // makes this a test rather than an assertion about a getter: it is asked for
+    // *after* the save, and it is the one that would land in the wrong folder.
+    drop(subject.take());
+    std::thread::sleep(Duration::from_secs(5));
+    let subject = WindowlessSubject::start(&home.join("marker"));
+
+    // Both folders again: a build that moved the directory mid-sitting would put
+    // the second file — and the record naming both of them — in the new one,
+    // and this is what says so instead of timing out on the old one.
+    let (folder, sitting) =
+        the_sitting_with_recordings_in(&[&clips, &chosen], 2, DETECTION_PATIENCE);
+    let recordings = sitting["recordings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the sitting has no recordings:\n{sitting:#}"));
+    assert_eq!(
+        folder, clips,
+        "the record of the sitting that was open moved to the folder saved during it, so it is \
+         no longer beside the recordings it names — and every file is still on disk, so nothing \
+         fails and nothing is left able to say which sitting they belonged to (AGENTS.md \
+         section 56):\n{sitting:#}",
+    );
+    assert_eq!(
+        sitting["session_id"], opened["session_id"],
+        "the second file has to belong to the sitting that was already open, or this test is \
+         about two sittings and proves nothing:\n{sitting:#}\n\nthe sitting that was open when \
+         the folder was saved:\n{opened:#}",
+    );
+    assert!(
+        recordings.iter().all(|recording| recording["output"]
+            .as_str()
+            .is_some_and(|output| Path::new(output).starts_with(&clips))),
+        "every file of the sitting that was open must stay beside the session record that names \
+         them. One of them moved with the setting, which leaves the record pointing at files \
+         that are not there — and leaves nothing able to say which sitting they \
+         belonged to (AGENTS.md section 56):\n{sitting:#}",
+    );
+    assert!(
+        sittings_in(&chosen).is_empty(),
+        "and no part of the open sitting — least of all its record — may be written into the \
+         new folder while it is open: {:?}",
+        sittings_in(&chosen),
+    );
+
+    // Still open, so the screen still says the folder is waiting on it.
+    let now = settings_of(
+        client
+            .call(&IpcCommand::GetSettings)
+            .expect("the settings can be read"),
+    );
+    assert!(
+        setting(&now, RECORDING_DIRECTORY)
+            .not_yet_in_force
+            .is_some(),
+        "the sitting has not ended, so the answer has not changed:\n{now:#?}",
+    );
+
+    drop(client);
+    drop(subject);
+    recorder.stop();
     let _ = std::fs::remove_dir_all(&home);
 }
 
