@@ -248,6 +248,7 @@ rather than any one crate:
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `record_end_to_end.rs`   | That `clipped-recorder record` against a real window produces media the harness accepts — and, in `ctrl_c_during_a_recording_leaves_a_playable_file`, that a real `CTRL_C_EVENT` mid-recording leaves a file that **plays**, with the three finalisation lines appearing in the diagnostics _in order_, so "the trailer was written and then the encoder was flushed" fails exactly as a missing line does. Also that a recording ends when its window closes, and still leaves valid media                                                                                                                                                                                                                                                                                                            |
 | `ipc_protocol.rs`        | That `clipped-recorder serve` speaks the protocol in [ipc.md](ipc.md) over a real named pipe to a real child process: the handshake and a version it does not speak, a frame that is not a message, a length prefix that would allocate the machine, a client that vanishes mid-request, commands whose subsystem is not built, the connection cap and its slot coming back, a second recorder refusing to compete for the endpoint, a recorder watching for games answering `watching` where one that was not asked to watch answers `idle` — checked in the bytes of the reply as well as in the parsed one, because an absent sitting is what a parsed status cannot show — a recording driven **entirely over the protocol** producing a playable file, a recording **naming the game it is of** whether the window asked for it or the watcher started it, with the sitting checked in the bytes for the same reason, and a `session_ended` event carrying that sitting's files when it ends — and an export driven the same way, whose MP4 is **decoded** from first frame to last, holds the recording's coded bytes packet for packet, refuses a destination that already exists without touching it, and reports a refusal from the muxer in the muxer's own words             |
+| `automatic_sessions.rs`  | That `clipped-recorder watch` records a real launched subject with nobody touching it, and what the sitting it leaves says: a game that exits, a game killed with a real `TerminateProcess`, a Ctrl+C with the capture still running, a game that never draws a window — and **a window resized mid-recording**, which is [issue #184](https://github.com/wildware-uk/clipped/issues/184)'s first acceptance criterion. That last one changes the subject's size with a real `SetWindowPos` from outside the process that owns it, and asserts [ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)'s decision off the session record: two files in one sitting, the first finished as `target-resized` at the size the window was and decoding as many pictures as the recorder said it encoded, the second carrying on at the size it now is — and the **seam** between them, measured on the session's own timeline and printed, which fails if the restart delay a resize is supposed to skip is waited out |
 | `ctrl_c.rs`              | The half of Ctrl+C that needs no capture engine: that the finalisation hook runs exactly once and the process exits cleanly, against a real child sent a real console event. `record_end_to_end.rs` is what proves the resulting _file_ plays                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `supervision.rs`         | That the recorder is a process with a lifetime of its own, against real processes ended with a real `TerminateProcess` — no signal, no destructors: that a recorder outlives the process that started it and keeps serving, that a second launch attaches rather than competing and one holding the instance name touches nothing at all, that a killed recorder is reported and replaced rather than left showing a stale state, and that a recorder which cannot start is given up on after a bounded number of attempts. Two of its tests need a GPU and record a real window: one kills the supervisor mid-recording and proves the recording carried on and the file plays, the other kills the _recorder_ mid-recording and proves the file it left is playable and that the supervisor named it |
 | `command_line.rs`        | The command-line surface: that `record --help` documents a default for every option, that invalid values are usage errors and not panics, that a missing target names all three ways of giving one, that an existing recording is not overwritten without being asked, and that `list-windows` and `capabilities` report what they claim to. Also the one thing about `watch` that only the built program shows: that a settings file it cannot read produces the plain sentence on **standard error**, on a line of its own rather than only inside a log record. It starts `watch` over an unreadable file, waits for it to say it is watching, and stops it                                                                                                                                         |
@@ -295,6 +296,35 @@ comes from a test application rather than an example:
 cargo build -p clipped-video-pattern
 cargo test  -p clipped-recorder --test ipc_protocol -- --ignored --nocapture --test-threads=1
 ```
+
+`automatic_sessions.rs` is the same shape and the same subject, and is the one
+place a **mid-recording resize** is exercised against a real window. **CI has
+never been able to run it, and never will be able to**: a hosted runner has no
+compositor, so neither capture backend produces a frame there — it is a test a
+person runs on a machine with a display in front of them, and
+`CLIPPED_REQUIRE_CAPTURE` is what makes a machine that cannot capture fail
+rather than skip.
+
+```text
+cargo build -p clipped-video-pattern
+cargo build -p clipped-recorder --examples
+$env:CLIPPED_REQUIRE_CAPTURE = "1"
+cargo test -p clipped-recorder --test automatic_sessions -- --ignored --nocapture --test-threads=1
+```
+
+The resize on its own, which is issue #184's acceptance criterion and takes
+about half a minute:
+
+```text
+cargo test -p clipped-recorder --test automatic_sessions \
+  a_window_resized_mid_recording_is_followed_by_a_second_file -- --ignored --nocapture
+```
+
+It prints the two files' sizes, durations and places on the session's timeline,
+and the seam between them, whether it passes or fails. A workspace is left
+behind under `%TEMP%\clipped-watch-resize-…` **only when the run failed**, with
+the path printed — the recordings and the session record it kept are the only
+evidence of what it saw.
 
 ### How a test drives an application
 

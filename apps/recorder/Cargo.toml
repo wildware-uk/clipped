@@ -148,11 +148,20 @@ windows-sys = { version = "0.61", features = [
 # is deliberately detached from it, so there is no `Child` to call `kill` on and
 # `OpenProcess`/`TerminateProcess` is how it is ended — and
 # `GetExitCodeProcess` is how "did it survive?" is answered rather than assumed.
+#
+# `tests/automatic_sessions.rs` needs `Win32_UI_WindowsAndMessaging` for the
+# third: the mid-recording resize in
+# `a_window_resized_mid_recording_is_followed_by_a_second_file` is a real
+# `SetWindowPos` against the subject's real window, and `GetClientRect` is how
+# "the window really is that size now" is answered rather than assumed. Calling
+# the resize *handler* instead is the unit test issue #184's first acceptance
+# criterion rules out by name.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # What the recordings this binary produces are checked with: the container
