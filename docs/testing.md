@@ -868,6 +868,54 @@ The end of it, which no unit test covers, is a recording:
 decodes. What that costs is in
 [encoder-pipeline.md](encoder-pipeline.md), "Encoding from another adapter".
 
+## Capture that breaks in the middle of a recording
+
+Nothing above can produce this. A driver reset, a window that revokes capture
+part way through, or a capture that silently starts returning frames with nothing
+in them are the failures
+[issue #97](https://github.com/wildware-uk/clipped/issues/97) and
+[issue #285](https://github.com/wildware-uk/clipped/issues/285) exist for, and no
+test application can be asked to cause one. The capture suite cannot reach them
+and CI has never exercised window capture by either backend at all, for want of a
+compositor.
+
+So they are covered from inside `crates/session`, against a scripted capture
+backend factory, in `crates/session/src/recording.rs`:
+
+| Test | What it forces |
+| --- | --- |
+| `a_backend_that_fails_mid_recording_is_replaced_and_the_recording_carries_on` | The preferred backend refuses on its fourth frame; the second one takes over and the same file carries on. |
+| `a_capture_that_has_gone_black_is_replaced_rather_than_recorded_to_the_end` | Eleven seconds of a genuinely black Direct3D texture, read by the production sampler. |
+| `an_interrupted_backend_is_restarted_rather_than_given_up_on` | A driver reset, which restarts the same method rather than losing it. |
+| `a_failure_nothing_can_take_over_from_still_leaves_the_recording_that_was_made` | The same failure with no second backend: the file up to it is finalised and kept. |
+
+```text
+cargo test -p clipped-session --lib recording::tests
+```
+
+**They are not `#[ignore]`d, and that is the same considered difference as the
+adapter tests below.** They need a `D3D11CreateDevice` call and nothing else — no
+window, no compositor, no display, and no encode hardware, because the encoder is
+pinned to the software one. Two devices are created rather than one, deliberately:
+a replacement backend brings its own Direct3D device with it, and an encoder
+session can only bind textures belonging to the device it was opened against, so
+a fixture that shared one device between the two backends would pass with the
+encoder reopen deleted.
+
+Everything else about them is real: the real `CaptureFallback` policy, the real
+black-frame sampler reading real pixels back off the GPU, the real encoder, and a
+real Matroska file that `clipped-media-validation` then decodes — which is the
+half that says the pictures *after* the change can be decoded against the codec
+header written *before* it.
+
+What they cannot say is whether a real broken capture on real hardware looks the
+way this fixture does. A Windows Graphics Capture session that has stopped
+working is *observed* to hand over frames of zeroes rather than to report
+anything, which is what the detector is built around, but nothing in this
+repository can make one do it on request. That belongs to the capture
+compatibility matrix in
+[issue #96](https://github.com/wildware-uk/clipped/issues/96).
+
 ## What is not built yet
 
 AGENTS.md section 26 names four test applications. **Three exist.**

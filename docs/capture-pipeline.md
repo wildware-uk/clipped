@@ -1093,14 +1093,14 @@ classification that decision will read.
 
 ## Automatic capture fallback
 
-**Status: built in `crates/capture`, and not yet wired into a session.**
 `CaptureFallback` ([issue #97](https://github.com/wildware-uk/clipped/issues/97))
-is what keeps a recording going when the backend under it stops working. The
-recording loop in `crates/session/src/recording.rs` still creates a backend
-directly and ends the recording on the first error; adopting the fallback there
-is [issue #285](https://github.com/wildware-uk/clipped/issues/285), because
-`crates/session` is owned by other work in this milestone. Everything below
-describes what the capture crate does today, and says where the boundary is.
+is what keeps a recording going when the backend under it stops working, and
+since [issue #285](https://github.com/wildware-uk/clipped/issues/285) the
+recording loop in `crates/session/src/recording.rs` consults it for the whole of
+a recording rather than only at the start. What that costs the loop, and what it
+does when the method changes, is under
+["What the recording loop does with it"](#what-the-recording-loop-does-with-it)
+below.
 
 ### The shape, and why it is not a wrapper
 
@@ -1179,20 +1179,24 @@ So the rule here stands as written for a replacement *within* one file: a
 recording committed to a size cannot change it, whatever produced the change. It
 relaxes in exactly one direction, which is that a caller who has followed a resize
 into a new file tells the fallback so through `CaptureFallback::resize`, and the
-next replacement is judged against the size the recording now uses. Wiring that
-into the recording loop is
-[issue #285](https://github.com/wildware-uk/clipped/issues/285).
+next replacement is judged against the size the recording now uses. The recording
+loop routes every resize through it, including the one that can happen while the
+loop is still waiting for its first frame — a resize done behind the fallback's
+back would leave it judging replacements against a size the recording no longer
+uses, and the symptom would be a replacement refused for producing exactly the
+right frames.
 
 In practice the mismatch is rare: both Windows backends produce the target's
 client area in `B8G8R8A8`, so a replacement normally produces exactly what the
 failed one did. It is the transition cases — a game that changed resolution in
 the same moment its capture broke — that end here.
 
-A second consequence of a backend change is recorded rather than solved: **the
-replacement's frames come from a different Direct3D device.** An encoder opened
-against the old device (`crates/session/src/windows/device.rs`) cannot bind them
-and has to be reopened. Nothing in `crates/capture` can do that, and it is part
-of what issue #285 has to do when it adopts this.
+A second consequence of a backend change belongs to the session rather than to
+this crate: **the replacement's frames come from a different Direct3D device.**
+An encoder opened against the old device
+(`crates/session/src/windows/device.rs`) cannot bind them and has to be reopened.
+Nothing in `crates/capture` can do that; what `crates/session` does about it is
+below.
 
 ### Black frames
 
@@ -1255,17 +1259,21 @@ and is still not fallen back from — but it is what lets the layer above tell a
 paused game from an empty recording. See "A minimised window, from end to end"
 below.
 
-Since [issue #461](https://github.com/wildware-uk/clipped/issues/461) the
-*recording* keeps its own account of the rest, because `note_silence` is inside
-`CaptureFallback` and the session does not yet call anything on it beyond
-`start` (see [Automatic capture fallback](#automatic-capture-fallback) for where
-that boundary is). `clipped_session::recording` accumulates the acquisition
+The *recording* keeps its own account of the rest, and both accounts are now fed
+from the same loop. `clipped_session::recording` accumulates the acquisition
 timeout on every `Acquisition::Timeout`, keeps the longest unbroken stretch, says
 so once at `warn` past thirty seconds, and puts
 `RecordingReport::longest_source_silence` on the report and in the sentence the
-user reads. The threshold is the same thirty seconds `note_silence` uses, so the
-two cannot disagree about the same recording when the fallback is finally
-threaded through the loop.
+user reads ([issue #461](https://github.com/wildware-uk/clipped/issues/461)); the
+same arm calls `note_silence`, so `CaptureFallback::silent_for` is true of a live
+recording rather than of nothing. The threshold is the same thirty seconds
+`note_silence` uses, deliberately, so the two cannot disagree about the same
+recording.
+
+`silent_for` has no reader outside the fallback yet. It is there for the
+diagnostics command in
+[issue #302](https://github.com/wildware-uk/clipped/issues/302), which is where
+the desktop window gets any of this.
 
 That number exists because of the case below, where the source is not idle at
 all.
@@ -1292,6 +1300,53 @@ Every attempt and every outcome is also logged as it happens, with
 for a change and `error` for a recording that ends because nothing could take
 over.
 
+### What the recording loop does with it
+
+`crates/session/src/recording.rs` owns the `CaptureFallback` for the length of a
+recording and consults it on every turn of the loop
+([issue #285](https://github.com/wildware-uk/clipped/issues/285)):
+
+| Where | What it calls | How often |
+| --- | --- | --- |
+| A frame, after it has been encoded | `inspect(&frame)` | Every frame. The watch rations the readback itself, to one frame every 500 ms. |
+| `Acquisition::Timeout`, `TargetMinimised` | `note_silence(ACQUIRE_TIMEOUT)` | Every silent acquisition. |
+| `Acquisition::SizeChanged` before the first frame | `resize(backend, size)` | Once, if it happens. |
+| Any `CaptureError` but `TargetLost` | `recover(backend, error)` | Only on a failure. |
+| A `BlackRun` from `inspect` | `recover_from_black_frames(backend, run)` | Only after ten seconds of black. |
+
+`inspect` is deliberately called with **every** frame rather than every Nth. The
+rationing belongs to `BlackFrameWatch`, which knows what a sample costs;
+rationing in the loop instead would ration by frame rate rather than by time, so
+the same rule would fire twice a second at 60 fps and four times a second at 120.
+Measured at 1920x1080 BGRA8 in a release build: 4 ns for a frame it does not
+sample, 48 µs for one it does on graphics hardware and 57 µs on WARP, which
+averages 1.6 µs a frame at 60 fps — about 96 µs of every second. The cost does
+not grow with the picture, because the sampler reads sixteen single pixels
+whatever the resolution.
+
+**Reopening the encoder is the session's half, and it can refuse.** A
+replacement — or a restart of the same method — brings its own Direct3D device,
+so the loop takes one frame from it to learn which device that is, opens a new
+encoder session against it, and then holds the new session to what the file
+already declares: the same codec, and byte-for-byte the same out-of-band
+parameter sets. Matroska writes both once, in the header (ADR 0001), so an
+encoder that would produce a different stream cannot be written into that track,
+and the recording is finished at the change with
+`SessionError::EncoderCannotFollowCapture` rather than continuing into a file a
+player would decode against the wrong codec header. In practice the two match:
+the replacement is configured from the same settings, at the same size, for the
+same codec. The case it exists for is a driver reset that leaves the preferred
+encoder unopenable and the reopened session being a different family.
+
+Everything the loop pays for a recovery is paid **only** on that path: one frame
+acquired and released, and one encoder session opened. A recording whose capture
+never falters does none of it.
+
+`RecordingReport::capture_method` is the method that was running when the file
+was finished — after a fallback that is not the one selection chose — and
+`RecordingReport::capture_changes` is `CaptureStatus::changes()`, empty for the
+ordinary recording where nothing happened.
+
 ### What is not built
 
 - **Remembering per game what worked.** The issue asks for it and it is not here:
@@ -1300,13 +1355,11 @@ over.
   ([issue #108](https://github.com/wildware-uk/clipped/issues/108)) rather than
   this crate's. [Issue #286](https://github.com/wildware-uk/clipped/issues/286)
   covers storing it and preferring it at the next launch of that game.
-- **The session using any of this**
-  ([issue #285](https://github.com/wildware-uk/clipped/issues/285)), including
-  reopening the encoder against the replacement's graphics device.
-- **The desktop UI showing the current method.** The status is there to be shown;
-  no screen shows it yet
-  ([issue #101](https://github.com/wildware-uk/clipped/issues/101) owns
-  diagnostics).
+- **The desktop UI showing the current method.** The recording now knows it and
+  the report carries it; nothing carries it to the window
+  ([issue #302](https://github.com/wildware-uk/clipped/issues/302) is the
+  diagnostics command, and `apps/desktop/src/diagnostics.ts` still draws
+  "Capture backend — Not reported").
 
 ## A window nothing is drawing: minimised, occluded, or on a display that has gone
 

@@ -14,11 +14,25 @@
 //! open the encoder        against that device, so no frame is ever copied across adapters
 //! open the audio          the endpoints' formats are what the audio tracks declare
 //! create the file         the encoder's parameter sets are the container's codec header
-//! ── loop ──              acquire, admit, submit, drain, queue
+//! ── loop ──              acquire, inspect, admit, submit, drain, queue
 //!    first frame          fixes the epoch, and starts the audio threads on it
+//!    capture failed       hand the backend to the fallback, take a replacement,
+//!                         and open the encoder again on *its* device
 //! stop the audio          before the queue closes, so the last samples are written
 //! flush and finalise      on every path out, including a panic
 //! ```
+//!
+//! # Capture that stops working part way through
+//!
+//! The backend is not fixed for the length of a recording. `CaptureFallback`
+//! owns the policy — which failures are worth another backend, which are not,
+//! and what a replacement has to produce before it is allowed to take over — and
+//! this loop owns the consequences: reading every frame for a capture that has
+//! silently gone black, and reopening the encoder when a replacement puts a
+//! different graphics device behind the frames
+//! ([issues #285 and #97](https://github.com/wildware-uk/clipped/issues/285),
+//! `docs/capture-pipeline.md`). None of it costs anything while capture is
+//! working, which is the ordinary case and the one the loop is measured on.
 //!
 //! # Where audio joins
 //!
@@ -140,7 +154,7 @@ pub(crate) fn record(
     )
     .map_err(SessionError::from)?;
 
-    let (fallback, mut backend, format) = started.into_parts();
+    let (fallback, backend, format) = started.into_parts();
     let method = fallback.current_method();
 
     // Held here, on this thread, for exactly as long as capture is open —
@@ -171,33 +185,63 @@ pub(crate) fn record(
         "capture started"
     );
 
-    let outcome = record_frames(settings, stop, backend.as_mut(), format, method, outputs);
-
-    // The backend is shut down here rather than being left to `Drop` so that
-    // the display's duplication, or the compositor's frame pool, is released
-    // before this function returns to a caller that may go on to do something
-    // slow with the report (AGENTS.md section 58).
-    backend.shut_down();
-    outcome
+    // The fallback goes into the loop rather than being read once and dropped.
+    // That is the whole of issue #285: before it, a `CaptureFallback` was built,
+    // asked which method it had chosen, and let go of at the end of this
+    // function — so a capture that failed, restarted or went black *during* a
+    // recording was never noticed and never recovered from, and the black-frame
+    // detection issue #97 built and measured had no caller at all.
+    //
+    // The backend goes with it, by value. `CaptureFallback::recover` takes a
+    // failed backend that way on purpose: it shuts the old one down before
+    // asking the platform for another, which DXGI requires, and the loop cannot
+    // go on using a backend it has given up (`docs/capture-pipeline.md`).
+    // Shutting the surviving backend down is therefore `record_frames`'s, and it
+    // does it as soon as the loop ends rather than after the trailer is
+    // written — earlier than this function used to, which releases the display's
+    // duplication or the compositor's frame pool sooner (AGENTS.md section 58).
+    record_frames(settings, stop, fallback, backend, format, outputs)
 }
 
 /// Everything from the first frame to the finished file.
 fn record_frames(
     settings: &RecordingSettings,
     stop: &dyn crate::StopSignal,
-    backend: &mut dyn CaptureBackend,
+    mut fallback: CaptureFallback<'_>,
+    backend: Box<dyn CaptureBackend>,
     mut format: FrameFormat,
-    method: CaptureMethod,
     outputs: &crate::RecordingOutputs<'_>,
 ) -> Result<RecordingReport, SessionError> {
     let replay = outputs.replay;
+    // The running backend, and the one thing in this function that can stop
+    // existing while the recording is still going. `CaptureFallback::recover`
+    // takes a failed backend by value and shuts it down before asking the
+    // platform for a replacement, so between handing one over and being given
+    // another there is nothing here to hold; when nothing can take over there
+    // never is one again, and the loop ends in the same step that discovers it.
+    // An `Option` says that out loud, in the one place it is true, rather than a
+    // second backend value that would have to be kept in step with this one.
+    let mut capture = Some(backend);
+    let method = fallback.current_method();
+
     // Held for the whole of the recording: the encoder session is opened
     // against it and may not outlive it. `format` is passed by mutable
     // reference rather than by value because waiting for the first frame is
     // also where a target that resized between being measured and being
     // captured is followed, and everything below — the encoder, the size on
     // every submitted frame, the track in the header — is configured from it.
-    let device = first_frame_device(backend, stop, &mut format)?;
+    // The resize goes through the fallback rather than through the backend so
+    // that the format a replacement is judged against is the one the recording
+    // ended up committed to; a fallback left holding the pre-resize size would
+    // refuse every replacement for producing exactly the right frames.
+    let mut device = first_frame_device(
+        capture
+            .as_deref_mut()
+            .expect("the backend is only given up inside the loop below"),
+        &mut fallback,
+        stop,
+        &mut format,
+    )?;
 
     let encode_size = settings.encode_size(format.size())?;
     let opened = encoding::open(
@@ -214,7 +258,17 @@ fn record_frames(
     let _entered = span.enter();
 
     let bitrate = opened.bitrate;
+    let mut encoder_kind = opened.kind;
     let mut encoder = opened.encoder;
+    // What the file's video track is about to declare, kept so that a
+    // replacement encoder can be held to it. A track's codec and its
+    // out-of-band parameter sets go in the container's header and cannot change
+    // part way through a file (ADR 0001), so an encoder reopened against a
+    // replacement backend's device is only usable if it produces exactly these.
+    let declared = TrackDeclaration {
+        codec: opened.codec,
+        parameter_sets: encoder.parameter_sets().to_vec(),
+    };
     // Before the file, because a track's sampling rate and channel count go in
     // the container's header and only the device knows them. A source that
     // cannot be opened fails the recording here, while nothing has been
@@ -289,6 +343,11 @@ fn record_frames(
     let mut last_frame_at: Option<Instant> = None;
 
     while !stop.is_requested() {
+        // The one thing the acquisition below can ask for that cannot be done
+        // while a frame borrowed from the backend is alive: giving the backend
+        // up. It is decided inside the match and acted on after it.
+        let mut interruption = None;
+
         // Before the space check and before the acquisition: a copy issued on
         // an earlier frame may be ready now, and reading it back is what lets
         // whoever pressed the key stop waiting. It touches the GPU and nothing
@@ -338,6 +397,10 @@ fn record_frames(
                 break;
             }
         }
+
+        let backend = capture
+            .as_deref_mut()
+            .expect("a recovery that finds no replacement leaves this loop in the same step");
 
         match backend.acquire(ACQUIRE_TIMEOUT) {
             Ok(Acquisition::Frame(frame)) => {
@@ -393,6 +456,43 @@ fn record_frames(
                 if let Some(screenshots) = screenshots.as_mut() {
                     screenshots.consider(&frame, clock);
                 }
+
+                // Last of all, for the same rule. This is the only capture
+                // failure that returns no error: a capture that has silently
+                // stopped working goes on handing over frames and every pixel
+                // in them is zero, and a recording that never looks writes a
+                // black file and reports success (issue #97).
+                //
+                // Called with **every** frame rather than every Nth, and that
+                // is a decision rather than the obvious thing. The rationing
+                // belongs to the value that knows what a sample costs:
+                // `BlackFrameWatch::is_due` admits one GPU readback every
+                // 500 ms and answers every other frame from a timestamp
+                // comparison. Rationing *here* instead — sampling one frame in
+                // thirty — would ration by frame rate rather than by time, so
+                // the same rule would be twice a second at 60 fps and four
+                // times a second at 120, and it would put a second answer to
+                // "how often can this be afforded?" in a second crate
+                // (AGENTS.md section 55).
+                //
+                // Measured rather than assumed, at 1920x1080 BGRA8 on this
+                // machine (AGENTS.md section 19), in a release build:
+                //
+                // ```text
+                // a frame it does not sample          4 ns
+                // a frame it does sample (hardware)  48 µs
+                // a frame it does sample (WARP)      57 µs
+                // averaged over a second at 60 fps  1.6 µs a frame
+                // ```
+                //
+                // So a watched capture costs about 96 µs of every second, and
+                // the two frames a second it does touch spend 0.3% of a 16.7 ms
+                // frame budget. The cost does not grow with the picture: the
+                // sampler reads sixteen single pixels whatever the resolution,
+                // and the expense is the `Map` rather than the 64 bytes.
+                if let Some(run) = fallback.inspect(&frame) {
+                    interruption = Some(Interruption::Black(run));
+                }
             }
             Ok(Acquisition::Timeout) => {
                 // **Not an error, and not a reason to stop.** A source that has
@@ -417,6 +517,13 @@ fn record_frames(
                 // a test, which a wall clock would not.
                 counters.note_idle(ACQUIRE_TIMEOUT);
                 note_source_silence(replay_buffer, last_frame_at);
+                // And the fallback's own account of the same silence, which is
+                // what `silent_for` answers a diagnostics screen with. It is
+                // deliberately not a failure — the module documentation of
+                // `clipped_capture::fallback` says why, and this loop's
+                // `SILENT_SOURCE_THRESHOLD` above uses that same judgement and
+                // that same half-minute rather than a second rule.
+                fallback.note_silence(ACQUIRE_TIMEOUT);
             }
             Ok(Acquisition::TargetMinimised) => {
                 // **The recording continues.** Alt-tabbing out of an exclusive
@@ -440,6 +547,11 @@ fn record_frames(
                 // so a replay buffer told only about timeouts would be wrong in
                 // exactly the case it is wrong in most (issue #574).
                 note_source_silence(replay_buffer, last_frame_at);
+                // Told to the fallback for the same reason, and with the same
+                // consequence, which is none: a minimised window is the case
+                // that would cost somebody their preferred backend every time
+                // they alt-tabbed, and both Windows backends wait it out.
+                fallback.note_silence(ACQUIRE_TIMEOUT);
             }
             Ok(Acquisition::SizeChanged(size)) => {
                 // Matroska fixes a track's dimensions in the header, and the
@@ -468,15 +580,112 @@ fn record_frames(
                 break;
             }
             Err(CaptureError::TargetLost { .. }) => {
+                // Answered here rather than by the fallback, which agrees:
+                // `FailureResponse::Fatal` is what `response_to` reads this as,
+                // and no backend records a window that has closed. Keeping the
+                // arm means the recording ends as `TargetLost` — a clean end a
+                // session follows — rather than as a capture failure.
                 tracing::info!("the recorded window closed; finishing the recording");
                 end_reason = EndReason::TargetLost;
                 break;
             }
             Err(error) => {
-                failure = Some(error.into());
+                // **Not the end of the recording any more.** Before issue #285
+                // every other capture failure broke out of the loop here, so a
+                // driver reset or a window that turned out to be uncapturable
+                // finished the file where it stood even on a machine whose other
+                // backend would have carried on.
+                interruption = Some(Interruption::Failed(error));
+            }
+        }
+
+        let Some(interruption) = interruption else {
+            continue;
+        };
+
+        // The backend is given up here and only here, which is what the
+        // `expect` at the top of the loop rests on.
+        let failed = capture
+            .take()
+            .expect("the backend was taken from the same `Option` at the top of this turn");
+        match resume(
+            &mut fallback,
+            failed,
+            interruption,
+            stop,
+            settings,
+            format,
+            encode_size,
+            &declared,
+        ) {
+            Resumed::Capture(resumed) => {
+                // The old encoder's held pictures, into the file, before
+                // anything the replacement produces goes in after them. A
+                // failure here is the recording's, not the recovery's: the
+                // capture is running again either way.
+                //
+                // Afterwards rather than before `resume`, which costs a second
+                // encode session being open for the length of the recovery. The
+                // alternative costs more: an encoder shut down before a recovery
+                // that then fails is one the finalisation below would flush
+                // again, and a `flush` of a session that has ended would turn a
+                // clean stop into a reported failure. A session held for a few
+                // milliseconds — or, at worst, for the ten seconds the
+                // replacement is given to draw — is refused by `encoding::open`
+                // with a message about session limits, which ends the recording
+                // exactly where it would have ended without any of this.
+                if let Err(error) = flush(encoder.as_mut(), &sinks, &mut counters) {
+                    failure = Some(error);
+                    capture = Some(resumed.backend);
+                    break;
+                }
+                encoder.shut_down();
+
+                capture = Some(resumed.backend);
+                encoder = resumed.encoder;
+                encoder_kind = resumed.encoder_kind;
+                // Held rather than read: a `FrameDevice` is a reference to the
+                // graphics device the encoder session was opened against, and
+                // it is kept for as long as that session lives
+                // (`crate::windows::device`). Swapped rather than assigned so
+                // that the release of the old one is a statement rather than a
+                // side effect of an assignment nothing reads — and it happens
+                // *after* the session opened against it was shut down above.
+                drop(core::mem::replace(&mut device, resumed.device));
+                // The pacing gate is not reset. It holds the recording to the
+                // rate it was asked for against the media timeline, which the
+                // replacement carries on rather than restarts, and a gate that
+                // forgot would admit a burst at the seam.
+                tracing::warn!(
+                    capture_backend = resumed.change.to().log_value(),
+                    previous_capture_backend = resumed.change.from().log_value(),
+                    trigger = resumed.change.trigger().log_value(),
+                    encoder = %encoder_kind.log_encoder_family(),
+                    frames_encoded = counters.encoded,
+                    "the capture backend was replaced mid-recording and the encoder was reopened \
+                     against the replacement's graphics device; the recording continues in the \
+                     same file"
+                );
+            }
+            Resumed::Ends(reason) => {
+                end_reason = reason;
+                break;
+            }
+            Resumed::Fails(error) => {
+                failure = Some(error);
                 break;
             }
         }
+    }
+
+    // As soon as the loop is over, rather than after the trailer: a display's
+    // duplication and a compositor's frame pool are the platform's, and nothing
+    // below this line needs a frame (AGENTS.md section 58). `None` when a
+    // recovery found nothing to take over, which is the one way out of the loop
+    // with no backend to shut down — the fallback shut that one down itself,
+    // before it went looking.
+    if let Some(mut backend) = capture.take() {
+        backend.shut_down();
     }
 
     // Anything still waiting for a frame is told there will not be one, before
@@ -510,10 +719,21 @@ fn record_frames(
         Err(error) => return Err(reported_failure(failure, error)),
     };
 
+    let status = fallback.status();
     let report = RecordingReport {
         output: settings.output().map(Path::to_path_buf),
-        capture_method: method,
-        encoder: opened.kind,
+        // The method that was *running when the file was finished*, which after
+        // a fallback is not the one selection chose. Reporting the chosen one
+        // would name a backend that stopped working part way through, and
+        // `capture_changes` below is what makes the answer explicable rather
+        // than surprising (issue #285's third criterion).
+        capture_method: status.current_method(),
+        capture_changes: status.changes().to_vec(),
+        // The same rule for the encoder: a replacement backend's device may be
+        // one this machine's preferred encoder cannot open a session on, and
+        // the family that actually encoded the last stretch is the one the
+        // report names.
+        encoder: encoder_kind,
         codec: opened.codec,
         width: encode_size.0,
         height: encode_size.1,
@@ -562,6 +782,13 @@ fn record_frames(
         // a recording that went missing.
         output = %RedactedPath::new(report.output().unwrap_or_else(|| settings.directory())),
         wrote_a_recording = settings.writes_a_recording(),
+        // The method in use at the end, and how many times it changed. Both,
+        // rather than only the first: "Desktop Duplication" in a recording that
+        // started on Windows Graphics Capture is a fact with no explanation
+        // attached, and `capture_backend_changes` of 0 is what says the ordinary
+        // recording was ordinary (SPEC.md section 36).
+        capture_backend = report.capture_method().log_value(),
+        capture_backend_changes = report.capture_changes().len(),
         frames_encoded = report.frames_encoded(),
         frames_captured = report.frames_captured(),
         frames_skipped_for_rate = report.frames_skipped_for_rate(),
@@ -602,6 +829,222 @@ fn record_frames(
     }
 
     conclude(report, failure)
+}
+
+/// Why the recording loop gave its capture backend up.
+///
+/// The two failures [`CaptureFallback`] recovers from, in the shape the loop
+/// meets them. They are separate because they arrive differently: one is an
+/// error the backend returned, and the other is a backend that returned no
+/// error at all and has been handing over frames with nothing in them.
+#[derive(Debug)]
+enum Interruption {
+    /// The backend reported a failure.
+    Failed(CaptureError),
+    /// The backend is running, and that is the problem: it has been producing
+    /// nothing but black for longer than a fade or a loading screen lasts.
+    Black(clipped_capture::BlackRun),
+}
+
+/// What the file's video track declares, and what a replacement encoder has to
+/// match before a packet of its may go into it.
+///
+/// Matroska writes a track's codec and its out-of-band parameter sets — the
+/// sequence and picture parameter sets for H.264 and HEVC, the sequence header
+/// for AV1 — once, in the header, before the first frame (ADR 0001,
+/// `crates/muxer/src/writer.rs`). A second encoder session that would produce a
+/// different stream cannot be written into that track: a player decodes
+/// everything after the change against a codec header describing something else,
+/// in a file that looks finished. So it is checked rather than assumed.
+///
+/// In practice the two match. The replacement is configured from the same
+/// [`crate::settings::RecordingSettings`], at the same size, for the same codec,
+/// so an encoder of the same family produces the same parameter sets. The case
+/// this exists for is the one where it does not: a driver reset that leaves
+/// NVENC unopenable, where the reopened session is the software encoder and its
+/// stream is its own.
+struct TrackDeclaration {
+    codec: Codec,
+    parameter_sets: Vec<u8>,
+}
+
+impl TrackDeclaration {
+    /// Why a reopened encoder cannot be carried into this file, or [`None`] when
+    /// it can.
+    ///
+    /// A separate function from the caller because it is the one judgement in
+    /// the recovery path that has to be right and cannot be exercised through
+    /// it: forcing a real second encoder to produce different parameter sets
+    /// needs a machine whose preferred encoder disappears between two calls
+    /// (AGENTS.md section 23 on testing the rule where the rule is).
+    fn refuses(
+        &self,
+        kind: clipped_encoder::EncoderKind,
+        codec: Codec,
+        parameter_sets: &[u8],
+    ) -> Option<String> {
+        // Named as a user reads them rather than as a log field: this goes
+        // into `SessionError::EncoderCannotFollowCapture`, which is a sentence
+        // somebody is shown (AGENTS.md section 15).
+        if codec != self.codec {
+            return Some(format!(
+                "the {kind} encoder opened against its graphics device produces {codec} and \
+                 this recording's video track is {}",
+                self.codec
+            ));
+        }
+        if parameter_sets != self.parameter_sets {
+            return Some(format!(
+                "the {kind} encoder opened against its graphics device produces a different \
+                 {codec} stream from the one this recording's video track describes"
+            ));
+        }
+        None
+    }
+}
+
+/// A recording that has capture back under it.
+struct Resumption {
+    backend: Box<dyn CaptureBackend>,
+    /// The replacement's graphics device, which must outlive the encoder below.
+    device: FrameDevice,
+    encoder: Box<dyn VideoEncoder>,
+    encoder_kind: clipped_encoder::EncoderKind,
+    change: clipped_capture::MethodChange,
+}
+
+/// What came of trying to put a working capture back under a recording.
+///
+/// Three answers, because there are three ways out of the loop that asks:
+/// carry on, finish the file for a reason a session can follow, or fail.
+enum Resumed {
+    /// Capture is running again, on a backend the encoder is bound to.
+    Capture(Box<Resumption>),
+    /// The recording ends here with the file complete, for this reason.
+    Ends(EndReason),
+    /// The recording ends here, and this is what went wrong. The file is
+    /// finalised on the way out either way.
+    Fails(SessionError),
+}
+
+/// Puts a working capture back under a recording whose backend stopped, and
+/// points the encoder at it.
+///
+/// This is the half of [issue #285](https://github.com/wildware-uk/clipped/issues/285)
+/// that is not wiring. `CaptureFallback` will hand back a running replacement
+/// for a backend that failed — but the replacement creates its own Direct3D
+/// device, and an encoder session can only bind textures belonging to the device
+/// it was opened against (`crate::windows::device`). So the encoder is opened
+/// again, against a frame from the new backend, and the recording carries on
+/// into the same file only if what the new session produces is what that file's
+/// track already declares.
+///
+/// **The failed backend is gone by the time this returns, whatever it returns.**
+/// `CaptureFallback::recover` takes it by value and shuts it down before asking
+/// the platform for another, because DXGI gives a process one duplication per
+/// display and a replacement would be refused while the old one still held it.
+///
+/// The costs are deliberate and are paid only here, on a path a recording
+/// normally never takes: one frame of the replacement is acquired and released
+/// to learn its device — the same price the first frame of a recording pays —
+/// and one encoder session is opened. Neither happens while capture is working.
+#[allow(clippy::too_many_arguments)]
+fn resume(
+    fallback: &mut CaptureFallback<'_>,
+    failed: Box<dyn CaptureBackend>,
+    interruption: Interruption,
+    stop: &dyn crate::StopSignal,
+    settings: &RecordingSettings,
+    committed: FrameFormat,
+    encode_size: (u32, u32),
+    declared: &TrackDeclaration,
+) -> Resumed {
+    let recovery = match interruption {
+        Interruption::Failed(cause) => fallback.recover(failed, cause),
+        Interruption::Black(run) => fallback.recover_from_black_frames(failed, run),
+    };
+    let (mut backend, change) = match recovery {
+        Ok(recovery) => recovery.into_parts(),
+        // Every reason nothing could take over is already in this error, with
+        // each candidate and what it said (`FallbackError::Exhausted`), and
+        // `From<FallbackError>` keeps the two that had names of their own — a
+        // window that closed is still reported as a lost target rather than as
+        // a capture nothing could replace.
+        Err(error) => return Resumed::Fails(error.into()),
+    };
+
+    // The replacement's own first frame, for the device its textures are on.
+    // `CaptureFallback` has already refused any replacement whose format is not
+    // the one this recording committed to, so this cannot be where the size
+    // changes — except by the target itself resizing in the same moment, which
+    // is what the check below is for.
+    let mut resumed = committed;
+    let device = match first_frame_device(backend.as_mut(), fallback, stop, &mut resumed) {
+        Ok(device) => device,
+        // A stop request while the replacement was starting is a stop request.
+        // Reporting it as a capture that produced no frames would tell somebody
+        // who pressed Ctrl+C that their recording failed.
+        Err(_) if stop.is_requested() => {
+            backend.shut_down();
+            return Resumed::Ends(EndReason::Stopped);
+        }
+        Err(error) => {
+            backend.shut_down();
+            return Resumed::Fails(error);
+        }
+    };
+    if resumed != committed {
+        // The target changed size while the replacement was starting. One file
+        // cannot follow that, for the reason the `SizeChanged` arm of the loop
+        // gives: a session finishes this file and starts the next one (ADR
+        // 0012). Reported as the resize it is rather than as the fallback that
+        // happened to be in flight when it landed.
+        tracing::warn!(
+            width = resumed.size().width(),
+            height = resumed.size().height(),
+            "the recorded window changed size while a replacement capture backend was starting; \
+             this recording was finished at that point"
+        );
+        backend.shut_down();
+        return Resumed::Ends(EndReason::TargetResized);
+    }
+
+    let opened = match encoding::open(
+        &device.as_graphics_device(),
+        settings,
+        encode_size,
+        resumed.pixel_format(),
+    ) {
+        Ok(opened) => opened,
+        Err(error) => {
+            backend.shut_down();
+            return Resumed::Fails(error);
+        }
+    };
+
+    if let Some(reason) =
+        declared.refuses(opened.kind, opened.codec, opened.encoder.parameter_sets())
+    {
+        // Shut down in this order for the reason `crate::windows::device`
+        // gives: the session goes before the device it was opened against.
+        let mut encoder = opened.encoder;
+        encoder.shut_down();
+        drop(encoder);
+        drop(device);
+        backend.shut_down();
+        return Resumed::Fails(SessionError::EncoderCannotFollowCapture {
+            method: change.to().to_string(),
+            reason,
+        });
+    }
+
+    Resumed::Capture(Box::new(Resumption {
+        backend,
+        device,
+        encoder: opened.encoder,
+        encoder_kind: opened.kind,
+        change,
+    }))
 }
 
 /// What a finished recording turns out to be: the report, or the failure that
@@ -1301,6 +1744,7 @@ fn nanos_of(time: Duration) -> i64 {
 /// only ever one `FrameFormat` for a recording and no stale copy to pick up.
 fn first_frame_device(
     backend: &mut dyn CaptureBackend,
+    fallback: &mut CaptureFallback<'_>,
     stop: &dyn crate::StopSignal,
     format: &mut FrameFormat,
 ) -> Result<FrameDevice, SessionError> {
@@ -1332,7 +1776,12 @@ fn first_frame_device(
                 }
             }
             Acquisition::SizeChanged(size) => {
-                let resized = backend.resize(size)?;
+                // Through the fallback rather than through the backend, which
+                // is what its own documentation asks for: it judges every later
+                // replacement against the format this recording committed to,
+                // and a resize done behind its back would leave it refusing
+                // replacements for producing exactly the right frames.
+                let resized = fallback.resize(backend, size)?;
                 if resized != *format {
                     // At `info` because it changes what the file will contain:
                     // somebody reading the log to explain why a recording is
@@ -1539,39 +1988,72 @@ mod tests {
         Nothing,
         /// The window drew, so a frame is handed over.
         ///
-        /// Only usable on a backend given a texture by
-        /// [`ScriptedBackend::drawing`], because a frame is a texture and there
-        /// is nothing honest to put there otherwise.
+        /// Only usable on a backend whose factory was given a texture by
+        /// [`ScriptedFactory::painting`], because a frame is a texture and
+        /// there is nothing honest to put there otherwise.
         Drew,
         /// The window is minimised, so nothing will draw until it is restored.
         Minimised,
         /// The target changed shape, which is what a window being dragged by
         /// its edge looks like from here.
         Resized(u32, u32),
+        /// Capture failed, with the error this returns.
+        ///
+        /// The whole reason this fixture exists: no real backend can be made to
+        /// have a driver reset on the fourth frame, and "what does a recording
+        /// do when capture breaks half way through?" is not answerable without
+        /// one that can (issues #285 and #97).
+        Fails(fn() -> CaptureError),
+    }
+
+    /// A window that has opted out of being captured, which is the failure
+    /// `CaptureFallback` answers by trying a different backend.
+    fn opted_out() -> CaptureError {
+        CaptureError::UnsupportedTarget {
+            method: CaptureMethod::WindowsGraphicsCapture,
+            target: clipped_capture::TargetKind::Window,
+            reason: "the window has opted out of being captured",
+        }
+    }
+
+    /// A driver reset, which is the failure answered by restarting the *same*
+    /// backend.
+    fn interrupted() -> CaptureError {
+        CaptureError::Interrupted {
+            method: CaptureMethod::WindowsGraphicsCapture,
+            reason: "the display adapter was reset",
+        }
     }
 
     /// A capture backend that replays a script.
     ///
     /// Without a texture it never produces a frame, which is all the tests of
     /// the wait for the first frame need: what they are about is what happens
-    /// to the *format* on the way to one. Given a texture by
-    /// [`drawing`](Self::drawing) it hands over real frames on that texture, and
-    /// the whole recording loop runs against it — an encoder opened on the
-    /// texture's own device, a real file, and a script that can put a minimised
-    /// stretch in the middle of a recording, which no test can do to a real
-    /// compositor without a window to minimise.
+    /// to the *format* on the way to one. Given one by its factory it hands over
+    /// real frames on that texture, and the whole recording loop runs against it
+    /// — an encoder opened on the texture's own device, a real file, and a
+    /// script that can put a minimised stretch, or a driver reset, in the middle
+    /// of a recording.
     #[derive(Debug)]
     struct ScriptedBackend {
+        method: CaptureMethod,
         steps: VecDeque<Step>,
         format: FrameFormat,
-        resizes: u32,
         /// The texture every [`Step::Drew`] hands over, owned for the whole of
         /// this backend's life and never recycled — which is exactly the
         /// promise [`FrameTexture`] is documented to need.
         texture: Option<ID3D11Texture2D>,
-        /// How many frames have been handed over, which is what spaces their
-        /// timestamps.
-        drawn: u64,
+        /// The clock every backend in one test stamps its frames from.
+        ///
+        /// Shared, and that is load-bearing: both Windows backends stamp from
+        /// the machine's performance counter, so a replacement carries on from
+        /// where the failed one stopped rather than starting again at zero. A
+        /// fixture that restarted the clock would hand the recording's timeline
+        /// frames it had already been given, which is a different bug from the
+        /// one under test.
+        clock: &'static AtomicU64,
+        resizes: &'static AtomicU64,
+        shut_downs: &'static AtomicU64,
     }
 
     /// How far apart the frames a scripted backend draws are, in nanoseconds.
@@ -1581,27 +2063,9 @@ mod tests {
     /// counting frames is counting the script rather than the pacing rule.
     const SCRIPTED_FRAME_INTERVAL_NANOS: u64 = 100_000_000;
 
-    impl ScriptedBackend {
-        fn new(format: FrameFormat, steps: impl IntoIterator<Item = Step>) -> Self {
-            Self {
-                steps: steps.into_iter().collect(),
-                format,
-                resizes: 0,
-                texture: None,
-                drawn: 0,
-            }
-        }
-
-        /// The same backend, handing over `texture` for every [`Step::Drew`].
-        fn drawing(mut self, texture: ID3D11Texture2D) -> Self {
-            self.texture = Some(texture);
-            self
-        }
-    }
-
     impl CaptureBackend for ScriptedBackend {
         fn method(&self) -> CaptureMethod {
-            CaptureMethod::WindowsGraphicsCapture
+            self.method
         }
 
         fn initialise(
@@ -1620,7 +2084,10 @@ mod tests {
                         .as_ref()
                         .expect("a script that draws was given a texture to draw on")
                         .as_raw();
-                    self.drawn += 1;
+                    let at = self
+                        .clock
+                        .fetch_add(SCRIPTED_FRAME_INTERVAL_NANOS, Ordering::Relaxed)
+                        + SCRIPTED_FRAME_INTERVAL_NANOS;
 
                     // SAFETY: `handle` is an `ID3D11Texture2D` this backend owns
                     // for the whole of its life and never recycles, and the
@@ -1631,29 +2098,220 @@ mod tests {
                     Ok(Acquisition::Frame(CapturedFrame::new(
                         texture,
                         self.format,
-                        CaptureTimestamp::from_source(
-                            SourceClock::PerformanceCounter,
-                            self.drawn * SCRIPTED_FRAME_INTERVAL_NANOS,
-                        ),
+                        CaptureTimestamp::from_source(SourceClock::PerformanceCounter, at),
                     )))
                 }
                 Some(Step::Resized(width, height)) => Ok(Acquisition::SizeChanged(
                     FrameSize::new(width, height).expect("a real size"),
                 )),
                 Some(Step::Minimised) => Ok(Acquisition::TargetMinimised),
+                Some(Step::Fails(error)) => Err(error()),
                 Some(Step::Nothing) | None => Ok(Acquisition::Timeout),
             }
         }
 
         fn resize(&mut self, size: FrameSize) -> Result<FrameFormat, CaptureError> {
-            self.resizes += 1;
+            self.resizes.fetch_add(1, Ordering::Relaxed);
             // What a real backend does: rebuild the frame pool and report the
             // format it will now produce.
             self.format = FrameFormat::new(size, self.format.pixel_format());
             Ok(self.format)
         }
 
-        fn shut_down(&mut self) {}
+        fn shut_down(&mut self) {
+            self.shut_downs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A counter that outlives the test that made it.
+    ///
+    /// The backends a `CaptureFallback` creates outlive the borrow of the
+    /// factory that made them — the fallback owns them — so a counter shared
+    /// between the two has to be `'static`. Each call leaks its own, so no two
+    /// tests can see each other's numbers. This is `crate::fallback`'s own
+    /// arrangement in `clipped-capture`, for the same reason.
+    fn counter() -> &'static AtomicU64 {
+        Box::leak(Box::new(AtomicU64::new(0)))
+    }
+
+    /// A capture backend factory a test writes the script for.
+    ///
+    /// This is the seam issue #285's proof needs. Everything a recording does
+    /// with capture goes through `CaptureFallback`, which builds backends from a
+    /// candidate list, so a test that wants capture to break on cue substitutes
+    /// the list — and then the *real* fallback policy, the real recovery, the
+    /// real encoder and the real Matroska writer all run.
+    ///
+    /// Each factory paints its own texture on **its own Direct3D device**, and
+    /// that is the point rather than tidiness: a replacement backend really does
+    /// put a different graphics device behind the frames, which is the whole
+    /// reason the encoder has to be reopened. A fixture that shared one device
+    /// between the two would pass with the reopen deleted.
+    #[derive(Debug)]
+    struct ScriptedFactory {
+        method: CaptureMethod,
+        format: FrameFormat,
+        /// Held so that the device outlives every texture and frame taken from
+        /// it, and so that a test can assert the two factories are not the same
+        /// device.
+        device: Option<windows::Win32::Graphics::Direct3D11::ID3D11Device>,
+        texture: Option<ID3D11Texture2D>,
+        /// One script per `create`, in order. A factory asked more often than it
+        /// was scripted hands over timeouts, which is what an idle source is.
+        plans: std::sync::Mutex<VecDeque<Vec<Step>>>,
+        clock: &'static AtomicU64,
+        creations: &'static AtomicU64,
+        resizes: &'static AtomicU64,
+        shut_downs: &'static AtomicU64,
+    }
+
+    impl ScriptedFactory {
+        fn new(method: CaptureMethod, clock: &'static AtomicU64) -> Self {
+            Self {
+                method,
+                format: format_of(TEST_SIZE.0, TEST_SIZE.1),
+                device: None,
+                texture: None,
+                plans: std::sync::Mutex::new(VecDeque::new()),
+                clock,
+                creations: counter(),
+                resizes: counter(),
+                shut_downs: counter(),
+            }
+        }
+
+        /// The same factory, whose backends hand over a texture of `device`
+        /// filled with `fill` in every byte.
+        ///
+        /// `0x40` is the flat grey the loop tests record; `0x00` is a capture
+        /// that has silently stopped working, which is the only capture failure
+        /// that returns no error and the one issue #97's detector exists for.
+        fn painting(
+            mut self,
+            device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+            fill: u8,
+        ) -> Self {
+            self.texture = Some(test_texture(&device, TEST_SIZE.0, TEST_SIZE.1, fill));
+            self.device = Some(device);
+            self
+        }
+
+        /// The same factory, whose next `create` produces a backend running
+        /// `steps`.
+        fn planning(self, plans: impl IntoIterator<Item = Vec<Step>>) -> Self {
+            *self.plans.lock().expect("no test panics holding this lock") =
+                plans.into_iter().collect();
+            self
+        }
+
+        fn creations(&self) -> u64 {
+            self.creations.load(Ordering::Relaxed)
+        }
+
+        fn resizes(&self) -> u64 {
+            self.resizes.load(Ordering::Relaxed)
+        }
+
+        fn shut_downs(&self) -> u64 {
+            self.shut_downs.load(Ordering::Relaxed)
+        }
+    }
+
+    impl clipped_capture::BackendDeclaration for ScriptedFactory {
+        fn method(&self) -> CaptureMethod {
+            self.method
+        }
+
+        fn capabilities(&self) -> clipped_capture::BackendCapabilities {
+            clipped_capture::BackendCapabilities::new(true, true)
+        }
+
+        fn availability(
+            &self,
+            _target: &clipped_capture::TargetProperties,
+        ) -> clipped_capture::Availability {
+            clipped_capture::Availability::Available
+        }
+    }
+
+    impl clipped_capture::CaptureBackendFactory for ScriptedFactory {
+        fn create(&self) -> Result<Box<dyn CaptureBackend>, CaptureError> {
+            self.creations.fetch_add(1, Ordering::Relaxed);
+            let steps = self
+                .plans
+                .lock()
+                .expect("no test panics holding this lock")
+                .pop_front()
+                .unwrap_or_default();
+
+            Ok(Box::new(ScriptedBackend {
+                method: self.method,
+                steps: steps.into(),
+                format: self.format,
+                texture: self.texture.clone(),
+                clock: self.clock,
+                resizes: self.resizes,
+                shut_downs: self.shut_downs,
+            }))
+        }
+    }
+
+    /// The window every scripted recording captures.
+    fn scripted_target() -> CaptureTarget {
+        CaptureTarget::new(
+            clipped_capture::TargetHandle::from_raw(0x1234),
+            clipped_capture::TargetProperties::new(
+                clipped_capture::TargetKind::Window,
+                FrameSize::new(TEST_SIZE.0, TEST_SIZE.1).expect("a real size"),
+            ),
+        )
+    }
+
+    /// Starts a capture over `candidates`, exactly as `record` does.
+    ///
+    /// Through `CaptureFallback::start` rather than by building a backend
+    /// directly, because that is what the recording loop is handed and because
+    /// the fallback's own bookkeeping — which method is current, which format
+    /// the recording is committed to — has to be the real one for the recovery
+    /// under test to mean anything.
+    fn scripted_capture(
+        candidates: &'static [&'static dyn clipped_capture::CaptureBackendFactory],
+    ) -> (
+        CaptureFallback<'static>,
+        Box<dyn CaptureBackend>,
+        FrameFormat,
+    ) {
+        CaptureFallback::start(
+            candidates,
+            &scripted_target(),
+            &CaptureConfig::default(),
+            CaptureMethodSetting::Automatic,
+        )
+        .expect("a scripted candidate list starts")
+        .into_parts()
+    }
+
+    /// Gives one factory the lifetime a `CaptureFallback` needs of it.
+    ///
+    /// The fallback holds its candidates for the length of the recording and the
+    /// backends it makes outlive the borrow of the factory that made them, so
+    /// the factory has to outlive the test rather than the statement. The test
+    /// keeps the same reference and asks it afterwards how many backends it was
+    /// asked for. One leak per test of a handful of small values.
+    fn leaked(factory: ScriptedFactory) -> &'static ScriptedFactory {
+        Box::leak(Box::new(factory))
+    }
+
+    /// The candidate list `CaptureFallback::start` is handed, in preference
+    /// order.
+    fn candidates(
+        factories: &[&'static ScriptedFactory],
+    ) -> &'static [&'static dyn clipped_capture::CaptureBackendFactory] {
+        let list: Vec<&'static dyn clipped_capture::CaptureBackendFactory> = factories
+            .iter()
+            .map(|factory| *factory as &'static dyn clipped_capture::CaptureBackendFactory)
+            .collect();
+        Box::leak(list.into_boxed_slice())
     }
 
     /// A stop signal that trips after a fixed number of polls.
@@ -1688,6 +2346,28 @@ mod tests {
         )
     }
 
+    /// The capture a test of the wait for the first frame runs against: one
+    /// factory, no texture, so it never produces a frame.
+    ///
+    /// That is all these need — what they are about is what happens to the
+    /// *format* on the way to a frame — and it keeps them runnable on a machine
+    /// with no Direct3D at all, which is where they were before the factory
+    /// existed.
+    fn blind_capture(
+        steps: Vec<Step>,
+    ) -> (
+        &'static ScriptedFactory,
+        CaptureFallback<'static>,
+        Box<dyn CaptureBackend>,
+    ) {
+        let factory = leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .planning([steps]),
+        );
+        let (fallback, backend, _) = scripted_capture(candidates(&[factory]));
+        (factory, fallback, backend)
+    }
+
     #[test]
     fn a_target_resized_before_the_first_frame_carries_the_new_format_forward() {
         // The wait for the first frame is up to ten seconds, which is long
@@ -1699,23 +2379,30 @@ mod tests {
         // old size: a garbled picture in a track that declares the wrong
         // dimensions, and nothing downstream that can tell (AGENTS.md section
         // 22).
-        let mut format = format_of(1280, 720);
-        let mut backend = ScriptedBackend::new(format, [Step::Resized(1920, 1080)]);
+        let (factory, mut fallback, mut backend) = blind_capture(vec![Step::Resized(1920, 1080)]);
+        let mut format = format_of(TEST_SIZE.0, TEST_SIZE.1);
         let stop = StopAfter::polls(2);
 
-        let error = first_frame_device(&mut backend, &stop, &mut format)
-            .expect_err("a scripted backend never produces a frame");
+        let error = first_frame_device(backend.as_mut(), &mut fallback, &stop, &mut format)
+            .expect_err("a scripted backend with no texture never produces a frame");
 
         assert!(
             matches!(error, SessionError::NoFrames),
             "the wait should end with `no frames`, not {error}"
         );
-        assert_eq!(backend.resizes, 1, "the backend should have been rebuilt");
+        assert_eq!(factory.resizes(), 1, "the backend should have been rebuilt");
         assert_eq!(
             format,
             format_of(1920, 1080),
             "the recording must be configured from the format `resize` returned, not the one \
              `initialise` did"
+        );
+        assert_eq!(
+            fallback.committed_format(),
+            format_of(1920, 1080),
+            "the resize must go through the fallback, or every later replacement is judged \
+             against a size this recording no longer uses and is refused for producing exactly \
+             the right frames (issue #285)"
         );
     }
 
@@ -1727,12 +2414,12 @@ mod tests {
         // the wait for the first frame runs on exactly as it does for a window
         // that has not drawn yet; what must not happen is an error, a hang, or a
         // frame format built out of the minimised shape (issue #383).
-        let mut format = format_of(1280, 720);
-        let mut backend =
-            ScriptedBackend::new(format, [Step::Minimised, Step::Minimised, Step::Minimised]);
+        let (factory, mut fallback, mut backend) =
+            blind_capture(vec![Step::Minimised, Step::Minimised, Step::Minimised]);
+        let mut format = format_of(TEST_SIZE.0, TEST_SIZE.1);
         let stop = StopAfter::polls(3);
 
-        let error = first_frame_device(&mut backend, &stop, &mut format)
+        let error = first_frame_device(backend.as_mut(), &mut fallback, &stop, &mut format)
             .expect_err("a minimised window produces no frame to take a device from");
 
         assert!(
@@ -1740,10 +2427,10 @@ mod tests {
             "a minimised window is a window that produced no frames, not a failure of \
              capture: {error}"
         );
-        assert_eq!(backend.resizes, 0, "there was no size to adopt");
+        assert_eq!(factory.resizes(), 0, "there was no size to adopt");
         assert_eq!(
             format,
-            format_of(1280, 720),
+            format_of(TEST_SIZE.0, TEST_SIZE.1),
             "the format must be the one capture reported, not one derived from the \
              minimised shape"
         );
@@ -1751,14 +2438,14 @@ mod tests {
 
     #[test]
     fn a_target_that_never_changes_size_keeps_the_format_it_was_initialised_with() {
-        let mut format = format_of(1280, 720);
-        let mut backend = ScriptedBackend::new(format, [Step::Nothing]);
+        let (factory, mut fallback, mut backend) = blind_capture(vec![Step::Nothing]);
+        let mut format = format_of(TEST_SIZE.0, TEST_SIZE.1);
         let stop = StopAfter::polls(2);
 
-        let _ = first_frame_device(&mut backend, &stop, &mut format);
+        let _ = first_frame_device(backend.as_mut(), &mut fallback, &stop, &mut format);
 
-        assert_eq!(backend.resizes, 0);
-        assert_eq!(format, format_of(1280, 720));
+        assert_eq!(factory.resizes(), 0);
+        assert_eq!(format, format_of(TEST_SIZE.0, TEST_SIZE.1));
     }
 
     /// A muxer failure with a reason in it, which is what a full disk produces.
@@ -1830,6 +2517,7 @@ mod tests {
             duration: Duration::ZERO,
             end_reason: EndReason::Stopped,
             audio_tracks: Vec::new(),
+            capture_changes: Vec::new(),
         }
     }
 
@@ -2146,9 +2834,28 @@ mod tests {
     }
 
     impl Drop for TemporaryRecording {
+        /// Removed when the test passed, kept when it did not.
+        ///
+        /// The pattern `crates/library/tests/support/mod.rs` uses, and it earns
+        /// its keep here: what these tests produce is a Matroska file, and a
+        /// failed assertion about one is not diagnosable without the file. The
+        /// path is printed so it can be found.
         fn drop(&mut self) {
-            if let Some(directory) = self.0.parent() {
-                let _ = std::fs::remove_dir_all(directory);
+            let Some(directory) = self.0.parent() else {
+                return;
+            };
+            if std::thread::panicking() {
+                eprintln!(
+                    "recording kept for diagnosis: {}",
+                    RedactedPath::new(directory)
+                );
+                return;
+            }
+            if let Err(error) = std::fs::remove_dir_all(directory) {
+                eprintln!(
+                    "the temporary recording could not be removed: {} ({error})",
+                    RedactedPath::new(directory)
+                );
             }
         }
     }
@@ -2399,17 +3106,23 @@ mod tests {
         None
     }
 
-    /// A BGRA texture on `device`, filled with a flat grey.
+    /// A BGRA texture on `device`, with `fill` in every byte of it.
     ///
-    /// The picture does not matter here — what is under test is which
+    /// The picture usually does not matter — what is under test is which
     /// acquisitions are counted as what, not what the encoder made of them — but
     /// the *format* does: `PixelFormat::Bgra8Unorm` is what the scripted format
     /// declares, and the software encoder checks the two agree before it copies
     /// anything (`crates/encoder/src/software/readback.rs`).
+    ///
+    /// It matters in exactly one place. `0x00` everywhere is a capture that has
+    /// silently stopped working — every channel of every pixel zero — and it is
+    /// what `clipped_capture::D3d11FrameSampler` reads back through the real
+    /// Direct3D path in the black-frame test below. `0x40` is an ordinary grey.
     fn test_texture(
         device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
         width: u32,
         height: u32,
+        fill: u8,
     ) -> ID3D11Texture2D {
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
@@ -2434,7 +3147,7 @@ mod tests {
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
-        let pixels = vec![0x40u8; (width as usize) * (height as usize) * 4];
+        let pixels = vec![fill; (width as usize) * (height as usize) * 4];
         let initial = D3D11_SUBRESOURCE_DATA {
             pSysMem: pixels.as_ptr().cast(),
             SysMemPitch: width * 4,
@@ -2530,23 +3243,19 @@ mod tests {
     ) -> (RecordingReport, TemporaryRecording) {
         let device =
             test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
-        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+        let list = candidates(&[leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .painting(device, 0x40)
+                .planning([steps.into_iter().collect()]),
+        )]);
+        let (fallback, backend, format) = scripted_capture(list);
 
-        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
         let recording = TemporaryRecording::new(purpose);
         let settings = buffered_loop_settings(&recording);
-        let mut backend = ScriptedBackend::new(format, steps).drawing(texture);
         let stop = StopAfter::polls(40);
 
-        let report = record_frames(
-            &settings,
-            &stop,
-            &mut backend,
-            format,
-            CaptureMethod::WindowsGraphicsCapture,
-            outputs,
-        )
-        .expect("a capture with frames in it is a capture");
+        let report = record_frames(&settings, &stop, fallback, backend, format, outputs)
+            .expect("a capture with frames in it is a capture");
 
         (report, recording)
     }
@@ -2673,18 +3382,21 @@ mod tests {
         // that could not produce a single clip.
         let device =
             test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
-        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
-        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
+        let list = candidates(&[leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .painting(device, 0x40)
+                .planning([vec![Step::Minimised]]),
+        )]);
+        let (fallback, backend, format) = scripted_capture(list);
         let recording = TemporaryRecording::new("buffered-no-video");
         let settings = buffered_loop_settings(&recording);
-        let mut backend = ScriptedBackend::new(format, [Step::Minimised]).drawing(texture);
 
         let error = record_frames(
             &settings,
             &StopAfter::polls(4),
-            &mut backend,
+            fallback,
+            backend,
             format,
-            CaptureMethod::WindowsGraphicsCapture,
             &crate::RecordingOutputs::default(),
         )
         .expect_err("no frame was ever drawn");
@@ -2705,26 +3417,22 @@ mod tests {
         // section 54).
         let device =
             test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
-        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+        let list = candidates(&[leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .painting(device, 0x40)
+                .planning([steps.into_iter().collect()]),
+        )]);
+        let (fallback, backend, format) = scripted_capture(list);
 
-        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
         let recording = TemporaryRecording::new(purpose);
         let settings = loop_settings(&recording);
-        let mut backend = ScriptedBackend::new(format, steps).drawing(texture);
         // Far beyond the script, so the loop ends because it was asked to and
         // not because the script ran out: the steps after the last one are
         // ordinary timeouts, which is what an idle source looks like.
         let stop = StopAfter::polls(40);
 
-        record_frames(
-            &settings,
-            &stop,
-            &mut backend,
-            format,
-            CaptureMethod::WindowsGraphicsCapture,
-            outputs,
-        )
-        .expect("a recording with frames in it is a recording")
+        record_frames(&settings, &stop, fallback, backend, format, outputs)
+            .expect("a recording with frames in it is a recording")
     }
 
     #[test]
@@ -3131,5 +3839,433 @@ mod tests {
             "five acquisitions in two stretches is two stretches"
         );
         assert_eq!(report.frames_captured(), 3);
+    }
+
+    #[test]
+    fn a_reopened_encoder_is_held_to_what_the_file_already_declares() {
+        // The judgement that keeps a recovery from corrupting a file. Matroska
+        // writes a track's codec and its out-of-band parameter sets once, in the
+        // header, so an encoder reopened against a replacement backend's device
+        // has to produce the same ones or its packets decode against a codec
+        // header describing something else — in a file that looks finished.
+        //
+        // Tested here rather than through a recovery because forcing a real
+        // second encoder to disagree needs a machine whose preferred encoder
+        // stops existing between two calls, which is exactly the driver reset
+        // this guards against and exactly what cannot be arranged.
+        let declared = TrackDeclaration {
+            codec: Codec::H264,
+            parameter_sets: vec![0x00, 0x00, 0x01, 0x67, 0x42],
+        };
+
+        assert_eq!(
+            declared.refuses(
+                EncoderKind::Software,
+                Codec::H264,
+                &[0x00, 0x00, 0x01, 0x67, 0x42]
+            ),
+            None,
+            "the ordinary case: the same encoder, at the same size, for the same codec"
+        );
+
+        let different_sets = declared
+            .refuses(EncoderKind::Nvenc, Codec::H264, &[0x00, 0x00, 0x01, 0x67])
+            .expect("a stream the track does not describe cannot go into it");
+        assert!(
+            different_sets.contains("NVENC") && different_sets.contains("H.264"),
+            "the refusal must name the encoder and the codec so it can be acted on: \
+             {different_sets}"
+        );
+
+        let different_codec = declared
+            .refuses(
+                EncoderKind::Amf,
+                Codec::Hevc,
+                &[0x00, 0x00, 0x01, 0x67, 0x42],
+            )
+            .expect("a track declaring H.264 cannot contain HEVC");
+        assert!(
+            different_codec.contains("HEVC") && different_codec.contains("H.264"),
+            "the refusal must name both codecs, or it says nothing about which is wrong: \
+             {different_codec}"
+        );
+    }
+
+    // ---- capture that breaks mid-recording ---------------------------------
+    //
+    // Issues #285 and #97, and the one thing a unit test of `CaptureFallback`
+    // cannot say: whether the recording loop consults it. Every test below
+    // breaks capture *during* a recording and asks what the file and the report
+    // turned out to be — the real fallback policy, a real replacement backend on
+    // its own Direct3D device, the real encoder reopened against that device,
+    // and a real Matroska file at the end of it.
+    //
+    // None of them needs a window, a compositor or a display, which is what lets
+    // CI cover a path no hardware will reproduce on request: WARP is a Direct3D
+    // device and a `ScriptedFactory` is a backend that fails when it is told to.
+
+    /// Everything a fallback test wants to know afterwards.
+    struct Recovered {
+        report: RecordingReport,
+        /// Kept so the file outlives the assertions; dropping it removes the
+        /// directory, and keeps it when a test failed.
+        recording: TemporaryRecording,
+        preferred: &'static ScriptedFactory,
+        replacement: &'static ScriptedFactory,
+    }
+
+    /// Records a script that breaks, with a second backend behind it.
+    ///
+    /// The two factories paint their textures on **two different Direct3D
+    /// devices**, which is what makes this a test of the encoder being reopened
+    /// rather than of the backend being swapped: an encoder session can only
+    /// bind textures belonging to the device it was opened against, so a
+    /// recording that carried on submitting frames to the first session would
+    /// fail at the driver.
+    ///
+    /// Each factory is given one script per backend it will be asked to make,
+    /// in order, because a backend that is *restarted* is a second backend from
+    /// the same factory and needs its own.
+    fn recording_that_recovers(
+        purpose: &str,
+        preferred_fill: u8,
+        preferred: Vec<Vec<Step>>,
+        replacement: Vec<Vec<Step>>,
+        polls: u64,
+    ) -> Result<Recovered, (SessionError, TemporaryRecording)> {
+        let first = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        let second = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        assert_ne!(
+            first.as_raw(),
+            second.as_raw(),
+            "the two backends must be on different graphics devices, or this says nothing about \
+             the encoder being reopened"
+        );
+
+        // One clock between them, because both Windows backends stamp frames
+        // from the machine's performance counter: a replacement carries on from
+        // where the failed one stopped rather than handing the recording's
+        // timeline moments it has already been given.
+        let clock = counter();
+        let preferred = leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, clock)
+                .painting(first, preferred_fill)
+                .planning(preferred),
+        );
+        let replacement = leaked(
+            ScriptedFactory::new(CaptureMethod::DesktopDuplication, clock)
+                .painting(second, 0x40)
+                .planning(replacement),
+        );
+
+        let (fallback, backend, format) = scripted_capture(candidates(&[preferred, replacement]));
+        assert_eq!(
+            fallback.current_method(),
+            CaptureMethod::WindowsGraphicsCapture,
+            "selection prefers Windows Graphics Capture, so that is what has to fail"
+        );
+
+        let recording = TemporaryRecording::new(purpose);
+        let settings = loop_settings(&recording);
+        match record_frames(
+            &settings,
+            &StopAfter::polls(polls),
+            fallback,
+            backend,
+            format,
+            &crate::RecordingOutputs::default(),
+        ) {
+            Ok(report) => Ok(Recovered {
+                report,
+                recording,
+                preferred,
+                replacement,
+            }),
+            Err(error) => Err((error, recording)),
+        }
+    }
+
+    /// Asserts that `recording` is a Matroska file with a decodable H.264 track
+    /// of at least `frames` pictures in it.
+    ///
+    /// Decoded rather than counted: the whole question a fallback raises about a
+    /// file is whether the pictures *after* the change can be decoded against
+    /// the codec header written *before* it, and only a decoder can answer that
+    /// (AGENTS.md section 22).
+    fn decodes_at_least(recording: &TemporaryRecording, frames: u64) {
+        use clipped_media_validation::{require_media_tools, Media, VideoStream};
+
+        if require_media_tools().is_none() {
+            return;
+        }
+        Media::open(recording.path())
+            .expect("a finished recording opens")
+            .validate()
+            .video_stream_count(1)
+            .video(
+                VideoStream::codec("h264")
+                    .resolution(TEST_SIZE.0, TEST_SIZE.1)
+                    .decoded_frames_at_least(frames),
+            )
+            .assert_valid();
+    }
+
+    #[test]
+    fn a_backend_that_fails_mid_recording_is_replaced_and_the_recording_carries_on() {
+        // Issue #285's first and second acceptance criteria, against a forced
+        // failure rather than a unit test of the branch.
+        //
+        // Before this, `Err(error)` in the acquisition arm ended the recording:
+        // a window that turned out to be uncapturable finished the file where it
+        // stood, on a machine whose other backend would have gone on recording
+        // for the rest of the session. The `CaptureFallback` that knows how to
+        // replace it was built, asked once which method it had chosen, and
+        // dropped.
+        let recovered = recording_that_recovers(
+            "capture-fallback",
+            0x40,
+            vec![vec![
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Fails(opted_out),
+            ]],
+            vec![vec![Step::Drew; 20]],
+            60,
+        )
+        .unwrap_or_else(|(error, _recording)| {
+            panic!("the recording should have survived its backend failing: {error}")
+        });
+        let report = &recovered.report;
+
+        assert_eq!(
+            report.capture_method(),
+            CaptureMethod::DesktopDuplication,
+            "the report must name the method actually in use at the end, not the one selection \
+             chose at the start (issue #285)"
+        );
+        let changes = report.capture_changes();
+        assert_eq!(changes.len(), 1, "one replacement happened: {changes:?}");
+        assert_eq!(changes[0].from(), CaptureMethod::WindowsGraphicsCapture);
+        assert_eq!(changes[0].to(), CaptureMethod::DesktopDuplication);
+        assert_eq!(
+            changes[0].trigger(),
+            clipped_capture::FallbackTrigger::CaptureFailed
+        );
+        assert!(
+            changes[0].reason().contains("opted out"),
+            "the change must carry the failure in the words the failure used: {}",
+            changes[0].reason()
+        );
+
+        assert_eq!(
+            recovered.preferred.creations(),
+            1,
+            "a method that has failed is never asked again in the same recording"
+        );
+        assert_eq!(recovered.replacement.creations(), 1);
+        assert!(
+            recovered.preferred.shut_downs() >= 1,
+            "the failed backend must be shut down before the platform is asked for another; \
+             DXGI gives a process one duplication per display"
+        );
+
+        // Both halves are in the file. Three frames came from the preferred
+        // backend and one of those opened the encoder, so anything past two is
+        // video the replacement produced — and the count would be two exactly if
+        // the recording had ended at the failure.
+        assert!(
+            report.frames_encoded() > 2,
+            "the recording stopped at the failure instead of carrying on: {} frames",
+            report.frames_encoded()
+        );
+        assert_eq!(
+            report.packets_written(),
+            report.frames_encoded(),
+            "the replacement's packets did not reach the file"
+        );
+        assert!(matches!(report.end_reason(), EndReason::Stopped));
+
+        // And it is one playable file rather than two halves that happen to be
+        // adjacent: the pictures after the change decode against the codec
+        // header written before it.
+        decodes_at_least(&recovered.recording, report.frames_encoded());
+    }
+
+    #[test]
+    fn a_capture_that_has_gone_black_is_replaced_rather_than_recorded_to_the_end() {
+        // Issue #97's unmet criterion, and the only capture failure that returns
+        // no error at all: a capture that has silently stopped working goes on
+        // handing over frames and every pixel in them is zero. The detector for
+        // it was built and measured against real Direct3D textures, and until
+        // this it had no caller — so no recording ever asked whether its frames
+        // had gone black, and a black file was reported as a successful one.
+        //
+        // The texture here is genuinely black on a genuine Direct3D device and
+        // the sampler reading it is the production one: nothing about this test
+        // is arranged to make the judgement come out a particular way.
+        //
+        // `BlackFrameWatch` tolerates ten seconds and samples twice a second, so
+        // the black stretch has to be at least that long on the source's own
+        // clock. The first sample is the loop's first frame, at 200 ms — the
+        // frame before it opened the encoder — and the twenty-first is at
+        // 10,200 ms, which is the 102nd frame this backend produces. The script
+        // has more than that so the detection rather than the script is what
+        // ends the black stretch.
+        let recovered = recording_that_recovers(
+            "capture-gone-black",
+            0x00,
+            vec![vec![Step::Drew; 115]],
+            vec![vec![Step::Drew; 10]],
+            200,
+        )
+        .unwrap_or_else(|(error, _recording)| {
+            panic!("a black capture should be replaced, not fatal: {error}")
+        });
+        let report = &recovered.report;
+
+        let changes = report.capture_changes();
+        assert_eq!(
+            changes.len(),
+            1,
+            "a capture that produced nothing but black for over ten seconds was recorded to the \
+             end and reported as a successful recording (issues #97 and #285): {changes:?}"
+        );
+        assert_eq!(
+            changes[0].trigger(),
+            clipped_capture::FallbackTrigger::BlackFrames,
+            "the change must be attributed to the black frames rather than to an error, because \
+             there was no error: {changes:?}"
+        );
+        assert_eq!(
+            report.capture_method(),
+            CaptureMethod::DesktopDuplication,
+            "the black backend went on capturing"
+        );
+        assert!(
+            changes[0].reason().contains("black"),
+            "the reason must say what was seen: {}",
+            changes[0].reason()
+        );
+        assert!(
+            recovered.replacement.creations() == 1,
+            "no replacement was ever created"
+        );
+
+        // The lit backend's frames are in the file after the black ones. 101 of
+        // the black backend's 102 reached the loop — the first opened the
+        // encoder — and nine of the replacement's ten did, for the same reason.
+        // Counted as *captured* rather than as encoded because a writer that
+        // falls behind drops encodes, which is a fact about the machine.
+        assert_eq!(
+            report.frames_captured(),
+            110,
+            "101 black frames and 9 lit ones is what this script produces; a different number \
+             means the black run was measured somewhere else"
+        );
+        assert!(
+            report.frames_encoded() > 101,
+            "the recording did not carry on after the black capture was replaced: {} frames",
+            report.frames_encoded()
+        );
+        decodes_at_least(&recovered.recording, report.frames_encoded());
+    }
+
+    #[test]
+    fn an_interrupted_backend_is_restarted_rather_than_given_up_on() {
+        // `CaptureError::Interrupted` is a driver reset or a mode change, and it
+        // says outright that the target is still where it was — so the *same*
+        // backend is started again rather than the preferred method being lost
+        // for the rest of the recording. The encoder is still reopened, because
+        // the restarted backend brings a new session with it.
+        let recovered = recording_that_recovers(
+            "capture-interrupted",
+            0x40,
+            // Two scripts for one factory: the second is the backend the
+            // restart creates, which is a new backend from the same method.
+            vec![
+                vec![Step::Drew, Step::Drew, Step::Fails(interrupted)],
+                vec![Step::Drew; 10],
+            ],
+            vec![Vec::new()],
+            60,
+        )
+        .unwrap_or_else(|(error, _recording)| {
+            panic!("an interrupted backend should be restarted: {error}")
+        });
+        let report = &recovered.report;
+
+        let changes = report.capture_changes();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(
+            changes[0].is_restart(),
+            "a driver reset restarts the backend it interrupted; falling back would cost the \
+             user their preferred method for a fault it did not have: {changes:?}"
+        );
+        assert_eq!(
+            report.capture_method(),
+            CaptureMethod::WindowsGraphicsCapture,
+            "the method did not change, so the report must not say it did"
+        );
+        assert_eq!(
+            recovered.preferred.creations(),
+            2,
+            "the same factory should have been asked for a second backend"
+        );
+        assert_eq!(
+            recovered.replacement.creations(),
+            0,
+            "the other method was never needed and must not have been created"
+        );
+        assert!(report.frames_encoded() > 1);
+        decodes_at_least(&recovered.recording, report.frames_encoded());
+    }
+
+    #[test]
+    fn a_failure_nothing_can_take_over_from_still_leaves_the_recording_that_was_made() {
+        // The half of this that must not regress. Recovery runs on every
+        // recording and the failure it guards against is rare, so a bug in it
+        // would cost footage that would otherwise have been fine (AGENTS.md
+        // section 56). When there is no second backend the answer has to be
+        // exactly what it was before any of this existed: the file is finalised
+        // where it stands, everything up to the failure plays, and the error
+        // says what was tried.
+        let device = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        let only = leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .painting(device, 0x40)
+                .planning([vec![
+                    Step::Drew,
+                    Step::Drew,
+                    Step::Drew,
+                    Step::Fails(opted_out),
+                ]]),
+        );
+        let (fallback, backend, format) = scripted_capture(candidates(&[only]));
+
+        let recording = TemporaryRecording::new("capture-exhausted");
+        let settings = loop_settings(&recording);
+        let error = record_frames(
+            &settings,
+            &StopAfter::polls(40),
+            fallback,
+            backend,
+            format,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect_err("there was no other backend to take over");
+
+        assert!(
+            matches!(error, SessionError::CaptureExhausted(_)),
+            "the user is owed every candidate that was tried and what each said: {error}"
+        );
+        assert!(
+            recording.path().exists(),
+            "the recording made before the failure is the thing that cannot be made again \
+             (AGENTS.md section 17); it was deleted"
+        );
+        // Two frames reached the encoder — the first opened it — so the file has
+        // video in it and is not the empty header `conclude` removes.
+        decodes_at_least(&recording, 1);
     }
 }
