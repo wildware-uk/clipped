@@ -28,6 +28,19 @@
 //! against. Reporting an overhead smaller than that difference would be
 //! reporting nothing.
 //!
+//! The whole measurement is repeated up to [`ATTEMPTS`] times and the *lowest*
+//! overhead is the one asserted on, which is the same argument as keeping the
+//! fastest round, one level up. Keeping the fastest round protects against a
+//! scheduling event landing inside one round; it cannot protect against a host
+//! that is contended for the whole of one measurement, which is what a shared
+//! CI runner does. That produced a failure on `main`
+//! ([issue #631](https://github.com/wildware-uk/clipped/issues/631)): a
+//! disabled `debug!` measured at 14.589 ns against a 9.931 ns bound, when five
+//! runs on an idle machine put it at 2.543 to 2.593 ns and the noise floor of
+//! that CI run was 1.787 ns against a local 0.18. An attempt is only ever made
+//! slower by the machine, so the lowest of several is the honest estimate and a
+//! regression still shows in every one of them.
+//!
 //! This binary contains one test, deliberately. Installing a second subscriber
 //! anywhere in the process makes `tracing` abandon its cached per-callsite
 //! decisions, and the disabled `debug!` then costs several times as much —
@@ -51,6 +64,21 @@ const ITERATIONS: u64 = 5_000_000;
 /// Rounds per loop. Nine is enough for the fastest round to settle without the
 /// test taking long enough to be skipped.
 const ROUNDS: usize = 9;
+
+/// How many times the whole measurement may be repeated before it is believed.
+///
+/// Keeping the fastest of [`ROUNDS`] handles a scheduling event inside a round.
+/// It does nothing about a host contended for the whole of one loop's rounds,
+/// which is what a shared runner does and what failed `main` in
+/// [issue #631](https://github.com/wildware-uk/clipped/issues/631). Repeating
+/// the measurement and keeping the lowest overhead is the same reasoning
+/// applied to the thing above a round.
+///
+/// Three, because one attempt costs under a second and the failure being
+/// guarded against is transient: a run contended through all three attempts is
+/// a machine that could not have measured anything, and a regression is present
+/// in every attempt so the lowest still shows it.
+const ATTEMPTS: usize = 3;
 
 /// The largest per-iteration overhead accepted from a disabled `debug!`, in
 /// nanoseconds, on a machine where the baseline loop is faster than this.
@@ -179,12 +207,33 @@ fn disabled_logging_costs_nothing_measurable_in_a_hot_loop() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("no other test in this binary installs a subscriber");
 
-    let measurements = nanoseconds_per_iteration(&[
-        without_logging,
-        without_logging_again,
-        with_frame_trace,
-        with_disabled_debug,
-    ]);
+    // The lowest overhead of several whole measurements, for the reason the
+    // module documentation gives: a contended host inflates an entire attempt,
+    // which keeping the fastest round cannot undo. Each attempt is scored by the
+    // disabled `debug!` overhead, because that is the tighter of the two
+    // assertions and the one issue #631 failed on — and the attempt that wins
+    // brings its own baseline, control and `trace_frame!` figures with it, so
+    // every number asserted on comes from one self-consistent measurement
+    // rather than from the best of each column taken separately.
+    let mut best: Option<Vec<f64>> = None;
+    for _ in 0..ATTEMPTS {
+        let attempt = nanoseconds_per_iteration(&[
+            without_logging,
+            without_logging_again,
+            with_frame_trace,
+            with_disabled_debug,
+        ]);
+        let overhead = attempt[3] - attempt[0];
+        let better = match &best {
+            Some(kept) => overhead < kept[3] - kept[0],
+            None => true,
+        };
+        if better {
+            best = Some(attempt);
+        }
+    }
+    let measurements = best.expect("ATTEMPTS is not zero, so an attempt was kept");
+
     let (baseline, control) = (measurements[0], measurements[1]);
     let (frame_trace, disabled_debug) = (measurements[2], measurements[3]);
 
@@ -194,7 +243,7 @@ fn disabled_logging_costs_nothing_measurable_in_a_hot_loop() {
 
     eprintln!(
         "iterations per round: {ITERATIONS}, rounds: {ROUNDS}, \
-         frame-tracing feature: {}\n\
+         attempts: {ATTEMPTS}, frame-tracing feature: {}\n\
          baseline                  {baseline:.3} ns/iteration\n\
          baseline (repeated)       {control:.3} ns/iteration  \
          (noise floor {noise_floor:.3})\n\
