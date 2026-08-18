@@ -637,6 +637,10 @@ mod tests {
                     accepted: "true or false".to_owned(),
                     applies: true,
                     unavailable: None,
+                    // A notification switch is global and has no automatic
+                    // recording waiting on it, so it is never held back
+                    // (issue #609, `clipped_ipc::SettingEntry`).
+                    not_yet_in_force: None,
                 })
                 .collect(),
         }
