@@ -127,6 +127,8 @@ function Field({
         <p className="clipped-muted" id={hintId(entry.key)}>
           {entry.overridden ? 'You changed this.' : 'Clipped ships with this on.'}
         </p>
+
+        <NotYetInForce entry={entry} />
       </div>
     );
   }
@@ -217,7 +219,36 @@ function Field({
           {describeSettingsProblem(devices.problem)}
         </p>
       ) : null}
+
+      <NotYetInForce entry={entry} />
     </div>
+  );
+}
+
+/**
+ * What is still in force, for a value that is saved and not yet the one being
+ * used.
+ *
+ * The recording directory is the only setting that can be in this state, and it
+ * is for the length of one sitting: where automatic recordings are written moves
+ * between sittings and never during one, so that a sitting’s session record is
+ * never separated from the files it names (AGENTS.md section 56, issue #609).
+ * Without this the control looks as though it did nothing — the folder on screen
+ * is the one that was saved, and the footage is going somewhere else (AGENTS.md
+ * section 27).
+ *
+ * The recorder’s own sentence, because only the recorder knows what is in force.
+ * `role="status"` so that a screen reader is told when it appears, which is
+ * immediately after the save it explains.
+ */
+function NotYetInForce({ entry }: { readonly entry: SettingEntry }): ReactNode {
+  if (entry.not_yet_in_force === undefined) {
+    return null;
+  }
+  return (
+    <p className="clipped-muted" role="status">
+      {entry.not_yet_in_force}
+    </p>
   );
 }
 

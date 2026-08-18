@@ -309,6 +309,52 @@ describe('the Settings screen', () => {
   });
 
   /*
+   * Where automatic recordings are written moves between sittings and never
+   * during one, so that a sitting’s session record is never separated from the
+   * files it names (AGENTS.md section 56, issue #609). For the length of the
+   * sitting that is open the folder on screen is therefore the one that was
+   * saved and not the one the footage is going to — which, unsaid, is a control
+   * that appears to have done nothing (AGENTS.md section 27).
+   *
+   * The sentence is the recorder’s: only it knows what is in force. What this
+   * screen has to get right is drawing it *beside* the control rather than in
+   * place of it, since the value is still editable and still what was saved.
+   */
+  it('says where recordings still go while a saved folder is waiting on a sitting', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      recorderSettings: () =>
+        settingsWith('recording_directory', {
+          value: String.raw`D:\Clips`,
+          overridden: true,
+          not_yet_in_force: String.raw`Automatic recordings still go to C:\Users\alex\Videos\Clipped. They go here from the next session.`,
+        }),
+    });
+
+    await openSection(user, 'Storage');
+
+    // Still a control, and still holding what was saved: this is not a setting
+    // nothing reads, which is the row `unavailable` is for.
+    expect(await screen.findByLabelText('Recording directory')).toHaveValue(String.raw`D:\Clips`);
+    expect(pane()).toHaveTextContent(
+      String.raw`Automatic recordings still go to C:\Users\alex\Videos\Clipped. They go here from the next session.`,
+    );
+  });
+
+  it('says nothing about waiting when the folder is the one being used', async () => {
+    // The other half, and the one that keeps the sentence honest: a recorder
+    // with nothing to wait for sends no `not_yet_in_force`, and a screen that
+    // invented a delay would be describing one that is not there.
+    const user = userEvent.setup();
+    renderScreen();
+
+    await openSection(user, 'Storage');
+    await screen.findByLabelText('Recording directory');
+
+    expect(pane()).not.toHaveTextContent('Automatic recordings still go to');
+  });
+
+  /*
    * Save says "save changes" in front of the section it is in, so that is what
    * it saves. An edit left in another pane is somebody's to come back to, and a
    * button that quietly sent it as well would be doing something it did not say

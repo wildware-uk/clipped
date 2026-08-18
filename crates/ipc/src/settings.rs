@@ -122,6 +122,26 @@ pub struct SettingEntry {
     /// count. Absent for a setting that is in force.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+    /// What is still in force, for a saved value that is not yet the one being
+    /// used.
+    ///
+    /// A different thing from [`unavailable`](Self::unavailable): that one is a
+    /// setting nothing reads at all, and this is one that is read and has not
+    /// got there yet. Absent for every setting whose new value is used by the
+    /// next recording, which is all of them but one.
+    ///
+    /// The one is the recording directory. Where automatic recordings are
+    /// written moves **between sittings and never during one**, because a
+    /// sitting's session record is written next to the files it names and the
+    /// two must not be separated (AGENTS.md section 56,
+    /// `clipped_session::automatic::SessionManager::set_recording_directory`).
+    /// A directory saved while a game is being recorded is therefore saved but
+    /// not yet used, and a screen that drew it as the answer would be saying
+    /// something untrue about where the next few minutes of footage is going
+    /// (AGENTS.md section 27,
+    /// [issue #609](https://github.com/wildware-uk/clipped/issues/609)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_yet_in_force: Option<String>,
 }
 
 /// The settings, and the file they came from.
@@ -277,6 +297,7 @@ mod tests {
             unavailable: Some(
                 "a recording still captures the game's window (issue #61)".to_owned(),
             ),
+            not_yet_in_force: None,
         };
 
         let json = serde_json::to_string(&entry).expect("it serialises");
@@ -301,12 +322,56 @@ mod tests {
             accepted: "1-480 frames per second".to_owned(),
             applies: true,
             unavailable: None,
+            not_yet_in_force: None,
         };
 
         let json = serde_json::to_string(&entry).expect("it serialises");
         assert!(
-            !json.contains("unavailable") && !json.contains("choices"),
-            "an absent reason and an open value set are absent fields: {json}",
+            !json.contains("unavailable")
+                && !json.contains("choices")
+                && !json.contains("not_yet_in_force"),
+            "an absent reason, an open value set and a setting that is already in force are \
+             absent fields: {json}",
+        );
+        assert_eq!(
+            serde_json::from_str::<SettingEntry>(&json).expect("and deserialises"),
+            entry,
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_saved_and_not_yet_used_says_where_recordings_are_still_going() {
+        // The distinction the field exists for. `applies` is true and
+        // `unavailable` is absent — the recorder does read this setting — and
+        // what a window must still be able to say is that the folder on screen
+        // is not where the next few minutes of footage is going, because the
+        // sitting that is open keeps its recordings and its session record
+        // together (AGENTS.md sections 27 and 56, issue #609).
+        let entry = SettingEntry {
+            key: "recording_directory".to_owned(),
+            label: "Recording directory".to_owned(),
+            value: r"D:\Clips".to_owned(),
+            overridden: true,
+            choices: Vec::new(),
+            accepted: r"a folder on this machine, such as D:\Clips".to_owned(),
+            applies: true,
+            unavailable: None,
+            not_yet_in_force: Some(
+                r"Automatic recordings still go to C:\Users\alex\Videos\Clipped. They go here \
+                  from the next session."
+                    .to_owned(),
+            ),
+        };
+
+        let json = serde_json::to_string(&entry).expect("it serialises");
+        assert!(
+            !json.contains("unavailable"),
+            "a setting the recorder does read must not arrive as one it does not: {json}",
+        );
+        assert!(
+            json.contains("not_yet_in_force"),
+            "and a window cannot say when a saved value starts counting unless the sentence \
+             crosses: {json}",
         );
         assert_eq!(
             serde_json::from_str::<SettingEntry>(&json).expect("and deserialises"),

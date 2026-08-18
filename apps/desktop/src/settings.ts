@@ -558,9 +558,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: 'storage',
     label: 'Storage',
+    /*
+     * "the next session" and not "the next recording", because those differ for
+     * this one setting. A recording asked for from this window honours a new
+     * folder at once; an automatic one moves between sittings and never during
+     * one, so that a sitting's session record is never separated from the files
+     * it names (AGENTS.md section 56, issue #609). The recorder says so on the
+     * row itself while a sitting is holding a change back.
+     */
     lead:
       'Where recordings go, and what happens when the disk fills. A directory chosen here is ' +
-      'where the recorder writes from the next recording onwards.',
+      'where the recorder writes from the next session onwards.',
     keys: [RECORDING_DIRECTORY],
     rows: [
       {

@@ -503,18 +503,7 @@ fn recordings_directory(
     named: Option<&Path>,
     configured: Option<&Path>,
 ) -> Result<PathBuf, WatchCommandError> {
-    // Three layers, top down: the flag, then the settings file, then the videos
-    // folder this build would pick on its own. The middle one is step 3 of
-    // SPEC.md section 45 - a directory chosen once in the settings screen has to
-    // be the one an automatic recording lands in, since nobody is at a command
-    // line when a game launches (issue #307).
-    let directory = match (named, configured) {
-        (Some(named), _) => named.to_path_buf(),
-        (None, Some(chosen)) => chosen.to_path_buf(),
-        (None, None) => {
-            crate::config::default_output_directory().ok_or(WatchCommandError::NoOutputDirectory)?
-        }
-    };
+    let directory = chosen_recordings_directory(named, configured)?;
 
     // Created here rather than on the first recording, because this command
     // runs for days before it writes anything and "the drive you named is not
@@ -525,6 +514,32 @@ fn recordings_directory(
         source,
     })?;
     Ok(directory)
+}
+
+/// Which directory those three layers name, without making it.
+///
+/// Split out because a directory saved from the Settings screen has to be
+/// resolved *again* while the recorder is running, and the answer has to be the
+/// one this run started with when nothing has changed — a second rule for
+/// "where do recordings go" is the scattering AGENTS.md section 30 forbids, and
+/// two rules that disagreed would have the settings screen offer to move
+/// recordings that were never anywhere else (issue #609).
+fn chosen_recordings_directory(
+    named: Option<&Path>,
+    configured: Option<&Path>,
+) -> Result<PathBuf, WatchCommandError> {
+    // Three layers, top down: the flag, then the settings file, then the videos
+    // folder this build would pick on its own. The middle one is step 3 of
+    // SPEC.md section 45 - a directory chosen once in the settings screen has to
+    // be the one an automatic recording lands in, since nobody is at a command
+    // line when a game launches (issue #307).
+    Ok(match (named, configured) {
+        (Some(named), _) => named.to_path_buf(),
+        (None, Some(chosen)) => chosen.to_path_buf(),
+        (None, None) => {
+            crate::config::default_output_directory().ok_or(WatchCommandError::NoOutputDirectory)?
+        }
+    })
 }
 
 /// The catalogue, with whatever happened to the user's overlay reported.
@@ -950,6 +965,14 @@ impl Driver {
             // #584.
             self.report_the_sitting();
 
+            // And where they are going, which the pass above may just have
+            // changed and which the manager itself changes when it closes a
+            // sitting. A window asking for the settings compares it against
+            // what the file holds, which is how it can say that a directory
+            // somebody saved a minute ago is saved and not yet in use
+            // (issue #609).
+            self.say_where_recordings_are_going();
+
             // First of all, and before the recording that is running can be
             // collected: `stop_recording` raises the flag *before* it raises
             // the stop signal, so a pass that sees the recording finished has
@@ -1063,19 +1086,18 @@ impl Driver {
     /// `apply_settings` last wrote them — rather than a global half laid over
     /// per-game entries this driver had been carrying (AGENTS.md section 30).
     ///
-    /// And **not the recording directory**, which is not in the configuration
-    /// this replaces. Where automatic recordings are written is resolved once
-    /// by [`recordings_directory`] before this thread starts and frozen into
-    /// the manager's `AutomaticSettings`, which has no setter; a directory
-    /// saved from the Settings screen therefore still reaches automatic
-    /// recordings only after a restart. That is the same criterion — SPEC.md
-    /// section 45 names the directory beside the microphone in step 3 — but it
-    /// is different state with a question of its own attached: the session
-    /// sidecar is written next to the recordings it describes, so moving the
-    /// directory while a sitting is open would leave a session record in one
-    /// folder and its own files in another (AGENTS.md section 56). It wants
-    /// deciding rather than assuming, and is deliberately left for an issue of
-    /// its own rather than ridden in on this one.
+    /// # The recording directory travels the same pass, and lands differently
+    ///
+    /// Where automatic recordings are written is **not** in the `Configuration`
+    /// this replaces: it is frozen into the manager's `AutomaticSettings` by
+    /// [`recordings_directory`] before this thread starts. It rides this same
+    /// generation check — one mechanism, not two — and is handed over by
+    /// [`Self::take_the_directory_the_user_saved`], which is where the
+    /// difference between the two is: a configuration reaches the next
+    /// *recording*, and a directory reaches the next *sitting*. A session's
+    /// record is written next to the files it names, so a directory that moved
+    /// half way through a sitting would leave the record in one folder and some
+    /// of its own recordings in another (AGENTS.md section 56, issue #609).
     ///
     /// Nothing happens under `watch`, which serves no protocol: there is no
     /// Settings screen to save from, so the start-up configuration is still the
@@ -1095,8 +1117,117 @@ impl Driver {
             return;
         }
 
-        self.manager.set_configuration(recordings.configuration());
+        let configuration = recordings.configuration();
+        let configured = configuration
+            .storage()
+            .recording_directory()
+            .map(Path::to_path_buf);
+        self.manager.set_configuration(configuration);
+        self.take_the_directory_the_user_saved(configured.as_deref());
         self.settings_generation = Some(generation);
+    }
+
+    /// Gives the manager the recording directory the Settings screen last
+    /// saved.
+    ///
+    /// # Where it lands, and when
+    ///
+    /// [`SessionManager::set_recording_directory`] decides that, and the rule is
+    /// **between sittings, never during one**: a sitting's session record is
+    /// written next to the recordings it names, and a directory that moved half
+    /// way through would separate the two — silently, because every file is
+    /// still on disk and nothing is left able to say which sitting they
+    /// belonged to (AGENTS.md section 56). With no sitting open it is in force
+    /// at once, which is the case whenever nobody is playing; with one open it
+    /// is held until the manager closes that sitting.
+    ///
+    /// # Why the folder is made here
+    ///
+    /// For the reason [`recordings_directory`] makes it at start-up: this
+    /// recorder may run for days before it writes anything, and "the drive you
+    /// named is not there" is not a thing to find out at the moment a game
+    /// launches (AGENTS.md section 17). Doing it when the save arrives is as
+    /// close to the moment somebody could act on the failure as this loop gets.
+    ///
+    /// **A folder that cannot be made is still taken.** The alternative is a
+    /// setting the user saved, saw accepted, and which silently does not apply
+    /// — and the failure is already handled where it belongs: a recording
+    /// starting into a directory that is missing, is not a directory, or cannot
+    /// be written to fails naming it (`crate::config::ConfigError`), which is a
+    /// reported failure rather than a control that lies.
+    ///
+    /// # Threads
+    ///
+    /// The watcher's own loop, on a pass that follows a save and on no other:
+    /// one relaxed atomic load is what gets this far, so the directory read and
+    /// the `create_dir_all` happen once per save rather than once a second. No
+    /// capture thread reaches here, and a recording in progress is untouched --
+    /// it was given its output path when it started (AGENTS.md section 20).
+    fn take_the_directory_the_user_saved(&mut self, configured: Option<&Path>) {
+        // Resolved by the same three layers `run` resolved it by, so that a
+        // settings file which says nothing lands back on the same default
+        // rather than looking like a change. `None` for the flag: the recorder
+        // that serves a Settings screen has no `--output-directory` of its own,
+        // and one that did would be honouring what somebody typed for this run
+        // over what a window saved.
+        let directory = match chosen_recordings_directory(None, configured) {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the recording directory that was saved could not be resolved, so automatic \
+                     recordings keep going where they were going"
+                );
+                return;
+            }
+        };
+
+        // Handed over whether or not it looks like a change, and the manager
+        // decides. It is the one that knows where recordings are going *and*
+        // where a sitting is holding them back from going, and a second copy of
+        // that rule here got it wrong in exactly one case: somebody who picks a
+        // folder mid-game and then picks the old one back would have had the
+        // first choice arrive anyway when the sitting ended, because from out
+        // here the second save looks like no change at all (AGENTS.md
+        // section 30).
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            tracing::warn!(
+                directory = %RedactedPath::new(&directory),
+                %error,
+                "the recording directory that was saved could not be created; it is still what \
+                 automatic recordings will be started into, and one that cannot be written to \
+                 fails naming it"
+            );
+        }
+
+        if !self.manager.set_recording_directory(directory.clone()) {
+            eprintln!(
+                "Recordings will go to {} from the next session. The sitting that is open keeps \
+                 its recordings where they are.",
+                directory.display()
+            );
+        }
+    }
+
+    /// Puts where automatic recordings are going on the state the protocol
+    /// reads.
+    ///
+    /// It is what the Settings screen's "recordings still go to ..." sentence is
+    /// answered from (`crate::settings::note_where_recordings_still_go`), and
+    /// it has to come from here rather than from the settings file, because the
+    /// file holds what was *saved* and this holds what is in *force* — which
+    /// are the same thing except during the one sitting that separates them.
+    ///
+    /// Once a pass, like [`Self::report_the_sitting`], and for the same reason:
+    /// the manager moves the directory itself when a sitting ends, so nothing
+    /// else knows the moment it happened. It is one small lock and a path
+    /// comparison on a loop that turns over about once a second, on no capture
+    /// thread.
+    fn say_where_recordings_are_going(&self) {
+        let Some(recordings) = self.recordings.as_ref() else {
+            return;
+        };
+        recordings.automatic_recordings_go_to(self.manager.recording_directory());
     }
 
     /// Puts the sitting this recorder is in on the status the protocol reports,

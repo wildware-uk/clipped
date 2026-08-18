@@ -111,7 +111,7 @@ use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
     ReplaySummary, Reply, SaveReplay, ScreenshotSummary, Server, ServerError, SessionSummary,
-    StartRecording, StopRecording, TakeScreenshot, TransportError, Watching,
+    SettingsView, StartRecording, StopRecording, TakeScreenshot, TransportError, Watching,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
@@ -601,6 +601,29 @@ impl RecorderService {
         &self.recordings
     }
 
+    /// The settings, with the one that is saved and not yet in use said so.
+    ///
+    /// Every answer this service gives about the settings goes through here,
+    /// because the file alone cannot tell the whole truth about one of them.
+    /// Where automatic recordings are written moves **between sittings and
+    /// never during one** — a sitting's session record is written next to the
+    /// files it names, and the two must not be separated (AGENTS.md section 56)
+    /// — so for the length of a sitting the file holds a folder the launch
+    /// watcher is not using yet. Drawing the file's answer alone would be a
+    /// settings screen saying something untrue about where the next few minutes
+    /// of footage is going (AGENTS.md section 27, issue #609).
+    ///
+    /// A recorder that watches for no games has no such gap and nothing is
+    /// added: a recording the window asks for reads the settings file at the
+    /// moment it starts.
+    fn settings_in_force(&self, mut settings: SettingsView) -> SettingsView {
+        crate::settings::note_where_recordings_still_go(
+            &mut settings,
+            self.recordings.automatic_recording_directory().as_deref(),
+        );
+        settings
+    }
+
     /// Records what became of the global hotkeys, so `get_hotkeys` can answer.
     ///
     /// Called once, by `serve`, immediately after registering them. A second
@@ -802,12 +825,14 @@ impl CommandHandler for RecorderService {
             // the only lock it takes is the settings file's own
             // (`crate::settings`, issue #51).
             Command::GetSettings => Ok(Reply::Settings {
-                settings: self.settings.view()?,
+                settings: self.settings_in_force(self.settings.view()?),
             }),
             // Answered with the settings as they now stand, so the window draws
-            // what was saved rather than what it hoped had been.
+            // what was saved rather than what it hoped had been — and, for the
+            // recording directory, whether what was saved is what automatic
+            // recordings are using yet (issue #609).
             Command::ApplySettings(request) => Ok(Reply::Settings {
-                settings: self.settings.apply(&request)?,
+                settings: self.settings_in_force(self.settings.apply(&request)?),
             }),
             // Asked of Windows each time rather than answered from a list read
             // at start-up: a microphone plugged in while the window is open is
@@ -952,6 +977,29 @@ pub(crate) struct RecordingState {
     /// answering `get_status`. Neither is a capture thread and neither waits on
     /// the other for longer than a `memcpy`.
     watching: Mutex<Option<Watching>>,
+    /// Where the launch watcher is currently writing recordings and session
+    /// records, as its session manager holds it.
+    ///
+    /// [`None`] for a recorder that watches for nothing, which is a plain
+    /// `serve`: it starts no recording of its own accord, so there is no
+    /// directory of its own to be behind the settings file.
+    ///
+    /// **What is in force, not what was saved.** The settings file already
+    /// answers what was saved, and for every setting but this one the two are
+    /// the same thing. The recording directory moves between sittings and never
+    /// during one, so for the length of a sitting the file holds a folder the
+    /// recorder is not yet using, and a window that drew the file's answer would
+    /// say the wrong thing about where the next few minutes of footage is going
+    /// (`crate::settings::note_where_recordings_still_go`, AGENTS.md sections 27
+    /// and 56, issue #609).
+    ///
+    /// # Locks
+    ///
+    /// Its own, taken by nothing else and held for a path comparison. The writer
+    /// is the launch watcher's thread, once a pass; the readers are connection
+    /// threads answering `get_settings` and `apply_settings`. Neither is a
+    /// capture thread (AGENTS.md section 20).
+    automatic_directory: Mutex<Option<PathBuf>>,
 }
 
 /// A recording that has been started.
@@ -1168,6 +1216,9 @@ impl RecordingState {
             // Nothing is watching until something says it is, which is what a
             // `serve` with no `--watch-for-games` reports for its whole life.
             watching: Mutex::new(None),
+            // And so nothing has a recording directory of its own yet. The
+            // watcher's thread fills this in on its first pass.
+            automatic_directory: Mutex::new(None),
         }
     }
 
@@ -1421,6 +1472,36 @@ impl RecordingState {
         if changed {
             self.publish_what_the_watcher_changed();
         }
+    }
+
+    /// Records where the launch watcher is writing recordings now.
+    ///
+    /// Nothing is published: this is not part of a status, and a window learns
+    /// it by asking for the settings. It changes a handful of times in a
+    /// recorder's life — once when watching starts, and again each time a
+    /// directory the user saved during a sitting is taken up when that sitting
+    /// ends — so the store below is almost always a comparison that finds
+    /// nothing to do (`crate::watch::Driver::say_where_recordings_are_going`).
+    pub(crate) fn automatic_recordings_go_to(&self, directory: &Path) {
+        let mut held = self
+            .automatic_directory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.as_deref() != Some(directory) {
+            *held = Some(directory.to_path_buf());
+        }
+    }
+
+    /// Where the launch watcher is writing recordings, when one is watching.
+    ///
+    /// [`None`] when nothing records by itself, in which case there is no
+    /// directory that can be behind the settings file: a recording the window
+    /// asks for reads the file at the moment it starts.
+    pub(crate) fn automatic_recording_directory(&self) -> Option<PathBuf> {
+        self.automatic_directory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Says a sitting is over, with the files it produced.

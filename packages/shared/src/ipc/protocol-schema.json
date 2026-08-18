@@ -1013,6 +1013,7 @@
       ],
       "optional": [
         "choices",
+        "not_yet_in_force",
         "unavailable"
       ]
     },
@@ -2919,6 +2920,15 @@
                   "value": "name:Shure MV7"
                 },
                 {
+                  "accepted": "a folder on this machine, such as D:\\Clips",
+                  "applies": true,
+                  "key": "recording_directory",
+                  "label": "Recording directory",
+                  "not_yet_in_force": "Automatic recordings still go to C:\\Users\\alex\\Videos\\Clipped. They go here from the next session.",
+                  "overridden": true,
+                  "value": "D:\\Clips"
+                },
+                {
                   "accepted": "\"game-window\" or \"display\"",
                   "applies": false,
                   "choices": [
@@ -2927,6 +2937,7 @@
                   ],
                   "key": "capture_target",
                   "label": "Capture target",
+                  "not_yet_in_force": "Automatic recordings still go to the previous folder until the next session",
                   "overridden": false,
                   "unavailable": "a recording still captures the game's own window; reading this setting when a recording starts is issue #61",
                   "value": "game-window"

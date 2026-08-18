@@ -144,6 +144,7 @@ use clipped_events::GameEvent;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
 use clipped_game_detection::launcher::Launchers;
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
+use clipped_logging::RedactedPath;
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
 
@@ -334,6 +335,14 @@ pub struct SessionManager {
     /// it would not be a test (AGENTS.md section 25).
     launchers: Launchers,
     settings: AutomaticSettings,
+    /// A recording directory the user saved while a sitting was open, waiting
+    /// for that sitting to end.
+    ///
+    /// [`None`] whenever there is nothing waiting, which is nearly always: a
+    /// directory saved with no sitting open is applied there and then and never
+    /// arrives here. See [`Self::set_recording_directory`] for why the two
+    /// cases differ.
+    pending_directory: Option<PathBuf>,
     /// What the user has configured, as it stood the last time the driver
     /// handed it over. Read once per recording, in [`Self::begin_recording`].
     configuration: Configuration,
@@ -412,6 +421,7 @@ impl SessionManager {
             catalogue,
             launchers: Launchers::none(),
             settings,
+            pending_directory: None,
             configuration: Configuration::defaults(),
             active: None,
             deferred: Vec::new(),
@@ -475,6 +485,112 @@ impl SessionManager {
     #[must_use]
     pub const fn configuration(&self) -> &Configuration {
         &self.configuration
+    }
+
+    /// Moves where recordings and session records are written — **never while a
+    /// sitting is open**.
+    ///
+    /// Returns whether the change is in force now. `false` means a sitting was
+    /// open and the directory is being held until it ends; the caller has
+    /// somebody to tell, because a control whose effect is invisible is one that
+    /// appears to do nothing (AGENTS.md section 27).
+    ///
+    /// # Why a sitting is the unit
+    ///
+    /// A sitting is a sequence of recordings held together by one session
+    /// record, and that record is written *next to the files it names*
+    /// ([`Self::begin_recording`] persists it to
+    /// [`AutomaticSettings::directory`]). Moving the directory half way through
+    /// would leave the record in one folder and some of its own recordings in
+    /// another — and the failure is silent, because every file is still on disk
+    /// and nothing is left able to say which sitting they belonged to (AGENTS.md
+    /// section 56). Waiting is what keeps a session record and its recordings
+    /// together across the change; the alternative — moving the files to follow
+    /// the setting — rewrites user data as a side effect of a settings change,
+    /// which is a much larger promise than a folder picker makes.
+    ///
+    /// # How long the wait actually is
+    ///
+    /// Bounded by the sitting, not by how often somebody plays. **A directory
+    /// saved when no sitting is open is in force immediately** — which is the
+    /// case whenever nobody is playing, including the user who changes it and
+    /// then does not launch a game for a week. A change only waits while a game
+    /// is running or inside its restart grace, so the longest wait is one
+    /// sitting, and it ends within seconds of the game closing
+    /// ([issue #609](https://github.com/wildware-uk/clipped/issues/609)).
+    ///
+    /// # What it does not do
+    ///
+    /// It creates nothing, checks nothing and moves nothing. Whether the
+    /// directory can be written to is settled where it already was — when the
+    /// setting was saved, and at the moment a recording starts
+    /// (`apps/recorder`'s `ConfigError::OutputDirectoryMissing` and its
+    /// neighbours) — and a recording already running keeps the output path it
+    /// was given, exactly as it keeps the settings it was resolved with.
+    pub fn set_recording_directory(&mut self, directory: PathBuf) -> bool {
+        if directory == self.settings.directory() {
+            // Back where recordings already go. Anything held is cancelled:
+            // saving a directory and then saving the old one back must not
+            // leave the first change queued behind a sitting.
+            self.pending_directory = None;
+            return true;
+        }
+
+        if self.active.is_some() {
+            tracing::info!(
+                directory = %RedactedPath::new(&directory),
+                current = %RedactedPath::new(self.settings.directory()),
+                "a new recording directory was saved while a sitting was open, so it will be \
+                 used from the next sitting; this one keeps its recordings and its session \
+                 record together where they are"
+            );
+            self.pending_directory = Some(directory);
+            return false;
+        }
+
+        self.move_recordings_to(directory);
+        true
+    }
+
+    /// Where recordings and session records are being written.
+    #[must_use]
+    pub fn recording_directory(&self) -> &Path {
+        self.settings.directory()
+    }
+
+    /// A directory the user saved that the open sitting is holding back, if
+    /// there is one.
+    ///
+    /// What "recordings will go here from the next sitting" is answered from.
+    #[must_use]
+    pub fn pending_recording_directory(&self) -> Option<&Path> {
+        self.pending_directory.as_deref()
+    }
+
+    /// Takes the directory a sitting was holding back, now that it has ended.
+    ///
+    /// Called from [`Self::close_active`] — after the ended session has been
+    /// written to the directory it belongs to and handed over, and before any
+    /// deferred game becomes a sitting of its own, which is a new sitting and so
+    /// belongs in the new folder.
+    fn take_the_directory_the_sitting_held_back(&mut self) {
+        if let Some(directory) = self.pending_directory.take() {
+            self.move_recordings_to(directory);
+        }
+    }
+
+    /// Points the settings at `directory`, and says so.
+    ///
+    /// Said at `info` rather than `debug` because it is the moment a control
+    /// the user operated takes effect, and a change nobody can see happening is
+    /// indistinguishable from one that never did (AGENTS.md sections 27 and 35).
+    fn move_recordings_to(&mut self, directory: PathBuf) {
+        tracing::info!(
+            directory = %RedactedPath::new(&directory),
+            previous = %RedactedPath::new(self.settings.directory()),
+            "recordings and session records are now written to the directory the user chose"
+        );
+        self.settings.set_directory(directory);
     }
 
     /// The session that is open, if one is.
@@ -1134,6 +1250,13 @@ impl SessionManager {
             "the session ended"
         );
         actions.push(SessionAction::SessionEnded(Box::new(active.session)));
+
+        // Here, and nowhere earlier. The sitting's record has been written to
+        // the directory that holds its recordings and handed over, so from this
+        // line on nothing of it is left to separate from its files; and this is
+        // before the deferred launch below, which is a *new* sitting and
+        // therefore belongs wherever the user has since said (issue #609).
+        self.take_the_directory_the_sitting_held_back();
 
         if !self.stopping {
             // The most recently deferred game, because it is the one the user
