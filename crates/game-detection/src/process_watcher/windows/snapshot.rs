@@ -7,9 +7,13 @@
 //! reached, which is what the fallback poller does with it.
 //!
 //! The read itself is not this crate's: `clipped-windows` owns
-//! `CreateToolhelp32Snapshot` and the handle discipline around it, so that
-//! Windows' process table is read from exactly one place in the workspace
-//! (AGENTS.md section 55). This module is left with the two things that are
+//! `CreateToolhelp32Snapshot` and the handle discipline around it, so that no
+//! crate of the recorder's workspace copies either (AGENTS.md section 55). The
+//! desktop application has a read of its own, which it cannot share for
+//! reasons that are about layering rather than about this crate — they are in
+//! `clipped_windows::process_table`'s documentation, and the two reads are
+//! listed in `tests/integration/tests/process_table_reads.rs`. This module is
+//! left with the two things that are
 //! this watcher's own — resolving a baseline's executable paths, and diffing
 //! the table on a poll — plus the error type conversion the rest of the
 //! watcher expects.

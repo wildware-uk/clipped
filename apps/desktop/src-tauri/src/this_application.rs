@@ -68,12 +68,38 @@
 //!
 //! Those are the two comparisons `clipped_windows::ProcessTree` makes about the
 //! same hazard, for the same reason. They are made again here rather than
-//! shared, and that is not a second implementation by accident:
-//! `tests/integration/tests/workspace_layering.rs` allows this crate exactly
-//! one member of the recorder's workspace, `clipped-ipc`, so that closing this
-//! window can never reach capture or encoding (ADR 0002). `clipped-windows` is
-//! not that one, and linking it to borrow a two-line comparison would put the
-//! capture layer inside the window's process.
+//! shared, and so is the `CreateToolhelp32Snapshot` walk beneath them — the
+//! second of the two reads of Windows' process table this repository contains
+//! ([issue #289](https://github.com/wildware-uk/clipped/issues/289); the other
+//! is `crates/windows/src/process_table.rs`, and
+//! `tests/integration/tests/process_table_reads.rs` is what fails if a third
+//! appears). That is not a second implementation by accident. Three things
+//! were available and none of them is better:
+//!
+//! - **Linking `clipped-windows`.**
+//!   `tests/integration/tests/workspace_layering.rs` allows this crate exactly
+//!   one member of the recorder's workspace, `clipped-ipc`, so that closing
+//!   this window can never reach capture or encoding (ADR 0002).
+//!   `clipped-windows` is not that one, and linking it to borrow forty lines of
+//!   enumeration would put the capture layer inside the window's process — and
+//!   would do it to reach a type whose rule for an unknown creation time is the
+//!   *opposite* of the one this module needs, for the reason
+//!   [`consistent_with`] gives.
+//! - **Asking the recorder over IPC.** It cannot answer. The question is which
+//!   processes *this* process started, and the recorder is a different process:
+//!   it would have to be handed this one's identifier and then walk the table
+//!   anyway, with no way to tell a reused identifier for this process from the
+//!   real one. It is also asked on the message loop on every foreground change,
+//!   where a round trip would make the answer arrive after the menu is drawn —
+//!   and the recorder need not be running at all, which would leave the record
+//!   control offering Clipped's own webview exactly when Clipped is idle.
+//! - **Asking the recorder's own rule.** It has one, and it is deliberately a
+//!   different rule: `clipped-windows` recognises Clipped by the executables it
+//!   ships as, which is right for a process that ships them and useless here,
+//!   because `msedgewebview2.exe` is not one of them and matching on its name
+//!   is the bug at the top of this file. That difference is the subject of
+//!   `tests/integration/tests/foreground_rules.rs`, which compares the half of
+//!   the two rules that must agree and says why this half must not.
 //!
 //! The two copies differ in two places, and both are written down rather than
 //! left to be discovered. The rule for an unknown start time is one — see

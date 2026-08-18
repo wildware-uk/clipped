@@ -1,8 +1,8 @@
 //! The process table, read in one call.
 //!
 //! `CreateToolhelp32Snapshot` is the one Windows call that answers "what is
-//! running, and who started it?" for the whole machine at once, and it is read
-//! from exactly one place in the workspace: here (AGENTS.md section 55).
+//! running, and who started it?" for the whole machine at once, and this is
+//! the only place the recorder makes it (AGENTS.md section 55).
 //! [`crate::ProcessTree`] uses it to find a game's children it has never met,
 //! and `clipped_game_detection`'s process watcher uses it for the same table —
 //! once as a baseline when it starts, and repeatedly as the fallback poller it
@@ -11,6 +11,22 @@
 //! parentage, not an executable path, because resolving a path is an
 //! `OpenProcess` per row and only the watcher's baseline wants to pay for it
 //! ([`process_image_path`](crate::process_image_path) is the call that does).
+//!
+//! # The other read, which is not in this workspace
+//!
+//! The recorder's, and not the repository's. `apps/desktop/src-tauri` is a
+//! separate Cargo workspace which may link exactly one member of this one,
+//! `clipped-ipc` (ADR 0002, `tests/integration/tests/workspace_layering.rs`),
+//! so `apps/desktop/src-tauri/src/this_application.rs` takes a snapshot of its
+//! own to answer which processes are Clipped's — a question about the window's
+//! own descendants that no other process can answer for it (issue #390). That
+//! copy is deliberate, is argued at length where it lives, and differs from
+//! this one in what it does with a creation time Windows will not give.
+//!
+//! Both are listed, with the argument for each, in
+//! `tests/integration/tests/process_table_reads.rs`, which fails if a third
+//! appears anywhere in the repository. It exists because this paragraph used
+//! to say there was only one (issue #289).
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
