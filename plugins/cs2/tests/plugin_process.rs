@@ -525,7 +525,13 @@ fn a_plugin_with_no_configuration_says_so_rather_than_installing_one() {
         "the message has to leave the user an action: {message}"
     );
 
-    let status = child.wait().expect("it exits");
+    // Bounded, like every other wait in this suite (issue #549). This plugin
+    // is expected to exit — it has just said it cannot do its job — and that
+    // is exactly the reasoning that left every other unbounded wait in place
+    // before this issue was raised. A plugin that does not exit should fail
+    // this test with a sentence, not hang it until the workflow's own timeout
+    // kills the job and reports nothing useful.
+    let status = wait_for_exit(&mut child, PATIENCE).unwrap_or_else(|problem| panic!("{problem}"));
     assert!(
         !status.success(),
         "a plugin that cannot do its job should not exit as though it did"
