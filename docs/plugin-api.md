@@ -1469,12 +1469,19 @@ application is the thing most likely to be misread (AGENTS.md section 7):
   rather than starting them uninvited; `docs/privacy.md` is why that is not a
   detail. So `plugins/league`, `plugins/cs2` and `plugins/dota2` still run only
   when they are started by hand.
-- **Nothing keeps what a plugin reports**
+- **What a plugin reports is kept, and nothing draws it**
   ([issue #71](https://github.com/wildware-uk/clipped/issues/71)). A recording
-  drains its plugins' events and places each one on its own timeline; the seam
-  where they are handed over is `SessionPlugins::take_events`, and no caller
-  writes them to `clipped-storage` against the recording yet. Today they are
-  counted in the log and go no further.
+  drains its plugins' events at `SessionPlugins::take_events`, and
+  `apps/recorder/src/watch.rs:1143` hands them to
+  `SessionManager::record_game_events`, which writes them to the session's
+  sidecar; the library indexer turns those into `library_events` rows. That
+  half is done. What is missing is the other end: the marks reach no screen,
+  because the editor is rendered without a clip
+  (`apps/desktop/src/Shell.tsx`) and the only reader of `library_events` in
+  the window is called from a test.
+
+  This entry previously said the events were "counted in the log and go no
+  further", which stopped being true when the persistence landed.
 - **Nothing installs a plugin.** `plugins/league`, `plugins/cs2` and
   `plugins/dota2` each build an executable and have a `plugin.json` beside it;
   putting the two in a directory under the plugins folder — `plugins` inside

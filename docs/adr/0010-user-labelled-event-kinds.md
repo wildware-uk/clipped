@@ -201,20 +201,22 @@ here.
   the type's own tests. Wiring an actual input-binding or fingerprint
   subsystem to produce one is `crates/session`'s work and is not part of
   #345's scope.
-- **The plugin producer boundary needs a matching change, and does not have
-  it yet.** `crates/plugins/src/report.rs::ReportedEvent::into_event` refuses
-  a report whose kind is `EventKind::Unrecognised`, on the grounds that an
-  unnamespaced word a plugin invents could pre-empt a future standard tag.
-  It does not yet refuse `EventKind::UserLabelled`, because `EventKind` has
-  no producer boundary of its own — by design, the same as `Custom` — and the
-  boundary for what a *plugin* may claim belongs to whichever crate parses a
-  plugin's report. Until `into_event` is updated to refuse a `UserLabelled`
-  kind exactly as it refuses `Unrecognised`, a plugin sending
-  `"kind":"user:something"` would be accepted rather than refused. This is
-  flagged rather than fixed here because `crates/plugins` is outside this
-  crate's boundary; it is the first thing whoever wires a producer for these
-  events should close, and a test written against `report.rs` that fails if
-  the check is missing is the acceptance criterion issue #345 already names.
+- **The plugin producer boundary needed a matching change, and has it.**
+  `crates/plugins/src/report.rs::ReportedEvent::into_event` refuses a report
+  whose kind is `EventKind::Unrecognised`, on the grounds that an unnamespaced
+  word a plugin invents could pre-empt a future standard tag. It refuses
+  `EventKind::UserLabelled` for a different reason, at `report.rs:226`: `kind`
+  is a field a plugin controls, so without the check an integration could put
+  words in a user's mouth. The refusal is `ReportRefused::NotAPluginsToGive`
+  and `crates/plugins/src/report.rs:502` is the test that fails if it is
+  removed.
+
+  This paragraph previously said the check did not exist and that
+  `"kind":"user:something"` "would be accepted rather than refused". It was
+  written before the check landed in the same pull request and was never
+  updated. A stale note claiming a forgery hole is worse than no note: a
+  reader either believes the hole is open, or doubts the guard that closes
+  it.
 - **Closing the `clipped.*` plugin-identifier gap is a behaviour change, not
   only an addition.** A manifest declaring `"id": "clipped.something"` was
   previously accepted by `EventSource::plugin` and is refused after this

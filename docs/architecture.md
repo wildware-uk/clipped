@@ -129,7 +129,7 @@ surrounding responsibility.
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
 | Media Library | `clipped-library` | M6 |
 | Storage Manager | `clipped-storage` (persistence); `clipped-library::accounting` (measurement and limits) | M6, M12 |
-| Export Engine | not yet created; `clipped-edit` is the edit document it renders, `clipped-muxer` for remux | M11 |
+| Export Engine | `clipped-export`; `clipped-edit` is the edit document it renders, `clipped-muxer` for remux | M11 |
 | Plugin Manager | `clipped-plugins` | M9 |
 | Game/Screen Capture | `clipped-capture` | M1 |
 | Audio Capture | `clipped-audio` | M1–M2 |
@@ -146,13 +146,16 @@ module of `clipped-session` because retention, range selection and holding
 segments against eviction are self-contained logic with no need of capture, and
 because `clipped-session` is the top layer — nothing else could reuse it there.
 The Export
-Engine has no crate yet because nothing exports; creating an empty crate for it
-now would be speculative structure, and the M11 issues that build it will place
-it. What does exist is the thing it will render: `clipped-edit` is the
+Engine is `clipped-export`: the plan, the renderer and the progress and
+cancellation model. Nothing depends on that crate yet — no binary runs an
+export — so it is written and tested at the edge of the tree rather than wired
+into one. What it renders is `clipped-edit`: the
 non-destructive edit document — which recordings to play, which parts of them,
 in which order, how loud each track is and what text goes over the picture
-([editing.md](editing.md)) — and it holds no exporter, no editor and no edit
-operation. It sits at layer 0 beside `clipped-ipc` because both ends of the
+([editing.md](editing.md)) — together with the operations that change one, which
+since [issue #84](https://github.com/wildware-uk/clipped/issues/84) are trim
+start, trim end, split, delete section, undo and redo. It holds no exporter and
+no editor. It sits at layer 0 beside `clipped-ipc` because both ends of the
 application read a document, and it performs no file or database access at all,
 so a clip cannot damage the recording it refers to. The Storage Manager is split
 between two crates because the mechanism and the policy are different jobs. The
@@ -247,8 +250,9 @@ large:
   Tauri 2 window hosting a React interface, with its layout, navigation, design
   tokens and accessibility baseline, drawn from `packages/ui` and typed by
   `packages/shared`. It runs — `npm run dev` opens the window — and it shows no
-  data it does not have: each of the seven screens says it is not built and
-  names the issue that builds it, and the recorder status block shows what its
+  data it does not have: six of the seven screens are written and the last,
+  Trash, is the placeholder that names the issue building it
+  (`apps/desktop/src/Shell.tsx`), and the recorder status block shows what its
   link with the recorder reports, which is one wording per link state and no
   guessing ([#106](https://github.com/wildware-uk/clipped/issues/106),
   [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
@@ -430,10 +434,13 @@ the reason for
 `sessions.md` covers what joins them: the session manager, every rule it applies,
 and the sidecar a session is written to until M6's database exists. Both are
 explicit about what is not built, which for sessions is three of the four capture
-modes and every per-game setting. `editing.md` is a specification rather than a
-description, as `ipc.md` is: the document model exists in `clipped-edit` and is
-the shape the ten remaining M11 tickets are held to, but no editor, no export
-engine and no edit operation is written, and the document says so. `search.md`
+modes and every per-game setting. `editing.md` is now mostly description rather
+than specification: the document model and every operation on it exist in
+`clipped-edit`, and the export engine exists in `clipped-export`. What is still
+specification is the joining up — nothing depends on `clipped-export`, so no
+export runs, and the desktop editor screen cannot yet open a clip, draw a frame
+or read a waveform ([issue #306](https://github.com/wildware-uk/clipped/issues/306)).
+That is the shape the fourteen remaining M11 tickets are held to. `search.md`
 is the same shape again: the query language, its parser and its matcher exist in
 `clipped-library`, so the syntax, every error message and the measured cost of
 matching are written down, and the document is explicit that nothing indexes a
