@@ -98,7 +98,7 @@ impl ProbeDevice {
 }
 
 /// The DXGI adapter with this identifier.
-fn find_adapter(wanted: AdapterId) -> Result<IDXGIAdapter1, windows::core::Error> {
+pub(super) fn find_adapter(wanted: AdapterId) -> Result<IDXGIAdapter1, windows::core::Error> {
     // SAFETY: `CreateDXGIFactory1` takes no arguments beyond the interface
     // identifier, which the generic parameter supplies, and returns an owned
     // reference that `IDXGIFactory1` releases on drop.

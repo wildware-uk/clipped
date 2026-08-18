@@ -109,6 +109,9 @@ mod recommendation;
 mod reference;
 
 #[cfg(windows)]
+mod readback;
+
+#[cfg(windows)]
 mod software;
 
 #[cfg(windows)]
@@ -142,4 +145,4 @@ pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendatio
 #[cfg(windows)]
 pub use software::SoftwareEncoder;
 #[cfg(windows)]
-pub use windows::{AmfEncoder, NvencEncoder, QuickSyncEncoder, WindowsProbe};
+pub use windows::{open_across_adapters, AmfEncoder, NvencEncoder, QuickSyncEncoder, WindowsProbe};

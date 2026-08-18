@@ -67,9 +67,9 @@ use crate::codec::Resolution;
 ///
 /// Deliberately not [`EncodeErrorKind`](crate::EncodeErrorKind): this module
 /// knows about Direct3D and nothing about encoders, and the caller
-/// ([`super::SoftwareEncoder`]) is where the two meet.
+/// ([`crate::SoftwareEncoder`]) is where the two meet.
 #[derive(Debug)]
-pub(super) enum ReadbackError {
+pub(crate) enum ReadbackError {
     /// The handle is not a live Direct3D 11 device, or not a texture.
     NotDirect3D {
         /// What was expected, as in `ID3D11Device`.
@@ -100,7 +100,7 @@ pub(super) enum ReadbackError {
 }
 
 /// The staging texture a frame is copied through, and the timings of doing it.
-pub(super) struct Readback {
+pub(crate) struct Readback {
     /// Kept alive for the session, because the staging texture belongs to it.
     _device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -120,7 +120,7 @@ impl Readback {
     /// [`GraphicsDevice`](crate::GraphicsDevice) promises of the handle inside
     /// it. This function takes its own reference to it, so the device outlives
     /// the caller's borrow, but it cannot outlive the caller's *device*.
-    pub(super) unsafe fn open(
+    pub(crate) unsafe fn open(
         device: *mut c_void,
         resolution: Resolution,
     ) -> Result<Self, ReadbackError> {
@@ -211,7 +211,7 @@ impl Readback {
     ///
     /// `texture` must be a live `ID3D11Texture2D` on the device this was opened
     /// against, valid for the duration of the call.
-    pub(super) unsafe fn map<T>(
+    pub(crate) unsafe fn map<T>(
         &mut self,
         texture: *mut c_void,
         use_pixels: impl FnOnce(&[u8], usize) -> T,
@@ -390,7 +390,7 @@ impl Readback {
 
     /// How long has been spent copying frames out of video memory, and over how
     /// many frames.
-    pub(super) const fn elapsed(&self) -> (Duration, u64) {
+    pub(crate) const fn elapsed(&self) -> (Duration, u64) {
         (self.elapsed, self.frames)
     }
 }

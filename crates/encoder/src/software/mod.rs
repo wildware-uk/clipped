@@ -25,7 +25,7 @@
 //!
 //! ```text
 //! ID3D11Texture2D (BGRA, video memory)
-//!         │  CopyResource + Map          readback.rs   ← 14 MB per frame at 1440p
+//!         │  CopyResource + Map          ../readback.rs ← 14 MB per frame at 1440p
 //!   BGRA bytes (system memory)                           and a CPU/GPU wait
 //!         │  swscale                     convert.rs    ← reads 14 MB, writes 5.5 MB
 //!   YUV 4:2:0 planes
@@ -70,7 +70,6 @@
 
 mod avcodec;
 mod convert;
-mod readback;
 
 #[cfg(test)]
 mod tests;
@@ -87,7 +86,7 @@ use crate::packet::EncodedPacket;
 
 use self::avcodec::CodecSession;
 use self::convert::Converter;
-use self::readback::{Readback, ReadbackError};
+use crate::readback::{Readback, ReadbackError};
 
 /// The kinds of graphics resource this backend can read.
 const SUPPORTED_SURFACES: &[SurfaceKind] = &[SurfaceKind::D3d11Texture2D];
@@ -479,7 +478,7 @@ fn validate(config: &EncoderConfig) -> Result<(), EncodeErrorKind> {
 }
 
 /// Turns a readback failure into something a session loop can act on.
-fn readback_failure(error: ReadbackError) -> EncodeErrorKind {
+pub(crate) fn readback_failure(error: ReadbackError) -> EncodeErrorKind {
     match error {
         ReadbackError::NotDirect3D { expected, detail } => EncodeErrorKind::Configuration {
             detail: format!("the handle given is not a live {expected}: {detail}"),

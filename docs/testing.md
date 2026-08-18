@@ -825,10 +825,48 @@ The injected half is in `crates/encoder/src/detection.rs` and
 "the first DXGI enumerates" a rule that can be broken rather than a coincidence
 of this machine's enumeration order.
 
-**What is not tested here is that AMF then records.** It does not, on a machine
-whose capture device is not AMD's, and making it do so is the part of issue #443
-that is still open. These tests cover the refusal and the report, not the
-capability.
+### That it then records, which needs two graphics cards
+
+The tests above cover the refusal and the report. That an encoder on the *other*
+adapter then produces a recording is covered by three more, in
+`crates/encoder/src/windows/bridge.rs`, and those are `#[ignore]`d — the only
+`#[ignore]`d tests in the encoder crate.
+
+| Test | What it needs |
+| --- | --- |
+| `amf_encodes_frames_captured_on_an_nvidia_device` | An NVIDIA **and** an AMD adapter, and `ffmpeg` |
+| `nvenc_encodes_frames_captured_on_an_amd_device` | The same |
+| `an_encoder_on_the_capture_adapter_keeps_the_callers_own_device` | The same |
+
+```text
+cargo test -p clipped-encoder --lib -- --ignored --nocapture --test-threads=1 windows::bridge
+```
+
+**`#[ignore]`d because they need two vendors' silicon in one machine**, which no
+hosted runner has and most developer machines do not. That is a stronger
+requirement than "an encoder is present", which is what `CLIPPED_REQUIRE_ENCODER`
+asserts, so it cannot be the lever here: a single-GPU machine with
+`CLIPPED_REQUIRE_ENCODER=1` is a legitimate configuration and these must not fail
+on it. Asking for them by name is the consent. They still report a
+`SKIPPED (encoder): …` line and stop if the machine turns out not to have both.
+
+The two encoding tests submit six frames of six different solid colours,
+decode the result with FFmpeg and check each colour. A copy that carried the
+wrong texture, carried it a frame late, or carried nothing would still produce a
+bitstream — and would produce the wrong colours. Reverting
+`open_across_adapters` to hand the capture device straight through fails both,
+with `AMFContext::InitDX11 failed with AMF_INVALID_ARG (4)` and
+`nvEncOpenEncodeSessionEx failed with NV_ENC_ERR_NO_ENCODE_DEVICE (1)`
+respectively, which is the pair of failures issue #443 is about.
+
+The third asserts the *identity of the device handle* rather than that an
+encoder opened, because opening proves nothing about which device it opened
+against — and an encoder already on the capture adapter must never pay the copy.
+
+The end of it, which no unit test covers, is a recording:
+`clipped-recorder record --encoder amf` on such a machine, whose file `ffprobe`
+decodes. What that costs is in
+[encoder-pipeline.md](encoder-pipeline.md), "Encoding from another adapter".
 
 ## What is not built yet
 

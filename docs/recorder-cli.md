@@ -836,16 +836,23 @@ The same goes for an encoder that is on an adapter the frames will not be
 captured on. On a machine with two vendors' adapters — a discrete card beside an
 integrated part — capture creates its Direct3D device on the default adapter,
 and the other vendor's encoder refuses a device that is not its own. Such an
-encoder reads *present, and not usable for recording here*, with a line under it
-naming the card the frames will be captured on
+encoder reads *present, and usable only if asked for by name*, with a line under
+it naming the card the frames will be captured on
 ([#443](https://github.com/wildware-uk/clipped/issues/443)):
 
 ```text
-  AMD AMF — present, and not usable for recording here: frames are captured on the NVIDIA adapter
+  AMD AMF — present, and usable only if asked for by name: frames are captured on the NVIDIA adapter, so each one would be copied across
     on AMD Radeon(TM) Graphics
     the capture adapter is NVIDIA GeForce RTX 4090
     measured: ...
 ```
+
+"Asked for by name" means `--encoder amf`, which refuses a substitute: that
+recording does happen, and pays a copy of every frame between the two adapters
+for it ([encoder-pipeline.md](encoder-pipeline.md), "Encoding from another
+adapter"). `--encoder auto` will not choose such an encoder, and a stale
+`encoder` setting substitutes to one on capture's own adapter rather than paying
+the copy.
 
 Its codec table is still printed, and `--refresh` still measures its limits: the
 hardware is real, and the capability probe opens its session on a device of its

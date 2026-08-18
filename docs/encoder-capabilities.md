@@ -91,14 +91,18 @@ refusals of their own. All three now say so in a sentence naming both vendors,
 through one shared function in `windows/dxgi.rs`.
 
 So on a machine with two vendors' adapters — the ordinary gaming laptop, a
-discrete card beside an integrated part — one of the two encoders is entirely
-real and entirely unusable. It was reported as **available** until
-[issue #443](https://github.com/wildware-uk/clipped/issues/443), which is exactly
-the promise-a-capability-the-recording-does-not-have failure the section above
-refuses to make about the media transforms.
+discrete card beside an integrated part — one of the two encoders is real and
+costs something to use that the other does not. It was reported as **available**
+until [issue #443](https://github.com/wildware-uk/clipped/issues/443), which is
+exactly the promise-a-capability-the-recording-does-not-have failure the section
+above refuses to make about the media transforms.
 
-It is now reported as *present, and not usable for recording here*, naming the
-adapter the frames will be captured on. Deliberately a third answer rather than
+It is now reported as *present, and usable only if asked for by name*, naming the
+adapter the frames will be captured on. A recording that names it and refuses a
+substitute does record with it, by copying every frame onto its adapter
+([encoder-pipeline.md](encoder-pipeline.md), "Encoding from another adapter");
+a recording that would have been content with any encoder must not, because one
+on capture's own adapter costs nothing. Deliberately a third answer rather than
 either of the two that existed:
 
 - **Not available.** `Automatic` will not choose it, and
