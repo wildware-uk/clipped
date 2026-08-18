@@ -114,6 +114,7 @@
 
 pub mod client;
 pub mod command;
+pub mod diagnostics;
 pub mod error;
 pub mod frame;
 pub mod hotkeys;
@@ -134,6 +135,10 @@ pub use client::{Client, ClientError, EventClient};
 pub use command::{
     AddBookmark, Command, ExportRecording, Reply, SaveReplay, Shutdown, StartRecording,
     StopRecording, TakeScreenshot,
+};
+pub use diagnostics::{
+    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics, EncoderAccount,
+    EncoderSummary,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};

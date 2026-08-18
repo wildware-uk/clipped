@@ -1,7 +1,10 @@
+import type { CaptureAccount, Diagnostics, EncoderAccount } from '@clipped/shared';
 import { PROTOCOL_VERSION } from '@clipped/shared';
 
 import { name as INTERFACE_NAME, version as INTERFACE_VERSION } from '../package.json';
+import type { LibraryRead } from './library';
 import { redactPath, redactPathsIn } from './redactPath';
+import { describeDiagnosticsProblem } from './recorderDiagnostics';
 import type { RecorderLinkView } from './useRecorderLink';
 
 /**
@@ -14,20 +17,30 @@ import type { RecorderLinkView } from './useRecorderLink';
  *
  * # What this window can establish, and what it cannot
  *
- * SPEC.md section 36 lists twelve things a recorder must record, and the window
- * can report exactly one of them — the path of a recording in progress, which
- * arrives inside a `recording` status. Everything else is inside the recorder
- * process with nothing to carry it here: `CaptureStatus` in `clipped-capture`
- * (#97), the capability report `clipped-recorder capabilities` prints (#14), and
- * the figures the `metrics` event stream would carry, which this recorder refuses
- * with `not_implemented` because nothing measures them yet (#100). Issue #302 is
- * the command that would bring them.
+ * SPEC.md section 36 lists twelve things a recorder must record. This window can
+ * report **four** of them:
+ *
+ * - **Recording paths**, from the `recording` status, which it always could.
+ * - **Game detection**, from the sitting a `recording` or `watching` status
+ *   carries. That arrived with protocol 2 and nothing on this screen had been
+ *   changed to read it, so the row went on naming the issue that had already
+ *   supplied it.
+ * - **The capture backend** and **the encoder**, through `get_diagnostics`
+ *   ([#302](https://github.com/wildware-uk/clipped/issues/302)) —
+ *   `CaptureStatus` from `clipped-capture` (#97) and the report
+ *   `clipped-recorder capabilities` prints (#14), neither of which had anything
+ *   carrying it here.
+ *
+ * The other nine still name the work that would supply them: the figures the
+ * `metrics` stream would carry, which this recorder refuses with
+ * `not_implemented` because nothing measures them yet (#100), and the subsystems
+ * that do not exist. `docs/diagnostics.md` is the whole account.
  *
  * So [`diagnostics`] below names all twelve, one row each, with what this build
  * reports against each — the same contract the Games screen keeps for its own
- * unbuilt table. Drawing twelve gauges reading zero would be indistinguishable
- * from a machine that dropped no frames, and this build has not counted
- * (AGENTS.md section 27).
+ * unbuilt table. Drawing gauges reading zero would be indistinguishable from a
+ * machine that dropped no frames, and this build has not counted (AGENTS.md
+ * section 27).
  */
 
 /** Where `clipped-logging` writes, in the form a user can paste into Explorer. */
@@ -64,9 +77,9 @@ export interface CaptureHealthText {
  * "nothing has failed" means nothing has failed *since then*.
  */
 export const SCOPE_OF_THIS_SUMMARY =
-  'This describes the recorder this window is attached to, since this window opened. Capture ' +
-  'itself — which backend is running, what it fell back from, how many frames were dropped — is ' +
-  'not reported to this window by any build yet; issue #302 is the command that would carry it.';
+  'This describes the recorder this window is attached to, since this window opened. Which ' +
+  'capture backend is running, and what it fell back from, are in the table below; how many ' +
+  'frames were dropped is measured by nothing yet (issue #100).';
 
 /**
  * What to say about capture health, given everything the window knows.
@@ -175,90 +188,195 @@ export interface Diagnostic {
   readonly known: boolean;
 }
 
-/** The sentence every unreported row ends with, so a reader knows where to look. */
-const CARRIED_BY = 'Issue #302 is the command that would carry it.';
+/**
+ * What one row says about the capture backend.
+ *
+ * Four answers rather than two, because there are four things that can be true
+ * and only one of them is "a backend is running": the recorder has not been
+ * asked yet, it could not be asked, nothing is being recorded so there is no
+ * backend at all, or this is the one capturing. Collapsing the middle two would
+ * put "no capture backend" on screen for a recorder nobody reached.
+ */
+export function describeCaptureBackend(read: LibraryRead<Diagnostics>): Diagnostic {
+  const subject = 'Capture backend';
+
+  if (read.state === 'reading') {
+    return { subject, reported: 'Being read from the recorder.', known: false };
+  }
+  if (read.state === 'unread') {
+    return { subject, reported: describeDiagnosticsProblem(read.problem), known: false };
+  }
+
+  const capture = read.value.capture;
+  if (capture === undefined) {
+    return {
+      subject,
+      reported:
+        'Nothing is being recorded, so no capture backend is running. This is reported for the ' +
+        'recording in progress, because that is when there is one.',
+      known: false,
+    };
+  }
+
+  return { subject, reported: describeCapture(capture), known: true };
+}
+
+/** The capture backend in one sentence, and what it fell past to get there. */
+function describeCapture(capture: CaptureAccount): string {
+  const asked =
+    capture.setting === 'Automatic'
+      ? 'chosen automatically'
+      : `pinned to ${capture.setting} in the settings`;
+  const changes =
+    capture.changes.length === 0
+      ? 'It has not been replaced or restarted since this recording started.'
+      : capture.changes
+          .map((change) =>
+            change.restart
+              ? `${change.from} was restarted: ${change.reason}`
+              : `${change.to} took over from ${change.from}: ${change.reason}`,
+          )
+          .join(' ');
+  const started =
+    capture.current === capture.started_with
+      ? ''
+      : ` The recording started with ${capture.started_with}.`;
+
+  return `${capture.current}, ${asked}.${started} ${changes}`;
+}
+
+/** What one row says about what this machine can encode. */
+export function describeEncoder(read: LibraryRead<Diagnostics>): Diagnostic {
+  const subject = 'Encoder';
+
+  if (read.state === 'reading') {
+    return { subject, reported: 'Being read from the recorder.', known: false };
+  }
+  if (read.state === 'unread') {
+    return { subject, reported: describeDiagnosticsProblem(read.problem), known: false };
+  }
+
+  return { subject, reported: summariseEncoders(read.value.encoders), known: true };
+}
+
+/**
+ * The encoders in one sentence, for the table.
+ *
+ * The whole report is drawn below it; this is the line somebody reads first.
+ * "None" is a real answer here and is said in those words: a machine with no
+ * usable hardware encoder records with the CPU, and that is worth knowing rather
+ * than worth hiding.
+ */
+function summariseEncoders(encoders: EncoderAccount): string {
+  const usable = encoders.encoders.filter((encoder) => encoder.available && encoder.implemented);
+  if (usable.length === 0) {
+    return 'No encoder on this machine is one this build can record with. The whole report is below.';
+  }
+
+  return `${usable
+    .map((encoder) =>
+      encoder.adapter === undefined ? encoder.label : `${encoder.label} on ${encoder.adapter}`,
+    )
+    .join(', ')}. The whole report is below.`;
+}
+
+/**
+ * How the encoder report was obtained, said before anybody reads its figures.
+ *
+ * The difference between a reading taken just now and one stored before a driver
+ * update is the difference between a report about this machine and a report
+ * about the machine it used to be. The cache is keyed on the driver version so
+ * that a stale one cannot be served, and saying which it was is what lets a
+ * reader check that for themselves.
+ */
+export function describeEncoderSource(encoders: EncoderAccount): string {
+  const when =
+    encoders.probed || encoders.detected_at === undefined
+      ? 'Read from this machine just now'
+      : `A stored reading, taken ${encoders.detected_at}`;
+
+  return (
+    `${when}, in ${String(encoders.elapsed_ms)} ms. Answering this question never opens an ` +
+    'encoder session, because that would take a slot from a game that may be mid-match — so ' +
+    'a limit below may be the encoder family’s published figure rather than a measurement ' +
+    'of this card. Every one that is says so.'
+  );
+}
+
+/** What the rows measured by nothing say, so a reader knows what is missing. */
+const MEASURED_BY_NOTHING =
+  'Not reported. Nothing measures it during a recording yet, so there is no figure — which ' +
+  'is not the same as a figure of zero. Issue #100.';
 
 /**
  * Every diagnostic SPEC.md section 36 asks for, and where the log files are.
  *
- * The order is the specification's. One row is a value; the rest name the work
+ * The order is the specification's. Four rows are values; the rest name the work
  * that would supply one, which is the alternative to twelve gauges reading zero.
  */
-export function diagnostics(view: RecorderLinkView): readonly Diagnostic[] {
-  const recording =
-    view.link?.link === 'attached' && view.link.status.state === 'recording'
-      ? view.link.status
-      : null;
+export function diagnostics(
+  view: RecorderLinkView,
+  recorder: LibraryRead<Diagnostics>,
+): readonly Diagnostic[] {
+  const status = view.link?.link === 'attached' ? view.link.status : null;
+  const recording = status?.state === 'recording' ? status : null;
+  // Read off the status rather than off the recording, so that a game keeps its
+  // name through the seconds a sitting spends waiting out a restart grace with
+  // nothing being recorded (`docs/ipc.md`, protocol 2).
+  const sitting = status === null || status.state === 'idle' ? undefined : status.session;
 
   return [
     {
       subject: 'Game detection',
       reported:
-        'Not reported. The protocol describes a recording by its capture target — process ' +
-        '4242 — and has no vocabulary for a game or a session. Issue #241.',
-      known: false,
+        sitting === undefined
+          ? 'No sitting is open, so there is no game to name. This is reported while a game is ' +
+            'being recorded, and while the recorder is waiting for one to come back.'
+          : `${sitting.game_name ?? 'A game the catalogue would not attribute'}, in the sitting ` +
+            `${sitting.session_id}, which started ${sitting.started_at}.`,
+      known: sitting !== undefined,
     },
-    {
-      subject: 'Capture backend',
-      reported:
-        'Not reported. clipped-capture already tracks the method in use, the method a recording ' +
-        `started with, and every fallback and restart with its reason (issue #97). ${CARRIED_BY}`,
-      known: false,
-    },
+    describeCaptureBackend(recorder),
     {
       subject: 'Resolution changes',
-      reported: `Not reported. Issue #98 owns the behaviour. ${CARRIED_BY}`,
-      known: false,
-    },
-    {
-      subject: 'Encoder',
       reported:
-        'Not reported. clipped-recorder capabilities prints the adapters, the encoder runtimes, ' +
-        'the codecs the installed driver registers and the limits it measured (issue #14), and ' +
-        `it prints them to a terminal. ${CARRIED_BY}`,
+        'Not reported. A recording follows its target being resized (issue #98); nothing counts ' +
+        'the times it happened.',
       known: false,
     },
+    describeEncoder(recorder),
     {
       subject: 'Dropped frames',
       reported:
         'Not reported. The metrics event stream is defined and this recorder refuses it with ' +
-        'not_implemented, because nothing measures these during a recording yet. Issue #100.',
+        `not_implemented. ${MEASURED_BY_NOTHING}`,
       known: false,
     },
-    {
-      subject: 'Encoder latency',
-      reported: 'Not reported. Nothing measures it during a recording. Issue #100.',
-      known: false,
-    },
-    {
-      subject: 'Audio drift',
-      reported: 'Not reported. Nothing measures it during a recording. Issue #100.',
-      known: false,
-    },
+    { subject: 'Encoder latency', reported: MEASURED_BY_NOTHING, known: false },
+    { subject: 'Audio drift', reported: MEASURED_BY_NOTHING, known: false },
     {
       subject: 'Audio devices',
-      reported: 'Not reported. No recording captures audio yet. Issue #180.',
+      reported:
+        'Not reported. A recording does capture audio (issue #180) and the recorder can list ' +
+        'this machine’s microphones for the Settings screen, but which devices a recording ' +
+        'used is not carried into diagnostics. Issue #100.',
       known: false,
     },
     {
       subject: 'Recording paths',
       reported:
         recording === null
-          ? 'Nothing is being recorded, so there is no path. This is the one diagnostic on this ' +
-            'list the window can report, and it arrives inside a recording status.'
+          ? 'Nothing is being recorded, so there is no path. This arrives inside a recording ' +
+            'status, which is the one place a window is told where a recording is going.'
           : recording.output,
       known: recording !== null,
     },
     {
       subject: 'Muxer status',
-      reported: 'Not reported. Nothing says whether the muxer is keeping up. Issue #100.',
+      reported: `Not reported. Nothing says whether the muxer is keeping up. ${MEASURED_BY_NOTHING}`,
       known: false,
     },
-    {
-      subject: 'Disk latency',
-      reported: 'Not reported. Nothing measures it. Issue #100.',
-      known: false,
-    },
+    { subject: 'Disk latency', reported: MEASURED_BY_NOTHING, known: false },
     {
       subject: 'Plugin events',
       reported: 'Not reported. There is no plugin system. Issue #69.',
@@ -285,6 +403,16 @@ export interface DiagnosticsReportInput {
   readonly userAgent: string;
   /** When the report was composed. */
   readonly takenAt: Date;
+  /**
+   * What the recorder said about capture and encoding, if it has been asked.
+   *
+   * The report is composed from whatever the window holds, and a screen that has
+   * only just opened holds a read in flight. That is a state the report says out
+   * loud rather than one it leaves blank: "the recorder had not answered yet"
+   * and "the recorder has no encoder" are different things to read in a bug
+   * report (issue #302).
+   */
+  readonly recorder: LibraryRead<Diagnostics>;
 }
 
 /** A duration a person reads, from the milliseconds the protocol carries. */
@@ -349,6 +477,81 @@ function recorderFields(view: RecorderLinkView): readonly Field[] {
   return fields;
 }
 
+/**
+ * The fields the recorder answered `get_diagnostics` with.
+ *
+ * Every one of them is present in every state, carrying what happened instead
+ * when there is no value. A report that left them out when the recorder could
+ * not be asked would be indistinguishable from a report written by a build that
+ * never asks, which is the distinction the whole of this screen is about.
+ */
+function recorderDiagnosticsFields(read: LibraryRead<Diagnostics>): readonly Field[] {
+  if (read.state === 'reading') {
+    return [
+      ['Capture backend', 'the recorder had not answered when this was taken'],
+      ['Encoders', 'the recorder had not answered when this was taken'],
+    ];
+  }
+  if (read.state === 'unread') {
+    return [
+      ['Capture backend', `not read: ${redactPathsIn(read.problem.message)}`],
+      ['Encoders', `not read (${read.problem.code})`],
+    ];
+  }
+
+  const capture = read.value.capture;
+  const fields: Field[] = [
+    [
+      'Capture backend',
+      capture === undefined ? 'none — nothing is being recorded' : capture.current,
+    ],
+  ];
+
+  if (capture !== undefined) {
+    fields.push(['  asked for', capture.setting]);
+    fields.push(['  started with', capture.started_with]);
+    // Stated in both directions. An empty list is what says the backend has not
+    // been replaced, and a reader who could not tell that from a report that
+    // omits the field would not know whether anybody had looked.
+    if (capture.changes.length === 0) {
+      fields.push(['  changes', 'none since this recording started']);
+    }
+    for (const change of capture.changes) {
+      fields.push([
+        '  changed',
+        redactPathsIn(
+          change.restart
+            ? `${change.from} restarted (${change.trigger}): ${change.reason}`
+            : `${change.to} took over from ${change.from} (${change.trigger}): ${change.reason}`,
+        ),
+      ]);
+    }
+  }
+
+  const encoders = read.value.encoders;
+  const usable = encoders.encoders.filter((encoder) => encoder.available && encoder.implemented);
+  fields.push([
+    'Encoders',
+    usable.length === 0
+      ? 'none this build can record with'
+      : usable
+          .map(
+            (encoder) =>
+              `${encoder.encoder}${encoder.adapter === undefined ? '' : ` on ${encoder.adapter}`}` +
+              ` (${encoder.codecs.map((codec) => codec.codec).join(', ')})`,
+          )
+          .join('; '),
+  ]);
+  fields.push([
+    '  reading',
+    encoders.probed || encoders.detected_at === undefined
+      ? `taken just now, in ${String(encoders.elapsed_ms)} ms`
+      : `stored, taken ${encoders.detected_at}`,
+  ]);
+
+  return fields;
+}
+
 /** The fields describing what has gone wrong, which is why anybody sends this. */
 function failureFields(view: RecorderLinkView): readonly Field[] {
   const fields: Field[] = [];
@@ -400,7 +603,7 @@ function failureFields(view: RecorderLinkView): readonly Field[] {
  */
 export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
   const health = describeCaptureHealth(input.view);
-  const unreported = diagnostics(input.view)
+  const unreported = diagnostics(input.view, input.recorder)
     .filter((entry) => !entry.known)
     .map((entry) => entry.subject);
 
@@ -421,6 +624,7 @@ export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
      * somebody can act on. The report is not the screen.
      */
     ['Capture health', redactPathsIn(`${health.state} — ${health.detail}`)],
+    ...recorderDiagnosticsFields(input.recorder),
     ...failureFields(input.view),
     ['Notice', input.notice === undefined ? 'none' : redactPathsIn(input.notice)],
   ];

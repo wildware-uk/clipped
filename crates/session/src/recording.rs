@@ -157,6 +157,17 @@ pub(crate) fn record(
     let (fallback, backend, format) = started.into_parts();
     let method = fallback.current_method();
 
+    // The one moment this fact exists outside this thread's stack. `fallback` is
+    // dropped a few lines below — the frame loop holds the backend, not the
+    // thing that chose it — so a reading not taken here is a reading nobody can
+    // take, and the capture backend would go on existing only in the log
+    // (`crate::capture_account`, issue #302). It is one small copy into a mutex,
+    // before the first frame is asked for, and nothing on the frame loop touches
+    // it again (AGENTS.md sections 17 and 20).
+    if let Some(accounting) = outputs.capture {
+        accounting.publish(fallback.status().into());
+    }
+
     // Held here, on this thread, for exactly as long as capture is open —
     // through the first frame, the whole loop and the finalisation. A display
     // the operating system has powered down is not a dark source, it is no

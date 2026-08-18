@@ -87,6 +87,16 @@ export interface CommandAnswers {
    */
   readonly recorderHotkeys?: () => unknown;
   /**
+   * What `recorder_diagnostics` answers: how the recorder is capturing, and what
+   * this machine can encode (issue #302).
+   *
+   * The default is a rejection, as every recorder command's is. A stub that
+   * quietly answered with an empty encoder list would let a screen test pass
+   * while the screen drew "Clipped found no encoder on this machine" over a
+   * recorder nobody asked — the two readings that command exists to keep apart.
+   */
+  readonly recorderDiagnostics?: () => unknown;
+  /**
    * What `recorder_settings` answers: every setting, as the recorder holds it.
    *
    * The default is a rejection, as every recorder command's is. A stub that
@@ -323,6 +333,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'recorder_hotkeys') {
         return answered(commands.recorderHotkeys);
+      }
+      if (command === 'recorder_diagnostics') {
+        return answered(commands.recorderDiagnostics);
       }
       if (command === 'recorder_settings') {
         return answered(commands.recorderSettings);

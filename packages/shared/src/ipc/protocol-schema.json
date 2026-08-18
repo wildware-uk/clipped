@@ -53,6 +53,7 @@
         "open_playback",
         "open_preview",
         "get_hotkeys",
+        "get_diagnostics",
         "get_settings",
         "apply_settings",
         "get_audio_devices",
@@ -141,6 +142,7 @@
         "export_progress",
         "settings",
         "microphone_level",
+        "diagnostics",
         "startup",
         "automatic",
         "previews"
@@ -211,7 +213,8 @@
         "trash_emptied",
         "favourited",
         "locked",
-        "plugins"
+        "plugins",
+        "diagnostics"
       ],
       "tolerates_unrecognised": false
     },
@@ -236,6 +239,18 @@
       "optional": [
         "replay_seconds",
         "session"
+      ]
+    },
+    "adapter_summary": {
+      "required": [
+        "captures",
+        "description",
+        "kind",
+        "vendor",
+        "video_memory_bytes"
+      ],
+      "optional": [
+        "driver_version"
       ]
     },
     "add_bookmark": {
@@ -280,6 +295,70 @@
         "colour",
         "duration_seconds",
         "label"
+      ]
+    },
+    "capture_account": {
+      "required": [
+        "changes",
+        "current",
+        "setting",
+        "started_with"
+      ],
+      "optional": []
+    },
+    "capture_method_change": {
+      "required": [
+        "from",
+        "reason",
+        "restart",
+        "to",
+        "trigger"
+      ],
+      "optional": []
+    },
+    "codec_summary": {
+      "required": [
+        "codec",
+        "inferred"
+      ],
+      "optional": [
+        "max_framerate_1080p",
+        "max_height",
+        "max_width",
+        "supported"
+      ]
+    },
+    "diagnostics": {
+      "required": [
+        "encoders"
+      ],
+      "optional": [
+        "capture"
+      ]
+    },
+    "encoder_account": {
+      "required": [
+        "adapters",
+        "elapsed_ms",
+        "encoders",
+        "probed"
+      ],
+      "optional": [
+        "detected_at"
+      ]
+    },
+    "encoder_summary": {
+      "required": [
+        "asked",
+        "available",
+        "codecs",
+        "encoder",
+        "implemented",
+        "label"
+      ],
+      "optional": [
+        "adapter",
+        "unavailable"
       ]
     },
     "error_detail.not_implemented": {
@@ -672,6 +751,13 @@
     "reply.bookmark_added": {
       "required": [
         "bookmark",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.diagnostics": {
+      "required": [
+        "diagnostics",
         "reply"
       ],
       "optional": []
@@ -1135,6 +1221,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "get_diagnostics",
+      "params": null,
+      "reply": "reply.diagnostics",
+      "available_in_this_build": true
+    },
+    {
       "name": "get_settings",
       "params": null,
       "reply": "reply.settings",
@@ -1387,6 +1479,7 @@
           "export_progress",
           "settings",
           "microphone_level",
+          "diagnostics",
           "startup",
           "automatic",
           "previews"
@@ -2609,6 +2702,114 @@
       },
       "parses": true,
       "discriminant": "response.ok.hotkeys"
+    },
+    {
+      "name": "the diagnostics of a recorder that is recording, whose preferred capture backend could not be started",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "diagnostics": {
+              "capture": {
+                "changes": [
+                  {
+                    "from": "Windows Graphics Capture",
+                    "reason": "this build has no Windows Graphics Capture backend to create",
+                    "restart": false,
+                    "to": "Desktop Duplication",
+                    "trigger": "initialisation_failed"
+                  }
+                ],
+                "current": "Desktop Duplication",
+                "setting": "Automatic",
+                "started_with": "Desktop Duplication"
+              },
+              "encoders": {
+                "adapters": [
+                  {
+                    "captures": true,
+                    "description": "NVIDIA GeForce RTX 4090",
+                    "driver_version": "32.0.15.6094",
+                    "kind": "own_video_memory",
+                    "vendor": "nvidia",
+                    "video_memory_bytes": 25769803776
+                  }
+                ],
+                "detected_at": "2026-08-11T20:14:00+01:00",
+                "elapsed_ms": 3,
+                "encoders": [
+                  {
+                    "adapter": "AMD Radeon(TM) Graphics",
+                    "asked": false,
+                    "available": false,
+                    "codecs": [
+                      {
+                        "codec": "hevc",
+                        "inferred": true,
+                        "max_framerate_1080p": 240,
+                        "max_height": 4096,
+                        "max_width": 4096,
+                        "supported": true
+                      }
+                    ],
+                    "encoder": "amf",
+                    "implemented": true,
+                    "label": "AMD AMF",
+                    "unavailable": "it is on an AMD adapter, and a recording on this machine creates its device on the NVIDIA one"
+                  }
+                ],
+                "probed": false
+              }
+            },
+            "reply": "diagnostics"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.diagnostics.capturing"
+    },
+    {
+      "name": "the diagnostics of a recorder with nothing being recorded",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "diagnostics": {
+              "encoders": {
+                "adapters": [
+                  {
+                    "captures": true,
+                    "description": "Microsoft Basic Render Driver",
+                    "kind": "software",
+                    "vendor": "microsoft",
+                    "video_memory_bytes": 0
+                  }
+                ],
+                "elapsed_ms": 41,
+                "encoders": [
+                  {
+                    "asked": false,
+                    "available": false,
+                    "codecs": [],
+                    "encoder": "nvenc",
+                    "implemented": true,
+                    "label": "NVIDIA NVENC",
+                    "unavailable": "there is no NVIDIA adapter on this machine"
+                  }
+                ],
+                "probed": true
+              }
+            },
+            "reply": "diagnostics"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.diagnostics"
     },
     {
       "name": "a shutdown accepted, with nothing being recorded",

@@ -45,10 +45,10 @@ use clipped_ipc::frame::{read_message, write_message};
 use clipped_ipc::transport::connect;
 use clipped_ipc::{
     features, ApplySettings, Client, ClientError, ClientMessage, Command as IpcCommand,
-    ConnectionRole, Endpoint, ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello,
-    HotkeyBinding, PeerIdentity, RecorderStatus, Reply, SaveReplay, ServerMessage, SettingEntry,
-    SettingsView, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS,
+    ConnectionRole, Diagnostics, Endpoint, ErrorCode, ErrorDetail, Event, EventClient, EventStream,
+    Hello, HotkeyBinding, PeerIdentity, RecorderStatus, Reply, SaveReplay, ServerMessage,
+    SettingEntry, SettingsView, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS,
+    PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 
 use support::{
@@ -1219,6 +1219,180 @@ fn hotkey_report(client: &mut Client) -> Vec<HotkeyBinding> {
     }
 }
 
+/// What the recorder says about capture and encoding.
+fn diagnostics(client: &mut Client) -> Diagnostics {
+    match client
+        .call(&IpcCommand::GetDiagnostics)
+        .expect("a recorder can say how it is capturing and what it can encode")
+    {
+        Reply::Diagnostics { diagnostics } => diagnostics,
+        other => panic!("`get_diagnostics` was answered with {other:?}"),
+    }
+}
+
+#[test]
+fn a_recorder_reports_what_this_machine_can_encode_without_a_terminal() {
+    // Issue #302's second acceptance criterion, against a real recorder over a
+    // real pipe: what `clipped-recorder capabilities` prints, obtained by a
+    // client that has no terminal to read.
+    //
+    // It needs no GPU. A machine with no hardware encoder at all still has
+    // adapters — Windows always presents at least the Basic Render Driver — and
+    // still has the software encoder, and "Clipped found no NVIDIA card" is
+    // exactly the report this exists to deliver.
+    let recorder = ServedRecorder::start("diagnostics-encoders");
+    let mut client = recorder.client();
+
+    let diagnostics = diagnostics(&mut client);
+    let encoders = &diagnostics.encoders;
+
+    assert!(
+        !encoders.encoders.is_empty(),
+        "every build knows the four encoder families of SPEC.md section 9, present or not:          {encoders:?}"
+    );
+    for family in ["nvenc", "amf", "quick_sync", "software"] {
+        let summary = encoders
+            .encoders
+            .iter()
+            .find(|summary| summary.encoder == family)
+            .unwrap_or_else(|| panic!("`{family}` should be reported: {encoders:?}"));
+        assert!(
+            !summary.label.is_empty(),
+            "an encoder with no label is a row a window cannot draw: {summary:?}"
+        );
+        // The half a report of bare ticks would hide: what the machine can do,
+        // and what *this build* can do with it, are different questions
+        // (AGENTS.md sections 27 and 54).
+        assert_eq!(
+            summary.implemented,
+            family != "quick_sync",
+            "the encoders this build has a proven backend for are the ones              `EncoderKind::is_implemented` names: {summary:?}"
+        );
+        assert_eq!(
+            summary.available,
+            summary.unavailable.is_none(),
+            "an encoder that cannot be used says why, and one that can does not: {summary:?}"
+        );
+        // An encoder that names an adapter names one that is in the list beside
+        // it. The two halves are mapped separately — encoders carry a per-boot
+        // identifier and adapters carry a model name — so a mismatch here is a
+        // window drawing "NVENC, on an adapter this report does not mention".
+        if let Some(adapter) = &summary.adapter {
+            assert!(
+                encoders
+                    .adapters
+                    .iter()
+                    .any(|candidate| &candidate.description == adapter),
+                "`{adapter}` is not one of the adapters this report lists: {encoders:?}"
+            );
+        }
+    }
+
+    assert!(
+        !encoders.adapters.is_empty(),
+        "Windows always presents at least the Basic Render Driver, so an empty adapter list          means the report was never taken: {encoders:?}"
+    );
+    assert!(
+        encoders
+            .adapters
+            .iter()
+            .filter(|adapter| adapter.captures)
+            .count()
+            <= 1,
+        "a recording creates its graphics device on one adapter, so at most one is marked:          {encoders:?}"
+    );
+
+    // Nothing is being recorded, so there is no capture backend running and the
+    // account is absent rather than a guess at which one would be chosen.
+    assert_eq!(
+        diagnostics.capture, None,
+        "an idle recorder has no capture backend to name: {diagnostics:?}"
+    );
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_recorder_that_can_report_diagnostics_says_so_in_its_welcome() {
+    // The check a window makes before it draws either row. A recorder built
+    // before issue #302 refuses `get_diagnostics` with `unknown_command`, and
+    // "this machine has no encoder" and "nobody asked" are the two readings a
+    // screen must never confuse — which is the whole reason the capability is
+    // named rather than inferred from an empty answer.
+    let recorder = ServedRecorder::start("diagnostics-welcome");
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::DIAGNOSTICS),
+        "a recorder that performs `get_diagnostics` advertises it: {:?}",
+        client.welcome().features
+    );
+    // And it does perform it, which is the half a feature list cannot promise
+    // on its own: `replay` was advertised by a build that refused `save_replay`
+    // with `not_implemented` for two milestones.
+    let _ = diagnostics(&mut client);
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_recorder_carries_no_path_into_its_diagnostics() {
+    // Issue #302's fourth acceptance criterion, and the one worth a test of its
+    // own. The capability cache lives at
+    // `%LOCALAPPDATA%\Clipped\encoder-capabilities.json`, the terminal report
+    // prints where it is, and this reply must not: the path runs through the
+    // user's account name (AGENTS.md section 13, `docs/logging.md`).
+    //
+    // Asserted over the **bytes of the frame**, not over a parsed reply. A path
+    // in a field this build does not define would be invisible to a
+    // `Diagnostics` and would still be in what somebody pastes into a bug
+    // report, which is the difference this test exists to make.
+    let recorder = ServedRecorder::start("diagnostics-no-paths");
+
+    let mut connection =
+        connect(recorder.endpoint(), PATIENCE).expect("the recorder accepts a connection");
+    write_message(
+        &mut connection,
+        &ClientMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerIdentity {
+                name: CLIENT_NAME.to_owned(),
+                version: "0.0.0".to_owned(),
+            },
+            role: ConnectionRole::Control,
+            streams: Vec::new(),
+        }),
+    )
+    .expect("the handshake is written");
+    let _welcome: ServerMessage = read_message(&mut connection).expect("the recorder welcomes");
+
+    let request = IpcCommand::GetDiagnostics
+        .to_request(1)
+        .expect("the command has no parameters to fail on");
+    write_message(&mut connection, &ClientMessage::Request(request)).expect("the request is sent");
+    let reply: ServerMessage = read_message(&mut connection).expect("the recorder answers");
+    let json = serde_json::to_string(&reply).expect("the frame serialises");
+
+    // A Windows path in JSON is `C:\Users\...`, so the account name and the
+    // directories are what to look for rather than a separator.
+    for leak in ["Users", "AppData", "Clipped\\\\", "encoder-capabilities"] {
+        assert!(
+            !json.contains(leak),
+            "`{leak}` reached a diagnostics reply, which is a path leaving this machine inside \
+             something a user is asked to paste into a bug report: {json}"
+        );
+    }
+
+    drop(connection);
+    recorder.stop();
+}
+
 /// One action's row, or a failure naming the action that is missing.
 fn row<'a>(hotkeys: &'a [HotkeyBinding], action: &str) -> &'a HotkeyBinding {
     hotkeys
@@ -1639,6 +1813,38 @@ fn a_recording_driven_entirely_over_the_protocol_produces_a_playable_file() {
         other => panic!("the recorder should say it is recording, not {other:?}"),
     }
 
+    // Issue #302's first acceptance criterion, and the only place it can be
+    // checked: a capture backend exists only while something is being captured,
+    // and it is chosen on the capture thread by a `CaptureFallback` that is
+    // dropped as soon as the frame loop starts. A unit test of the publisher
+    // could not show that the reading reaches a client at all.
+    let while_recording = diagnostics(&mut client);
+    let capture = while_recording
+        .capture
+        .as_ref()
+        .expect("a recording in progress is capturing with something, and says which");
+
+    assert_eq!(
+        capture.setting, "Automatic",
+        "a recording nobody pinned a method for asked for whichever one works: {capture:?}"
+    );
+    assert!(
+        !capture.current.is_empty(),
+        "a capture backend with no name is a row a window cannot draw: {capture:?}"
+    );
+    assert_eq!(
+        capture.current, capture.started_with,
+        "nothing replaced the backend during this recording, so the two agree — and an empty          change list is what says so rather than an absence: {capture:?}"
+    );
+    for change in &capture.changes {
+        // Whatever is here is a real fall-through from start-up, so every field
+        // of it has to be worth drawing.
+        assert!(
+            !change.reason.is_empty() && !change.trigger.is_empty(),
+            "a capture change that explains nothing is a row with no purpose: {change:?}"
+        );
+    }
+
     let summary = match client
         .call(&IpcCommand::StopRecording(StopRecording {
             recording_id: Some(recording_id),
@@ -1699,6 +1905,15 @@ fn a_recording_driven_entirely_over_the_protocol_produces_a_playable_file() {
         Reply::Status { status } => assert_eq!(status, RecorderStatus::Idle),
         other => panic!("expected a status, got {other:?}"),
     }
+
+    // And the capture account goes with it. A recorder that went on reporting
+    // the last backend it used would be answering "what is capturing" with a
+    // reading of what was.
+    assert_eq!(
+        diagnostics(&mut client).capture,
+        None,
+        "nothing is being recorded, so there is no capture backend to name"
+    );
 
     drop(client);
     recorder.stop();

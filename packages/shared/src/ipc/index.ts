@@ -9,9 +9,17 @@
  */
 
 export type {
+  AdapterSummary,
+  CaptureAccount,
+  CaptureMethodChange,
   ClientMessage,
+  CodecSummary,
   CommandName,
   ConnectionRole,
+  Diagnostics,
+  DiagnosticsReply,
+  EncoderAccount,
+  EncoderSummary,
   ErrorCode,
   ErrorDetail,
   ErrorOutcome,

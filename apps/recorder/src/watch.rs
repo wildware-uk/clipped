@@ -1915,6 +1915,11 @@ where
     let mut outputs = RecordingOutputs::default().with_progress(progress);
     if let Some(adopted) = adopted.as_ref() {
         outputs = outputs.with_screenshots(adopted.screenshots());
+        // And where it says which capture backend it settled on, so that a
+        // recording detection started reaches the Diagnostics screen the same
+        // way one the window started does (issue #302). Only when the recording
+        // is reachable: a recording nothing can ask about has nobody to tell.
+        outputs = outputs.with_capture_account(adopted.capture());
     }
     let outcome =
         match std::panic::catch_unwind(AssertUnwindSafe(|| record(&settings, stop, &outputs))) {
