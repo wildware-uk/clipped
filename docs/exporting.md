@@ -163,7 +163,121 @@ The measured agreement, on the fixtures those tests build:
   re-encode that happened to produce the same number of frames.
 
 That is the tolerance
-[issue #84](https://github.com/wildware-uk/clipped/issues/84) asks for.
+[issue #84](https://github.com/wildware-uk/clipped/issues/84) asks for. What
+the *size* of the export is measured against is
+[How large the file will be](#how-large-the-file-will-be), which is the same
+shape of measurement: the file on disk, read by something that is not this
+crate.
+
+## How large the file will be
+
+`ExportPlan::size` answers that before anything is written, from the same pass
+over the recording that found the keyframes. It answers one of two things, and a
+caller has to draw both:
+
+| Method | Answer |
+| --- | --- |
+| Stream copy | `SizeEstimate::Estimated`, within the margin below |
+| Re-encode | `SizeEstimate::Unknown(Reencode)` — **no figure at all** |
+
+**A re-encode has no estimate on purpose.** How large a re-encode is is a
+property of the bitrate somebody chooses, nothing chooses one yet (see "What is
+not built yet"), and a number worked out from the source's own bitrate would be
+a number about a file that is not the one being written. That is the figure a
+user decides whether they have room for, so an invented one is exactly what
+AGENTS.md section 27 forbids: an export dialog draws "unknown" rather than a
+zero or a guess.
+
+### What a copy's estimate is made of
+
+Two halves, known to very different accuracies:
+
+```text
+estimate = coded media + container
+```
+
+The **coded media is exact**. A copy writes the recording's own packets, so the
+size of the export's media is the sum of the sizes of the packets the segments
+take — read from each packet's header during the indexing pass, held in
+`IndexedFrame::bytes` and `AudioPacketIndex`, and summed by the same half-open
+rule the writing loop applies. `EstimatedSize::media_bytes` and
+`Export::byte_len` are compared for equality by the test below, not for
+closeness.
+
+The **container is modelled**. It is what `clipped-muxer` writes round the
+packets, and it is the only place the error lives:
+
+| Part | Modelled as |
+| --- | --- |
+| EBML header, seek head, segment information, cue framing | 390 bytes |
+| The picture track's declaration | 115 bytes plus its exact codec private data |
+| Each sound track's declaration | 140 bytes plus its exact codec private data |
+| Each packet | 7 bytes of block header and element framing |
+| Each cluster | 10 bytes |
+| Each keyframe | 25 bytes of cue point |
+
+**A cluster is not a keyframe.** `MkvWriter` closes a cluster at a keyframe *or*
+after one second of media, whichever comes first
+(`CLUSTER_TIME_LIMIT_MS` in `crates/muxer/src/writer.rs`), so a clip whose
+keyframes are four seconds apart holds four times as many clusters as keyframes.
+The estimate walks the keyframes and divides each gap by that window, and the
+measurement below includes a fixture with a four-second keyframe interval
+precisely so that a model which counted one cluster per keyframe cannot pass.
+
+### The margin, and what it was measured on
+
+`EstimatedSize::MARGIN` is **0.5%** of the finished file. It is what a caller may
+rely on; it is not what was observed. The largest error observed is **0.015%**,
+and the headroom between the two is deliberate — the fixtures are one codec at
+one size, and a margin measured under some conditions is not a promise about
+every recording.
+
+Measured by `crates/export/tests/an_export_is_the_size_the_plan_said.rs`, which
+plans and then really exports each case and compares the estimate against
+`std::fs::metadata(…).len()` — the bytes on disk, read from the filesystem
+rather than from anything in this crate. Conditions: H.264 through
+`libopenh264` at 320×240 and 10 pictures a second, uncompressed 48 kHz audio,
+twelve-second recordings, on the pinned FFmpeg build.
+
+| Case | Estimate | On disk | Error |
+| --- | ---: | ---: | ---: |
+| A fifth of a second, one sound track | 32,743 | 32,738 | +0.015% |
+| One keyframe interval, one sound track | 152,991 | 152,986 | +0.003% |
+| Three intervals, one sound track | 476,955 | 476,970 | −0.003% |
+| The whole recording, one sound track | 1,892,431 | 1,892,529 | −0.005% |
+| Two segments, one sound track | 616,824 | 616,857 | −0.005% |
+| Three segments, one sound track | 629,466 | 629,499 | −0.005% |
+| A fifth of a second, no sound | 12,053 | 12,052 | +0.008% |
+| One keyframe interval, no sound | 56,266 | 56,266 | 0.000% |
+| The whole recording, no sound | 736,350 | 736,361 | −0.001% |
+| Three intervals, two sound tracks | 766,850 | 766,884 | −0.004% |
+| Two segments, two sound tracks | 1,003,304 | 1,003,356 | −0.005% |
+| One four-second interval, one sound track | 629,973 | 629,989 | −0.003% |
+| The whole four-second-interval recording | 1,897,181 | 1,897,275 | −0.005% |
+| Two four-second-interval segments | 1,259,269 | 1,259,324 | −0.004% |
+
+The error is largest on the shortest clips, which is where the file's fixed
+header is the largest share of it, and it shrinks as the media grows. The
+estimate is slightly **under** on everything but the shortest clips; at five
+hundredths of a percent that is not a figure anybody would act on differently,
+and it is recorded here rather than corrected away because the direction of a
+residual is part of what was measured.
+
+**Re-measure rather than widen.** The test asserts three things: that the media
+is exactly what was written, that the *container* is within 3% of the container
+that was written, and that the whole file is within `EstimatedSize::MARGIN`. The
+middle one is the one that notices a change — a file is almost all media, so a
+container model that had doubled would still pass the last one on a long clip.
+If it fails, a constant above no longer describes what `clipped-muxer` writes,
+and the figures in this table have to be taken again from a run of the test.
+
+### What this does not carry yet
+
+The estimate stops at `ExportPlan`. Getting it as far as the export dialog is
+[issue #322](https://github.com/wildware-uk/clipped/issues/322): nothing in
+`clipped-ipc` carries it and the dialog does not draw it, so
+[issue #90](https://github.com/wildware-uk/clipped/issues/90)'s criterion is
+answerable but is not yet answered on screen.
 
 ## Progress, cancellation and what is left behind
 

@@ -14,6 +14,20 @@
 //!   frame at all, and whether that frame is a keyframe, is a property of the
 //!   bitstream. [`VideoFrameIndex`] is that answer, built by demuxing the file
 //!   once without decoding anything.
+//!
+//! # And the one it cannot answer without the file either: how big
+//!
+//! The same pass reads how many bytes the container stores for each packet, in
+//! [`IndexedFrame::bytes`] and in [`AudioPacketIndex`]. A stream copy writes the
+//! recording's own packets, so the size of the export is the size of the packets
+//! it takes plus what the container costs to write round them — which makes an
+//! estimate an arithmetic sum over an index already being built rather than
+//! anything anybody has to guess at ([`crate::plan::EstimatedSize`]).
+//!
+//! It is not free in memory: a sound track is tens of packets a second, so an
+//! hour of one is a megabyte or so of index beside the pictures'. That is the
+//! same order as the picture index the plan already needs and it lives only for
+//! as long as the plan is being made.
 
 use clipped_edit::SourceTime;
 use clipped_muxer::{AudioCodec, FrameRate, VideoCodec};
@@ -218,6 +232,81 @@ pub struct IndexedFrame {
     pub decode: SourceTime,
     /// Whether a decoder can start here.
     pub keyframe: bool,
+    /// How many bytes of coded picture the container stores for it.
+    ///
+    /// A copy writes exactly these bytes, so summing them over the pictures a
+    /// segment takes is the size of that segment's video — measured rather than
+    /// worked out from a bitrate.
+    pub bytes: u32,
+}
+
+/// One coded packet of a recording's sound track, as the container stores it.
+///
+/// The sound half of the same answer: [`IndexedFrame`] carries the picture
+/// sizes, and this carries a sound track's. There is no keyframe here because
+/// every audio packet is one — sound is cut on packet boundaries and a decoder
+/// can start at any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioPacket {
+    /// When it is presented, on the recording's own timeline.
+    pub presentation: SourceTime,
+    /// How many bytes of coded sound the container stores for it.
+    pub bytes: u32,
+}
+
+/// Every coded packet of one of a recording's sound tracks, in the order they
+/// are stored.
+///
+/// Built by the same pass that builds [`VideoFrameIndex`], and for the same
+/// reason: how many bytes a copy of a range would write is a property of the
+/// bitstream, and a variable-bitrate track's answer cannot be worked out from
+/// its duration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioPacketIndex {
+    packets: Vec<AudioPacket>,
+}
+
+impl AudioPacketIndex {
+    /// An index over `packets`, which must be in the order they are stored.
+    #[must_use]
+    pub fn new(packets: Vec<AudioPacket>) -> Self {
+        Self { packets }
+    }
+
+    /// The packets, in the order they are stored.
+    #[must_use]
+    pub fn packets(&self) -> &[AudioPacket] {
+        &self.packets
+    }
+
+    /// How many packets the track holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Whether the track holds no packets at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// The packets a half-open source range covers.
+    ///
+    /// The same rule as [`VideoFrameIndex::frames_in`] and the same rule the
+    /// writing loop applies to sound: presented at or after `start` and strictly
+    /// before `end`. That is what makes the sum below the bytes a copy of that
+    /// range writes rather than an approximation of them.
+    pub fn packets_in(
+        &self,
+        start: SourceTime,
+        end: SourceTime,
+    ) -> impl Iterator<Item = AudioPacket> + '_ {
+        self.packets
+            .iter()
+            .filter(move |packet| packet.presentation >= start && packet.presentation < end)
+            .copied()
+    }
 }
 
 /// Every coded picture of a recording's video track, in decode order.
@@ -312,13 +401,31 @@ impl VideoFrameIndex {
 pub struct SourceProfile {
     streams: Vec<SourceStream>,
     frames: VideoFrameIndex,
+    audio_packets: Option<Vec<AudioPacketIndex>>,
 }
 
 impl SourceProfile {
     /// A profile over `streams`, whose video track is described by `frames`.
+    ///
+    /// The sound tracks' packets are **not** described by this: a profile made
+    /// this way says nothing about how large they are, and a plan over it
+    /// answers that it does not know rather than answering zero. Add them with
+    /// [`with_audio_packets`](Self::with_audio_packets).
     #[must_use]
     pub fn new(streams: Vec<SourceStream>, frames: VideoFrameIndex) -> Self {
-        Self { streams, frames }
+        Self {
+            streams,
+            frames,
+            audio_packets: None,
+        }
+    }
+
+    /// The same profile, with one packet index per sound track, in the order
+    /// [`audio`](Self::audio) returns them.
+    #[must_use]
+    pub fn with_audio_packets(mut self, audio_packets: Vec<AudioPacketIndex>) -> Self {
+        self.audio_packets = Some(audio_packets);
+        self
     }
 
     /// Every stream the container declares, in its own order.
@@ -354,6 +461,18 @@ impl SourceProfile {
     pub const fn frames(&self) -> &VideoFrameIndex {
         &self.frames
     }
+
+    /// Where each sound track's packets are, when they were measured.
+    ///
+    /// [`None`] for a profile written out by hand rather than read from a file.
+    /// Deliberately distinguished from an empty list, which is a recording with
+    /// no sound at all: "nothing measured this" and "there is none" are
+    /// different answers and an estimate must not confuse them (AGENTS.md
+    /// section 54).
+    #[must_use]
+    pub fn audio_packets(&self) -> Option<&[AudioPacketIndex]> {
+        self.audio_packets.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +484,7 @@ mod tests {
             presentation: SourceTime::from_nanos(presentation_nanos),
             decode: SourceTime::from_nanos(presentation_nanos),
             keyframe,
+            bytes: if keyframe { 4_000 } else { 500 },
         }
     }
 
@@ -448,9 +568,59 @@ mod tests {
                 presentation: SourceTime::from_nanos(200_000_000),
                 decode: SourceTime::from_nanos(100_000_000),
                 keyframe: false,
+                bytes: 500,
             },
         ]);
         assert!(reordered.is_reordered());
+    }
+
+    #[test]
+    fn a_sound_tracks_packets_are_taken_by_the_same_half_open_rule_as_the_pictures() {
+        // The sizes are what an estimate sums, so which packets a range covers
+        // decides the answer. The packet at 200 ms belongs to the second range
+        // and to nothing else — the same rule the writing loop applies, which is
+        // what makes the sum the bytes a copy would write.
+        let index = AudioPacketIndex::new(
+            (0..10)
+                .map(|number| AudioPacket {
+                    presentation: SourceTime::from_nanos(number * 100_000_000),
+                    bytes: 960,
+                })
+                .collect(),
+        );
+
+        let first: u64 = index
+            .packets_in(SourceTime::ZERO, SourceTime::from_nanos(200_000_000))
+            .map(|packet| u64::from(packet.bytes))
+            .sum();
+        let second: u64 = index
+            .packets_in(
+                SourceTime::from_nanos(200_000_000),
+                SourceTime::from_nanos(400_000_000),
+            )
+            .map(|packet| u64::from(packet.bytes))
+            .sum();
+
+        assert_eq!(first, 2 * 960);
+        assert_eq!(second, 2 * 960);
+        assert_eq!(index.len(), 10);
+        assert!(!index.is_empty());
+    }
+
+    #[test]
+    fn a_profile_written_by_hand_says_nothing_about_its_sound_rather_than_saying_zero() {
+        // "Nothing measured this" and "there is none" are different answers, and
+        // a size estimate over the second would be a figure with no basis.
+        let profile = SourceProfile::new(Vec::new(), VideoFrameIndex::default());
+        assert_eq!(profile.audio_packets(), None);
+
+        let measured = profile.with_audio_packets(vec![AudioPacketIndex::default()]);
+        assert_eq!(
+            measured.audio_packets().map(<[_]>::len),
+            Some(1),
+            "a recording whose one sound track holds no packets is not a recording nobody looked \
+             at"
+        );
     }
 
     #[test]

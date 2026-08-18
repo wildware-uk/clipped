@@ -53,39 +53,110 @@ pub(crate) fn recording(
     name: &str,
     seconds: u32,
 ) -> PathBuf {
-    let path = directory.file(name);
-    let video = format!("testsrc2=size=320x240:rate={FRAME_RATE}");
-    let gop = KEYFRAME_INTERVAL.to_string();
-    let length = seconds.to_string();
-    let destination = path.to_string_lossy().into_owned();
+    recording_with_sound(tools, directory, name, seconds, 1)
+}
 
-    let output = Command::new(tools.ffmpeg())
+/// Writes a recording with `audio_streams` sound tracks and returns its path.
+///
+/// The fixture with the keyframe interval the rest of these tests use.
+///
+/// # Panics
+///
+/// When `ffmpeg` fails, with its own diagnostics.
+pub(crate) fn recording_with_sound(
+    tools: &MediaTools,
+    directory: &TemporaryDirectory,
+    name: &str,
+    seconds: u32,
+    audio_streams: u32,
+) -> PathBuf {
+    recording_with(
+        tools,
+        directory,
+        name,
+        seconds,
+        audio_streams,
+        KEYFRAME_INTERVAL,
+    )
+}
+
+/// Writes a recording with `audio_streams` sound tracks and `keyframe_interval`
+/// pictures between keyframes, and returns its path.
+///
+/// The same fixture as [`recording`], which is this with one sound track and the
+/// usual interval. A size estimate has to be measured against files with more
+/// sound than that and against files with none, because the tracks are where the
+/// estimate has the most to add up; and against a keyframe interval longer than
+/// the writer's cluster window, because that is what separates "one cluster per
+/// keyframe" from "one cluster a second" — a fixture where they coincide cannot
+/// tell a right model from a wrong one.
+///
+/// # Panics
+///
+/// When `ffmpeg` fails, with its own diagnostics.
+pub(crate) fn recording_with(
+    tools: &MediaTools,
+    directory: &TemporaryDirectory,
+    name: &str,
+    seconds: u32,
+    audio_streams: u32,
+    keyframe_interval: u32,
+) -> PathBuf {
+    let path = directory.file(name);
+    let mut arguments: Vec<String> = vec![
         // `-nostdin` because `ffmpeg` otherwise reads the console, and a test
         // harness's console is not something it should be reading.
-        .arg("-nostdin")
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            &video,
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000",
-            "-t",
-            &length,
-            "-c:v",
-            "libopenh264",
-            "-g",
-            &gop,
-            "-c:a",
-            "pcm_s16le",
-            "-metadata:s:a:0",
-            "title=Game",
-            &destination,
-        ])
+        "-nostdin".to_owned(),
+        "-v".to_owned(),
+        "error".to_owned(),
+        "-f".to_owned(),
+        "lavfi".to_owned(),
+        "-i".to_owned(),
+        format!("testsrc2=size=320x240:rate={FRAME_RATE}"),
+    ];
+
+    for stream in 0..audio_streams {
+        // A different tone per track, so two tracks are two different sets of
+        // packets rather than the same bytes twice.
+        let frequency = 440 + stream * 110;
+        arguments.extend([
+            "-f".to_owned(),
+            "lavfi".to_owned(),
+            "-i".to_owned(),
+            format!("sine=frequency={frequency}:sample_rate=48000"),
+        ]);
+    }
+
+    arguments.extend([
+        "-t".to_owned(),
+        seconds.to_string(),
+        "-map".to_owned(),
+        "0:v:0".to_owned(),
+        "-c:v".to_owned(),
+        "libopenh264".to_owned(),
+        "-g".to_owned(),
+        keyframe_interval.to_string(),
+    ]);
+
+    if audio_streams == 0 {
+        arguments.push("-an".to_owned());
+    } else {
+        for stream in 0..audio_streams {
+            arguments.extend(["-map".to_owned(), format!("{}:a:0", stream + 1)]);
+        }
+        arguments.extend(["-c:a".to_owned(), "pcm_s16le".to_owned()]);
+        for stream in 0..audio_streams {
+            arguments.extend([
+                format!("-metadata:s:a:{stream}"),
+                format!("title={}", track_name(stream)),
+            ]);
+        }
+    }
+
+    arguments.push(path.to_string_lossy().into_owned());
+
+    let output = Command::new(tools.ffmpeg())
+        .args(&arguments)
         .output()
         .expect("the pinned ffmpeg can be run");
 
@@ -95,6 +166,18 @@ pub(crate) fn recording(
         String::from_utf8_lossy(&output.stderr)
     );
     path
+}
+
+/// What a fixture's *n*th sound track is called.
+///
+/// The names a recording really carries, so that a test reading them back is
+/// reading something a recording would have.
+pub(crate) fn track_name(stream: u32) -> String {
+    match stream {
+        0 => "Game".to_owned(),
+        1 => "Microphone".to_owned(),
+        other => format!("Track {other}"),
+    }
 }
 
 /// One packet of a file, as `ffprobe` reports it.

@@ -17,6 +17,9 @@
 //!   by copying the coded packets the recording already holds, or whether it
 //!   needs every frame decoded and encoded again — and names every reason.
 //!   Nothing is written to answer it.
+//! - **Saying how large the result will be.** [`ExportPlan::size`] answers that
+//!   from the same pass, for a copy, and answers that it cannot for a re-encode
+//!   rather than inventing a figure.
 //! - **Doing it, for a copy.** [`export`] reads the recording, cuts it where
 //!   the document says, moves the timestamps onto the clip's own timeline and
 //!   writes the result through `clipped_muxer::MkvWriter`.
@@ -103,8 +106,12 @@ pub mod source;
 
 pub use crate::error::ExportError;
 pub use crate::plan::{
-    CopyBlocker, ExportMethod, ExportPlan, MixReason, PlanError, PlannedAudioTrack, PlannedSegment,
+    CopyBlocker, EstimatedSize, ExportMethod, ExportPlan, MixReason, PlanError, PlannedAudioTrack,
+    PlannedSegment, SizeEstimate, SizeUnknown,
 };
 pub use crate::progress::{Cancellation, ExportOptions, ExportProgress, DEFAULT_PROGRESS_INTERVAL};
 pub use crate::render::{export, plan_export, Export, SourceFiles};
-pub use crate::source::{IndexedFrame, SourceProfile, SourceStream, StreamFormat, VideoFrameIndex};
+pub use crate::source::{
+    AudioPacket, AudioPacketIndex, IndexedFrame, SourceProfile, SourceStream, StreamFormat,
+    VideoFrameIndex,
+};

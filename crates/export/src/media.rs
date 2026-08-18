@@ -39,7 +39,10 @@ use clipped_muxer::{AudioCodec, AvError, FrameRate, VideoCodec};
 use rusty_ffmpeg::ffi;
 
 use crate::error::ExportError;
-use crate::source::{IndexedFrame, SourceProfile, SourceStream, StreamFormat, VideoFrameIndex};
+use crate::source::{
+    AudioPacket, AudioPacketIndex, IndexedFrame, SourceProfile, SourceStream, StreamFormat,
+    VideoFrameIndex,
+};
 
 /// FFmpeg's `AVERROR_EOF`, which is `FFERRTAG('E','O','F',' ')`.
 ///
@@ -91,6 +94,11 @@ pub(crate) struct PacketInfo {
     pub(crate) duration_nanos: i64,
     /// Whether a decoder can start here.
     pub(crate) keyframe: bool,
+    /// How many bytes of coded media it carries.
+    ///
+    /// Read from the packet's own header rather than from its payload, so that
+    /// the indexing pass can record it without touching the bytes.
+    pub(crate) bytes: u32,
 }
 
 /// A recording, open for reading.
@@ -259,6 +267,10 @@ impl SourceMedia {
     /// ask. Nothing is decoded, so the cost is reading the container's packet
     /// headers.
     ///
+    /// The same headers carry each packet's coded size, which is what lets a
+    /// plan say how large a copy would be, so it is recorded here rather than
+    /// paid for with a second pass.
+    ///
     /// # Errors
     ///
     /// [`ExportError::SourceRead`] when the file stops being readable, and
@@ -267,26 +279,47 @@ impl SourceMedia {
         self.seek_before_nanos(0)?;
 
         let video = self.video_stream_index();
+        // The container index of each sound track, in the order a document
+        // numbers them: 0 for the first audio stream, not for the video one.
+        let audio_streams: Vec<usize> = self
+            .streams
+            .iter()
+            .filter(|stream| stream.is_audio())
+            .map(SourceStream::index)
+            .collect();
+
         let mut frames = Vec::new();
+        let mut audio = vec![Vec::new(); audio_streams.len()];
 
         while let Some(packet) = self.read()? {
+            let presentation = clipped_edit::SourceTime::from_nanos(
+                packet.presentation_nanos.max(0).unsigned_abs(),
+            );
+
             if Some(packet.stream) == video {
                 frames.push(IndexedFrame {
-                    presentation: clipped_edit::SourceTime::from_nanos(
-                        packet.presentation_nanos.max(0).unsigned_abs(),
-                    ),
+                    presentation,
                     decode: clipped_edit::SourceTime::from_nanos(
                         packet.decode_nanos.max(0).unsigned_abs(),
                     ),
                     keyframe: packet.keyframe,
+                    bytes: packet.bytes,
+                });
+            } else if let Some(track) = audio_streams
+                .iter()
+                .position(|stream| *stream == packet.stream)
+            {
+                audio[track].push(AudioPacket {
+                    presentation,
+                    bytes: packet.bytes,
                 });
             }
         }
 
-        Ok(SourceProfile::new(
-            self.streams.clone(),
-            VideoFrameIndex::new(frames),
-        ))
+        Ok(
+            SourceProfile::new(self.streams.clone(), VideoFrameIndex::new(frames))
+                .with_audio_packets(audio.into_iter().map(AudioPacketIndex::new).collect()),
+        )
     }
 
     /// Positions the reader a little before `nanos` on the recording's
@@ -352,7 +385,7 @@ impl SourceMedia {
 
         // SAFETY: the packet is live and filled in; every field read is a plain
         // scalar.
-        let (index, presentation, decode, duration, flags) = unsafe {
+        let (index, presentation, decode, duration, flags, size) = unsafe {
             let packet = self.packet.as_ptr();
             (
                 (*packet).stream_index,
@@ -360,6 +393,7 @@ impl SourceMedia {
                 (*packet).dts,
                 (*packet).duration,
                 (*packet).flags,
+                (*packet).size,
             )
         };
 
@@ -379,6 +413,7 @@ impl SourceMedia {
             decode_nanos: rescale(decode, time_base, NANOSECONDS) - self.origin_nanos,
             duration_nanos: rescale(duration.max(0), time_base, NANOSECONDS),
             keyframe: (flags & ffi::AV_PKT_FLAG_KEY as c_int) != 0,
+            bytes: u32::try_from(size).unwrap_or(0),
         }))
     }
 

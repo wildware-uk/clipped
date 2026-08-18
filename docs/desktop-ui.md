@@ -751,11 +751,13 @@ gap: no command carries a plan, an export, its progress or its cancellation, and
 - **No Export button.** Nothing here can start one: no command, no file-system
   permission, no way to choose a destination. The dialog says so in its marked
   panel rather than offering a button that would fail.
-- **No estimated size.** `ExportPlan` reports the method, the blockers, the
-  segments, the tracks and the duration, and no bytes;
-  [#323](https://github.com/wildware-uk/clipped/issues/323) is what makes a
-  figure possible. Drawing one now would be a figure nobody measured — and it is
-  the figure somebody decides whether they have room for.
+- **No estimated size.** `ExportPlan::size` now answers it —
+  [#323](https://github.com/wildware-uk/clipped/issues/323) measured a copy to
+  within 0.5% of the finished file and says "unknown" for a re-encode
+  ([docs/exporting.md](exporting.md#how-large-the-file-will-be)) — but nothing
+  carries it here: no command serialises a plan, which is
+  [#322](https://github.com/wildware-uk/clipped/issues/322). When it does, the
+  dialog has to draw the unknown case as an absence rather than as a zero.
 - **No progress bar and no Cancel.** Both are the engine's (`ExportProgress`,
   `Cancellation`) and arrive with #322. A progress bar that does not move and a
   cancel button that does nothing are two of the same bug.
