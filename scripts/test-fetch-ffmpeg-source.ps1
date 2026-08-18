@@ -203,6 +203,28 @@ try {
         -ExpectedExitCode 1 `
         -Contains @('has no -Asset parameter')
 
+    Write-Host 'Where it writes'
+
+    # A relative -Destination is what .github/workflows/release.yml passes, to
+    # keep the corresponding source out of the directory the FFmpeg cache
+    # restores. It has to mean "relative to where I am", which is not free: the
+    # archives are written by `git -C <throwaway clone> archive --output=...`,
+    # and git resolves a relative output path against the clone it was pointed
+    # at. Before this was resolved up front, the workflow's own invocation would
+    # have failed on the first tag with git unable to open a path inside a
+    # directory this script deletes at the end of the run.
+    Push-Location $fixtureRoot
+    try {
+        $relative = Invoke-Case -Arguments @('-PlanOnly', '-FetchScript', $fixture, '-Destination', 'ffmpeg-source')
+    } finally {
+        Pop-Location
+    }
+    Assert-Case `
+        -Name 'a relative destination is resolved against the caller, not against the clone git is pointed at' `
+        -Result $relative `
+        -ExpectedExitCode 0 `
+        -Contains @((Join-Path $fixtureRoot 'ffmpeg-source'))
+
     Write-Host 'Against the real pin'
 
     # The pin this repository actually carries. This case is the one that fails

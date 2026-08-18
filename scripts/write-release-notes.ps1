@@ -40,6 +40,15 @@
     FFmpeg build shipped, which is the fact the corresponding-source obligation
     turns on. Omitted rather than guessed when it is not.
 
+.PARAMETER CorrespondingSourceDirectory
+    The corresponding source of the shipped FFmpeg, as
+    scripts/fetch-ffmpeg-source.ps1 assembles it. The release attaches every
+    file in it, and when it is given the notes name those assets, so that a
+    reader is told where the source is rather than left to work out that the
+    two archives further down the asset list are it. Omitted rather than
+    claimed when it is not there: notes that said the source was attached when
+    it was not would be worse than notes that said nothing.
+
 .PARAMETER RepositoryUrl
     Base URL the documentation links are built from.
 
@@ -58,6 +67,7 @@ param(
     [Parameter(Mandatory)] [string] $InstallerPath,
     [Parameter(Mandatory)] [string] $OutFile,
     [string] $FfmpegPinPath = '',
+    [string] $CorrespondingSourceDirectory = '',
     [string] $RepositoryUrl = 'https://github.com/wildware-uk/clipped'
 )
 
@@ -84,6 +94,15 @@ $megabytes = [math]::Round($installer.Length / 1MB, 1)
 $ffmpeg = $null
 if ($FfmpegPinPath -and (Test-Path -LiteralPath $FfmpegPinPath -PathType Leaf)) {
     $ffmpeg = Get-Content -LiteralPath $FfmpegPinPath -Raw | ConvertFrom-Json
+}
+
+# The assets the release publishes to discharge the LGPL's source obligation.
+# Read off the directory rather than named here, because their names carry the
+# FFmpeg commit and the build-recipe tag and both move with the pin.
+$correspondingSource = @()
+if ($CorrespondingSourceDirectory -and
+    (Test-Path -LiteralPath (Join-Path $CorrespondingSourceDirectory 'CORRESPONDING-SOURCE.md') -PathType Leaf)) {
+    $correspondingSource = @(Get-ChildItem -LiteralPath $CorrespondingSourceDirectory -File | Sort-Object Name)
 }
 
 $lines = @()
@@ -133,6 +152,28 @@ $lines += ("[docs/licensing.md]({0}/blob/{1}/docs/licensing.md) sets out what a 
 $lines += 'carries and why, including where the corresponding source of the exact FFmpeg'
 $lines += 'build shipped here can be obtained.'
 $lines += ''
+
+if ($correspondingSource.Count -gt 0) {
+    $lines += '### The FFmpeg source, on this page'
+    $lines += ''
+    $lines += 'FFmpeg is LGPL v3, and its libraries are shipped here as DLLs. Its source is'
+    $lines += 'therefore published as assets on this release, beside the installer - FFmpeg at'
+    $lines += 'the commit this build was made from, and the recipe it was configured and'
+    $lines += 'compiled by, because the `configure` arguments and the versions of every'
+    $lines += 'library compiled into it are not in FFmpeg itself:'
+    $lines += ''
+    $lines += '| Asset | Size |'
+    $lines += '| --- | --- |'
+    foreach ($asset in $correspondingSource) {
+        $lines += ("| ``{0}`` | {1} MB |" -f $asset.Name, [math]::Round($asset.Length / 1MB, 1))
+    }
+    $lines += ''
+    $lines += '`CORRESPONDING-SOURCE.md` records which binary they are the source of, by commit'
+    $lines += 'id. Nothing has to be requested and nobody has to be asked: what you were given'
+    $lines += 'and what it was built from are in the same place.'
+    $lines += ''
+}
+
 $lines += 'No patent licence comes with this download. Distributing software that encodes'
 $lines += 'H.264 or HEVC has patent-pool implications no copyright licence addresses;'
 $lines += ("[ADR 0008]({0}/blob/{1}/docs/adr/0008-codec-patent-position.md) is the project's" -f $RepositoryUrl, $Tag)

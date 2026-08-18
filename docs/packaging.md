@@ -25,6 +25,15 @@ arranged this way, and what a release still owes on top of it.
     avutil-60.dll                   │  (docs/ffmpeg.md)
     swresample-6.dll                │
     swscale-9.dll                  ─┘
+    licences\                      the licence texts and third-party notices
+        README.md                   (docs/licensing.md)
+        LICENSE.txt
+        THIRD-PARTY-NOTICES.md
+        THIRD-PARTY-NOTICES-RUST.md
+        ffmpeg\
+            NOTICE.md
+            LGPL-3.0.txt
+            GPL-3.0.txt
     uninstall.exe
 ```
 
@@ -52,12 +61,19 @@ same `bin` directory and are test tools ([docs/ffmpeg.md](ffmpeg.md)): nothing i
 shells out to them, and shipping a program nobody runs is a licence obligation
 taken on for nothing.
 
-**The licence texts and third-party notices are not shipped yet.** That is
-[#123](https://github.com/wildware-uk/clipped/issues/123), and
-[`scripts/collect-notices.ps1`](../scripts/collect-notices.ps1) already produces
-the payload; [docs/licensing.md](licensing.md) says what a release owes and what
-each part is discharged by. **An installer built today is not one that may be
-distributed.**
+**The licence texts and third-party notices ship, in `licences\` beside the
+binaries.** [`scripts/collect-notices.ps1`](../scripts/collect-notices.ps1)
+produces them and
+[`scripts/stage-installer-payload.ps1`](../scripts/stage-installer-payload.ps1)
+puts them in the bundle, refusing to build an installer without them
+([#123](https://github.com/wildware-uk/clipped/issues/123),
+[#538](https://github.com/wildware-uk/clipped/pull/538)). The **corresponding
+source of the FFmpeg build** is not in the installer and is not meant to be: it
+is attached to the release, beside the download
+([docs/releasing.md](releasing.md#the-corresponding-source-gate)).
+[docs/licensing.md](licensing.md) says what a release owes and what each part is
+discharged by. **An installer built today still may not be distributed** — not
+for want of paperwork, but for the reasons docs/releasing.md gates on.
 
 ## What it depends on from Windows, and what it carries
 
@@ -177,7 +193,10 @@ uninstall entry under `HKEY_CURRENT_USER`.
 
 ## What is not solved here
 
-- **Licence texts and notices**, and the corresponding source offer:
-  [#123](https://github.com/wildware-uk/clipped/issues/123).
+- **The corresponding source of the FFmpeg build.** It is an obligation of the
+  release rather than of the installer, and the release publishes it as assets
+  beside the download ([docs/licensing.md](licensing.md),
+  [#123](https://github.com/wildware-uk/clipped/issues/123)). Nothing in this
+  page's staging touches it.
 - **Code signing, versioning and releases.** Nothing here is signed, so Windows
   SmartScreen will warn about it.

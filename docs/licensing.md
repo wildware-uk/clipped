@@ -33,6 +33,14 @@ Three documents divide this up, and it is worth knowing which is which:
 > a missing FFmpeg, and for a stronger reason. A build without them is not one
 > anybody is licensed to distribute, so it is a refusal rather than a warning.
 >
+> **The source of the FFmpeg it ships goes up with it.** The other half of the
+> LGPL is not a file in the installer:
+> [`scripts/fetch-ffmpeg-source.ps1`](../scripts/fetch-ffmpeg-source.ps1)
+> assembles the source of the exact build being conveyed, and the release
+> workflow attaches it to the release in the same call that attaches the
+> installer — same page, same moment, no request to make. See "Conveying the
+> libraries themselves" below.
+>
 > What remains before a release is not packaging. It is the questions
 > [docs/releasing.md](releasing.md) gates on — a signed build, and the codec
 > patent position ([#257](https://github.com/wildware-uk/clipped/issues/257)).
@@ -41,7 +49,9 @@ Three documents divide this up, and it is worth knowing which is which:
 > [`.github/workflows/release.yml`](../.github/workflows/release.yml) is the only
 > thing in this repository that builds an installer and publishes it, and it
 > refuses while any of the six texts below is absent from what
-> `bundle.resources` collects — naming each missing file. See
+> `bundle.resources` collects — naming each missing file — or while the
+> corresponding source of the FFmpeg it would ship is missing, incomplete, or
+> the source of some other build. See
 > [docs/releasing.md](releasing.md#the-licence-gate).
 
 ## Clipped's own code
@@ -77,7 +87,7 @@ directory an installer copies wholesale.
 | ----------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | **4(a)**    | A prominent notice with each copy that the Library is used and that the Library and its use are covered by the LGPL.       | `ffmpeg/NOTICE.md` in the payload. It names the exact build, its version, its `configure` arguments and every DLL shipped, all read out of the installed build rather than written down. | Generated **and installed**, in `licences/ffmpeg/` beside the binaries ([#123](https://github.com/wildware-uk/clipped/issues/123)). |
 | **4(b)**    | A copy of the GNU **GPL** as well as the LGPL.                                                                             | `ffmpeg/LGPL-3.0.txt`, copied from the fetched build's own `LICENSE.txt`, and `ffmpeg/GPL-3.0.txt`, from [`licences/GPL-3.0.txt`](../licences/GPL-3.0.txt) in this repository.           | Generated **and installed**.                                                                                                        |
-| **4(c)**    | Where copyright notices are displayed at run time, FFmpeg's must be among them, with a pointer to those two licence texts. | An about or diagnostics screen.                                                                                                                                                          | **Does not exist.** Clipped has no about screen; see "Reporting which FFmpeg is in use" below.                                      |
+| **4(c)**    | Where copyright notices are displayed at run time, FFmpeg's must be among them, with a pointer to those two licence texts. | An about or diagnostics screen.                                                                                                                                                          | **Does not exist.** Clipped has no about screen. The recorder logs which build it loaded, which is not the same thing; see "Reporting which FFmpeg is in use" below.                                      |
 | **4(d)(1)** | Either a shared-library mechanism that lets the user replace the Library, or Installation Information.                     | Dynamic linking. The DLLs sit beside the executables as ordinary files and Windows resolves them from there.                                                                             | **Met by construction, and verified** — see "Replacing the FFmpeg libraries" below.                                                 |
 | **4(e)**    | Installation Information where GPL section 6 would require it.                                                             | Nothing. It only applies under 4(d)(0), and Clipped takes 4(d)(1) and ships no locked-down device.                                                                                       | Does not apply.                                                                                                                     |
 
@@ -113,10 +123,27 @@ For the pin as of this page:
 | FFmpeg commit       | `9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b`                                    |
 | Build recipe commit | `2437e7b868da3c11872367b15f3c613b87c24819` (tag `autobuild-2026-08-09-13-03`) |
 
-A release attaches both archives and the generated `CORRESPONDING-SOURCE.md`, or
-links to a mirror that will outlive it. Pointing at a third party's release page
-is not enough on its own: the obligation runs to whoever received the binary,
-and BtbN's builds are deleted after a few months.
+**The release attaches both archives and the generated
+`CORRESPONDING-SOURCE.md`, on the same page as the installer.**
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs
+`fetch-ffmpeg-source.ps1` in its gate job, the corresponding-source gate refuses
+the release unless what it produced is present, complete and the source of the
+build the pin now names, and the job that drafts the release attaches those
+files in the same `gh release create` call as the installer
+([docs/releasing.md](releasing.md#the-corresponding-source-gate)). Nobody has to
+remember to do it, and no window exists in which the installer is downloadable
+and its source is not.
+
+The choice made here is to **publish the source**, not to offer it. A written
+offer is permitted, but it is a commitment to answer requests from anybody who
+holds a copy of the binary, for years, by a project with no staffed address; and
+it would put a promise on a stranger's machine that this repository would have
+to keep long after anybody is reading it. Publishing it beside the download
+costs 22 MB per release, is discharged the moment the release is drafted, and
+needs nobody to answer anything. It also has to stay that way: pointing at a
+third party's release page would not be enough on its own, because the
+obligation runs to whoever received the binary and BtbN's builds are deleted
+after a few months.
 
 **Never modify the DLLs.** If Clipped ever ships a patched FFmpeg, the patch has
 to be published with the source and the modification marked. Nothing in the
@@ -135,19 +162,26 @@ artefact:
 
 ### Reporting which FFmpeg is in use
 
-**This does not exist yet.** `clipped-muxer`'s `linkage` module can answer the
-question — `linked_build()` returns the build identifier, the library versions,
-the `configure` arguments and the licence the loaded libraries report — but
-nothing outside `crates/muxer/tests/ffmpeg_linkage.rs` calls it. The recorder
-does not log it at start-up, the desktop application has no about screen, and
-the diagnostics screen ([#101](https://github.com/wildware-uk/clipped/issues/101))
-does not name it.
+**The recorder logs it, and nothing shows it to a user.** `clipped-muxer`'s
+`linkage` module answers the question — `linked_build()` returns the build
+identifier, the library versions, the `configure` arguments and the licence the
+loaded libraries report — and it is called in two places outside the tests:
 
-That leaves two things undone: a user cannot tell which FFmpeg they have, and
-section 4(c) has nothing to attach a notice to.
-[#256](https://github.com/wildware-uk/clipped/issues/256) tracks it, because the
-change belongs in `crates/muxer` and the recorder rather than in a documentation
-ticket.
+- [`apps/recorder/src/main.rs`](../apps/recorder/src/main.rs) logs the build
+  identifier, the licence and the three library versions as the first line of
+  every recorder log, before anything else runs. Read out of the libraries the
+  process actually loaded rather than from the pin, so a machine running an
+  FFmpeg of its own — which `.cargo/config.toml` deliberately allows — says so.
+- [`apps/recorder/src/capabilities.rs`](../apps/recorder/src/capabilities.rs)
+  answers the capability query from the same call.
+
+That is enough for a bug report and enough to tell which build's source is the
+corresponding one. It is **not** section 4(c): a line in a log file is not a
+copyright notice displayed at run time, and the desktop application still has no
+about screen and no diagnostics screen naming it
+([#101](https://github.com/wildware-uk/clipped/issues/101),
+[#256](https://github.com/wildware-uk/clipped/issues/256)). A user who never
+opens a log still cannot tell which FFmpeg they have.
 
 ### Replacing the FFmpeg libraries
 
@@ -294,11 +328,11 @@ Two things it decides that belong on this page:
 
 ## The release checklist
 
-Steps 1 to 4 work today, and step 2 is what an installer build now requires
-rather than merely suggests. Steps 1, 2 and 5 are performed by
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) on a tag —
-which will not build one until step 5 is genuinely satisfied. Steps 6 to 8
-remain a description of what a release has to do rather than a procedure anyone
+Steps 1 to 6 are performed by
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) on a tag, and
+two of them are gated rather than trusted: it will not build an installer while
+step 5 is unsatisfied, and will not build one while step 4 is. Steps 7 and 8 are
+still a description of what a release has to do rather than a procedure anybody
 can run end to end; [docs/releasing.md](releasing.md#making-a-release) is where
 they sit in the order of a release.
 
@@ -312,15 +346,16 @@ they sit in the order of a release.
    is assembled beside the destination and moved onto it only once it is
    complete, so a failed run never leaves half of one where the last one was.
 4. `scripts/fetch-ffmpeg-source.ps1` — assemble the corresponding source and its
-   manifest.
+   manifest. The release workflow runs this in its gate job, into a directory
+   outside the cached FFmpeg tree, and refuses the release unless what it
+   produced is complete and is the source of the pinned build.
 5. Include the payload in the installer, beside the binaries and the seven
-   FFmpeg DLLs. Those are staged by
+   FFmpeg DLLs. Both are staged by
    [`scripts/stage-installer-payload.ps1`](../scripts/stage-installer-payload.ps1)
-   and collected by `bundle.resources` ([docs/packaging.md](packaging.md)); the
-   payload is the part that is not there yet, and adding it is a matter of
-   staging it into the same directory.
-6. Attach the source archives and `CORRESPONDING-SOURCE.md` to the release, or
-   link to a mirror that will outlive it.
+   and collected by `bundle.resources` ([docs/packaging.md](packaging.md)).
+6. Attach the source archives and `CORRESPONDING-SOURCE.md` to the release. The
+   workflow does this in the same `gh release create` call as the installer, so
+   the source cannot lag behind the binary it corresponds to.
 7. Check the about or diagnostics screen names the FFmpeg build and points at
    the licence texts ([#256](https://github.com/wildware-uk/clipped/issues/256)).
 8. Substitute the DLLs in the installed application with another compatible
@@ -330,7 +365,9 @@ they sit in the order of a release.
 Steps 3 and 4 have their own tests —
 [`scripts/test-collect-notices.ps1`](../scripts/test-collect-notices.ps1) and
 [`scripts/test-fetch-ffmpeg-source.ps1`](../scripts/test-fetch-ffmpeg-source.ps1)
-— and CI runs both, in the Rust job, after the step that installs the pinned
+— and so does the refusal that stops a release happening without them
+([`scripts/test-check-release-gates.ps1`](../scripts/test-check-release-gates.ps1)).
+CI runs all three, in the Rust job, after the step that installs the pinned
 FFmpeg they need. Unlike `scripts/test-check-prerequisites.ps1`, which is run by
 hand because it guards a contributor's setup and fails visibly for whoever broke
 it, these guard what a release is obliged to give a user, and a regression in

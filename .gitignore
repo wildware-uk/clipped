@@ -34,6 +34,14 @@ dist/
 # history.
 /third-party/ffmpeg/
 
+# The corresponding source of the pinned FFmpeg, when it is assembled here
+# rather than at scripts/fetch-ffmpeg-source.ps1's default of
+# third-party/ffmpeg/source. .github/workflows/release.yml puts it here on
+# purpose, to keep it out of the directory the FFmpeg cache restores, and it is
+# 22 MB of somebody else's source that a release publishes as assets rather than
+# something to keep in this history.
+/ffmpeg-source/
+
 # Editor and OS noise
 .vscode/*
 !.vscode/extensions.json

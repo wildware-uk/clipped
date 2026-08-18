@@ -10,7 +10,7 @@ Three questions this answers, in order of how easy they are to get wrong:
 
 1. [What a version is, and what a milestone is not](#a-milestone-is-not-a-version)
 2. [Who decides a milestone is finished](#who-decides-a-milestone-is-finished)
-3. [What a tag is allowed to do](#the-five-gates)
+3. [What a tag is allowed to do](#the-six-gates)
 
 ## A milestone is not a version
 
@@ -114,7 +114,7 @@ An agent may:
 - run the rehearsal (below) and report which gates refuse;
 - open a pull request bumping the version declarations, when the gates say
   everything else is ready;
-- push a tag once the rehearsal reports all five gates passing.
+- push a tag once the rehearsal reports all six gates passing.
 
 An agent may **not** publish a release. The workflow always produces a
 **draft**, and a draft is not a distribution: nothing is downloadable and
@@ -128,7 +128,7 @@ means changing this page in a pull request, on purpose, with somebody else
 reading it — which is the correct amount of friction for a decision that cannot
 be reverted once somebody has downloaded the result.
 
-## The five gates
+## The six gates
 
 Pushing a tag matching `v*` runs
 [`.github/workflows/release.yml`](../.github/workflows/release.yml). Its first
@@ -144,6 +144,7 @@ after one has refused, so a tag that is wrong in four ways is told so once.
 | **Continuous integration** | no successful `ci.yml` run exists for that exact commit | "it was green on the pull request" is a statement about a different tree |
 | **Milestones** | anything has yet to be released and any milestone is open or has open issues | the rule at the top of this page |
 | **Licences** | the installer would not bundle the licence texts and third-party notices | see below |
+| **Corresponding source** | the source of the FFmpeg build the installer would ship is not assembled, is incomplete, or is the source of a different build | see below |
 
 The milestone gate **retires itself** once anything has been published. After
 the first release, which version comes next is semantic versioning, and a newly
@@ -194,15 +195,9 @@ The gate checks the artefact rather than the issue tracker deliberately. #123
 being closed is somebody's opinion; a bundle without `GPL-3.0.txt` in it is a
 licence breach whatever anybody thinks.
 
-Two obligations it does **not** check, because they are not files in a bundle,
-and which whoever publishes the draft has to satisfy by hand:
+One obligation it does **not** check, because it is not a file in a bundle, and
+which whoever publishes the draft has to satisfy by hand:
 
-- **The corresponding source of the exact FFmpeg build** has to be attached to
-  the release or mirrored somewhere that will outlive it.
-  [`scripts/fetch-ffmpeg-source.ps1`](../scripts/fetch-ffmpeg-source.ps1)
-  assembles it. Pointing at BtbN's release page is not enough: the obligation
-  runs to whoever received the binary, and those builds are deleted after a few
-  months.
 - **The relinking permission**, tested by substituting the FFmpeg DLLs in the
   installed application and confirming it still records. docs/licensing.md,
   "Replacing the FFmpeg libraries", is the procedure.
@@ -210,12 +205,64 @@ and which whoever publishes the draft has to satisfy by hand:
 Note that `bundle.licenseFile` in `tauri.conf.json` does not discharge anything
 here. NSIS *displays* that text during installation; it does not install it.
 
+### The corresponding source gate
+
+The licence texts are the half of the FFmpeg obligation that fits inside an
+installer. The other half is **the source of the exact build being shipped**,
+and until [#123](https://github.com/wildware-uk/clipped/issues/123) was finished
+this document, `docs/licensing.md` and the `NOTICE.md` inside every installed
+copy all described a thing the workflow did not do:
+[`scripts/fetch-ffmpeg-source.ps1`](../scripts/fetch-ffmpeg-source.ps1) existed,
+nothing ran it, and the release job uploaded an installer and a `.sha256` and
+nothing else. The notice a user would have received says the source "is
+published with the Clipped release that carries these files" — a sentence that
+would have been false on somebody else's machine, unrecallably.
+
+**What happens now.** The gate job assembles the corresponding source, into a
+directory outside the cached FFmpeg tree so that it is a fetch verified during
+this run rather than bytes restored from a cache. This gate then refuses unless:
+
+- `CORRESPONDING-SOURCE.md` is there at all — which is what fails if the step
+  that assembles it is removed or errors;
+- it records the asset name and SHA-256 that `scripts/fetch-ffmpeg.ps1 -PrintPin`
+  reports, so that source assembled for a previous pin is caught. That is the
+  failure a directory listing cannot show: every file present, every archive
+  intact, all of it the source of a build nobody is shipping;
+- every archive the manifest promises exists, opens as an archive and holds more
+  than a token number of entries — a truncated fetch has the right name and the
+  wrong contents;
+- there are two of them. FFmpeg without
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) is not the
+  corresponding source of these DLLs: the `configure` arguments and the versions
+  of every external library compiled into them live in the recipe.
+
+The release job then downloads what the gate approved and attaches it in the
+same `gh release create` call as the installer. Same page, same moment: whoever
+can download the object code can download its source, with no request to make
+and nobody to ask. **A written offer was considered and not taken** — it is
+permitted, but it commits the project to answering requests for years from
+anybody holding a copy, and this one costs about 22 MB per release and is
+discharged the moment the draft exists. Which of the two is right is the
+repository owner's call; changing it means changing this section, `NOTICE.md`
+in `scripts/collect-notices.ps1`, and the workflow together, because the
+installed notice is what a recipient relies on.
+
+The gate does not check that the archives contain FFmpeg. The commit ids in the
+manifest are what tie them to the build and they were verified against the
+remote when the archives were made; a gate that tried to recognise FFmpeg by its
+file names would refuse a correct release the first time upstream renamed
+something.
+
 ## Making a release
 
 1. **Finish the milestones.** Every issue closed, every milestone closed by a
    maintainer.
-2. **Discharge [#123](https://github.com/wildware-uk/clipped/issues/123)** so
-   that the installer carries its paperwork.
+2. **Confirm the relinking permission by hand.** Everything else in
+   [#123](https://github.com/wildware-uk/clipped/issues/123) is carried by the
+   workflow — the texts in the installer, the source on the release — but
+   substituting the FFmpeg DLLs in an installed copy and confirming it still
+   records is a person at a keyboard. docs/licensing.md, "Replacing the FFmpeg
+   libraries", is the procedure.
 3. **Bump the version** in one reviewed pull request — every declaration in the
    table above, plus both lockfiles — and merge it.
 4. **Wait for CI to pass on `main`** at that commit. The gate requires it, and
@@ -231,25 +278,36 @@ here. NSIS *displays* that text during installation; it does not install it.
    ```
 
 7. **Read the draft.** The workflow attaches the installer, a `.sha256`
-   sidecar, and notes that state the build is unsigned, that SmartScreen will
-   warn, and the installer's SHA-256. Check the hash against the asset yourself
-   before publishing — the notes are generated from the file, but you are the
-   last person who can catch it if something upstream replaced it.
-8. **Attach the corresponding FFmpeg source**, or the link that will outlive
-   the release.
-9. **Publish it.** That is the last gate, and it is a person.
+   sidecar, the corresponding FFmpeg source — two archives and
+   `CORRESPONDING-SOURCE.md` — and notes that state the build is unsigned, that
+   SmartScreen will warn, the installer's SHA-256 and what the source assets
+   are. Check the hash against the asset yourself before publishing — the notes
+   are generated from the file, but you are the last person who can catch it if
+   something upstream replaced it. Check the source assets are on the draft too:
+   the gates refuse without them, but the assets are what a recipient actually
+   gets.
+8. **Publish it.** That is the last gate, and it is a person.
 
 ### Rehearsing
 
-`workflow_dispatch` on the Release workflow takes a tag and reports on all five
+`workflow_dispatch` on the Release workflow takes a tag and reports on all six
 gates without publishing anything. It exists because the gates all refuse today,
-and a refusal nobody can watch working is a refusal nobody trusts.
+and a refusal nobody can watch working is a refusal nobody trusts. The rehearsal
+assembles the corresponding source and gates it exactly as a tag push does,
+which is how that path can be exercised without a release existing.
 
 Ticking **build** additionally builds the installer, hashes it and renders the
-notes into the run summary, then leaves the file on the runner. It uploads
-nothing and creates nothing, deliberately: an installer built today is one that
-[may not be distributed](#the-licence-gate), and a workflow artefact on a public
-repository is a distribution.
+notes into the run summary, then leaves the file on the runner. It creates no
+release and uploads no installer, deliberately: an installer built today is one
+that [may not be distributed](#the-licence-gate), and a workflow artefact on a
+public repository is a distribution.
+
+The corresponding source *is* uploaded as a run artefact, on a rehearsal as on a
+tag push, and that is the one thing here that may be distributed — it is LGPL
+v3 source that anybody may redistribute, and publishing it is the obligation
+rather than the risk. It is uploaded because the job that drafts the release
+attaches the bytes the gate approved rather than a second copy it assembled for
+itself.
 
 You can run the gates locally against a checkout, which is what CI does:
 
@@ -259,10 +317,20 @@ gh api "repos/wildware-uk/clipped/milestones?state=all&per_page=100" | Out-File 
 gh api "repos/wildware-uk/clipped/releases?per_page=100" | Out-File releases.json -Encoding utf8
 gh api "repos/wildware-uk/clipped/actions/workflows/ci.yml/runs?head_sha=$sha" | Out-File ci-runs.json -Encoding utf8
 
+# The corresponding-source gate reads what this assembles. Skip it and that gate
+# refuses, correctly - there would be nothing to publish.
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg-source.ps1
+
 powershell -ExecutionPolicy Bypass -File scripts/check-release-gates.ps1 `
     -Tag v1.0.0 -CommitSha $sha `
     -MilestonesJson milestones.json -ReleasesJson releases.json -CiRunsJson ci-runs.json
 ```
+
+`fetch-ffmpeg-source.ps1` writes to `third-party/ffmpeg/source`, which is where
+the gate looks by default; the workflow passes `-CorrespondingSourceDirectory`
+because it keeps it out of the cached tree. Running it takes a shallow fetch of
+two commits and about 22 MB, and a second run over an intact directory fetches
+nothing.
 
 The three GitHub answers are handed to the script rather than fetched by it, so
 that every branch in it can be tested against a fixture instead of against the
@@ -288,8 +356,18 @@ Verified by running, on 2026-08-17, against the tree at `edb36d8`:
 - **The gate script refuses this repository, for the right reasons.** Run with
   the three `gh api` answers above and `-Tag v1.0.0`: Version, Continuous
   integration and Milestones refuse and Branch passes, each naming what is
-  wrong. Its own suite (`scripts/test-check-release-gates.ps1`, 30 cases) and
+  wrong. Its own suite (`scripts/test-check-release-gates.ps1`, 37 cases) and
   `scripts/test-write-release-notes.ps1` both pass.
+- **The corresponding source is assembled, and the gate reads it.** Run against
+  the real pin on 2026-08-17, `scripts/fetch-ffmpeg-source.ps1` fetched
+  `9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b` from FFmpeg and
+  `2437e7b868da3c11872367b15f3c613b87c24819` from BtbN/FFmpeg-Builds and wrote
+  21.2 MB and 0.2 MB of archives beside a manifest. With that directory in
+  place the gate passed and listed the assets; with the directory deleted it
+  refused, naming the FFmpeg build and `fetch-ffmpeg-source.ps1`; with one
+  archive truncated to a third of its length it refused with "not a readable
+  archive". Each of the gate's checks was also removed in turn from the script
+  and the suite failed each time, so none of them is a check nothing tests.
 - **The licence gate now passes**, which it did not when this page was written.
   [#123](https://github.com/wildware-uk/clipped/issues/123) landed in
   [#538](https://github.com/wildware-uk/clipped/pull/538), and an installer
@@ -309,8 +387,17 @@ Verified by running, on 2026-08-17, against the tree at `edb36d8`:
 Read and reasoned, but **not** run:
 
 - **`gh release create` has never executed here.** That the draft appears, with
-  both assets attached and `--verify-tag` accepting the tag, is inference from
-  the documented behaviour of `gh` and of the `contents: write` permission.
+  the installer, its checksum and the three corresponding-source assets attached
+  and `--verify-tag` accepting the tag, is inference from the documented
+  behaviour of `gh` and of the `contents: write` permission.
+- **The corresponding source has never made the trip between the two jobs.**
+  `actions/upload-artifact` in the gate job and `actions/download-artifact` in
+  the release job have not run here. Within one workflow run neither needs a
+  token or an extra permission, which is documented rather than observed. If the
+  download were to arrive empty, the release job refuses before writing any
+  notes — that step exists precisely because "the installer went up and the
+  source did not" is the failure that looks like success. The first rehearsal
+  with **build** ticked exercises the whole path except `gh release create`.
 - **No tag push has ever triggered the workflow**, so the `on.push.tags` match,
   the `needs: gate` refusal actually preventing the build, and the branch gate
   running against a real tag ref are all unobserved. They are also the cheapest

@@ -94,6 +94,19 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if (-not $FetchScript) { $FetchScript = Join-Path $PSScriptRoot 'fetch-ffmpeg.ps1' }
 if (-not $Destination) { $Destination = Join-Path $repositoryRoot 'third-party\ffmpeg\source' }
 
+# Made absolute before anything uses it. The archives are written with
+# `git -C <throwaway clone> archive --output=...`, and git resolves a relative
+# output path against the directory it was pointed at rather than against this
+# script's: a caller passing `-Destination ffmpeg-source` - as
+# .github/workflows/release.yml does, to keep the source out of the directory
+# the FFmpeg cache restores - would have git try to write into the clone that
+# is deleted at the end of the run. Resolving it here makes a relative path
+# mean what the caller meant.
+if (-not [System.IO.Path]::IsPathRooted($Destination)) {
+    $Destination = Join-Path (Get-Location).ProviderPath $Destination
+}
+$Destination = [System.IO.Path]::GetFullPath($Destination)
+
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
@@ -279,11 +292,26 @@ function Resolve-AbbreviatedCommit {
     $uri = "https://api.github.com/repos/$ApiRepository/commits/$Commit"
     Write-Step "  expanding $Commit through $uri"
 
+    $headers = @{
+        'User-Agent' = 'clipped-fetch-ffmpeg-source'
+        'Accept'     = 'application/vnd.github+json'
+    }
+
+    # Unauthenticated, this API allows sixty calls an hour per address, and a
+    # GitHub-hosted runner shares its address with every other runner on it. One
+    # call per release is not the problem; being told to come back in an hour on
+    # the day of a release is. $GITHUB_TOKEN is present in Actions and absent on
+    # a developer's machine, where sixty an hour is nobody's constraint, so it is
+    # used when it is there and not required when it is not. The answer is
+    # checked against the abbreviation either way, and the fetch that follows
+    # still proves the id.
+    if ($env:GITHUB_TOKEN) {
+        $headers['Authorization'] = "Bearer $($env:GITHUB_TOKEN)"
+        Write-Step '  (authenticated with $GITHUB_TOKEN)'
+    }
+
     try {
-        $response = Invoke-RestMethod -Uri $uri -Headers @{
-            'User-Agent' = 'clipped-fetch-ffmpeg-source'
-            'Accept'     = 'application/vnd.github+json'
-        } -UseBasicParsing
+        $response = Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
     } catch {
         throw @"
 Could not expand the abbreviated commit $Commit through $uri : $($_.Exception.Message)

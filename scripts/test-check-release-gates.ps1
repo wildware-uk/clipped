@@ -64,6 +64,15 @@ $licencePayload = @(
     'ffmpeg\GPL-3.0.txt'
 )
 
+# The pin a fixture ships, standing in for the one in scripts/fetch-ffmpeg.ps1.
+# Deliberately not the real one: a case that passed because the gate had found
+# the actual repository's pin rather than the fixture's would prove nothing.
+$fixturePin = @{
+    Tag    = 'autobuild-2020-01-01-00-00'
+    Asset  = 'ffmpeg-n8.1.2-34-gfixture001-win64-lgpl-shared-8.1.zip'
+    Sha256 = 'f1x7ure0000000000000000000000000000000000000000000000000000000000'
+}
+
 function Write-Fixture {
     param(
         [Parameter(Mandatory)] [string] $Path,
@@ -78,6 +87,85 @@ function Write-Fixture {
     # empty file gets a zero-byte one - which is what a failed `gh api`
     # redirected into a file actually leaves, and the case that has to refuse.
     [System.IO.File]::WriteAllText($Path, $Content)
+}
+
+function New-SourceArchive {
+    <#
+    .SYNOPSIS
+        A zip standing in for one of the corresponding-source archives.
+    .DESCRIPTION
+        A real one, with enough entries in it that the gate's "this opens but
+        holds almost nothing" floor is cleared. Built from files rather than
+        written as bytes, because what the gate reads is the archive's central
+        directory and only a real archive has one.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [int] $Entries = 40
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $staging = "$Path.contents"
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    foreach ($index in 1..$Entries) {
+        [System.IO.File]::WriteAllText((Join-Path $staging "file-$index.c"), "int fixture_$index(void) { return $index; }")
+    }
+
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $Path)
+    Remove-Item -LiteralPath $staging -Recurse -Force
+}
+
+function New-CorrespondingSource {
+    <#
+    .SYNOPSIS
+        What scripts/fetch-ffmpeg-source.ps1 leaves behind, in a fixture.
+    .DESCRIPTION
+        The same shape as the real thing: a manifest that names the binary asset
+        it is the source of, and the two archives it promises. -Asset and
+        -Sha256 are parameters so that a case can produce a directory assembled
+        for a *different* pin, which is the failure that looks identical to
+        success in a directory listing.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [string] $Asset = $fixturePin.Asset,
+        [string] $Sha256 = $fixturePin.Sha256,
+        [string[]] $Archives = @('ffmpeg-gfixture001-source.zip', 'ffmpeg-builds-autobuild-2020-01-01-00-00-source.zip'),
+        [switch] $WithoutArchiveFiles
+    )
+
+    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+
+    $rows = @($Archives | ForEach-Object { "| ``$_`` | https://github.com/FFmpeg/FFmpeg.git | ``0123456789abcdef0123456789abcdef01234567`` |" })
+
+    Write-Fixture -Path (Join-Path $Directory 'CORRESPONDING-SOURCE.md') -Content ((@(
+                '# Corresponding source for the FFmpeg build Clipped ships',
+                '',
+                '## The binary this is the source for',
+                '',
+                '| | |',
+                '| --- | --- |',
+                "| Asset | ``$Asset`` |",
+                "| SHA-256 | ``$Sha256`` |",
+                '',
+                '## What is here',
+                '',
+                '| File | Repository | Commit |',
+                '| --- | --- | --- |'
+            ) + $rows) -join "`n")
+
+    if (-not $WithoutArchiveFiles) {
+        foreach ($archive in $Archives) {
+            New-SourceArchive -Path (Join-Path $Directory $archive)
+        }
+    }
 }
 
 function New-Fixture {
@@ -95,12 +183,22 @@ function New-Fixture {
         The git history is real, because the branch gate asks git a question
         about ancestry that only git can answer. `main` and `side` diverge, so
         both verdicts can be produced.
+
+        It also carries the two things the corresponding-source gate reads: a
+        `scripts/fetch-ffmpeg.ps1` that answers `-PrintPin`, which is how that
+        gate learns which FFmpeg would be shipped, and the assembled source
+        itself under `third-party/ffmpeg/source`, which is where the gate looks
+        by default. Both are present unless a case says otherwise, because
+        "missing" is the interesting state and it should be asked for
+        deliberately.
     #>
     param(
         [Parameter(Mandatory)] [string] $Name,
         [string] $Version = '1.0.0',
         [hashtable] $Disagreeing = @{},
-        [switch] $WithLicences
+        [switch] $WithLicences,
+        [switch] $WithoutCorrespondingSource,
+        [switch] $WithoutFetchScript
     )
 
     $root = Join-Path $fixtureRoot $Name
@@ -196,6 +294,29 @@ clipped-ipc = { path = "../../../crates/ipc", version = "$(Resolve-FixtureVersio
         }
     }
 
+    # The pin, answering a question about itself, exactly as the real script
+    # does. The gate runs this rather than reading the file, so a fixture that
+    # printed nothing would exercise the same path a broken pin does.
+    $fetchScript = Join-Path $root 'scripts\fetch-ffmpeg.ps1'
+    if (-not $WithoutFetchScript) {
+        Write-Fixture -Path $fetchScript -Content @"
+param([switch] `$PrintPin)
+if (`$PrintPin) {
+    Write-Output 'tag=$($fixturePin.Tag)'
+    Write-Output 'asset=$($fixturePin.Asset)'
+    Write-Output 'sha256=$($fixturePin.Sha256)'
+    exit 0
+}
+Write-Output 'this fixture only answers -PrintPin'
+exit 1
+"@
+    }
+
+    $correspondingSource = Join-Path $root 'third-party\ffmpeg\source'
+    if (-not $WithoutCorrespondingSource) {
+        New-CorrespondingSource -Directory $correspondingSource
+    }
+
     Push-Location $root
     try {
         $previous = $ErrorActionPreference
@@ -226,6 +347,8 @@ clipped-ipc = { path = "../../../crates/ipc", version = "$(Resolve-FixtureVersio
         MainCommit    = $onMain
         BranchCommit  = $onSide
         Payload       = $payload
+        Source        = $correspondingSource
+        FetchScript   = $fetchScript
         MilestonesAll = (New-Milestones -Path (Join-Path $root '.milestones-finished.json') -Finished)
         MilestonesOpen = (New-Milestones -Path (Join-Path $root '.milestones-open.json'))
         ReleasesNone  = (New-Json -Path (Join-Path $root '.releases-none.json') -Value '[]')
@@ -382,7 +505,7 @@ try {
         -Name 'every gate passes, and the release is allowed' `
         -Result (Invoke-Gates -Fixture $good -Tag 'v1.0.0') `
         -ExpectedExitCode 0 `
-        -Contains @('All 5 gates pass', 'v1.0.0 may be built and drafted') `
+        -Contains @('All 6 gates pass', 'v1.0.0 may be built and drafted') `
         -DoesNotContain @('REFUSED')
 
     Write-Host ''
@@ -468,7 +591,7 @@ try {
         -Name 'a pre-release tag is a version like any other, and passes when the tree agrees' `
         -Result (Invoke-Gates -Fixture $prerelease -Tag 'v1.0.0-rc.1') `
         -ExpectedExitCode 0 `
-        -Contains @('All 5 gates pass')
+        -Contains @('All 6 gates pass')
 
     Write-Host ''
     Write-Host 'A tag on a branch is not a release'
@@ -621,7 +744,97 @@ try {
         -Name 'licences collected through a second declared resource satisfy the gate' `
         -Result (Invoke-Gates -Fixture $secondResource -Tag 'v1.0.0') `
         -ExpectedExitCode 0 `
-        -Contains @('All 5 gates pass')
+        -Contains @('All 6 gates pass')
+
+    Write-Host ''
+    Write-Host 'The source of the FFmpeg being shipped is published with it, or nothing is'
+
+    # The step that assembles it removed, or failed, or never ran. This is the
+    # state release.yml was actually in until this gate existed: the notices in
+    # every installed copy said the source was published with the release, and
+    # the workflow uploaded an installer and a checksum and nothing else.
+    $noSource = New-Fixture -Name 'no-corresponding-source' -WithLicences -WithoutCorrespondingSource
+    Assert-Case `
+        -Name 'a release with no corresponding source assembled is refused, and told how to assemble it' `
+        -Result (Invoke-Gates -Fixture $noSource -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @(
+        'REFUSED',
+        'Corresponding source',
+        'No CORRESPONDING-SOURCE.md',
+        $fixturePin.Asset,
+        'fetch-ffmpeg-source.ps1',
+        'issue #123'
+    )
+
+    # The pin moved and the directory did not. Every file is present and every
+    # archive opens; all of it is the source of a build nobody is shipping,
+    # which is the one failure a directory listing cannot show.
+    $stale = New-Fixture -Name 'stale-corresponding-source' -WithLicences -WithoutCorrespondingSource
+    New-CorrespondingSource `
+        -Directory $stale.Source `
+        -Asset 'ffmpeg-n8.1.1-9-gpreviouspin-win64-lgpl-shared-8.1.zip' `
+        -Sha256 '0000000000000000000000000000000000000000000000000000000000000000'
+    Assert-Case `
+        -Name 'source assembled for a previous pin is refused, and both builds are named' `
+        -Result (Invoke-Gates -Fixture $stale -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('not the source of the build this release would ship', $fixturePin.Asset, $fixturePin.Sha256)
+
+    # A manifest naming an archive the release does not carry. The manifest is
+    # the document a recipient reads, so a promise in it that nothing keeps is
+    # the same failure as no source at all - and it survives every check that
+    # only looks at what is in the directory.
+    $promised = New-Fixture -Name 'archive-promised-only' -WithLicences -WithoutCorrespondingSource
+    New-CorrespondingSource -Directory $promised.Source -WithoutArchiveFiles
+    Assert-Case `
+        -Name 'an archive the manifest promises and the directory lacks is refused, and named' `
+        -Result (Invoke-Gates -Fixture $promised -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('The corresponding source is incomplete', 'ffmpeg-gfixture001-source.zip', 'not in the directory')
+
+    # A truncated fetch. The name is right, the size is plausible, and it is not
+    # an archive - which is exactly what somebody owed the source finds out
+    # when they try to open it, months later, with no way to ask for another.
+    $truncated = New-Fixture -Name 'truncated-archive' -WithLicences
+    $victim = Join-Path $truncated.Source 'ffmpeg-gfixture001-source.zip'
+    $bytes = [System.IO.File]::ReadAllBytes($victim)
+    [System.IO.File]::WriteAllBytes($victim, $bytes[0..([math]::Floor($bytes.Length / 3))])
+    Assert-Case `
+        -Name 'an archive that does not open is refused, rather than counted as present' `
+        -Result (Invoke-Gates -Fixture $truncated -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('not a readable archive', 'ffmpeg-gfixture001-source.zip')
+
+    # FFmpeg without the build recipe is not the corresponding source of the
+    # DLLs: the configure arguments and the versions of every external library
+    # compiled into them live in BtbN/FFmpeg-Builds, not in FFmpeg.
+    $halfOfIt = New-Fixture -Name 'ffmpeg-without-the-recipe' -WithLicences -WithoutCorrespondingSource
+    New-CorrespondingSource -Directory $halfOfIt.Source -Archives @('ffmpeg-gfixture001-source.zip')
+    Assert-Case `
+        -Name 'FFmpeg without the build recipe is refused as half of the corresponding source' `
+        -Result (Invoke-Gates -Fixture $halfOfIt -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('names 1 source archive(s)', 'build recipe', 'BtbN/FFmpeg-Builds')
+
+    # The gate asks the pin which build is shipped rather than carrying a copy
+    # of it. If it cannot ask, it must refuse: a gate that fell back to "assume
+    # the source is for whatever is here" would approve any directory at all.
+    $noPin = New-Fixture -Name 'unreadable-pin' -WithLicences -WithoutFetchScript
+    Assert-Case `
+        -Name 'a pin the gate cannot read is a refusal, not an assumption' `
+        -Result (Invoke-Gates -Fixture $noPin -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('could not be established', 'fetch-ffmpeg.ps1')
+
+    # And the case that matters as much as any refusal: with the source
+    # assembled for the build being shipped, the gate passes and says what will
+    # be published.
+    Assert-Case `
+        -Name 'source assembled for the pinned build passes, and the assets are listed' `
+        -Result (Invoke-Gates -Fixture $good -Tag 'v1.0.0') `
+        -ExpectedExitCode 0 `
+        -Contains @('passed ] Corresponding source', 'ffmpeg-gfixture001-source.zip', 'entries')
 
     Write-Host ''
     Write-Host 'Evidence that is missing is a refusal, not a pass'
@@ -648,12 +861,12 @@ try {
 
     # Four things wrong at once should be four things said once, not one thing
     # said four times over four attempts.
-    $everything = New-Fixture -Name 'everything-wrong' -Disagreeing @{ 'package.json' = '0.2.0' }
+    $everything = New-Fixture -Name 'everything-wrong' -Disagreeing @{ 'package.json' = '0.2.0' } -WithoutCorrespondingSource
     Assert-Case `
         -Name 'every gate is evaluated, so one refusal does not hide the next three' `
         -Result (Invoke-Gates -Fixture $everything -Tag 'v1.0.0' -CommitSha $everything.BranchCommit -MilestonesJson $everything.MilestonesOpen -CiRunsJson $everything.CiFailed) `
         -ExpectedExitCode 1 `
-        -Contains @('5 of 5 gates refuse', 'Version, Branch, Continuous integration, Milestones, Licences')
+        -Contains @('6 of 6 gates refuse', 'Version, Branch, Continuous integration, Milestones, Licences, Corresponding source')
 
     # Rehearsal exists so the gates can be read on a day when they refuse. It
     # reports the same verdicts and changes none of them.
