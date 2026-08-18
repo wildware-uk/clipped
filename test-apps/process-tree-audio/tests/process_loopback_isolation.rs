@@ -44,7 +44,7 @@ use std::time::Instant;
 use clipped_audio::windows::ProcessLoopbackCapture;
 use clipped_audio::{AudioError, Capture};
 use clipped_media_validation::AudioContent;
-use clipped_process_tree_audio::harness::ToneSubject;
+use clipped_process_tree_audio::harness::{skipped, suppressed, ToneSubject};
 use clipped_video_pattern::steady_tone::SECOND_FREQUENCY;
 
 /// The subject, built by Cargo for this package.
@@ -62,48 +62,6 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// nowhere near that far apart, and a track that merely picked up a little
 /// bleed through a shared device is.
 const MINIMUM_RATIO: f64 = 8.0;
-
-/// The environment variable that turns "this machine cannot do this" from a
-/// skip into a failure.
-const REQUIRE_AUDIO: &str = "CLIPPED_REQUIRE_AUDIO";
-
-/// The environment variable that asks the tests which make a noise not to.
-const SKIP_AUDIO: &str = "CLIPPED_SKIP_AUDIO";
-
-fn is_set(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| !value.is_empty())
-}
-
-/// Whether the caller should skip because the machine has been asked for quiet.
-///
-/// Consulted before anything is started, which is the difference between this
-/// and [`skipped`]: by the time a test has discovered it cannot run, it has
-/// already made whatever noise it was going to make.
-fn suppressed() -> bool {
-    if !is_set(SKIP_AUDIO) {
-        return false;
-    }
-    assert!(
-        !is_set(REQUIRE_AUDIO),
-        "{SKIP_AUDIO} and {REQUIRE_AUDIO} are both set. One says these tests must not run and \
-         the other says they must not be skipped; there is no behaviour that satisfies both, so \
-         neither is being guessed at."
-    );
-    skipped(&format!("{SKIP_AUDIO} is set"));
-    true
-}
-
-/// Reports that the test could not run here.
-///
-/// Written through `std::io::stderr()` rather than with `eprintln!` because
-/// libtest captures the macros, and a skip nobody can see is how a test quietly
-/// stops testing anything.
-fn skipped(reason: &str) {
-    if is_set(REQUIRE_AUDIO) {
-        panic!("{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}");
-    }
-    let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
-}
 
 #[test]
 fn a_trees_track_holds_the_tone_its_child_played_and_not_the_one_next_door() {

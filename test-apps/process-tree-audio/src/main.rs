@@ -11,10 +11,14 @@
 //!
 //! A parent starts a player as its own child when it is sent `spawn` on
 //! standard input, which is how "the game spawned a helper that makes the
-//! noise" happens at a moment a test chooses. Closing standard input ends the
-//! parent, and the parent ends its child on the way out — on every path,
-//! including a panic, because a test application left rendering a tone on a
-//! shared machine is somebody's afternoon.
+//! noise" happens at a moment a test chooses. `spawn 1699` names the tone,
+//! and a parent takes as many of them as it is sent: "the game spawned a
+//! *second* helper, an hour in, and it plays something else" is the same
+//! sentence with a frequency in it, and is the only way a test can tell the
+//! joiner's audio from the audio that was already there. Closing standard
+//! input ends the parent, and the parent ends its children on the way out — on
+//! every path, including a panic, because a test application left rendering a
+//! tone on a shared machine is somebody's afternoon.
 
 #![cfg(windows)]
 
@@ -64,23 +68,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parent(options: &Options, limit: Option<Duration>) -> Result<(), Box<dyn std::error::Error>> {
     announce(&format!("ready pid={} role=parent", std::process::id()))?;
 
-    let mut child = None;
+    let mut children = Vec::new();
     for line in commands(limit) {
-        match line.trim() {
-            "spawn" => {
-                if child.is_none() {
-                    child = Some(spawn_player(options)?);
-                }
-            }
-            "stop" => break,
-            // A blank line is somebody pressing return, not a command.
-            "" => {}
-            other => announce(&format!("ignored command={other}"))?,
+        let command = line.trim();
+        if command == "stop" {
+            break;
+        }
+        // A blank line is somebody pressing return, not a command.
+        if command.is_empty() {
+            continue;
+        }
+        match spawn_request(command, options.frequency) {
+            Some(frequency) => children.push(spawn_player(options, frequency)?),
+            None => announce(&format!("ignored command={command}"))?,
         }
     }
 
-    if let Some(mut child) = child {
-        // The child has no reason to outlive its parent, and a test that
+    for mut child in children {
+        // A child has no reason to outlive its parent, and a test that
         // panicked is exactly when one would.
         let _ = child.kill();
         let _ = child.wait();
@@ -88,11 +93,34 @@ fn parent(options: &Options, limit: Option<Duration>) -> Result<(), Box<dyn std:
     announce("stopped")
 }
 
+/// The frequency a `spawn` command asks for, or [`None`] if this is not one.
+///
+/// `spawn` on its own means the frequency this run was started with, which is
+/// what a test asking for one child wants and is the only form that existed
+/// when there could only be one. `spawn 1699` names a frequency, and is how a
+/// test gets a **second** child playing something the first is not: a process
+/// that joined the tree while a capture was running cannot be told from the
+/// sibling that was already playing unless the two make different sounds
+/// (`tests/mid_recording_joiner.rs`).
+fn spawn_request(command: &str, default: f32) -> Option<f32> {
+    let rest = command.strip_prefix("spawn")?;
+    if rest.is_empty() {
+        return Some(default);
+    }
+    // A command word ends at whitespace: `spawner` is not `spawn`, and reading
+    // it as one would start a player nobody asked for.
+    let argument = rest.strip_prefix(char::is_whitespace)?.trim();
+    if argument.is_empty() {
+        return Some(default);
+    }
+    argument.parse().ok()
+}
+
 /// Starts a player as this process's own child and reports what it said.
-fn spawn_player(options: &Options) -> Result<Child, Box<dyn std::error::Error>> {
+fn spawn_player(options: &Options, frequency: f32) -> Result<Child, Box<dyn std::error::Error>> {
     let mut child = Command::new(std::env::current_exe()?)
         .arg("--play")
-        .args(["--frequency", &options.frequency.to_string()])
+        .args(["--frequency", &frequency.to_string()])
         .args(["--amplitude", &options.amplitude.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -203,4 +231,45 @@ fn commands(limit: Option<Duration>) -> impl Iterator<Item = String> {
     BufReader::new(std::io::stdin())
         .lines()
         .map_while(Result::ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_spawn_asks_for_the_frequency_this_run_was_started_with() {
+        // The form every test used before there could be more than one child,
+        // and the one `harness::ToneSubject::spawn_child` still sends.
+        assert_eq!(spawn_request("spawn", 997.0), Some(997.0));
+    }
+
+    #[test]
+    fn a_spawn_with_a_frequency_asks_for_that_one() {
+        // The whole of "a process joined the tree playing something else": a
+        // joiner that sounded like its sibling would be invisible in the
+        // measurement.
+        assert_eq!(spawn_request("spawn 1699", 997.0), Some(1699.0));
+        assert_eq!(spawn_request("spawn 1699.5", 997.0), Some(1699.5));
+    }
+
+    #[test]
+    fn a_command_that_merely_begins_with_spawn_is_not_one() {
+        // A command word ends at whitespace. Matching on the prefix alone would
+        // have `spawner` start a player, which is a tone nobody asked for
+        // playing on somebody's machine.
+        assert_eq!(spawn_request("spawner", 997.0), None);
+        assert_eq!(spawn_request("spawn-two", 997.0), None);
+        assert_eq!(spawn_request("respawn", 997.0), None);
+    }
+
+    #[test]
+    fn a_spawn_whose_frequency_is_not_a_number_is_refused_rather_than_guessed_at() {
+        // Refused, not defaulted: a test that mistyped a frequency should see
+        // `ignored command=` rather than a child playing the wrong tone, which
+        // would fail an isolation assertion for a reason that has nothing to do
+        // with the capture.
+        assert_eq!(spawn_request("spawn hello", 997.0), None);
+        assert_eq!(spawn_request("spawn 1699 1373", 997.0), None);
+    }
 }
