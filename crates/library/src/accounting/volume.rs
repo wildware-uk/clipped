@@ -8,7 +8,13 @@
 //!
 //! The measurement is a single call per volume, so it is cheap enough to take
 //! whenever a status is evaluated, and it is the one part of accounting that
-//! needs the platform ([`crate::accounting::windows`], AGENTS.md section 5).
+//! needs the platform. The call is not made here: `clipped-windows` is the
+//! layer platform queries belong in (AGENTS.md section 5), and
+//! `clipped_session::disk` needs the same two numbers to decide something else
+//! entirely — whether a recording can still be finished properly — so issue
+//! #277 left one copy of it there for both. What accounting keeps is the
+//! judgement: [`VolumeCapacity`] is this crate's vocabulary, and
+//! [`VolumeError`] is how it says a drive is not there.
 
 use std::path::Path;
 
@@ -61,7 +67,9 @@ impl VolumeCapacity {
 ///
 /// `path` does not have to exist. A recording directory that has not been
 /// created yet is an ordinary first-run state, so the nearest ancestor that does
-/// exist is asked instead — the drive is what the question is really about.
+/// exist is asked instead — the drive is what the question is really about. That
+/// rule is `clipped_windows::volume_free_space`'s, which is the one place in the
+/// workspace that states it (issue #277).
 ///
 /// # Errors
 ///
@@ -71,21 +79,18 @@ impl VolumeCapacity {
 pub fn capacity_of(path: &Path) -> Result<VolumeCapacity, VolumeError> {
     #[cfg(windows)]
     {
-        let mut first_failure = None;
-
-        for candidate in path.ancestors() {
-            match crate::accounting::windows::capacity_of(candidate) {
-                Ok(capacity) => return Ok(capacity),
-                Err(error) => {
-                    first_failure.get_or_insert(error);
-                }
-            }
+        // The walk up the ancestors is `clipped_windows::volume_free_space`'s,
+        // and the clamp is its `VolumeSpace`'s. What is this crate's is the
+        // vocabulary the answer arrives in: `VolumeCapacity`, which can say
+        // what is *used*, and `VolumeError`, which has a second variant for a
+        // build that cannot ask at all (issue #277).
+        match clipped_windows::volume_free_space(path) {
+            Ok(space) => Ok(VolumeCapacity::new(space.total_bytes(), space.free_bytes())),
+            Err(error) => Err(VolumeError::Unreadable {
+                path: error.path,
+                reason: error.reason,
+            }),
         }
-
-        Err(first_failure.unwrap_or(VolumeError::Unreadable {
-            path: path.to_path_buf(),
-            reason: "the path names no directory at all".to_owned(),
-        }))
     }
 
     #[cfg(not(windows))]

@@ -1050,9 +1050,10 @@ mod tests {
 
     #[test]
     fn a_guard_watches_the_folder_the_recording_goes_in_rather_than_the_file() {
-        // `GetDiskFreeSpaceExW` wants a directory, and the recording's own file
-        // does not exist when the guard is built. Pointing at the file would
-        // make the first probe fail and read as an unplugged drive.
+        // The volume query wants a directory, and the recording's own file does
+        // not exist when the guard is built. The walk up the ancestors would
+        // find the directory above it anyway, as `SpaceGuard::new` says;
+        // naming it keeps every probe off a path that is being written to.
         let guard = SpaceGuard::new(Path::new(r"D:\clips\session.mkv"), 1);
         assert_eq!(guard.directory, Path::new(r"D:\clips"));
     }
