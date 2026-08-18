@@ -92,3 +92,145 @@ pub mod ubisoft;
 pub mod xbox;
 
 pub use installed::Launchers;
+
+#[cfg(test)]
+mod tests {
+    use crate::catalogue::{Catalogue, LauncherKind, Match, MatchStrength, ProcessCandidate};
+
+    /// One row per provider module declared above, and what the shipped
+    /// catalogue has to have for it.
+    ///
+    /// The third column is a reason, and it is [`None`] for every launcher
+    /// today because every one of them has an entry. A launcher that
+    /// deliberately has none says so there instead, and the guard then requires
+    /// the catalogue to agree — so a reason left behind after somebody adds the
+    /// entry fails just as loudly as a missing entry does.
+    const PROVIDERS: &[(&str, LauncherKind, Option<&str>)] = &[
+        ("battlenet", LauncherKind::BattleNet, None),
+        ("epic", LauncherKind::Epic, None),
+        ("riot", LauncherKind::Riot, None),
+        ("steam", LauncherKind::Steam, None),
+        ("ubisoft", LauncherKind::Ubisoft, None),
+        ("xbox", LauncherKind::Xbox, None),
+    ];
+
+    /// The provider modules, taken from the declarations at the top of this
+    /// file rather than from a second list somebody has to remember to update.
+    ///
+    /// `pub mod` is the distinction that matters: a provider is public API a
+    /// caller names, and the shared helpers beside them — `claim`, `registry`,
+    /// `keyvalues`, `installed` — are private and are not launchers.
+    fn provider_modules() -> Vec<&'static str> {
+        include_str!("mod.rs")
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub mod "))
+            .filter_map(|rest| rest.strip_suffix(';'))
+            .collect()
+    }
+
+    /// Every provider here is one [`PROVIDERS`] knows the launcher kind of.
+    ///
+    /// This is the half that makes the guard below unavoidable. Adding
+    /// `pub mod ea;` above fails here until somebody says which
+    /// [`LauncherKind`] it produces, and saying that is what puts them in front
+    /// of the catalogue requirement.
+    #[test]
+    fn every_provider_module_is_accounted_for() {
+        let declared = provider_modules();
+        assert!(
+            !declared.is_empty(),
+            "no `pub mod` declaration was found in this file, so this guard is reading the wrong \
+             text and is checking nothing"
+        );
+
+        for module in &declared {
+            assert!(
+                PROVIDERS.iter().any(|(name, ..)| name == module),
+                "`pub mod {module};` is a launcher provider with no row in `PROVIDERS`. Add one \
+                 naming the `LauncherKind` it produces, so that the catalogue is checked for an \
+                 entry that identity can match."
+            );
+        }
+
+        for (module, ..) in PROVIDERS {
+            assert!(
+                declared.contains(module),
+                "`PROVIDERS` names `{module}`, which is no longer a `pub mod` in this file"
+            );
+        }
+    }
+
+    /// Every launcher with a provider has a catalogue entry it can actually
+    /// match.
+    ///
+    /// # Why this is not another test of the providers
+    ///
+    /// Every other test under this module asserts that a launcher identity is
+    /// *produced*, and none of them asserted that anything could *consume* one.
+    /// That is how five providers came to be written, tested, verified against
+    /// real installations and merged while no non-Steam entry in `games.toml`
+    /// carried an `app_id`: the whole provider tree was green, and the strongest
+    /// rung in the catalogue's precedence order fired for Steam and for nothing
+    /// else ([#44](https://github.com/wildware-uk/clipped/issues/44)).
+    ///
+    /// So this asks the question from the other end, and it asks it of the real
+    /// matcher rather than of the data. It builds the candidate a provider would
+    /// hand over and requires
+    /// [`Catalogue::match_process`](crate::catalogue::Catalogue::match_process)
+    /// to answer with that entry at
+    /// [`MatchStrength::LauncherIdentity`](crate::catalogue::MatchStrength::LauncherIdentity).
+    /// Reading `app_id().is_some()` off the entry instead would pass on data the
+    /// matcher rejects, which is the same mistake one rung further down.
+    #[test]
+    fn every_provided_launcher_has_a_catalogue_entry_it_can_match() {
+        let catalogue = Catalogue::seed().expect("the shipped catalogue should load");
+
+        for (module, kind, deliberately_none) in PROVIDERS {
+            let matchable: Vec<_> = catalogue
+                .entries()
+                .iter()
+                .filter_map(|entry| {
+                    let launcher = entry.launcher()?;
+                    if launcher.kind() != *kind {
+                        return None;
+                    }
+                    // Deliberately an executable name no entry lists. This rung
+                    // does not consult the executable at all, so using one the
+                    // entry also names would let a name-rung match masquerade
+                    // as the launcher-rung match this is checking for.
+                    let candidate =
+                        ProcessCandidate::new("nothing-in-the-catalogue-names-this.exe")
+                            .from_launcher(*kind, launcher.app_id()?);
+                    match catalogue.match_process(&candidate) {
+                        Match::One {
+                            entry: matched,
+                            strength: MatchStrength::LauncherIdentity,
+                        } if matched.game_id() == entry.game_id() => {
+                            Some(entry.game_id().as_str().to_owned())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            match deliberately_none {
+                None => assert!(
+                    !matchable.is_empty(),
+                    "the `{module}` provider produces `LauncherKind::{kind}` identities and no \
+                     shipped catalogue entry can be matched by one, so everything it reads off \
+                     this machine reaches nothing. A game it identifies is still placed by the \
+                     weaker executable-name and path rungs, and the rung the provider exists to \
+                     feed never fires. Add an `app_id` to an entry in \
+                     crates/game-detection/data/games.toml — read off a real installation, not \
+                     recalled — or record in `PROVIDERS` why this launcher deliberately has none."
+                ),
+                Some(reason) => assert!(
+                    matchable.is_empty(),
+                    "`PROVIDERS` says `{module}` deliberately has no catalogue entry, because \
+                     {reason}. But {matchable:?} can now be matched by a \
+                     `LauncherKind::{kind}` identity, so the reason is out of date: remove it."
+                ),
+            }
+        }
+    }
+}

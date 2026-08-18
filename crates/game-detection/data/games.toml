@@ -197,6 +197,14 @@ name = "VALORANT-Win64-Shipping.exe"
 
 [game.launcher]
 kind = "riot"
+# The Riot product identifier without the patchline, the same shape as
+# League's above. **Weaker evidence than the other identifiers in this file**:
+# the machine this was read from has `valorant.live` in
+# `%ProgramData%\Riot Games\Metadata` but no VALORANT installed, so this is
+# Riot's own spelling of the product taken from its metadata directory rather
+# than from a `product_install_full_path` that exists. Getting it wrong costs
+# nothing beyond the rung: the name rung above still places the game.
+app_id = "valorant"
 
 [game.capture]
 compatibility = "unknown"
@@ -212,6 +220,17 @@ name = "FortniteClient-Win64-Shipping.exe"
 
 [game.launcher]
 kind = "epic"
+# Epic's `AppName`, read from `Fortnite.item` in its manifest directory on a
+# machine with Fortnite installed. It is the display name here and an opaque
+# hexadecimal string for other titles, so it is copied rather than guessed at.
+#
+# On that machine the launcher rung fires for `FortniteBootstrapper.exe` and
+# *not* for the executable named above, because two manifests share
+# `B:\Epic Games\Fortnite` — `Fortnite` and the `Fortnite_StWContent` content
+# pack — and Epic refuses a tie it cannot break on `LaunchExecutable` rather
+# than guessing (see docs/game-detection.md, "Epic"). The name rung still
+# places the client, which is why this entry is no worse for it.
+app_id = "Fortnite"
 
 [game.capture]
 compatibility = "unknown"
@@ -225,6 +244,36 @@ name = "RocketLeague.exe"
 
 [game.launcher]
 kind = "epic"
+# No `app_id`. Epic's `AppName` for a game is opaque for most titles — the two
+# Grand Theft Auto manifests on the machine the entry above was read from are
+# `8769e24080ea413b8ebca3f1b8c50951` and `9d2d0eb64d5c44529cece33fe2a46482` —
+# so it cannot be guessed at, and nobody has had Rocket League installed to
+# copy it from. The name rung places the game meanwhile.
+
+[game.capture]
+compatibility = "unknown"
+
+# --- Ubisoft ----------------------------------------------------------------
+#
+# Ubisoft's identifier is a small integer and the name is nowhere near it: the
+# number is the subkey under `Ubisoft\Launcher\Installs`, and the name has to
+# be fetched from the matching `Uplay Install <id>` uninstall entry. Both were
+# read off a machine with the game installed.
+
+[[game]]
+game_id = "trackmania"
+name = "Trackmania"
+
+[[game.executables]]
+name = "Trackmania.exe"
+
+[game.launcher]
+kind = "ubisoft"
+# `HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\5595`, whose `InstallDir`
+# is the directory this game runs from. Nothing about the number says which
+# game it is, which is why it is copied from a real installation rather than
+# looked up.
+app_id = "5595"
 
 [game.capture]
 compatibility = "unknown"
@@ -241,11 +290,29 @@ name = "Overwatch.exe"
 
 [game.launcher]
 kind = "battle-net"
+# Blizzard's product code, not the game's name: read from the `--uid=` flag of
+# the uninstall entry Battle.net wrote on a machine with Overwatch installed.
+# `Battle.net.config` uses the same code, and the game's own `.build.info`
+# calls it `pro` — a third spelling this deliberately does not use.
+app_id = "prometheus"
 
 [game.capture]
 compatibility = "unknown"
 
 # --- Microsoft Store --------------------------------------------------------
+#
+# An Xbox identifier is a package *family* name — the publisher-facing name, an
+# underscore, and the publisher hash — and this is the one section of this file
+# where an executable name is close to useless on its own. Every packaged game
+# below declares `gamelaunchhelper.exe` as the program the Store starts, so
+# several different games present a process of the same name and only the
+# launcher rung can tell them apart (docs/game-detection.md, "Microsoft Store
+# packaged apps, and what they cost").
+#
+# Every family name here was read from
+# `HKLM\SOFTWARE\Microsoft\GamingServices\PackageRepository\Root` on a machine
+# with the game installed, and cross-checked against the package's own
+# `AppxManifest.xml` for the name a person would call it.
 
 [[game]]
 game_id = "minecraft-bedrock"
@@ -256,6 +323,64 @@ name = "Minecraft.Windows.exe"
 
 [game.launcher]
 kind = "xbox"
+# No `app_id`, deliberately. The family name is widely repeated as
+# `Microsoft.MinecraftUWP_8wekyb3d8bbwe`, and nobody working on this has had
+# the game installed to read it out of the package repository — so writing it
+# here would record somebody else's recollection as evidence, which is exactly
+# what the entries above avoid. The name rung places the game meanwhile, which
+# is what it has always done.
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "call-of-duty"
+name = "Call of Duty"
+
+[[game.executables]]
+name = "cod.exe"
+
+[game.launcher]
+kind = "xbox"
+# One package hosts several Call of Duty titles — its directory holds `cod24`
+# and `cod25` side by side — so this entry is the package, which is as fine a
+# distinction as the identifier can make.
+#
+# Note the shape: a *single* underscore before the publisher hash, because the
+# full name carries a resource qualifier (`..._x64_ww_5bkah9njm3e9g`). This is
+# the package that a `__` split drops silently.
+app_id = "38985CA0.COREBase_5bkah9njm3e9g"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "microsoft-flight-simulator-2024"
+name = "Microsoft Flight Simulator 2024"
+
+[[game.executables]]
+name = "FlightSimulator2024.exe"
+
+[game.launcher]
+kind = "xbox"
+# `Limitless` is the package's name and not a description of it; the manifest
+# inside is what says which game this is.
+app_id = "Microsoft.Limitless_8wekyb3d8bbwe"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "oblivion-remastered"
+name = "The Elder Scrolls IV: Oblivion Remastered"
+
+[[game.executables]]
+name = "OblivionRemastered-WinGDK-Shipping.exe"
+
+[game.launcher]
+kind = "xbox"
+# `ProjectAltar` is the development name the package kept.
+app_id = "BethesdaSoftworks.ProjectAltar_3275kfvn8vcwc"
 
 [game.capture]
 compatibility = "unknown"
