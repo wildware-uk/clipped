@@ -366,6 +366,32 @@ figures in [av-sync.md](av-sync.md) come from. Set `CLIPPED_REQUIRE_AUDIO` when
 the numbers are being recorded, so that a machine which delivers no endpoint
 packets fails rather than printing `SKIPPED (av-sync): …` and passing.
 
+### The hour-long drift measurement
+
+The 60-minute run [issue #30](https://github.com/wildware-uk/clipped/issues/30)
+asks for is that same test, told to run for an hour:
+
+```text
+CLIPPED_AV_SYNC_SECONDS=3600 CLIPPED_REQUIRE_AUDIO=1 \
+  cargo test -p clipped-video-pattern --test av_sync \
+  av_offset_stays_within_tolerance -- --ignored --nocapture --test-threads=1
+```
+
+It is a command a person runs, deliberately, and not something `cargo test`
+reaches: an hour of a machine's display, GPU and default output endpoint is not
+a thing to trip over. It writes no file — it measures the timestamps the
+pipeline produces, so there is nothing to clean up afterwards and nothing on
+disk to grow — and it leaves a borderless pattern window on a display for the
+hour.
+
+Besides the fitted rate it prints the offset minute by minute, with the rate
+fitted inside each minute on its own. That is the part worth reading: one slope
+over an hour cannot tell a clock that is steadily a few parts per million wrong
+from one that was right for fifty minutes and then jumped, and those have
+different causes. The measured results are in
+[av-sync.md](av-sync.md#what-an-hour-measures) and
+[audio-routing.md](audio-routing.md).
+
 Its two tests differ over sound. The drift one makes none: it holds a render
 stream open so the endpoint's clock keeps running, and every buffer it hands the
 audio engine is marked silent. The absolute one does make a sound, because a

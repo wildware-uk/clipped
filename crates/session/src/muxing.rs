@@ -699,14 +699,20 @@ fn shape_of(track: &clipped_muxer::AudioTrack) -> Option<AudioFormat> {
 impl CompatibilityMixer {
     /// Builds one from the layout, or [`None`] if there is no mix track.
     ///
-    /// A source whose sampling rate differs from the mix's is **left out of the
-    /// mix and said so once**, rather than failing the recording or being
-    /// resampled here. Its own isolated track is unaffected, which is the track
-    /// that matters most; resampling belongs with the rest of the clock and
-    /// rate handling in
-    /// [issue #30](https://github.com/wildware-uk/clipped/issues/30), and doing
-    /// it badly here would be worse than leaving one source out of a
-    /// convenience track.
+    /// A source whose sampling rate differs from the mix's is **converted to
+    /// the mix's rate and said so once**, rather than left out of the mix. It
+    /// used to be left out, which meant that on a machine with a 44.1 kHz
+    /// headset microphone and a 48 kHz render endpoint — ordinary hardware —
+    /// the one track a player that takes a track arbitrarily takes had no
+    /// microphone in it, and the only sign was a log line. The conversion is
+    /// `clipped_audio`'s (`crates/audio/src/mix/rate.rs`), it happens on the
+    /// mix's own copy, and the source's isolated track still carries the
+    /// capture's own samples at the capture's own rate
+    /// ([issue #30](https://github.com/wildware-uk/clipped/issues/30)).
+    ///
+    /// A source whose *channel layout* cannot be placed is still left out and
+    /// said so, because a downmix is a decision about what the user hears
+    /// rather than a conversion (AGENTS.md section 21).
     fn new(layout: &RecordingLayout) -> Option<Self> {
         let tracks = layout.audio_tracks();
         let mix = tracks.iter().position(|track| {
@@ -731,7 +737,23 @@ impl CompatibilityMixer {
                 continue;
             };
             match mixer.add_source(mixed_as(&source), shape, Level::UNITY) {
-                Ok(id) => sources.push(Some(id)),
+                Ok(id) => {
+                    if shape.sample_rate() != format.sample_rate() {
+                        // Worth one line at `info`, because it is the one thing
+                        // in the mix that a user could act on if they wanted
+                        // to: setting the two endpoints to the same rate in
+                        // Windows removes the conversion altogether.
+                        tracing::info!(
+                            audio_track = %source,
+                            source_rate = shape.sample_rate().get(),
+                            mix_rate = format.sample_rate().get(),
+                            "this source is captured at a different rate from the compatibility \
+                             mix, so the mix's copy of it is converted; its own track is \
+                             recorded at the rate it was captured at"
+                        );
+                    }
+                    sources.push(Some(id));
+                }
                 Err(error) => {
                     tracing::warn!(
                         audio_track = %source,

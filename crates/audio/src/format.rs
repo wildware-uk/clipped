@@ -26,7 +26,12 @@
 //! ([issue #30](https://github.com/wildware-uk/clipped/issues/30)). Converting
 //! between two endpoints that genuinely disagree about the rate — a recording
 //! that has to keep running when the default device moves from 48 kHz to
-//! 44.1 kHz — is not that, and is still refused; see `docs/audio-routing.md`.
+//! 44.1 kHz — is not that, and is still refused: half a track of the user's own
+//! samples and half a track of resampled ones, with nothing in the file saying
+//! where the join is, is what AGENTS.md section 22 rules out.
+//! [`crate::mix::rate`](crate::Mixer) does convert between rates, but only on
+//! the compatibility mix's own copy of a source, which is a derived track and
+//! not this one; see `docs/audio-routing.md`.
 //! Downmixing is a decision about what the user hears, which this crate is not
 //! entitled to make on its own (AGENTS.md section 21).
 

@@ -164,7 +164,7 @@ use clipped_audio::windows::SystemAudioCapture;
 use clipped_audio::{Capture, SampleOrigin};
 use clipped_capture::{
     registered_backend, registered_declarations, select, Acquisition, CaptureClock, CaptureConfig,
-    CaptureError, CaptureTarget, CaptureTimestamp, DriftEstimator, FrameSize, MediaTime,
+    CaptureError, CaptureTarget, CaptureTimestamp, DriftEstimator, DriftRate, FrameSize, MediaTime,
     SourceClock, SyncState, SyncTolerance, TargetHandle, TargetKind, TargetProperties,
     DEFAULT_DISCONTINUITY_STEP,
 };
@@ -185,6 +185,23 @@ const DEFAULT_RUN: Duration = Duration::from_secs(90);
 
 /// The environment variable that lengthens a run, in seconds.
 const RUN_SECONDS: &str = "CLIPPED_AV_SYNC_SECONDS";
+
+/// How long a slice of the run the drift report describes on its own line.
+///
+/// One fitted rate over a whole run cannot tell a clock that is steadily a few
+/// parts per million wrong from one that was right for fifty minutes and then
+/// jumped: both produce the same slope, and they have different causes and
+/// different fixes. So a run is also reported minute by minute — where the
+/// offset had got to at the end of each minute, and the rate fitted inside that
+/// minute alone. A steady clock shows the same rate in every slice; a step
+/// shows one slice whose rate the others do not share, with the offset flat
+/// either side of it.
+///
+/// A minute rather than anything finer because a slice has to be long enough
+/// for its own fit to mean something: at 10 ms endpoint buffers a minute is
+/// six thousand observations, and `DriftEstimator`'s own standard error says on
+/// each line whether that was enough.
+const TRACE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How long the absolute measurement runs for unless
 /// [`TONE_RUN_SECONDS`] says otherwise.
@@ -1095,7 +1112,48 @@ struct Report {
     source_interval_nanos: Option<f64>,
     audio: AudioSummary,
     estimator: DriftEstimator,
+    /// The run cut into [`TRACE_INTERVAL`] slices, in order.
+    trace: Vec<Slice>,
     tolerance: SyncTolerance,
+}
+
+/// One [`TRACE_INTERVAL`]'s worth of the run, fitted on its own.
+///
+/// The point of fitting a slice separately from the run is that a slice's rate
+/// describes only what happened inside it, so comparing the slices to each
+/// other is what says whether the drift was steady. The offset, by contrast, is
+/// still measured from the run's first observation — a slice-relative offset
+/// would hide exactly the accumulation the run exists to show.
+#[derive(Debug)]
+struct Slice {
+    /// Seconds from the run's first observation to this slice's last one.
+    until_seconds: f64,
+    /// The offset at this slice's last observation, in nanoseconds, measured
+    /// from the run's first observation.
+    offset_nanos: i64,
+    /// The rate fitted to this slice's observations alone, when it had a long
+    /// enough uninterrupted segment for one.
+    rate: Option<DriftRate>,
+    /// The standard error of [`Self::rate`].
+    rate_error: Option<DriftRate>,
+    observations: u64,
+    /// How many times the estimator decided this slice's observations had a
+    /// discontinuity in them — a step it will not fit a rate across.
+    discontinuities: u64,
+}
+
+impl Slice {
+    /// Reads a finished slice out of the estimator that fitted it.
+    fn of(slice: &DriftEstimator, until_seconds: f64, offset_nanos: i64) -> Self {
+        Self {
+            until_seconds,
+            offset_nanos,
+            rate: slice.rate(),
+            rate_error: slice.rate_standard_error(),
+            observations: slice.observations(),
+            discontinuities: slice.discontinuities(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1130,6 +1188,18 @@ impl Report {
         let mut estimator = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
         let mut first_media = None;
         let mut last_media = None;
+
+        // The slice being accumulated, and where the run had got to at its last
+        // observation. A slice is fitted by its own estimator rather than by
+        // arithmetic here, so that every rate this file prints — the run's and
+        // each slice's — comes out of the same fit (AGENTS.md section 55).
+        let mut trace: Vec<Slice> = Vec::new();
+        let mut slice = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
+        let mut slice_offset = 0_i64;
+        let mut slice_until = 0.0_f64;
+        let mut origin: Option<MediaTime> = None;
+        let mut boundary = TRACE_INTERVAL.as_secs_f64();
+
         for (device, track) in &audio.observations {
             let reference = clock
                 .media_time_on(SourceClock::PerformanceCounter, *device)
@@ -1137,9 +1207,35 @@ impl Report {
             let observed = clock
                 .media_time_on(SourceClock::PerformanceCounter, *track)
                 .expect("the audio track is timed on the performance counter");
-            estimator.observe(reference, observed);
+            let offset = estimator.observe(reference, observed);
             first_media.get_or_insert(observed);
             last_media = Some(observed);
+
+            let start = *origin.get_or_insert(reference);
+            let elapsed = reference.nanos_since(start) as f64 / 1e9;
+            if elapsed >= boundary {
+                if slice.observations() > 0 {
+                    trace.push(Slice::of(&slice, slice_until, slice_offset));
+                    slice = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
+                }
+                // A run with a real gap in it can cross several boundaries at
+                // once; the slices it produced nothing for are not invented.
+                while boundary <= elapsed {
+                    boundary += TRACE_INTERVAL.as_secs_f64();
+                }
+            }
+            slice.observe(reference, observed);
+            slice_offset = offset;
+            slice_until = elapsed;
+        }
+        // The run ends where it ends, so the last slice is a partial one. A
+        // fraction of a second of it fits a rate of hundreds of parts per
+        // million with an error bar wider still, which is noise wearing the
+        // same units as the answer; the run's own final offset is already
+        // printed above, so a runt slice adds nothing worth the confusion.
+        let covered = slice_until - trace.last().map_or(0.0, |last| last.until_seconds);
+        if slice.observations() > 0 && covered >= TRACE_INTERVAL.as_secs_f64() / 10.0 {
+            trace.push(Slice::of(&slice, slice_until, slice_offset));
         }
 
         Self {
@@ -1168,6 +1264,7 @@ impl Report {
                 last_media,
             },
             estimator,
+            trace,
             tolerance: SyncTolerance::default(),
         }
     }
@@ -1299,6 +1396,50 @@ impl Report {
                 ));
             }
             None => note("drift: not enough of a correction-free segment to fit a rate to"),
+        }
+
+        self.print_trace();
+    }
+
+    /// Prints where the offset had got to at the end of every
+    /// [`TRACE_INTERVAL`], and the rate fitted inside that interval alone.
+    ///
+    /// This is the shape of the drift rather than its size, and the two answer
+    /// different questions. The run's fitted rate says how far apart the track
+    /// and the picture end up; only the slices say whether they got there
+    /// steadily. A rate that is the same in every slice is a crystal running at
+    /// its own speed, which is what resampling corrects. A rate that is near
+    /// zero in every slice but one is a single event — a gap filled, a stream
+    /// reopened, a device swapped — and resampling is the wrong answer to it.
+    fn print_trace(&self) {
+        if self.trace.len() < 2 {
+            return;
+        }
+        note(&format!(
+            "drift by {}s slice: elapsed, offset from the run's first observation, and the \
+             rate fitted inside that slice alone",
+            TRACE_INTERVAL.as_secs(),
+        ));
+        for slice in &self.trace {
+            note(&format!(
+                "  {:>8.1} s  {:+9.3} ms  {:>12}  se {:>10}  {} obs{}",
+                slice.until_seconds,
+                slice.offset_nanos as f64 / 1e6,
+                slice.rate.map_or_else(
+                    || "-".to_owned(),
+                    |rate| format!("{:+.3} ppm", rate.parts_per_million())
+                ),
+                slice.rate_error.map_or_else(
+                    || "-".to_owned(),
+                    |error| format!("{:.3} ppm", error.parts_per_million())
+                ),
+                slice.observations,
+                if slice.discontinuities > 0 {
+                    format!(", {} discontinuity(ies)", slice.discontinuities)
+                } else {
+                    String::new()
+                },
+            ));
         }
     }
 

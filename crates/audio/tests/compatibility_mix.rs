@@ -87,9 +87,14 @@ fn format(channels: u16) -> AudioFormat {
 /// `frames` interleaved frames of a sine at `frequency`, the same in every
 /// channel.
 fn tone(frequency: f64, amplitude: f32, frames: usize, channels: usize) -> Vec<f32> {
+    tone_at(RATE, frequency, amplitude, frames, channels)
+}
+
+/// The same, for a source whose own sample rate is not the mix's.
+fn tone_at(rate: u32, frequency: f64, amplitude: f32, frames: usize, channels: usize) -> Vec<f32> {
     (0..frames)
         .flat_map(|frame| {
-            let phase = 2.0 * std::f64::consts::PI * frequency * frame as f64 / f64::from(RATE);
+            let phase = 2.0 * std::f64::consts::PI * frequency * frame as f64 / f64::from(rate);
             let sample = amplitude * phase.sin() as f32;
             std::iter::repeat_n(sample, channels)
         })
@@ -101,6 +106,11 @@ struct Feed {
     id: MixSourceId,
     samples: Vec<f32>,
     channels: usize,
+    /// Frames in one of this source's 10 ms packets, which is its own sample
+    /// rate divided by a hundred rather than the mix's: a 44.1 kHz endpoint
+    /// hands over 441 frames where a 48 kHz one hands over 480, and both cover
+    /// the same ten milliseconds.
+    packet_frames: usize,
     /// The packet of the recording this source's first packet is.
     from_packet: usize,
     /// How many recording packets pass between reads of this source.
@@ -120,9 +130,17 @@ impl Feed {
             id,
             samples,
             channels,
+            packet_frames: PACKET_FRAMES,
             from_packet: 0,
             every: 1,
         }
+    }
+
+    /// A source whose own sample rate is not the mix's, so its packets are a
+    /// different number of frames for the same ten milliseconds.
+    fn at_rate(mut self, rate: u32) -> Self {
+        self.packet_frames = rate as usize / 100;
+        self
     }
 
     fn starting_at_second(mut self, second: f64) -> Self {
@@ -147,8 +165,8 @@ impl Feed {
     /// This source's samples for recording packet `packet`, if it has any.
     fn packet(&self, packet: usize) -> Option<&[f32]> {
         let index = packet.checked_sub(self.from_packet)?;
-        let start = index * PACKET_FRAMES * self.channels;
-        let end = start + PACKET_FRAMES * self.channels;
+        let start = index * self.packet_frames * self.channels;
+        let end = start + self.packet_frames * self.channels;
         self.samples.get(start..end)
     }
 }
@@ -299,6 +317,84 @@ fn every_source_is_audible_in_the_mix_and_none_of_them_is_changed_by_it() {
             );
         }
     }
+}
+
+#[test]
+fn a_microphone_at_another_rate_is_audible_in_the_mix_and_its_own_track_is_untouched() {
+    // The hardware combination this exists for: a 44.1 kHz headset microphone
+    // and a 48 kHz render endpoint, which is what a great many machines have.
+    // Until issue #30 the mix refused the microphone, and the consequence was
+    // not a failed recording but a silent omission — the one track a player
+    // that takes a track arbitrarily takes had no voice in it, and the only
+    // sign was a log line.
+    //
+    // Both halves are asserted here, because the second is what makes the first
+    // allowed: the microphone is audible in the mix, and the samples that go on
+    // to its own track are bit-for-bit the ones the capture produced, at
+    // 44.1 kHz, with no conversion anywhere near them (AGENTS.md section 22).
+    const MICROPHONE_RATE: u32 = 44_100;
+
+    let mut mixer = Mixer::new(format(2)).anchored_at(AudioTimestamp::from_nanos(BASE));
+    let game = Feed::new(
+        mixer
+            .add_source(AudioSource::Game, format(2), Level::UNITY)
+            .expect("a stereo source fits a stereo mix"),
+        tone(GAME, 0.30, (SECONDS * f64::from(RATE)) as usize, 2),
+        2,
+    );
+    let microphone = Feed::new(
+        mixer
+            .add_source(
+                AudioSource::Microphone,
+                AudioFormat::new(
+                    core::num::NonZeroU32::new(MICROPHONE_RATE).expect("44.1 kHz is not zero"),
+                    core::num::NonZeroU16::new(1).expect("mono is not zero channels"),
+                    ChannelMask::from_bits(0x4),
+                    SampleFormat::Float32,
+                ),
+                Level::UNITY,
+            )
+            .expect("a source at another rate belongs in the mix"),
+        tone_at(
+            MICROPHONE_RATE,
+            MICROPHONE,
+            0.30,
+            (SECONDS * f64::from(MICROPHONE_RATE)) as usize,
+            1,
+        ),
+        1,
+    )
+    .at_rate(MICROPHONE_RATE);
+
+    let pristine = microphone.samples.clone();
+    let feeds = [game, microphone];
+    let mixed = run(&mut mixer, &feeds);
+    assert!(!mixed.is_empty(), "the mix produced nothing at all");
+
+    // In the mix, at its own frequency and at a level comparable with the
+    // source that did not need converting. A conversion that had the ratio
+    // upside down would put the tone at 1568 Hz or 1112 Hz instead, and the
+    // measurement at 1320 Hz would collapse.
+    let mix = listen(&mixed, 2);
+    let game_tone = mix.magnitude_at(GAME);
+    let microphone_tone = mix.magnitude_at(MICROPHONE);
+    assert!(
+        microphone_tone > game_tone / 2.0,
+        "a 44.1 kHz microphone should be as audible in a 48 kHz mix as anything else:          {MICROPHONE} Hz measures {microphone_tone:.4} against {GAME} Hz at {game_tone:.4}"
+    );
+
+    // And nothing of it changed on the way. Bit-identical, because the mixer
+    // takes a shared borrow and the conversion happens on a copy.
+    assert_eq!(
+        feeds[1].samples, pristine,
+        "the mixer altered the microphone's own samples"
+    );
+    let track = AudioContent::from_samples(feeds[1].samples.clone(), MICROPHONE_RATE);
+    let (peak, magnitude) = track.dominant_frequency();
+    assert!(
+        (peak - MICROPHONE).abs() < 5.0,
+        "the microphone's own track should still be {MICROPHONE} Hz at 44.1 kHz, and the          strongest thing on it is {peak:.1} Hz at {magnitude:.4}"
+    );
 }
 
 #[test]
