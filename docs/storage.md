@@ -6,10 +6,10 @@ it changes shape without anybody being asked to delete it, who may write to it
 and when, and why a failure of any of it cannot cost somebody a recording.
 
 **Status: the database exists and the library index fills part of it.**
-`crates/storage` opens it, migrates it, enforces the schema and offers the write
-path ([#55]). Since [#402] the recorder reconciles the index against the session
-sidecars on disk, so the tables a sitting produces — games, sessions, recordings,
-events — have a producer. The rest still do not, and say so by name below.
+`crates/storage` opens it, migrates it and enforces the schema ([#55]). Since
+[#402] the recorder reconciles the index against the session sidecars on disk,
+so the tables a sitting produces — games, sessions, recordings, events — have a
+producer. The rest still do not, and say so by name below.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -75,22 +75,40 @@ calls it instead.
 
 ## The concurrency model
 
-**One writer, any number of readers, across processes.**
+**One process writes, any number of processes read, and inside the writer two
+kinds of thread do the writing — neither of them a recording.**
 
 ```text
- recorder process                          desktop process
- ────────────────                          ───────────────
- capture / encode threads                  library screens
-        │ never touch the database                │
-        ▼                                         │
- WriteQueue  ── bounded channel ──▶ Writer thread │
-                                        │          ▼
-                                        ▼   Database::open_read_only
-                                  Database::open        (query_only)
-                                        │              │
-                                        └──▶  library.db  ◀──┘
-                                              (WAL mode)
+ recorder process                                     desktop process
+ ────────────────                                     ───────────────
+ capture / encode / recording threads                 library screens
+        │                                                    │
+        │ cannot reach clipped-storage at all                │ one command,
+        │ (tests/integration/tests/workspace_layering.rs)    │ one connection
+        │                                                    ▼
+        │ index_now(): sets a flag, notifies a         clipped-ipc-connection
+        │ condition variable, returns                  threads, one per command
+        ▼                                                    │
+ clipped-library-index thread                                │ set_favourite
+ reconcile · sweep · trash · thumbnails                      │ set_lock
+        │                                                    │ restore · empty
+        │                                                    ▼
+        └──────────────▶  Database::open  ◀──────────────────┘
+                                │
+                                ▼
+                            library.db
+                            (WAL mode)
 ```
+
+The desktop process is on the reading side of that picture and cannot be on the
+other: it may link `clipped-ipc` and nothing else of this workspace
+(`the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`), so
+every question it has about the library is a command the recorder answers, and
+so is every change it wants made (ADR 0002,
+[#301](https://github.com/wildware-uk/clipped/issues/301)).
+`Database::open_read_only` is the connection a second process would read
+through; nothing in the product opens one today, for that same reason, and the
+tests are what exercise it.
 
 The database is opened in write-ahead logging mode. That is the whole mechanism:
 a reader in WAL mode sees a consistent snapshot from before the write in
@@ -104,7 +122,7 @@ connection refuses every statement that would write. It opens the *file* for
 writing even so, deliberately: an `SQLITE_OPEN_READONLY` connection to a
 WAL-mode database cannot create the shared-memory index it needs, so it fails
 outright when the `-shm` file is not already there — which is exactly the state
-the desktop application meets if it opens the library before the recorder has.
+a second process meets if it opens the library before the recorder has.
 `query_only` gives the guarantee the flag was wanted for without that failure.
 
 A database that will not take the mode is a warning and not a failure, both when
@@ -119,45 +137,109 @@ actually granted**. A commit then does not wait for the disk to acknowledge it;
 a power cut can lose the most recent transactions but cannot corrupt the file,
 and losing the last few metadata writes costs a re-index from the sidecars.
 `FULL` would cost a disk flush on every commit made while a game is running,
-which is the thing the next section exists to avoid. In a rollback journal
+which is what the next section is about. In a rollback journal
 `NORMAL` buys the same speed by risking the file itself, so a database that fell
 back keeps `FULL` — the speed is worth having and the corruption is not.
 `durability_is_only_relaxed_where_write_ahead_logging_makes_it_safe` holds both
 halves of that.
 
-### Nothing on a recording path waits for the database
+### Which write runs on which thread
 
-AGENTS.md section 20 says capture threads must not wait on the database and
-section 18 lists high-frequency database writes among the things to avoid. So
-the writing path is a queue:
+AGENTS.md section 20 says a capture thread must not wait on the database, and
+section 18 lists high-frequency database writes among the things to avoid. This
+table is how that is kept: every write the product performs, the thread it runs
+on, and what is waiting for it.
 
-- `WriteQueue::submit` puts a closure on a **bounded channel** and returns. It
-  takes no lock on the database, performs no disk I/O, and never blocks. If the
-  queue is full it returns `SubmitError::Full` rather than waiting — the video is
-  what cannot be made again, and metadata can be rebuilt from the sidecars.
-- The `Writer` thread drains the queue and commits what it finds in **one
-  transaction per batch**, up to 256 writes or 50 milliseconds, whichever comes
-  first. A hundred rows cost one disk flush rather than a hundred.
-- Each write runs inside its own savepoint, so one that fails is rolled back
-  alone and the rest of the batch still commits.
+| Write | Where it is | Thread | What waits for it |
+| --- | --- | --- | --- |
+| Creating the file and running the migrations | `Database::open` | whichever thread below opened it | that thread, once, on the first use |
+| Sessions, recordings, clips and events, from the sidecars | `clipped_library::index::reconcile` | `clipped-library-index` | **nothing** |
+| Marking what has gone, and what has come back | `clipped_library::index::reconcile` | `clipped-library-index` | **nothing** |
+| Moving recordings to the trash to stay inside a storage limit | `clipped_session::cleanup::sweep`, through `clipped_library::accounting::cleanup` and `clipped_library::trash` | `clipped-library-index` | **nothing** |
+| A star put on or taken off | `clipped_library::favourites` | `clipped-ipc-connection` | the one window command that asked for it |
+| A padlock put on or taken off | `clipped_library::locks` | `clipped-ipc-connection` | the one window command that asked for it |
+| Restoring from the trash, and emptying it | `clipped_library::trash` | `clipped-ipc-connection` | the one window command that asked for it |
+| A recovered fragment sent to the trash | `apps/recorder/src/recover.rs` | the main thread of `clipped-recorder recover` | the person who typed the command |
+| Nothing, but the file is opened and so may be migrated | `apps/recorder/src/storage.rs` | the main thread of `clipped-recorder storage` | the person who typed the command |
 
-Measured on the maintainer's machine (`cargo test -p clipped-storage -- --nocapture`):
+`apps/recorder/src/library.rs` is where the recorder's two halves of that live:
+`LibraryIndexer` owns the background thread and the connection it writes
+through, and `LibraryReader` owns the connection the window's commands are
+answered on. They hold a connection each, deliberately — a page of the library
+must not wait behind a reconciliation.
 
-| Measurement | Result |
-| --- | --- |
-| 5,000 submissions while the writer was held inside a transaction for 1s | **243 µs total, 48 ns each** |
-| 10,000 queued writes | **40 transactions** (about 250 writes each) |
+Three things follow, and they are the answers to the question the queue below
+used to be the answer to.
 
-The second number is counted by SQLite's own commit hook rather than by the
-writer's bookkeeping, so the measurement does not come from the code being
-measured. The first is the one that matters for a capture thread: the database
-was deliberately busy for a full second and submitting was not delayed by it at
-all.
+**Nothing on a capture or encode path writes, and nothing on one can be made
+to.** `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-muxer` and
+`clipped-replay` do not depend on `clipped-storage`, directly or through
+anything else, so there is no `Database` to reach from a thread taking frames.
+Layering does not give that for free — `clipped-storage` is a layer 0 crate, so
+any of them *could* name it and still point down the stack — which is why
+`no_crate_on_a_capture_or_encoding_path_can_reach_the_database` in
+`tests/integration/tests/workspace_layering.rs` asserts it directly.
 
-**Nothing calls any of this yet.** The recorder writes no rows in this build.
-The mechanism exists now because the shape of the writing path is what decides
-whether a capture path can be made to wait on it, and that decision is much
-cheaper to make before there are callers than after.
+**Nothing a recording waits for writes either.** The recording thread's one
+contact with the index is `RecordingState::index_now` when a sitting ends, which
+is `LibraryIndexer::request`: it sets a flag, notifies a condition variable and
+returns, and the run it asks for happens on the indexer's thread. The indexer
+holds no lock that call needs while it writes.
+`asking_for_a_run_does_not_wait_for_the_run_that_is_writing` measures that
+against a run of a hundred transactions in flight, and fails if the asking ever
+takes as much as a tenth of a second.
+
+**The window's writes are on the connection thread that asked for them, and that
+is where they belong.** A star, a padlock and an emptied trash are all things a
+person did and is waiting to see the result of; answering "done" before the row
+was written would be a window drawing a star it will lose on the next read. The
+recorder gives each command its own connection and each connection its own
+thread (`crates/ipc/src/server.rs`), so a slow one delays the command that asked
+and nothing else.
+
+#### What it costs, and what a collision costs
+
+The measurements are in `docs/library.md`, because
+`clipped_library::index` is what does the writing: 2,000 sessions and 3,000
+recordings index in **403 ms** across **16 transactions**, and 10,000 sessions in
+**1.93 s** across **79**. At the pace the recorder actually uses — small batches
+and a real pause between them, because a run cannot know a game is not about to
+start — the same 2,000 sessions take **3.54 s** across **125** transactions, no
+one of which lasts longer than **13 ms**.
+
+Two writers can still meet: an indexer batch and a window's `set_favourite` want
+the same write lock. Both outcomes are bounded and neither loses anything.
+
+- The window's write is a single statement in its own transaction, so SQLite's
+  busy handler applies and it waits — at most `busy_timeout`, five seconds — and
+  then succeeds.
+- The indexer's batch reads before it writes, and SQLite refuses to upgrade a
+  read transaction to a write one while another writer holds the lock: it
+  answers `SQLITE_BUSY` immediately rather than running the busy handler, which
+  is how it avoids a deadlock between two upgraders. The batch is rolled back
+  whole, the run ends with a warning, and the next request re-runs it from the
+  sidecars — which is what makes an index safe to lose (AGENTS.md section 56).
+
+#### There used to be a queue here
+
+`clipped-storage` shipped a `WriteQueue`: a bounded channel a capture thread
+could drop a closure on, drained by a batching `Writer` thread, with benchmarks
+in this document showing a submission cost 48 ns. It was written before there
+were any callers, on the reasoning that the shape of the writing path decides
+whether a capture path can be made to wait on it.
+
+**Nothing ever submitted to it.** By the time the recorder wrote rows at all
+([#402](https://github.com/wildware-uk/clipped/issues/402)) every one of them
+was written from a thread in the table above, where a stall costs nothing, and
+every one of them had a caller that needed the answer — a window waiting to draw
+a star, a reconciliation counting what it wrote. A fire-and-forget queue that
+drops a write when it is full is the wrong shape for all of them. So it was
+removed rather than wired in
+([#605](https://github.com/wildware-uk/clipped/issues/605)), and this section
+describes what happens instead.
+
+Bring one back for a *producer* that cannot wait and does not need the answer.
+There is none today.
 
 ## How this relates to the session sidecars
 
@@ -409,7 +491,13 @@ They cover, among other things:
   depends on `configure` — migrating turns enforcement back on at the end, so a
   newly created database has it either way. That test exists because a mutation
   found the gap.
-- **The write path.** That submitting never waits, that a burst commits in few
-  transactions, that a failed write does not take its batch with it, that a full
-  queue refuses rather than blocks, and that stopping the writer writes
-  everything already queued.
+- **Which thread writes.** Not here — the writes are in `clipped-library` and
+  the threads are in `apps/recorder`, so the two properties "Which write runs on
+  which thread" claims are asserted where they can be:
+  `no_crate_on_a_capture_or_encoding_path_can_reach_the_database` in
+  `tests/integration/tests/workspace_layering.rs` reads the dependency graph out
+  of `cargo metadata` and fails if anything on a capture or encode path can
+  reach this crate at all, and
+  `asking_for_a_run_does_not_wait_for_the_run_that_is_writing` in
+  `apps/recorder/src/library.rs` times the recording thread's one call into the
+  index while a run of a hundred transactions is in flight.

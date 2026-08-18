@@ -1024,6 +1024,23 @@ impl LibraryIndexer {
         self
     }
 
+    /// The same indexer, working at a pace the caller chose.
+    ///
+    /// For the one test that has to have a run still going while it looks at
+    /// what asking for another costs
+    /// (`asking_for_a_run_does_not_wait_for_the_run_that_is_writing`). Nothing
+    /// in the product sets it: the pace a recorder indexes at is
+    /// [`IndexPace::background`](clipped_library::index::IndexPace::background)
+    /// because a run cannot know that a game is not about to start.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_pace(mut self, pace: clipped_library::index::IndexPace) -> Self {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.settings.pace = pace;
+        }
+        self
+    }
+
     /// The same indexer, keeping its pictures and its peaks in named
     /// directories.
     ///
@@ -2497,6 +2514,140 @@ mod tests {
             protection,
             Some(clipped_library::accounting::cleanup::Protection::Locked),
             "the sweep has to say the lock is what saved it"
+        );
+    }
+
+    /// A session record, as the recorder writes one beside its recordings.
+    ///
+    /// Written by hand rather than by running a recording: what the test below
+    /// needs is a reconciliation with rows to write, and the file is the
+    /// contract between the two halves (`crates/library/src/index/sidecar.rs`,
+    /// `docs/sessions.md`).
+    fn write_a_sitting(recordings: &std::path::Path, ordinal: usize) {
+        let media = recordings.join(format!("clipped-2026081{ordinal:04}-1.mkv"));
+        std::fs::write(&media, [0u8; 64]).expect("a recording can be written");
+        let output = media.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            recordings.join(format!("clipped-cs2-{ordinal:04}.session.json")),
+            format!(
+                r#"{{"schema_version":1,
+                     "session_id":"cs2-{ordinal:04}",
+                     "game":{{"kind":"known","game_id":"cs2","name":"Counter-Strike 2"}},
+                     "started_at":"2026-08-11T20:14:00+01:00",
+                     "ended_at":"2026-08-11T21:14:00+01:00",
+                     "recordings":[{{"index":1,
+                                     "output":"{output}",
+                                     "started_at":"2026-08-11T20:14:00+01:00",
+                                     "ended_at":"2026-08-11T21:14:00+01:00",
+                                     "outcome":"recorded",
+                                     "duration_seconds":3600.0}}],
+                     "clips":[],"events":[]}}"#
+            ),
+        )
+        .expect("a session record can be written");
+    }
+
+    /// How many sittings the run below has to get through.
+    ///
+    /// One session per transaction and a pause between them, so the run lasts
+    /// seconds and spends most of them either inside a write or a few
+    /// microseconds away from one.
+    const SITTINGS: usize = 100;
+
+    /// How long the asking is watched for, which has to be comfortably less
+    /// than the run takes.
+    const WATCHED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
+
+    /// The longest a caller may take to ask for a run before the answer is
+    /// "it waited". The call costs tens of nanoseconds; this is six orders of
+    /// magnitude of headroom, and still twenty times less than the run.
+    const NOT_WAITING: std::time::Duration = std::time::Duration::from_millis(100);
+
+    #[test]
+    fn asking_for_a_run_does_not_wait_for_the_run_that_is_writing() {
+        // AGENTS.md section 20 as the thing that actually happens, rather than
+        // as the `WriteQueue` that was built for it and never used
+        // ([issue #605](https://github.com/wildware-uk/clipped/issues/605)).
+        //
+        // Every row the recorder writes is written by the indexer thread, and
+        // the recording thread's one contact with it is
+        // `RecordingState::index_now`, which is `LibraryIndexer::request`. So
+        // the property that keeps a recording off the database is not that
+        // writes are queued — they are not — it is that asking for a run
+        // returns whatever the run in flight is in the middle of.
+        //
+        // A hundred sittings at one per transaction is a run of several
+        // seconds, holding a write transaction open for a hundred separate
+        // stretches of it. Asking is timed repeatedly across the first six
+        // hundred milliseconds of that, so the measurement is not one sample
+        // that might have fallen in a gap.
+        //
+        // Break it by moving `self.reconcile_once(&mut database)` inside the
+        // `state` lock in `Indexer::run`: `worst` becomes the rest of the run,
+        // which is the recording thread waiting on the database.
+        let directory = scratch_directory("index-request-never-waits");
+        let path = directory.join(LIBRARY_FILE);
+        let recordings = directory.join("recordings");
+        std::fs::create_dir_all(&recordings).expect("a recordings folder can be made");
+        for ordinal in 0..SITTINGS {
+            write_a_sitting(&recordings, ordinal);
+        }
+
+        let indexer = LibraryIndexer::at(Some(path.clone()), vec![recordings.clone()]).with_pace(
+            clipped_library::index::IndexPace {
+                batch: 1,
+                page: 512,
+                rest: std::time::Duration::from_millis(20),
+            },
+        );
+        indexer.start();
+
+        let watching = std::time::Instant::now();
+        let mut worst = std::time::Duration::ZERO;
+        let mut asked = 0u32;
+        while watching.elapsed() < WATCHED_FOR {
+            let at = std::time::Instant::now();
+            indexer.request();
+            worst = worst.max(at.elapsed());
+            asked += 1;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Read before the assertions, and through the same lock `request` takes:
+        // a run that had already finished would make the measurement above a
+        // measurement of an idle indexer, and reading it at all says the thread
+        // doing the writing is holding nothing this needs.
+        let finished = indexer.runs();
+
+        assert!(
+            worst < NOT_WAITING,
+            "asking for a run waited {worst:?} for the run that was writing, over {asked} \
+             attempts. That is the recording thread waiting on the database, which is what \
+             AGENTS.md section 20 forbids"
+        );
+        assert_eq!(
+            finished, 0,
+            "the run was supposed to still be going after {WATCHED_FOR:?}; {asked} \
+             measurements of an indexer that had already stopped prove nothing"
+        );
+
+        // And the run does write, which a test that only measured the asking
+        // would be satisfied without.
+        assert!(
+            indexer.settled_within(std::time::Duration::from_secs(60)),
+            "the indexer never finished the run"
+        );
+        indexer.shut_down();
+
+        let reader = Database::open_read_only(&path).expect("the library can be read");
+        let sessions: i64 = reader
+            .connection()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("the sessions can be counted");
+        assert_eq!(
+            sessions,
+            i64::try_from(SITTINGS).expect("a hundred fits"),
+            "every sitting had to reach the index, or the run being measured was not writing"
         );
     }
 }

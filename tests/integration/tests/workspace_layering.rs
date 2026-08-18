@@ -661,3 +661,86 @@ fn every_plugin_in_the_workspace_is_named_by_the_constant_that_governs_plugins()
          not reach it: {missing:?} are not listed"
     );
 }
+
+/// The crates whose code runs on a capture or encoding thread.
+///
+/// A frame arrives every 8 milliseconds at 120 FPS and the thread that takes it
+/// has nowhere to put a pause. These are the crates that thread runs through:
+/// the capture that hands out textures, the audio that fills a ring, the encoder
+/// that drives the hardware, the muxer that writes the container, and the replay
+/// buffer that keeps the last packets in memory.
+const CAPTURE_AND_ENCODING_CRATES: &[&str] = &[
+    "clipped-capture",
+    "clipped-audio",
+    "clipped-encoder",
+    "clipped-muxer",
+    "clipped-replay",
+];
+
+/// What none of them may reach, however many crates away it is.
+const THE_DATABASE: &str = "clipped-storage";
+
+#[test]
+fn no_crate_on_a_capture_or_encoding_path_can_reach_the_database() {
+    // AGENTS.md section 20: a capture thread must not wait on the database, and
+    // section 18 lists high-frequency database writes among the things to avoid
+    // outright — a commit is a disk flush, and a disk flush is a pause of
+    // unpredictable length happening while somebody is playing a game.
+    //
+    // `crates/storage` used to answer that with a `WriteQueue`: a bounded
+    // channel a capture thread could drop a closure on. Nothing ever submitted
+    // to it, and by the time the recorder did write rows they were all being
+    // written from threads where a stall costs nothing — so the queue went
+    // (issue #605). What replaces it is this: the capture and encoding crates
+    // cannot reach `clipped-storage` at all, so there is no thread on that path
+    // from which a database write could be written in the first place.
+    //
+    // Layering does not give this for free and cannot: `clipped-storage` is a
+    // layer 0 crate, so `every_dependency_points_down_the_stack` would welcome
+    // a `clipped-storage` entry in any of these manifests. This is the rule
+    // that would not.
+    //
+    // The closure is transitive, over `[dependencies]` and `[build-dependencies]`
+    // but not `[dev-dependencies]`: a test may open a database — several do,
+    // to check what a recording produced — and a dev-dependency is never linked
+    // into the shipping recorder.
+    let dependencies = workspace_dependencies();
+
+    let mut violations = Vec::new();
+    for entry in CAPTURE_AND_ENCODING_CRATES {
+        assert!(
+            dependencies.contains_key(*entry),
+            "{entry} is named here as a capture or encoding crate but is not a member of this \
+             workspace; rename it in CAPTURE_AND_ENCODING_CRATES or take it out"
+        );
+
+        let mut seen: Vec<String> = vec![(*entry).to_owned()];
+        // Each step remembers how it got here, so a failure names the route
+        // rather than only the two ends of it.
+        let mut frontier: Vec<Vec<String>> = vec![vec![(*entry).to_owned()]];
+        while let Some(route) = frontier.pop() {
+            let last = route.last().expect("a route is never empty");
+            for dependency in dependencies.get(last).into_iter().flatten() {
+                if dependency.is_dev() || seen.contains(&dependency.name) {
+                    continue;
+                }
+                let mut next = route.clone();
+                next.push(dependency.name.clone());
+                if dependency.name == THE_DATABASE {
+                    violations.push(next.join(" -> "));
+                    continue;
+                }
+                seen.push(dependency.name.clone());
+                frontier.push(next);
+            }
+        }
+    }
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "nothing that runs on a capture or encoding thread may reach {THE_DATABASE}: a write from \
+         one of these crates would be a disk flush on the thread taking frames (AGENTS.md \
+         sections 18 and 20, docs/storage.md, issue #605): {violations:#?}"
+    );
+}

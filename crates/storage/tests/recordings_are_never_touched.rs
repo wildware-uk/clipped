@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use clipped_storage::rusqlite::Connection;
-use clipped_storage::{Database, StorageError, WriteSettings, Writer};
+use clipped_storage::{Database, StorageError};
 
 /// The bytes standing in for a recording nobody can make again.
 const RECORDING: &[u8] = b"not really Matroska, but it is the user's and it is irreplaceable";
@@ -183,25 +183,22 @@ fn no_database_failure_touches_the_recording_beside_it() {
         "after a corrupt database"
     );
 
-    // 4. Writes that fail against a working database: a row that refers to a
-    //    game that is not there, through the queue a recording thread would
-    //    use.
+    // 4. A write that fails against a working database: a row that refers to a
+    //    game that is not there, written the way every writer in the product
+    //    writes — at the connection, on the thread that wanted the row
+    //    (docs/storage.md).
     let working = directory.join("working.db");
     let database = Database::open(&working).expect("a database can be created");
-    let writer = Writer::spawn(database, WriteSettings::default());
-    writer
-        .queue()
-        .submit("orphan", |connection| {
-            connection.execute(
-                "INSERT INTO sessions (session_id, game_id, started_at) \
-                 VALUES ('x-20260811-143205', 'never-played', '2026-08-11T14:32:05+01:00')",
-                [],
-            )?;
-            Ok(())
-        })
-        .expect("it queues");
-    let stats = writer.stop().expect("the writer stops");
-    assert_eq!(stats.failed, 1, "the write should have failed: {stats:?}");
+    let refused = database.connection().execute(
+        "INSERT INTO sessions (session_id, game_id, started_at) \
+         VALUES ('x-20260811-143205', 'never-played', '2026-08-11T14:32:05+01:00')",
+        [],
+    );
+    assert!(
+        refused.is_err(),
+        "a session naming a game that is not there should have been refused: {refused:?}"
+    );
+    drop(database);
     assert_eq!(recording_state(&recording), before, "after a failed write");
 
     // 5. Deleting the index outright. This is the worst case — the user's
