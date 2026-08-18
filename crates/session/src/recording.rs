@@ -677,6 +677,26 @@ fn record_frames(
                      against the replacement's graphics device; the recording continues in the \
                      same file"
                 );
+                // The reading a window can ask for, published again (issues
+                // #302 and #285). `CaptureAccounting` was built to be written
+                // more than once and until now never was: the account was
+                // published where the backend first opened, and the fallback
+                // was consulted nowhere, so the two halves of "which backend is
+                // this recording using" were each correct and never met.
+                //
+                // `fallback.status()` rather than `resumed.change` alone,
+                // because a window wants the whole history — the method now
+                // running *and* every replacement before it — and the status
+                // already carries both.
+                //
+                // Here rather than inside `resume`: that function returns three
+                // ways and only this one has a running capture to describe. It
+                // is also off the frame path, on a branch a recording normally
+                // never takes, which is what AGENTS.md sections 17 and 20
+                // require of anything a diagnostics screen wants.
+                if let Some(accounting) = outputs.capture {
+                    accounting.publish(fallback.status().into());
+                }
             }
             Resumed::Ends(reason) => {
                 end_reason = reason;
@@ -3923,6 +3943,10 @@ mod tests {
         recording: TemporaryRecording,
         preferred: &'static ScriptedFactory,
         replacement: &'static ScriptedFactory,
+        /// The reading a connection thread would ask for, as the recording left
+        /// it. Leaked for the same reason the factories are: `RecordingOutputs`
+        /// borrows it for the length of `record_frames`.
+        accounting: &'static crate::CaptureAccounting,
     }
 
     /// Records a script that breaks, with a second backend behind it.
@@ -3978,19 +4002,33 @@ mod tests {
 
         let recording = TemporaryRecording::new(purpose);
         let settings = loop_settings(&recording);
+        let accounting: &'static crate::CaptureAccounting =
+            Box::leak(Box::new(crate::CaptureAccounting::new()));
+        // The publish `record` does before it hands over to `record_frames`
+        // (`recording.rs`, where the backend first opens). Done here because
+        // this harness calls `record_frames` directly, and without it removing
+        // the republish would leave *nothing* published rather than something
+        // stale — so the test would fail for the wrong reason and prove less
+        // than it claims.
+        accounting.publish(fallback.status().into());
+        let outputs = crate::RecordingOutputs {
+            capture: Some(accounting),
+            ..crate::RecordingOutputs::default()
+        };
         match record_frames(
             &settings,
             &StopAfter::polls(polls),
             fallback,
             backend,
             format,
-            &crate::RecordingOutputs::default(),
+            &outputs,
         ) {
             Ok(report) => Ok(Recovered {
                 report,
                 recording,
                 preferred,
                 replacement,
+                accounting,
             }),
             Err(error) => Err((error, recording)),
         }
@@ -4021,6 +4059,73 @@ mod tests {
             .assert_valid();
     }
 
+    #[test]
+    fn the_reading_a_window_asks_for_follows_a_backend_replaced_mid_recording() {
+        // The seam between #302 and #285, which neither closed on its own.
+        //
+        // #302 built `CaptureAccounting` — an owned reading of what a recording
+        // is capturing with, publishable from the capture thread and readable
+        // from a connection thread — and its own documentation says it is
+        // "shaped for" being written again when a fallback happens. #285 built
+        // the fallback that happens. Between them the account was published
+        // once, where the backend first opened, and never again: two correct
+        // halves that did not meet.
+        //
+        // The consequence was invisible in both pull requests and obvious to a
+        // user: a backend replaced forty minutes into a recording, and a
+        // Diagnostics screen still reporting whatever was true in the first
+        // millisecond.
+        //
+        // This asserts the *live* reading rather than the report. The report is
+        // read when the file closes; the reading is what a window can ask for
+        // while the recording is still running, which is the whole point of it.
+        let recovered = recording_that_recovers(
+            "capture-account-follows",
+            0x40,
+            vec![vec![
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Fails(opted_out),
+            ]],
+            vec![vec![Step::Drew; 20]],
+            60,
+        )
+        .unwrap_or_else(|(error, _recording)| {
+            panic!("the recording should have survived its backend failing: {error}")
+        });
+
+        let account = recovered
+            .accounting
+            .account()
+            .expect("a recording that opened a backend has published a reading");
+
+        assert_eq!(
+            account.current(),
+            CaptureMethod::DesktopDuplication,
+            "the live reading still names the backend the recording started with, so a window \
+             asking mid-recording is told about a capture that is no longer running (issues #302 \
+             and #285)",
+        );
+        // The pair is what makes the reading worth having: a window can say
+        // "started on Windows Graphics Capture, now on Desktop Duplication"
+        // rather than only naming one of them.
+        assert_eq!(
+            account.started_with(),
+            CaptureMethod::WindowsGraphicsCapture,
+            "republishing must not overwrite which backend the recording began with",
+        );
+
+        let changes = account.changes();
+        assert!(
+            changes.iter().any(|change| {
+                change.from() == CaptureMethod::WindowsGraphicsCapture
+                    && change.to() == CaptureMethod::DesktopDuplication
+            }),
+            "the replacement is missing from the live reading's history, so a window can see \
+             which backend is running but not that anything went wrong: {changes:?}",
+        );
+    }
     #[test]
     fn a_backend_that_fails_mid_recording_is_replaced_and_the_recording_carries_on() {
         // Issue #285's first and second acceptance criteria, against a forced
