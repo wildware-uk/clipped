@@ -10,8 +10,6 @@
 //!   recorder-writes/UI-reads model needs, and migrates it.
 //! - The [`migrations`] framework and the schema itself, in
 //!   `crates/storage/migrations/`.
-//! - [`Writer`], the batching write queue that keeps a thread which must not
-//!   stall from waiting on a commit.
 //!
 //! [docs/storage.md](https://github.com/wildware-uk/clipped/blob/main/docs/storage.md)
 //! is the prose: the tables and why each one is shaped as it is, the
@@ -49,6 +47,29 @@
 //! `clipped-library`, which is the crate whose remit is reconciling the index
 //! against what is on disk.
 //!
+//! # Who writes, and from what thread
+//!
+//! **Nothing that must not stall touches this crate.** AGENTS.md section 20
+//! says a capture thread must not wait on the database, and the way that is
+//! kept is that no capture, encoder or muxer crate depends on this one at all —
+//! `no_crate_on_a_capture_or_encoding_path_can_reach_the_database` in
+//! `tests/integration/tests/workspace_layering.rs` is that as a rule rather
+//! than as a habit.
+//!
+//! What does write is the recorder's library indexer, on a thread of its own
+//! that nothing waits for, and the connection threads that answer a window's
+//! `set_favourite`, `set_lock`, `restore_from_trash` and `empty_trash` — each
+//! of which is a write the caller asked for and is waiting to hear the result
+//! of. `docs/storage.md` has the table of which write runs where.
+//!
+//! This crate once carried a `WriteQueue`: a bounded channel a capture thread
+//! could drop a closure on, drained by a batching writer thread. It was written
+//! before there were any callers, no caller ever appeared, and by the time one
+//! did the writes had all landed somewhere a stall does not matter — so it was
+//! removed rather than wired in ([issue #605](https://github.com/wildware-uk/clipped/issues/605)).
+//! Bring it back only for a *producer* that cannot wait and does not need the
+//! answer; every write there is today needs the answer.
+//!
 //! # Position in the architecture
 //!
 //! A leaf crate. Higher layers depend on it; it depends on no other
@@ -60,7 +81,6 @@
 mod database;
 mod error;
 pub mod migrations;
-mod writer;
 
 #[cfg(test)]
 mod test_support;
@@ -68,7 +88,6 @@ mod test_support;
 pub use database::{Database, APPLICATION_ID};
 pub use error::StorageError;
 pub use migrations::{MigrationOutcome, SCHEMA_VERSION};
-pub use writer::{SubmitError, WriteQueue, WriteSettings, WriteStats, Writer};
 
 /// The SQLite binding this crate is built on, re-exported.
 ///
