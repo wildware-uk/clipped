@@ -114,10 +114,17 @@ clipped-windows.workspace = true
 #                                        notification query and its enumerator
 #
 # The process table itself is not read here: `clipped-windows` owns
-# `CreateToolhelp32Snapshot` and the handle discipline around it, so that
-# Windows' process table has exactly one read site in the workspace (AGENTS.md
-# section 55, issue #289). This crate's baseline and polling fallback both call
+# `CreateToolhelp32Snapshot` and the handle discipline around it, so that no
+# crate of this workspace makes that call twice (AGENTS.md section 55, issue
+# #289). This crate's baseline and polling fallback both call
 # `clipped_windows::process_table` instead.
+#
+# There is a second read outside this workspace, in
+# `apps/desktop/src-tauri/src/this_application.rs`. It is a separate Cargo
+# workspace and ADR 0002 forbids it linking `clipped-windows`, so it cannot
+# share this one. Both are listed with the argument for each in
+# `tests/integration/tests/process_table_reads.rs`, which fails if a third
+# appears.
 #
 # Target-specific so that the debounce, the vocabulary and their tests still
 # compile and run on a machine that is not Windows (AGENTS.md section 5).

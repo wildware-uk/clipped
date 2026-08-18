@@ -151,6 +151,15 @@ clipped-ipc = { path = "../../../crates/ipc", version = "0.1.0" }
 # application that hosts a webview. Parentage answers it, and the process table
 # is where parentage is.
 #
+# That makes this the second of the two crates in this repository allowed to
+# read the process table, and the layering above is the whole reason it is not
+# one: the read it duplicates is `clipped-windows`', which this manifest may not
+# name. Both are listed with the argument for each in
+# `tests/integration/tests/process_table_reads.rs`, which fails if this feature
+# is turned on in a third manifest — the check `cargo metadata` cannot make,
+# because this is a different workspace and `windows` is a third-party crate
+# every one of them already names (issue #289).
+#
 # `Data_Xml_Dom` and `UI_Notifications` are the Windows toast a notification is
 # (issue #110, `src/toast.rs`), and `Foundation` is the event handler its button
 # is delivered through. Neither `tauri-plugin-notification` nor the

@@ -27,9 +27,14 @@
 //! process tree a game's audio is scoped to
 //! ([issue #25](https://github.com/wildware-uk/clipped/issues/25)) — see
 //! [`ProcessTree`], and `docs/audio-routing.md` for what it is for and what it
-//! costs. [`process_table`] is the one read of the process table in the
-//! workspace: `clipped_game_detection`'s process watcher folded its own copy
-//! into it ([issue #289](https://github.com/wildware-uk/clipped/issues/289)).
+//! costs. [`process_table`] is the recorder's one read of the process table:
+//! `clipped_game_detection`'s process watcher folded its own copy into it
+//! ([issue #289](https://github.com/wildware-uk/clipped/issues/289)). The
+//! desktop application keeps a second, in its own Cargo workspace and for a
+//! question about its own descendants that it cannot ask this crate — see
+//! [`process_table`] for why, and
+//! `tests/integration/tests/process_table_reads.rs` for the list a third would
+//! have to be added to.
 //! What the user is looking at, and whether it is something to record
 //! ([issue #416](https://github.com/wildware-uk/clipped/issues/416)) — see
 //! [`foreground_target`], which is what a press of the "Start or stop
