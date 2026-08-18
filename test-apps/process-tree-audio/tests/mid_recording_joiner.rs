@@ -77,30 +77,77 @@
 //! *only*: on the complement's track it measures 0.00016 against the 0.029 it
 //! measures on the tree's, so it moved rather than doubling.
 //!
-//! **The join is not free.** Every one of those joins cost the tree's track
-//! exactly one 25 ms window, in one of three shapes. Twelve of the fourteen were
-//! a **splice**: the tone that was already playing fell from 0.0400 to 0.008
-//! while its *peak amplitude stayed at full scale*, which is a discontinuity in
-//! the waveform rather than a hole, and audibly a click. One was 25 ms of
-//! **digital silence** delivered as real zero samples. One was a **hole** the
-//! audio engine delivered nothing for at all — 990 frames, 20.6 ms — which the
-//! capture covered with synthesised silence. `CaptureStats::discontinuities` was
-//! 0 in all fourteen, so nothing in the recorder notices any of the three.
+//! **The join is not free, and it is a hole rather than a click.** Every join
+//! costs the tree's track **1,504 frames — 31.33 ms — of exact digital zeros**,
+//! delivered inside ordinary packets whose flags are `0`: no
+//! `AUDCLNT_BUFFERFLAGS_SILENT`, no `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`,
+//! and `CaptureStats::discontinuities` at zero throughout. The run begins on a
+//! packet boundary and ends inside one, and both edges are a step straight
+//! from the signal to zero and back, which is what makes it audible: two clicks
+//! with a dropout between them.
 //!
-//! **It belongs to the tap that gained a stream.** A control run — a render
-//! client started *outside* the tree, with both sides open — puts the same
-//! single-slice disturbance on the **complement's** track and leaves the tree's
-//! untouched. So this is not an endpoint-wide hiccup and not a fault of include
-//! mode: whichever tap gains a stream to mix takes the click. In a real
-//! recording that means every application that starts playing costs one click on
-//! the other-system-audio track.
+//! It was read as a *splice at full amplitude* when
+//! [issue #626](https://github.com/wildware-uk/clipped/issues/626) was written,
+//! because the 25 ms window holding it measured 0.008 of a 0.0400 tone while
+//! its peak amplitude stayed at 0.0400. That peak is the 5 ms of the window the
+//! zeros do not cover: 0.00801/0.04000 is 0.2003, the window's root-mean-square
+//! falls by exactly its square root, and dumping the samples shows 1,504
+//! consecutive `0.0` between one sample at −0.0215 and the next at +0.0308. So
+//! the three shapes that issue lists are one shape, and the odd run that showed
+//! "a hole the capture covered with synthesised silence" was a reader falling
+//! behind on a loaded machine, not a second phenomenon.
+//!
+//! **It belongs to the tap whose stream set changed.** A process starting
+//! *outside* the tree puts the same 31.33 ms of zeros on the **complement's**
+//! track and leaves the tree's flat, which is what
+//! [`audio_starting_and_stopping_outside_the_tree_costs_the_complements_track_a_hole_each`]
+//! measures. So it is not an endpoint-wide hiccup and not a fault of include
+//! mode. A stream **leaving** costs the same as one joining, so in a real
+//! recording every application that starts playing and every one that stops
+//! costs the other-system-audio track 31 ms.
+//!
+//! **The whole-endpoint tap is immune.** `SystemAudioCapture` — an ordinary
+//! `AUDCLNT_STREAMFLAGS_LOOPBACK` capture of the endpoint — was watched across
+//! the same join and the same leave three times and produced no run of exact
+//! zeros longer than a millisecond, with the joiner's tone measuring 0.04001
+//! during against 0.00007 before. It is process-scoped taps specifically.
 //!
 //! So issue #27's second criterion is met in its first half and not in its
-//! second, and [issue #626](https://github.com/wildware-uk/clipped/issues/626)
-//! is the defect. What this file does about it is hold it still:
-//! [`MAXIMUM_DISTURBED`] and [`DISTURBANCE_NEAR`] fail if the click grows past
-//! three slices or moves away from the join, so the cost cannot creep while
-//! nobody is looking.
+//! second, and issue #626 is the defect. What this file does about it is hold
+//! it still: [`MAXIMUM_HOLE`] measures the zeros directly and fails if they
+//! grow past 40 ms, [`DISTURBANCE_NEAR`] fails if they move away from the
+//! change that caused them, and [`MAXIMUM_DISTURBED`] keeps the older,
+//! coarser bound on how much of the tone is lost.
+//!
+//! # What was tried against it, and did not help
+//!
+//! All of the following were measured on this machine, with the hole read as
+//! the longest run of exact zeros among the frames the audio engine actually
+//! delivered. Every one of them produced the same 1,504 frames:
+//!
+//! | Tried | Runs | Hole |
+//! | --- | --- | --- |
+//! | As shipped: event-driven, 200 ms buffer | 5 | 31.33 ms |
+//! | Polling — `Initialize` without `AUDCLNT_STREAMFLAGS_EVENTCALLBACK` | 3 | 31.33 ms |
+//! | A 10 ms buffer duration | 3 | 31.33 ms |
+//! | A 1,000 ms buffer duration | 3 | 31.33 ms |
+//! | `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` | 2 | 31.33 ms |
+//! | `AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY` | 3 | 31.33 ms |
+//! | A `--release` build | 3 | 31.33 ms |
+//! | Two taps of one tree, activated separately | 1 | 31.33 ms, **the same 1,504 samples** |
+//!
+//! `AUDCLNT_STREAMFLAGS_NOPERSIST`, `AUDCLNT_STREAMFLAGS_RATEADJUST` and
+//! `AUDCLNT_STREAMFLAGS_CROSSPROCESS` are refused outright by a process-loopback
+//! client, with `AUDCLNT_E_INVALID_STREAM_FLAG` (`0x88890021`).
+//!
+//! The last row is the one that closes the subject. Two `IAudioClient`s
+//! activated separately against the same tree produce **sample-identical**
+//! tracks — a sum of squared differences of exactly 0.0 over 6,000 samples once
+//! the two are aligned — and their holes start at the same sample and are the
+//! same length. There is no second copy to splice over the first, so nothing on
+//! the client side of WASAPI can avoid this. Every activation also costs 1,504
+//! frames of zeros at the *front* of its track, which is the same rebuild seen
+//! from the other end.
 //!
 //! # It plays a sound
 //!
@@ -202,6 +249,29 @@ const CONTINUITY: f64 = 0.5;
 /// for a busy machine and nowhere near enough to hide a join that started
 /// costing a tenth of a second.
 const MAXIMUM_DISTURBED: usize = 3;
+
+/// The longest run of digital silence a change to a tap's stream set may cost.
+///
+/// **This is a defect being pinned, not a tolerance being granted**, and it is
+/// the sharp form of [`MAXIMUM_DISTURBED`]: the loss is not a tone measurement
+/// that dipped, it is 1,504 frames of exactly `0.0` in the middle of a track,
+/// and reading it as such takes the bound from the 75 ms three slices allow to
+/// 40 ms and stops it depending on what the subject was playing.
+///
+/// 1,504 frames is 31.33 ms at 48 kHz and it does not vary: over more than
+/// thirty runs across every initialisation in the module documentation's table
+/// it was 1,504 every time, on both taps, in debug and release. 40 ms is
+/// therefore about a quarter of headroom — room for an endpoint whose device
+/// period is not this machine's, and nowhere near room for a hole that had
+/// doubled.
+///
+/// Measured over the frames the audio engine *delivered*: silence this crate
+/// synthesised because a reader fell behind is zeros too, and counting it here
+/// would fail this test for a busy machine rather than for
+/// [issue #626](https://github.com/wildware-uk/clipped/issues/626).
+/// [`Track::holes`] does the excluding, and the frames themselves are asserted
+/// on separately.
+const MAXIMUM_HOLE: Duration = Duration::from_millis(40);
 
 /// How far from the joiner's arrival a disturbed slice may sit before it is a
 /// different problem.
@@ -462,6 +532,22 @@ fn a_process_joining_the_tree_mid_recording_moves_onto_the_trees_track_without_a
         );
     }
 
+    // What the loss actually is, which is not a dip in a tone measurement but a
+    // run of exact zeros. Reported before it is asserted on so that a machine
+    // where the number is different says so in its output.
+    let holes = tree.holes(baseline_from);
+    let (hole_at, hole) = tree.deepest_hole(baseline_from);
+    let _ = writeln!(
+        out,
+        "the hole: {} run(s) of exact zeros among the frames the audio engine delivered, the \
+         longest {:.2} ms ({hole} frames) beginning {:.0} ms into the watched window and {:.0} ms \
+         from the joiner's arrival",
+        holes.len(),
+        tree.millis_between(hole_at, hole_at + hole),
+        tree.millis_between(baseline_from, hole_at),
+        arrival.map_or(f64::NAN, |at| tree.millis_between(at, hole_at)),
+    );
+
     // -- 1. the tree was audible before the joiner, and only the tree ---------
 
     let (peak, _) = before.dominant_frequency();
@@ -544,6 +630,27 @@ fn a_process_joining_the_tree_mid_recording_moves_onto_the_trees_track_without_a
          has grown or this machine is doing something the measurement has not seen",
         disturbed.len()
     );
+    assert!(
+        tree.millis_between(hole_at, hole_at + hole) <= MAXIMUM_HOLE.as_millis() as f64,
+        "a process joining the tree cost the tree's track {:.2} ms of exact digital zeros ({hole} \
+         frames) against the {} ms issue #626 pins it at. That is audio the game played and this \
+         recording does not have, bounded by two steps straight to zero and back — the audio \
+         engine delivered it inside packets it flagged as neither silent nor discontinuous, so \
+         nothing else in the recorder can notice it",
+        tree.millis_between(hole_at, hole_at + hole),
+        MAXIMUM_HOLE.as_millis(),
+    );
+    if hole > 0 {
+        let from_arrival = tree.millis_between(arrival, hole_at);
+        assert!(
+            from_arrival.abs() <= DISTURBANCE_NEAR.as_millis() as f64,
+            "the tree's track lost {:.2} ms of audio to exact zeros {from_arrival:.0} ms from the \
+             joiner's arrival — too far away to be the cost of the join. A capture that loses the \
+             game's audio at some unrelated moment is a defect nothing here has an explanation \
+             for",
+            tree.millis_between(hole_at, hole_at + hole),
+        );
+    }
     for (at, magnitude) in disturbed.iter().copied() {
         let from_arrival = tree.millis_between(arrival, at);
         assert!(
@@ -569,6 +676,230 @@ fn a_process_joining_the_tree_mid_recording_moves_onto_the_trees_track_without_a
          information rather than that defect, and the flag is the only account of audio the \
          engine captured and threw away"
     );
+}
+
+/// How long the outsider plays for, and how long the recording carries on after
+/// it has gone.
+///
+/// Long enough either side that the hole a start costs and the hole a stop
+/// costs are separate runs of zeros rather than one, and that neither can be
+/// mistaken for the other.
+const OUTSIDER_PLAYS: Duration = Duration::from_millis(1_200);
+
+#[test]
+#[ignore = "plays three tones, and needs an output endpoint and process-scoped capture"]
+fn audio_starting_and_stopping_outside_the_tree_costs_the_complements_track_a_hole_each() {
+    if suppressed() {
+        return;
+    }
+
+    // The same arrangement as the test above, and the opposite event: the tap
+    // whose stream set changes is the **complement's**, because the process
+    // that starts is nothing to do with the game. This is the common case in a
+    // real recording — the browser tab, the notification, the voice call — and
+    // it is the reason issue #626 is a product defect rather than a curiosity
+    // about trees.
+    let mut game = match ToneSubject::start(SUBJECT, &[]) {
+        Ok(subject) => subject,
+        Err(reason) => {
+            skipped(&reason);
+            return;
+        }
+    };
+    let mut neighbour = match ToneSubject::start(
+        SUBJECT,
+        &["--play", "--frequency", &SECOND_FREQUENCY.to_string()],
+    ) {
+        Ok(subject) => subject,
+        Err(reason) => {
+            skipped(&reason);
+            return;
+        }
+    };
+    assert!(
+        neighbour.tone().is_some(),
+        "the neighbouring subject reported itself as playing"
+    );
+
+    let (game_side, other_side) = match ProcessLoopbackCapture::open_pair(game.pid()) {
+        Ok(pair) => pair,
+        Err(error @ AudioError::ProcessLoopbackUnavailable { .. }) => {
+            skipped(&error.to_string());
+            return;
+        }
+        Err(error) => {
+            skipped(&format!("the game's audio could not be captured: {error}"));
+            return;
+        }
+    };
+
+    let stop = AtomicBool::new(false);
+    let (moments, tree, complement) = std::thread::scope(|scope| {
+        let stop = &stop;
+        let tree = scope.spawn(move || collect(game_side, stop));
+        let complement = scope.spawn(move || collect(other_side, stop));
+
+        // The game's tree has to be audible too, so that "the tree's track was
+        // untouched" is a claim about a track carrying audio rather than about
+        // a track carrying nothing.
+        let moments = play_the_outsider(&mut game);
+
+        stop.store(true, Ordering::Relaxed);
+        (
+            moments,
+            tree.join().expect("the tree's reader did not panic"),
+            complement
+                .join()
+                .expect("the complement's reader did not panic"),
+        )
+    });
+
+    game.stop();
+    neighbour.stop();
+
+    let (baseline_from, started, stopped) = match moments {
+        Ok(moments) => moments,
+        Err(reason) => {
+            skipped(&reason);
+            return;
+        }
+    };
+    for track in [&tree, &complement] {
+        assert!(
+            track.failure.is_none(),
+            "a healthy capture does not fail: {}",
+            track.failure.as_deref().unwrap_or_default()
+        );
+        assert!(
+            !track.samples.is_empty(),
+            "a capture that produced no samples at all cannot answer anything"
+        );
+    }
+
+    let watched = complement.frame_at(baseline_from);
+    let started_at = complement.frame_at(started);
+    let stopped_at = complement.frame_at(stopped);
+
+    // The outsider has to have been heard on the complement's track, or the
+    // holes below are somebody else's audio starting and this measures nothing.
+    let before = complement.content(watched, started_at);
+    let during = complement.content(started_at, stopped_at);
+    let outsider_before = before.magnitude_at(f64::from(THIRD_FREQUENCY));
+    let outsider_during = during.magnitude_at(f64::from(THIRD_FREQUENCY));
+
+    let holes = complement.holes(watched);
+    let (hole_at, hole) = complement.deepest_hole(watched);
+    let tree_from = tree.frame_at(baseline_from);
+    let (tree_hole_at, tree_hole) = tree.deepest_hole(tree_from);
+
+    let mut out = std::io::stderr();
+    let _ = writeln!(
+        out,
+        "the outsider: {THIRD_FREQUENCY} Hz measured {outsider_before:.5} on the complement's \
+         track before it started and {outsider_during:.5} while it played."
+    );
+    for (at, length) in &holes {
+        let _ = writeln!(
+            out,
+            "the complement's track: {:.2} ms of exact zeros ({length} frames) at {:.0} ms, which \
+             is {:.0} ms from the start and {:.0} ms from the stop",
+            complement.millis_between(*at, at + length),
+            complement.millis_between(watched, *at),
+            complement.millis_between(started_at, *at),
+            complement.millis_between(stopped_at, *at),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "the tree's track over the same window: {} run(s) of exact zeros, the longest {:.2} ms at \
+         {:.0} ms; the complement had {} frames of synthesised silence and {} flagged \
+         discontinuities",
+        tree.holes(tree_from).len(),
+        tree.millis_between(tree_hole_at, tree_hole_at + tree_hole),
+        tree.millis_between(tree_from, tree_hole_at),
+        complement.synthesised_since(watched),
+        complement.discontinuities_since(watched),
+    );
+
+    assert!(
+        outsider_during >= outsider_before * MINIMUM_RATIO,
+        "the process that started outside the tree has to be audible on the complement's track \
+         for anything below to be about it: {THIRD_FREQUENCY} Hz measured {outsider_during:.5} \
+         while it played against {outsider_before:.5} before it existed"
+    );
+
+    // -- what the change cost the tap that took it ---------------------------
+
+    assert!(
+        complement.millis_between(hole_at, hole_at + hole) <= MAXIMUM_HOLE.as_millis() as f64,
+        "a process starting and stopping outside the game's tree cost the other-system-audio \
+         track {:.2} ms of exact digital zeros ({hole} frames) against the {} ms issue #626 pins \
+         it at. Every application that starts playing during a recording costs this once and \
+         every one that stops costs it again, and the audio engine flags none of it",
+        complement.millis_between(hole_at, hole_at + hole),
+        MAXIMUM_HOLE.as_millis(),
+    );
+    for (at, length) in &holes {
+        let from_start = complement.millis_between(started_at, *at).abs();
+        let from_stop = complement.millis_between(stopped_at, *at).abs();
+        assert!(
+            from_start.min(from_stop) <= DISTURBANCE_NEAR.as_millis() as f64,
+            "the other-system-audio track lost {:.2} ms to exact zeros {:.0} ms into the watched \
+             window, which is {from_start:.0} ms from the moment a process outside the tree \
+             started and {from_stop:.0} ms from the moment it stopped. A capture that loses audio \
+             at some unrelated moment is a defect nothing here has an explanation for",
+            complement.millis_between(*at, at + length),
+            complement.millis_between(watched, *at),
+        );
+    }
+
+    // -- and that the tap that did not take it was left alone ----------------
+
+    assert_eq!(
+        tree_hole,
+        0,
+        "the game's track must not lose anything when a process that is nothing to do with the \
+         game starts or stops: it lost {:.2} ms to exact zeros at {:.0} ms into the same window. \
+         Issue #626 belongs to the tap whose stream set changed, and a hole on this side would \
+         mean it is endpoint-wide after all",
+        tree.millis_between(tree_hole_at, tree_hole_at + tree_hole),
+        tree.millis_between(tree_from, tree_hole_at),
+    );
+}
+
+/// Makes the game's tree audible, then starts and stops a process outside it.
+///
+/// Answers when the watched window begins, when the outsider was started and
+/// when it was asked to stop.
+///
+/// # Errors
+///
+/// A sentence saying why there is no tree making a noise, which on a machine
+/// that cannot render a tone is a reason to skip rather than to fail.
+fn play_the_outsider(game: &mut ToneSubject) -> Result<(Instant, Instant, Instant), String> {
+    let (_, playing) = game.spawn_child(PATIENCE)?;
+    assert_playing(playing, FREQUENCY);
+    std::thread::sleep(SETTLE);
+
+    let baseline_from = Instant::now();
+    std::thread::sleep(BASELINE);
+
+    let started = Instant::now();
+    let mut outsider = ToneSubject::start(
+        SUBJECT,
+        &["--play", "--frequency", &THIRD_FREQUENCY.to_string()],
+    )?;
+    assert!(
+        outsider.tone().is_some(),
+        "the outsider reported itself as playing"
+    );
+    std::thread::sleep(OUTSIDER_PLAYS);
+
+    let stopped = Instant::now();
+    outsider.stop();
+    std::thread::sleep(OUTSIDER_PLAYS);
+
+    Ok((baseline_from, started, stopped))
 }
 
 /// What the test asked the subjects to do, and when.
@@ -708,6 +1039,56 @@ impl Track {
             at += length;
         }
         found
+    }
+
+    /// Runs of exactly `0.0` in the frames the audio engine delivered, from
+    /// `from` to the end, as `(sample index, length)`.
+    ///
+    /// The measurement issue #626 is really about. Silence this crate
+    /// synthesised is excluded rather than counted: it is zeros as well, and a
+    /// reader that fell behind would otherwise be reported as the audio engine
+    /// having lost audio it never lost. A synthesised block therefore ends a
+    /// run rather than extending it, which is the conservative direction —
+    /// it can only make the hole look shorter than it was.
+    ///
+    /// Runs shorter than a millisecond are dropped: a handful of zero samples
+    /// is where a waveform crosses zero, not a hole.
+    fn holes(&self, from: usize) -> Vec<(usize, usize)> {
+        let least = self.rate as usize / 1_000;
+        let mut found = Vec::new();
+        let mut run: Option<usize> = None;
+        let close = |run: &mut Option<usize>, at: usize, found: &mut Vec<(usize, usize)>| {
+            if let Some(start) = run.take() {
+                if at - start >= least {
+                    found.push((start, at - start));
+                }
+            }
+        };
+
+        for block in &self.blocks {
+            let end = (block.at + block.frames).min(self.samples.len());
+            if block.origin == SampleOrigin::SynthesisedSilence || block.at >= end {
+                close(&mut run, block.at.min(self.samples.len()), &mut found);
+                continue;
+            }
+            for index in block.at.max(from)..end {
+                if self.samples[index] == 0.0 {
+                    run.get_or_insert(index);
+                } else {
+                    close(&mut run, index, &mut found);
+                }
+            }
+        }
+        close(&mut run, self.samples.len(), &mut found);
+        found
+    }
+
+    /// The longest [`Track::holes`] run, as `(sample index, length)`.
+    fn deepest_hole(&self, from: usize) -> (usize, usize) {
+        self.holes(from)
+            .into_iter()
+            .max_by_key(|(_, length)| *length)
+            .unwrap_or((from, 0))
     }
 
     /// Frames of silence this crate invented from `from` to the end.
