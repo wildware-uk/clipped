@@ -74,6 +74,15 @@ path = "../../tests/capture/odd_client_area.rs"
 name = "track_isolation"
 path = "../../tests/audio/track_isolation.rs"
 
+# The older-Windows measurement (issue #604): the same window and the same two
+# tones, recorded with process-scoped audio capture forced to fail, so that what
+# every shipping Windows 10 machine does is measured on hardware that is far past
+# the build where it stopped being the only option. It belongs to this package
+# for the reason the test above does — it starts this binary.
+[[test]]
+name = "system_audio_fallback"
+path = "../../tests/audio/system_audio_fallback.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root

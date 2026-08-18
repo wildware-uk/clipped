@@ -640,16 +640,88 @@ stream drained before stopping produced the 150 ms.
 build 20348, which no shipping Windows 10 release reaches, and
 `AudioError::ProcessLoopbackUnavailable` is what a machine below that floor
 produces. It is its own error precisely so a caller can tell it apart and take
-the documented fallback: **record one system-audio track and say that per-source
-separation is unavailable on this machine.** What must never happen is a track
-labelled "Game" that is really everything the machine played (ADR 0003's second
-consequence, AGENTS.md section 27). The message names the build number and the
-fallback, so a user whose tracks all came out identical can find out why.
+the documented fallback, and [the section below](#when-the-game-cannot-be-separated)
+is what that caller now does. What must never happen is a track labelled "Game"
+that is really everything the machine played (ADR 0003's second consequence,
+AGENTS.md section 27).
 
 The floor itself is still unconfirmed on real hardware — this has only been run
 on Windows 11 build 26200, where it works — so
 [prerequisites.md](prerequisites.md) does not yet state a minimum version for
 it.
+
+### When the game cannot be separated
+
+A machine that cannot scope a capture to a process records **one audio track
+holding everything it played**, rather than failing. The alternative is no
+recording at all on every shipping Windows 10 installation, and a degraded
+recording is worth more than none (AGENTS.md section 17).
+
+Until [issue #604](https://github.com/wildware-uk/clipped/issues/604) that
+sentence was true only of the error message. `crates/session/src/audio/mod.rs`
+mapped every failure of `ProcessLoopbackCapture::open_pair` to
+`SessionError::Audio` and propagated it, so the message promised a fallback that
+nothing implemented. It is the shape this project keeps finding: something
+described accurately in one place and absent from the code
+(`crates/session/src/audio/mod.rs::open` is where it lives now).
+
+**The track is called `System Audio`, and that is the decision rather than the
+fallback.** Not `Game`, which would be everything the machine played under the
+name of one process tree. Not `Other System Audio` either: SPEC.md section 11
+defines that track as all system audio *minus* the game's tree, so a track
+carrying the game as well is not that track under a different name — somebody
+who muted it in an editor expecting to still hear the game would hear nothing,
+which is precisely the failure AGENTS.md section 21 exists to prevent. A
+recording has the pair or the undivided track and never both, and `System Audio`
+sits where `Game` would have been so that the microphone stays where it is in
+every file.
+
+| | Separated | Undivided |
+| --- | --- | --- |
+| Tracks | Compatibility Mix, Game, Other System Audio, Microphone | Compatibility Mix, **System Audio**, Microphone |
+| Muting the game silences | the game | everything |
+
+Which failures take this path, and which still refuse:
+
+| `AudioError` | What a recording does | Why |
+| --- | --- | --- |
+| `ProcessLoopbackUnavailable` | Records one `System Audio` track | This machine will never scope a capture to a process. Refusing means no recording, for ever, on this machine |
+| `ProcessUnavailable` | Records one `System Audio` track | The game has exited or runs elevated, so there is no tree to scope to. `ProcessLoopbackCapture::open_excluding` already documented this answer for a tree that is empty before the capture opens |
+| `NoEndpoint` | Refuses | The fallback opens that same endpoint and would fail again a moment later, with a vaguer message |
+| `UnsupportedFormat` | Refuses | As above: the shape the endpoint presents does not change because the capture stopped being scoped |
+| `Platform` | Refuses | Nothing classified this failure. Recording a different track layout because of one nobody understood is guessing (AGENTS.md section 27) |
+
+**It is never silent.** Four places say so, and the first is the one a user
+meets without being told to look:
+
+1. **The file.** Its track is named `System Audio`, which any editor shows.
+2. **The recorder's own summary**, which gains a sentence naming the track and
+   the reason (`RecordingReport`).
+3. **A `warn` line**, carrying `audio_fallback`, the game's process and what
+   Windows said.
+4. **The session's record.** `clipped-<session>.session.json` gains an
+   `audio_fallback` object on the recording — `cause`, `detail` and `track` —
+   because a file whose audio layout differs from the settings written beside it,
+   with nothing recording why, is a support question nobody can answer months
+   later. [Issue #61](https://github.com/wildware-uk/clipped/issues/61) is the
+   same gap for a substituted encoder, still unfilled; this is deliberately not a
+   second instance of it. `docs/sessions.md` has the key.
+
+**Measuring it on hardware that cannot produce it.** Every machine in this
+project is far past build 20348, so the path can never be reached here by
+waiting for it.
+[`tests/audio/system_audio_fallback.rs`](../tests/audio/system_audio_fallback.rs)
+forces it with `CLIPPED_FORCE_AUDIO_SCOPING_FAILURE`, read by
+`clipped_session::audio`. What the variable injects is the **error**, not the
+outcome: a genuine `AudioError` comes back from the same call a Windows 10
+machine's failure comes back from, and everything after it — the classification,
+the endpoint capture, the track declaration, the mixer, the encoder, the
+Matroska writer — is the product's own. It is the same trick
+`crates/session/src/recording.rs`'s `ScriptedFactory` plays for capture, one
+layer down. The values are `unavailable`, `process-gone` and `platform`; anything
+else refuses the recording rather than being ignored, because a typo that quietly
+restored the ordinary behaviour would make a run that proved nothing look exactly
+like one that proved the fallback.
 
 ## The game's process tree
 

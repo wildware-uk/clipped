@@ -354,6 +354,7 @@ fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
         end_reason,
         audio_tracks: Vec::new(),
         capture_changes: Vec::new(),
+        audio_fallback: None,
     }))
 }
 

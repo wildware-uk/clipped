@@ -1498,6 +1498,144 @@ mod planning {
     }
 }
 
+/// Which failures of a scoped capture a recording carries on through, and which
+/// still refuse.
+///
+/// The decision of [issue #604](https://github.com/wildware-uk/clipped/issues/604),
+/// stated where it can be checked without a machine. What cannot be checked here
+/// is what the fallback then *records*, and asserting only the match arm would
+/// be exactly the test that issue says is not enough:
+/// `tests/audio/system_audio_fallback.rs` makes the recording and measures it.
+mod falling_back {
+    use super::*;
+
+    /// Every variant `AudioError` has, and what a recording does with each.
+    ///
+    /// A table rather than a test each, because the value of it is the
+    /// completeness: a variant added to `AudioError` should make somebody come
+    /// here and choose, and a list of six is where that is visible.
+    #[test]
+    fn only_a_failure_to_scope_at_all_is_carried_on_through() {
+        let carried_on: Vec<(AudioError, Option<SystemAudioFallbackCause>)> = vec![
+            (
+                // The whole population of shipping Windows 10.
+                AudioError::process_loopback_unavailable("build 19045 is below 20348"),
+                Some(SystemAudioFallbackCause::ProcessScopingUnavailable),
+            ),
+            (
+                // The game exited, or runs elevated. No tree to scope to either
+                // way, and `open_excluding` already documents this answer.
+                AudioError::ProcessUnavailable { process_id: 4242 },
+                Some(SystemAudioFallbackCause::GameProcessUnavailable),
+            ),
+            (
+                // The fallback opens this same endpoint, so it would fail again
+                // a moment later with a vaguer message.
+                AudioError::NoEndpoint,
+                None,
+            ),
+            (
+                // As above: the shape the endpoint presents does not change
+                // because the capture stopped being scoped.
+                AudioError::unsupported_format("tag 0xfffe, 8 bits per sample"),
+                None,
+            ),
+            (
+                // Nothing classified this. Recording a different track layout
+                // because of a failure nobody understood is guessing.
+                AudioError::Platform {
+                    operation: "activating the audio client",
+                    source: Box::new(std::io::Error::other("AUDCLNT_E_DEVICE_IN_USE")),
+                },
+                None,
+            ),
+            // The three below cannot reach the decision at all — `open_pair`
+            // does not produce them — and are here so that the table is the
+            // whole enumeration rather than the interesting part of it.
+            (AudioError::NoMicrophone, None),
+            (
+                AudioError::MicrophoneUnavailable {
+                    name: "Yeti".to_owned(),
+                },
+                None,
+            ),
+            (AudioError::NotOpen, None),
+        ];
+
+        for (error, expected) in carried_on {
+            assert_eq!(
+                SystemAudioFallbackCause::of(&error),
+                expected,
+                "a recording makes the wrong decision about {error:?}"
+            );
+        }
+    }
+
+    /// The message is the specification, so the specification and the file have
+    /// to name the same track.
+    ///
+    /// `clipped-audio` cannot depend on `clipped-muxer`, so the sentence a user
+    /// reads and the name written into the container are two literals in two
+    /// crates. This is the one place both are visible, and without it the
+    /// message could go on promising a track no recording declares — which is
+    /// the whole of issue #604 in a smaller form.
+    #[test]
+    fn the_message_names_the_track_the_recording_actually_declares() {
+        let message =
+            AudioError::process_loopback_unavailable("Windows refused the activation").to_string();
+
+        assert!(
+            message.contains(AudioSource::SystemAudio.track_name()),
+            "the message a user is shown has to name the track they will find in the file: \
+             {message}"
+        );
+        assert!(
+            !message.contains("Clipped can still"),
+            "a promise about what Clipped could do is not a description of what it did: \
+             {message}"
+        );
+    }
+
+    /// The layout of a recording that fell back, from the same `declare` a real
+    /// one goes through.
+    ///
+    /// The assertion that matters is the second: nothing in the file may be
+    /// called "Other System Audio" when it holds the game as well. A build that
+    /// filed the endpoint capture under the existing variant passes every
+    /// structural check — three tracks, the right rates, the mix in front — and
+    /// is the failure AGENTS.md section 21 forbids.
+    #[test]
+    fn an_undivided_recording_declares_a_system_audio_track_and_not_the_pairs_names() {
+        let sources = vec![
+            scripted(AudioSource::Microphone, 1, Vec::new()).source,
+            scripted(AudioSource::SystemAudio, 2, Vec::new()).source,
+        ];
+
+        let layout = declare(
+            VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT),
+            &sources,
+            true,
+        );
+
+        let names: Vec<_> = layout
+            .audio_tracks()
+            .iter()
+            .filter_map(clipped_muxer::AudioTrack::name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Compatibility Mix", "System Audio", "Microphone"],
+            "the undivided track takes the place the game's would have had, so a recording made \
+             on an older machine puts the microphone where every other recording puts it"
+        );
+        assert!(
+            !names.contains(&AudioSource::OtherSystemAudio.track_name()),
+            "a track holding the game as well as everything else must not be called \
+             everything-except-the-game (SPEC.md section 11): {names:?}"
+        );
+    }
+}
+
 /// That a recording opens the two scoped captures **as a pair**.
 ///
 /// # Why this is here and not in `clipped-audio`
@@ -1640,8 +1778,8 @@ mod pairing {
         // The real thing: the same call `crate::recording` makes, against the
         // same settings a recording of a window is made with. Nothing below
         // here knows this is a test.
-        let mut sources = match open(&settings) {
-            Ok(sources) => sources,
+        let opened = match open(&settings) {
+            Ok(opened) => opened,
             Err(error) => {
                 skipped(&format!(
                     "a process-scoped capture could not be opened here: {error}"
@@ -1649,6 +1787,12 @@ mod pairing {
                 return;
             }
         };
+        assert!(
+            opened.fallback.is_none(),
+            "this machine opened a process-scoped pair, so nothing was fallen back to: {:?}",
+            opened.fallback
+        );
+        let mut sources = opened.sources;
 
         let tracks: Vec<_> = sources
             .iter()

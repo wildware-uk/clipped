@@ -534,7 +534,37 @@ to start on, and no moment it can cover. An event that falls in such a gap
 belongs to the session and to no file, which the library stores as a null
 `recording_id` rather than as the nearest guess.
 
-Both keys were added after the schema shipped and the `schema_version` is
+`audio_fallback` is **absent from almost every recording**, and is the answer to
+"why does this file have one audio track where the settings beside it say two?".
+A machine that cannot scope an audio capture to a process — every shipping
+Windows 10 build, which is below the 20348 the API needs — records one track of
+everything it played rather than failing, and this is where the recording says
+so ([#604](https://github.com/wildware-uk/clipped/issues/604),
+[docs/audio-routing.md](audio-routing.md)):
+
+```json
+"audio_fallback": {
+  "cause": "process-scoping-unavailable",
+  "detail": "this machine cannot record a game's audio separately from everything else, which needs Windows build 20348 or later (E_NOTIMPL). Clipped records one System Audio track holding everything the machine plays instead, in place of the separate Game and Other System Audio tracks",
+  "track": "System Audio"
+}
+```
+
+- `cause` is a token from a closed vocabulary, so a reader can act on it:
+  `process-scoping-unavailable` (this machine never can) or
+  `game-process-unavailable` (the game had already exited, or runs with
+  privileges Clipped does not have).
+- `detail` is what the audio capture said, verbatim, because the `HRESULT` in it
+  is the diagnostic value.
+- `track` is what the file actually has, so the record names the track an editor
+  will show rather than leaving it to be inferred.
+
+The key is written only when it happened. A key present on every recording ever
+made would be noise, and a reader that tested for presence would call every
+recording a fallback. Its absence means the recording got the layout its
+`settings` describe.
+
+All three keys were added after the schema shipped and the `schema_version` is
 deliberately unchanged: every other field means exactly what it did, and a
 reader that does not know the key ignores it. A sidecar written by an older
 build has no `settings` on its recordings, which is not the same as a recording
@@ -940,6 +970,8 @@ into the sidecar and into logs:
 | `recordings[].end_reason` | `output-unavailable` | The output drive stopped answering |
 | `recordings[].outcome` | `interrupted` | The recorder was killed; the footage was adopted afterwards |
 | `recordings[].outcome` | `discarded` | The same, and the file was sent to the trash |
+| `recordings[].audio_fallback.cause` | `process-scoping-unavailable` | This machine cannot scope an audio capture to a process, so the file has one `System Audio` track instead of `Game` and `Other System Audio` |
+| `recordings[].audio_fallback.cause` | `game-process-unavailable` | The game's process could not be followed when the recording started, with the same consequence |
 
 `clipped-library`'s indexer knows the two `outcome` words: `recover --discard`
 indexes a recording before it moves it (issue #451), so the row it writes has

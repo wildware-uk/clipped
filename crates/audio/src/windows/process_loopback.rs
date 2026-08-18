@@ -1849,8 +1849,15 @@ mod tests {
         assert!(message.contains("20348"), "{message}");
         assert!(message.contains("E_NOTIMPL"), "{message}");
         assert!(
-            message.contains("system audio"),
-            "the message has to name the fallback: {message}"
+            message.contains("System Audio"),
+            "the message has to name the fallback, and to name it as the track an \
+             editor will show rather than as a description: {message}"
+        );
+        assert!(
+            message.contains("instead"),
+            "and it has to say that this is what happened, not what could happen. It \
+             said \"Clipped can still record\" for as long as nothing implemented it \
+             (issue #604): {message}"
         );
     }
 

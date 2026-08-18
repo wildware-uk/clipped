@@ -113,6 +113,7 @@ use super::session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEvent, SessionEventKind,
 };
 use crate::config::{ResolvedSettings, SettingKey};
+use crate::report::SystemAudioFallback;
 
 /// The version of the sidecar schema.
 ///
@@ -277,6 +278,50 @@ struct SidecarRecording<'a> {
     /// What this recording was made with, and which layer each answer came
     /// from. See [`SidecarSetting`].
     settings: BTreeMap<&'static str, SidecarSetting>,
+    /// Why this recording's audio layout is not the one `settings` describes.
+    ///
+    /// Omitted for the recording that got what it asked for, which is every
+    /// recording made on Windows build 20348 or later. Written for the one that
+    /// could not separate the game's audio from the rest and recorded a single
+    /// `System Audio` track instead
+    /// ([issue #604](https://github.com/wildware-uk/clipped/issues/604)).
+    ///
+    /// This is the field that makes "why does this file have one audio track
+    /// where the settings say two?" answerable from the file itself rather than
+    /// from a log that has rotated away — the gap
+    /// [issue #61](https://github.com/wildware-uk/clipped/issues/61) found for a
+    /// substituted encoder. The schema version is deliberately unchanged, on the
+    /// same argument the `settings` key was added under: a reader of version 2
+    /// that does not know the key ignores it, and every other field means
+    /// exactly what it did (`docs/sessions.md`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_fallback: Option<SidecarAudioFallback>,
+}
+
+/// What a recording recorded instead of separated system-audio tracks.
+///
+/// `cause` is a token from a closed vocabulary
+/// ([`SystemAudioFallbackCause::token`](crate::report::SystemAudioFallbackCause::token)),
+/// so a reader can act on it; `detail` is what the audio capture said, in its
+/// own words, because the `HRESULT` in it is the whole diagnostic value
+/// (AGENTS.md section 15). `track` is what the file actually has, so that the
+/// record names the track an editor will show rather than leaving it to be
+/// inferred.
+#[derive(Debug, Serialize)]
+struct SidecarAudioFallback {
+    cause: &'static str,
+    detail: String,
+    track: &'static str,
+}
+
+impl SidecarAudioFallback {
+    fn of(fallback: &SystemAudioFallback) -> Self {
+        Self {
+            cause: fallback.cause().token(),
+            detail: fallback.detail().to_owned(),
+            track: clipped_muxer::AudioSource::SystemAudio.track_name(),
+        }
+    }
 }
 
 /// One clip the session produced.
@@ -460,6 +505,7 @@ impl<'a> SidecarRecording<'a> {
             end_reason: None,
             detail: None,
             settings: settings_of(recording.settings()),
+            audio_fallback: None,
         };
 
         match recording.outcome() {
@@ -469,12 +515,14 @@ impl<'a> SidecarRecording<'a> {
                 duration,
                 size,
                 end_reason,
+                audio_fallback,
             }) => {
                 written.frames_encoded = Some(*frames_encoded);
                 written.duration_seconds = Some(duration.as_secs_f64());
                 written.width = Some(size.0);
                 written.height = Some(size.1);
                 written.end_reason = Some(end_reason_token(*end_reason));
+                written.audio_fallback = audio_fallback.as_ref().map(SidecarAudioFallback::of);
             }
             Some(
                 RecordingOutcomeSummary::NoWindow { detail }
@@ -711,6 +759,7 @@ mod tests {
                 duration: Duration::from_secs(6),
                 size: (2560, 1440),
                 end_reason: EndReason::TargetLost,
+                audio_fallback: None,
             },
             at(1_786_458_731),
         );
@@ -745,6 +794,74 @@ mod tests {
                 .expect("the output is a string")
                 .ends_with("clipped-a.mkv"),
             "{recording}"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_could_not_separate_the_games_audio_says_so_in_the_session() {
+        // The support question this key exists to answer: the settings beside it
+        // say the recording was made with system audio on, and the file has one
+        // audio track where the model says two. Without this the only record of
+        // why is a `warn` line in a log that rotates
+        // ([issue #61](https://github.com/wildware-uk/clipped/issues/61) is the
+        // same gap, unfilled, for a substituted encoder).
+        let mut session = Session::new(GameIdentity::Unidentified, at(1_786_458_725));
+        session.begin_recording(
+            1,
+            PathBuf::from(r"D:\clips\clipped-a.mkv"),
+            resolved(),
+            at(1_786_458_725),
+        );
+        session.end_recording(
+            1,
+            RecordingOutcomeSummary::Recorded {
+                frames_encoded: 181,
+                duration: Duration::from_secs(6),
+                size: (2560, 1440),
+                end_reason: EndReason::Stopped,
+                audio_fallback: Some(SystemAudioFallback {
+                    cause: crate::report::SystemAudioFallbackCause::ProcessScopingUnavailable,
+                    detail: "this machine cannot record a game's audio separately from \
+                             everything else"
+                        .to_owned(),
+                }),
+            },
+            at(1_786_458_731),
+        );
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+        let fallback = &file["recordings"][0]["audio_fallback"];
+
+        assert_eq!(
+            fallback["cause"],
+            Value::from("process-scoping-unavailable"),
+            "the cause is a token from a closed vocabulary, so a reader can act on it"
+        );
+        assert_eq!(
+            fallback["track"],
+            Value::from("System Audio"),
+            "the record has to name the track the file actually has, not the pair it does not"
+        );
+        assert!(
+            fallback["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("separately")),
+            "what the audio capture said is kept verbatim: {fallback}"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_got_the_tracks_it_asked_for_writes_no_fallback_key_at_all() {
+        // Absent rather than null, and this is the assertion that keeps it so: a
+        // key present on every recording ever made would be noise, and a reader
+        // that tested for presence would call every recording a fallback.
+        let recording = &written()["recordings"][0];
+        assert_eq!(
+            recording.get("audio_fallback"),
+            None,
+            "a recording that separated the game from the rest has nothing to explain: \
+             {recording}"
         );
     }
 
