@@ -1029,6 +1029,22 @@ fourth uses a real process that never draws anything — the recorder's own Ctrl
 fixture — to check what the console says when the search for a window gives up,
 and that it never claimed a recording that did not happen.
 
+A fifth is the one place a **resize** is exercised end to end. It changes the
+subject's window size mid-recording with a real `SetWindowPos` from outside the
+process that owns it — the recorder is told nothing, and finds out through
+capture — and then asserts
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)'s decision off
+the session record: two files in one sitting, the first finished as
+`target-resized` at the size the window was and decoding as many pictures as the
+recorder said it encoded, the second carrying on at the size it now is. It also
+measures the **seam** — `starts_at_nanos` plus `duration_seconds` of the first
+file against `starts_at_nanos` of the second, which is the gap on the session's
+own timeline — and fails if it is large enough to be the restart delay a resize
+is supposed to skip. Measured on this project's development machine on
+2026-08-18, from an unoptimised build: **0.288 s** and **1.523 s** over two
+runs — the larger of them the first run after a build, which pays for the
+encoder capability probe — against **6.077 s** with that skip removed.
+
 The `cmd.exe` parent does **not** reliably prove that the debounce joins a
 launcher and its game into one launch, and the test module says so at length:
 whether the watcher reports `cmd.exe → video-pattern.exe` as one launch or as

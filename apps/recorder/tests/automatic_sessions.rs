@@ -52,6 +52,37 @@
 //! `decoded_frames_at_least` rather than a packet count: a file whose packets
 //! all failed to decode satisfies every other assertion here.
 //!
+//! # The resize
+//!
+//! One of these is [ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md)
+//! checked against a real resize, which is
+//! [issue #184](https://github.com/wildware-uk/clipped/issues/184)'s first
+//! acceptance criterion and the one thing it rules out by name: *"verified
+//! against a real resize rather than a unit test of the branch."*
+//! `clipped_session::automatic`'s own tests call the branch — they hand
+//! `recording_finished` a constructed outcome and read the delay back out of
+//! `restart_delay_after` — and no test in the tree had ever taken a window that
+//! a capture backend was looking at and changed its size.
+//!
+//! This one does. `SetWindowPos` is called on the subject's window from this
+//! process, which is a resize a user dragging an edge would make: the compositor
+//! sees it, Windows Graphics Capture sees it, and the recording loop finds out
+//! the way it finds out about a game changing resolution — as
+//! `Acquisition::SizeChanged`, discovered rather than announced. Nothing in the
+//! recorder is told the resize happened.
+//!
+//! What is then asserted is the decision, not the mechanism:
+//!
+//! - **Two files, one sitting.** A resize does not end the session.
+//! - **The first one is finished, not abandoned**: `target-resized`, at the size
+//!   the window was, decoding as many pictures as the recorder said it encoded.
+//! - **The second one carries on**, at the size the window now is.
+//! - **The seam between them is small.** That is what #564 built and the only
+//!   part of the decision that a wrong build still produces two files for: the
+//!   restart delay is skipped for a resize, because that delay is a wait for an
+//!   exit that may be in flight and a resize is proof the window did not go
+//!   anywhere. The gap is measured off the session's own timeline and printed.
+//!
 //! And, on the one path a user takes most often and the other two do not touch
 //! — Ctrl+C with a game still running and a recording still capturing — that
 //! the session record is *finished*: an end reason of `recorder-stopping`, and
@@ -92,6 +123,10 @@ use std::time::{Duration, Instant};
 
 use clipped_media_validation::{require_media_tools, Media, TemporaryDirectory, VideoStream};
 use serde_json::Value;
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+};
 
 use support::{
     ensure_console, example_binary, read_stderr, recorder_binary, send_ctrl_c, terminate,
@@ -106,6 +141,53 @@ const PATTERN_SECONDS: u64 = 30;
 
 /// How long a recording is left running before the subject is killed.
 const RECORD_BEFORE_KILL: Duration = Duration::from_secs(6);
+
+/// How long the first file records before the window is resized underneath it.
+///
+/// Long enough that the file it leaves is unambiguously a recording — several
+/// seconds of pictures, past the first keyframe and into a second cluster —
+/// rather than a header and a trailer with nothing between them, which is the
+/// thing "the first file is complete and playable" has to distinguish itself
+/// from.
+const RECORD_BEFORE_RESIZE: Duration = Duration::from_secs(5);
+
+/// How long the second file is left recording before the recorder is stopped.
+///
+/// The same argument as above, applied to the successor: a second file that
+/// exists is not the claim ADR 0012 makes. The claim is that the sitting carried
+/// on, and a file with pictures in it is what says so.
+const RECORD_AFTER_RESIZE: Duration = Duration::from_secs(5);
+
+/// The size the subject's window is dragged to, mid-recording.
+///
+/// Smaller than the 1280x720 it starts at, so that the two files are told apart
+/// by their own dimensions and not by their order, and **even in both
+/// dimensions**: an odd client area is a defect of its own
+/// ([issue #561](https://github.com/wildware-uk/clipped/issues/561),
+/// [ADR 0013](../../../docs/adr/0013-capture-rounds-an-odd-dimension-away.md)),
+/// and a resize into one would have this test measuring that instead of this.
+const RESIZED_TO: (u32, u32) = (1024, 576);
+
+/// The largest gap between the two files this test will accept.
+///
+/// The figure that matters is `AutomaticSettings::recording_restart_delay`,
+/// which is five seconds by default and which ADR 0012 has the session skip for
+/// a resize.
+///
+/// What a healthy run costs is everything the successor has to do and nothing
+/// else: finishing the first file, one pass of `watch`'s loop — which promises
+/// only to run once a second — re-resolving the window, starting a capture,
+/// waiting for a frame, opening an encoder and creating a file. Measured on this
+/// project's development machine on 2026-08-18, from an unoptimised build:
+/// **0.288 s** and **1.523 s** over two runs, the larger of them the first run
+/// after a build, which pays for the encoder capability probe. A build that
+/// waited the delay out measured **6.077 s**.
+///
+/// This sits between the two, with two seconds of headroom above the slower
+/// healthy figure so that a busy machine does not trip it, and two and a half
+/// below the broken one so that reinstating the delay fails here rather than
+/// somewhere vaguer.
+const SEAM_BOUND: Duration = Duration::from_millis(3_500);
 
 /// How long any single thing these tests wait for is given.
 ///
@@ -313,6 +395,135 @@ fn stopping_the_recorder_mid_recording_finalises_it_and_finishes_the_session() {
 }
 
 #[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
+fn a_window_resized_mid_recording_is_followed_by_a_second_file() {
+    // Issue #184's first acceptance criterion, and ADR 0012's decision, against
+    // a resize this test really makes rather than one it tells the recorder
+    // about. Nothing here touches `EndReason`, `restart_delay_after` or any
+    // other branch by name: the window changes size, and everything below is
+    // read out of the session the recorder wrote.
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    ensure_console();
+
+    let workspace = Workspace::new("watch-resize");
+    let mut recorder = workspace.start_recorder();
+
+    recorder.wait_for("Watching for games.");
+    thread::sleep(Duration::from_secs(1));
+
+    // Long enough to outlive both files and the seam between them, so that
+    // nothing here ends because the subject ran out.
+    let mut pattern = LaunchedPattern::directly(SOURCE_FPS, 300);
+    let before = pattern.client_size();
+    assert_ne!(
+        before, RESIZED_TO,
+        "the subject already has the size this test resizes it to, so the resize would change \
+         nothing and the two files could not be told apart"
+    );
+
+    recorder.wait_for("Recording Clipped Video Pattern to");
+    thread::sleep(RECORD_BEFORE_RESIZE);
+
+    // The resize. A real `SetWindowPos` on the subject's real window, from
+    // outside the process that owns it — which is what a user dragging an edge
+    // is. The recorder is not told; it finds out through capture.
+    resize(pattern.window(), RESIZED_TO);
+    assert_eq!(
+        client_area(pattern.window()),
+        RESIZED_TO,
+        "the window did not actually change size, so nothing below would be about a resize"
+    );
+
+    // That capture saw it, and not merely that Windows did. Without this line
+    // the test could pass on a run where the resize landed after the recording
+    // had already ended for some other reason, and `wait_for` reads forwards,
+    // so it also fixes the order of the two lines below it.
+    recorder.wait_for("the recorded window changed size");
+    // The successor, which is the decision. This is the *second* time this line
+    // appears in the stream: `wait_for` never rewinds.
+    recorder.wait_for("Recording Clipped Video Pattern to");
+    thread::sleep(RECORD_AFTER_RESIZE);
+
+    let diagnostics = recorder.stop();
+    assert!(
+        pattern.is_running(),
+        "the subject must still have been running at the end, or a file boundary here says \
+         nothing about a resize:\n{diagnostics}"
+    );
+
+    let session = workspace.only_session();
+    let files = recorded_files(&session, &diagnostics);
+
+    assert_eq!(
+        files.len(),
+        2,
+        "a resize finishes the file and the session starts the next one (ADR 0012); this \
+         sitting has {} file(s) in it:\n{session:#}\n{diagnostics}",
+        files.len()
+    );
+
+    // The first file: finished on purpose, at the size the window was, and
+    // playable — which is the whole reason for following a resize with a new
+    // file rather than carrying on into a track that cannot hold two sizes.
+    assert_eq!(
+        files[0]["end_reason"],
+        Value::from("target-resized"),
+        "the first file should have ended because its target changed size:\n{diagnostics}"
+    );
+    assert_media_decodes(files[0], before, &diagnostics);
+    assert_at_least_seconds(files[0], 2.0, "the file the resize finished", &diagnostics);
+
+    // The second: the sitting carrying on, at the size the window now is. It
+    // ends because the recorder was stopped, which is this test doing the
+    // stopping and not the resize ending the session.
+    assert_eq!(
+        files[1]["end_reason"],
+        Value::from("stopped"),
+        "the second file should have run until the recorder was stopped:\n{diagnostics}"
+    );
+    assert_media_decodes(files[1], RESIZED_TO, &diagnostics);
+    assert_at_least_seconds(
+        files[1],
+        2.0,
+        "the file that followed the resize",
+        &diagnostics,
+    );
+
+    // And the seam, off the session's own timeline: where the first file's
+    // pictures stop, and where the second file's start.
+    let seam = seam_between(files[0], files[1], &diagnostics);
+    eprintln!(
+        "\n=== the seam a resize costs ===\n\
+         first file  : {}x{} for {}s, starting at {}ns on the session's timeline\n\
+         second file : {}x{} for {}s, starting at {}ns\n\
+         seam        : {:.3}s\n",
+        files[0]["width"],
+        files[0]["height"],
+        files[0]["duration_seconds"],
+        files[0]["starts_at_nanos"],
+        files[1]["width"],
+        files[1]["height"],
+        files[1]["duration_seconds"],
+        files[1]["starts_at_nanos"],
+        seam.as_secs_f64(),
+    );
+
+    assert!(
+        seam <= SEAM_BOUND,
+        "the two files are {:.3}s apart on the session's timeline, and this run will accept \
+         {:.3}s. The restart delay a recording ordinarily waits out is a wait for a process \
+         exit that may still be in flight, and a resize is proof the window did not go \
+         anywhere — so ADR 0012 has the session start the successor of a resized recording at \
+         once. A seam this size is that skip not happening, and it costs seconds of a game \
+         somebody is still playing every time they drag an edge.\n{diagnostics}",
+        seam.as_secs_f64(),
+        SEAM_BOUND.as_secs_f64(),
+    );
+}
+
+#[test]
 #[ignore = "needs a desktop session and WMI; see the module docs"]
 fn a_game_that_never_shows_a_window_is_said_so_and_never_claimed_as_a_recording() {
     // A launch is noticed seconds before there is anything to capture, and the
@@ -364,7 +575,8 @@ fn a_game_that_never_shows_a_window_is_said_so_and_never_claimed_as_a_recording(
 /// user data the recorder is pointed at.
 #[derive(Debug)]
 struct Workspace {
-    directory: TemporaryDirectory,
+    /// [`Option`] only so that [`Drop`] can decline to remove it. See there.
+    directory: Option<TemporaryDirectory>,
 }
 
 impl Workspace {
@@ -373,7 +585,7 @@ impl Workspace {
     }
 
     fn with_overlay(label: &str, overlay: &str) -> Self {
-        let directory = TemporaryDirectory::new(label);
+        let directory = Some(TemporaryDirectory::new(label));
         let workspace = Self { directory };
 
         fs::create_dir_all(workspace.clips()).expect("the clips directory can be created");
@@ -385,15 +597,18 @@ impl Workspace {
     }
 
     fn clips(&self) -> PathBuf {
-        self.directory.path().join("clips")
+        self.path().join("clips")
     }
 
     fn path(&self) -> &Path {
-        self.directory.path()
+        self.directory
+            .as_ref()
+            .expect("the workspace outlives everything that reads it")
+            .path()
     }
 
     fn local_app_data(&self) -> PathBuf {
-        self.directory.path().join("appdata")
+        self.path().join("appdata")
     }
 
     /// Starts `clipped-recorder watch` against this workspace.
@@ -456,6 +671,34 @@ impl Workspace {
         let text = fs::read_to_string(&sidecars[0]).expect("the session record can be read");
         serde_json::from_str(&text)
             .unwrap_or_else(|error| panic!("the session record is not JSON: {error}\n{text}"))
+    }
+}
+
+impl Drop for Workspace {
+    /// Removes the run's recordings, unless the test failed.
+    ///
+    /// `TemporaryDirectory` removes itself unconditionally, and [`Drop`] runs
+    /// while a panicking thread unwinds — so a failed assertion here would take
+    /// the recordings, the session record and the recorder's overlay with it,
+    /// which are the only evidence of what the run saw. Asking
+    /// [`std::thread::panicking`] separates the two cases, the same way
+    /// `crates/library/tests/support`'s `Scratch` does: a passing run's
+    /// workspace is worth nothing and goes, a failing run's stays, with the path
+    /// printed so whoever reads the failure knows where to look.
+    ///
+    /// Forgetting the `TemporaryDirectory` is what declines the removal; there
+    /// is nothing else in it to run.
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        if std::thread::panicking() {
+            eprintln!(
+                "workspace kept for diagnosis: {}",
+                directory.path().display()
+            );
+            std::mem::forget(directory);
+        }
     }
 }
 
@@ -549,6 +792,7 @@ impl Drop for RecorderProcess {
 struct LaunchedPattern {
     child: Child,
     process_id: u32,
+    window: usize,
     client: (u32, u32),
 }
 
@@ -560,10 +804,11 @@ impl LaunchedPattern {
         command.args(pattern_arguments(fps, seconds));
         let mut child = spawn(command, &binary);
         let process_id = child.id();
-        let client = read_ready_line(&mut child);
+        let (window, client) = read_ready_line(&mut child);
         Self {
             child,
             process_id,
+            window,
             client,
         }
     }
@@ -588,10 +833,11 @@ impl LaunchedPattern {
             .args(pattern_arguments(fps, seconds));
         let mut child = spawn(command, Path::new("cmd.exe"));
         let process_id = child.id();
-        let client = read_ready_line(&mut child);
+        let (window, client) = read_ready_line(&mut child);
         Self {
             child,
             process_id,
+            window,
             client,
         }
     }
@@ -602,6 +848,15 @@ impl LaunchedPattern {
 
     fn client_size(&self) -> (u32, u32) {
         self.client
+    }
+
+    /// The window handle the subject announced.
+    ///
+    /// Taken from the application's own `ready` line rather than searched for on
+    /// the desktop: the resize test has to act on the window the recorder is
+    /// recording, and a search by title would find whichever one it found.
+    fn window(&self) -> usize {
+        self.window
     }
 
     /// Whether the subject is still rendering.
@@ -713,8 +968,9 @@ fn spawn(mut command: Command, what: &Path) -> Child {
         .unwrap_or_else(|error| panic!("{} could not be started: {error}", what.display()))
 }
 
-/// The `client=WIDTHxHEIGHT` the pattern announces before it renders.
-fn read_ready_line(child: &mut Child) -> (u32, u32) {
+/// The `hwnd=0x…` and `client=WIDTHxHEIGHT` the pattern announces before it
+/// renders.
+fn read_ready_line(child: &mut Child) -> (usize, (u32, u32)) {
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut line = String::new();
     BufReader::new(stdout)
@@ -728,9 +984,20 @@ fn read_ready_line(child: &mut Child) -> (u32, u32) {
     let (width, height) = field
         .split_once('x')
         .unwrap_or_else(|| panic!("the client size is not WIDTHxHEIGHT: {field}"));
+
+    let handle = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("hwnd=0x"))
+        .unwrap_or_else(|| panic!("the ready line has no window handle: {line}"));
+    let window = usize::from_str_radix(handle, 16)
+        .unwrap_or_else(|error| panic!("the window handle is not hexadecimal: {handle} {error}"));
+
     (
-        width.parse().expect("the client width is a number"),
-        height.parse().expect("the client height is a number"),
+        window,
+        (
+            width.parse().expect("the client width is a number"),
+            height.parse().expect("the client height is a number"),
+        ),
     )
 }
 
@@ -766,6 +1033,141 @@ fn playable_recording<'a>(session: &'a Value, diagnostics: &str) -> &'a Value {
     }
 
     recorded[0]
+}
+
+/// Every recording of the session that produced a file, in the order the
+/// session made them.
+///
+/// The sibling of [`playable_recording`] for a sitting that is *supposed* to
+/// hold more than one. The same rule about the others applies: a recording that
+/// found no window is an ordinary tail on a session whose game has gone, and a
+/// recording that **failed** is not — a failure here would mean the successor
+/// of the resize never opened, which is the shape issue #561 had.
+fn recorded_files<'a>(session: &'a Value, diagnostics: &str) -> Vec<&'a Value> {
+    let recordings = session["recordings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the session record has no recordings:\n{session:#}"));
+
+    for recording in recordings {
+        let outcome = recording["outcome"].as_str().unwrap_or("none");
+        assert!(
+            matches!(outcome, "recorded" | "no-window"),
+            "a recording of this session failed rather than simply finding nothing to \
+             record: {recording:#}\n{diagnostics}"
+        );
+    }
+
+    recordings
+        .iter()
+        .filter(|recording| recording["outcome"] == "recorded")
+        .collect()
+}
+
+/// Asserts a file holds at least this many seconds of pictures.
+///
+/// A recording finalised without its last cluster, or one that opened and was
+/// closed again, satisfies every assertion about dimensions and end reasons and
+/// holds a fraction of a second.
+fn assert_at_least_seconds(recording: &Value, floor: f64, what: &str, diagnostics: &str) {
+    let seconds = recording["duration_seconds"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{what} has no duration:\n{recording:#}\n{diagnostics}"));
+    assert!(
+        seconds >= floor,
+        "{what} holds {seconds:.2}s, which is below the floor of {floor:.2}s; a fraction of a \
+         second is what a file finalised with nothing in it looks like:\n{diagnostics}"
+    );
+}
+
+/// The gap between where one file's pictures stop and the next one's start, on
+/// the session's own timeline.
+///
+/// `starts_at_nanos` is where a recording begins on that timeline and
+/// `duration_seconds` is how much of it the file covers, which is the pair the
+/// library already uses to put a moment on the right second of the right
+/// recording ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+/// Their difference is therefore the seam, measured out of the record the
+/// recorder wrote rather than off a clock in this process.
+///
+/// A negative gap — the second file starting before the first one's last picture
+/// — is reported as zero rather than as an error: it would mean the two spans
+/// overlap, which is not what this test is guarding against and is not a thing
+/// the pipeline can currently produce.
+fn seam_between(first: &Value, second: &Value, diagnostics: &str) -> Duration {
+    let nanos = |recording: &Value| {
+        recording["starts_at_nanos"].as_i64().unwrap_or_else(|| {
+            panic!(
+                "a recorded file has no place on the session's timeline, so the seam cannot be \
+                 measured:\n{recording:#}\n{diagnostics}"
+            )
+        })
+    };
+    let seconds = |recording: &Value| {
+        recording["duration_seconds"].as_f64().unwrap_or_else(|| {
+            panic!("a recorded file has no duration:\n{recording:#}\n{diagnostics}")
+        })
+    };
+
+    let ends = nanos(first) as f64 + seconds(first) * 1e9;
+    Duration::from_secs_f64(((nanos(second) as f64 - ends) / 1e9).max(0.0))
+}
+
+/// Changes a window's size, as a user dragging its edge does.
+///
+/// The position and the Z order are left alone so that the one thing that
+/// changes is the size, and the window is not activated: the subject is
+/// deliberately never focused (`docs/testing.md`), and taking the foreground
+/// here would change what the compositor is doing as well as what size it is
+/// doing it at.
+fn resize(window: usize, (width, height): (u32, u32)) {
+    // SAFETY: `window` is the handle the subject printed on its `ready` line and
+    // the process that owns it is still running — `LaunchedPattern` outlives
+    // this call. `SetWindowPos` takes no pointer, and the null second argument
+    // is the documented value for "leave the Z order alone", which
+    // `SWP_NOZORDER` also asks for.
+    let changed = unsafe {
+        SetWindowPos(
+            window as *mut core::ffi::c_void,
+            core::ptr::null_mut(),
+            0,
+            0,
+            width as i32,
+            height as i32,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    assert!(
+        changed != 0,
+        "SetWindowPos({window:#x}, {width}x{height}) failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// A window's client area, read back from Windows.
+///
+/// The subject is borderless, so this is also the size a capture of it produces,
+/// and it is asked of Windows rather than assumed because `SetWindowPos`
+/// returning true says the call was accepted and not that the window ended up
+/// the size that was asked for.
+fn client_area(window: usize) -> (u32, u32) {
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: as above for the handle; `client` is a live local of the right
+    // type and Windows retains nothing.
+    let read = unsafe { GetClientRect(window as *mut core::ffi::c_void, &raw mut client) };
+    assert!(
+        read != 0,
+        "GetClientRect({window:#x}) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    (
+        (client.right - client.left) as u32,
+        (client.bottom - client.top) as u32,
+    )
 }
 
 /// Asserts the file the session names is one that plays.
