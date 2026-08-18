@@ -45,7 +45,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clipped_audio::windows::SystemAudioCapture;
-use clipped_audio::{Capture, SampleOrigin};
+use clipped_audio::{AudioError, Capture, SampleOrigin};
 
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -214,6 +214,163 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
         (peak - TONE).abs() <= 10.0,
         "the strongest frequency in the recording should be the {TONE} Hz that was played, \
          not {peak:.1} Hz (magnitude {peak_magnitude:.6})"
+    );
+}
+
+/// How long the consumer stops reading for before it finishes the capture.
+///
+/// Longer than the 200 ms the audio engine holds, so that what a drain has to
+/// produce is a real backlog rather than one packet.
+const DRAIN_STALL: Duration = Duration::from_millis(500);
+
+/// How long a drain may take in wall-clock time.
+///
+/// A drain reads what the engine has queued and stops; it waits for nothing. A
+/// capture that has not begun one goes on reading the live endpoint, and takes
+/// as long as it is asked to.
+const PROMPT: Duration = Duration::from_millis(200);
+
+#[test]
+fn what_a_finished_capture_hands_over_is_the_sound_that_was_playing() {
+    // [Issue #320](https://github.com/wildware-uk/clipped/issues/320). The audio
+    // engine holds captured audio nobody has collected, and a capture that is
+    // simply closed throws it away — the last fraction of a second before
+    // somebody stopped recording, which is often the part they pressed the key
+    // for.
+    //
+    // `crates/audio/src/windows/microphone.rs` measures how *much* a drain
+    // recovers. What this measures is that it is the right audio: the tone that
+    // was playing at the moment the capture was finished has to be in what the
+    // drain handed over, at the frequency it was played, rather than silence of
+    // the right length — which is what a drain that had lost the packets and
+    // kept only the gap would produce, and which every length assertion in this
+    // workspace would accept.
+    if suppressed() {
+        return;
+    }
+
+    let mut capture = match SystemAudioCapture::open() {
+        Ok(capture) => capture,
+        Err(error) => {
+            skipped(&format!(
+                "system audio capture could not be opened: {error}"
+            ));
+            return;
+        }
+    };
+    let format = capture.format();
+    let rate = format.sample_rate().get() as f32;
+    let channels = usize::from(format.channels().get());
+
+    let mut player = match TonePlayer::start(TONE, AMPLITUDE) {
+        Ok(player) => player,
+        Err(reason) => {
+            skipped(&reason);
+            return;
+        }
+    };
+
+    // What this machine is playing anyway, before the tone. The comparison the
+    // assertion below is made against, because a developer's desktop is not
+    // silent.
+    let background = record(&mut capture, Duration::from_millis(400));
+
+    player.play();
+    // The endpoint holds a little audio, so the tone takes a moment to reach the
+    // capture.
+    let _ = record(&mut capture, Duration::from_millis(300));
+
+    // Nobody reads for half a second, which is what leaves the engine holding a
+    // backlog. Measured rather than assumed: `sleep` guarantees only that it
+    // does not return early.
+    let stall_began = Instant::now();
+    std::thread::sleep(DRAIN_STALL);
+    let stalled = stall_began.elapsed();
+
+    capture.finish();
+
+    // Only the samples the endpoint delivered. The rest of what a drain hands
+    // over is silence covering the part of the stall the engine could not hold,
+    // and mixing that into the measurement would only dilute it.
+    let drain_began = Instant::now();
+    let mut drained = Vec::new();
+    let mut synthesised = 0usize;
+    let mut ended_itself = false;
+    let give_up_at = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < give_up_at {
+        match capture.read(Duration::from_millis(100)) {
+            Ok(Capture::Samples(block)) => match block.origin() {
+                SampleOrigin::Endpoint => drained.extend_from_slice(block.samples()),
+                SampleOrigin::SynthesisedSilence => synthesised += block.frames(),
+            },
+            Ok(Capture::Idle | Capture::FormatChanged(_)) | Err(AudioError::NotOpen) => {
+                ended_itself = true;
+                break;
+            }
+            Err(error) => panic!("a drain does not fail: {error}"),
+        }
+    }
+    let drain_took = drain_began.elapsed();
+
+    player.stop();
+
+    let quiet = goertzel(&background, channels, rate, TONE);
+    let recovered = goertzel(&drained, channels, rate, TONE);
+    let seconds = (drained.len() / channels) as f64 / f64::from(rate);
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "the drain recovered {seconds:.3} s of endpoint audio ({synthesised} frames of \
+         synthesised silence beside it) after a {stalled:.3?} stall, in {drain_took:.3?}; \
+         {TONE} Hz measures {recovered:.6} in it against {quiet:.6} of background"
+    );
+
+    // A drain ends by itself, at the last sample that exists. Asserted first,
+    // because a capture that never began one goes on reading the live endpoint
+    // and every measurement below would then be of a longer recording rather
+    // than of a drain.
+    assert!(
+        ended_itself,
+        "a drain ends by handing over what it has and closing the capture; this one was still \
+         reading the endpoint {drain_took:.3?} later, so finishing it began no drain"
+    );
+    assert!(
+        drain_took <= PROMPT,
+        "draining took {drain_took:.3?}, which is longer than the {PROMPT:.3?} a drain that waits \
+         for nothing should need"
+    );
+    assert!(
+        !drained.is_empty(),
+        "a {stalled:.3?} stall leaves audio in the engine, and every one of the {synthesised} \
+         frames this drain handed over was silence this crate invented; what a drain is for is \
+         the audio the endpoint had captured and not been asked for"
+    );
+
+    // And it is the sound that was playing. The tone has to be in it by a margin
+    // no amount of background noise on a developer's machine would produce.
+    assert!(
+        recovered > quiet * MINIMUM_RATIO + 1e-4,
+        "the audio the engine was holding was the {TONE} Hz tone that was sounding when the \
+         capture was finished: it measures {recovered:.6} in the drain against {quiet:.6} of \
+         background before the tone started"
+    );
+
+    // Found rather than assumed, for the reason the first test in this file
+    // sweeps: a drain that resampled, dropped a channel or handed over the wrong
+    // buffers would still contain a tone — at the wrong frequency.
+    let (peak, peak_magnitude) = strongest_frequency(&drained, channels, rate, 200.0, 2_000.0);
+    assert!(
+        (peak - TONE).abs() <= 10.0,
+        "the strongest frequency in what the drain handed over should be the {TONE} Hz that was \
+         playing, not {peak:.1} Hz (magnitude {peak_magnitude:.6})"
+    );
+
+    assert!(
+        matches!(
+            capture.read(Duration::from_millis(10)),
+            Err(AudioError::NotOpen)
+        ),
+        "a capture that has finished draining is closed"
     );
 }
 

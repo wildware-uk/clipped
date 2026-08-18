@@ -16,7 +16,7 @@
 //!  wait for the first frame  ─── clock ───▶  read a buffer
 //!                                            place it on the timeline
 //!                            ◀── samples ─── queue it (never waits)
-//!  stop                      ─── flag ────▶  close the endpoint, report
+//!  stop                      ─── flag ────▶  drain, then close, then report
 //! ```
 //!
 //! Two things cross in each direction and no more. Out: the endpoint's format,
@@ -107,12 +107,31 @@ use placement::{place, AUDIO_CLOCK};
 /// is short enough that stopping a recording is not perceptibly delayed by it.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// How long a drain is allowed to take before the device is released anyway.
+///
+/// A backstop, not a period. A drain does not wait for anything —
+/// `clipped-audio` reads what the engine has queued and stops the moment it has
+/// nothing, so an endpoint that has been unplugged ends one on the first look —
+/// and the engine holds at most 200 ms, which this thread converts and queues in
+/// a few milliseconds. What this bounds is the one case that is not bounded by
+/// the engine: the capture's client is deliberately *not* stopped during a
+/// drain, so a device delivering packets faster than this thread consumes them
+/// would keep it reading for as long as it kept doing so.
+///
+/// Half a second, because the cost of hitting it is the tail of one track and
+/// the cost of not having it is a recording that will not finish and a
+/// microphone Windows still shows as in use (AGENTS.md sections 58 and 59).
+/// Reaching it is logged rather than passed over: on this machine a drain takes
+/// about 10 ms, so a run that needed 500 of them is something to report.
+const DRAIN_LIMIT: Duration = Duration::from_millis(500);
+
 /// One audio capture, whichever kind of endpoint is behind it.
 ///
-/// `clipped_audio::windows::SystemAudioCapture` and `MicrophoneCapture` present
-/// the same four operations and differ only in what they are pointed at, so the
-/// thread body below is written once against this rather than twice against
-/// them (AGENTS.md section 55). It is also what lets that body — the placement,
+/// `clipped_audio::windows::SystemAudioCapture`, `MicrophoneCapture` and
+/// `ProcessLoopbackCapture` present the same three operations — read, finish,
+/// close — and differ only in what they are pointed at, so the thread body below
+/// is written once against this rather than three times against them (AGENTS.md
+/// section 55). It is also what lets that body — the placement,
 /// the drift measurement, the queueing and the report — be tested on a machine
 /// with no sound card, which is every machine this workspace's CI runs on.
 pub(crate) trait AudioCapture: Send {
@@ -124,15 +143,31 @@ pub(crate) trait AudioCapture: Send {
     /// it is handled inside `clipped-audio` and arrives as synthesised silence.
     fn read(&mut self, timeout: Duration) -> Result<Capture<'_>, AudioError>;
 
-    /// Stops capturing and releases the device.
+    /// Asks the capture to hand over what the audio engine is still holding.
     ///
-    /// Deliberately not a *drain*. `clipped-audio`'s engine holds up to 200 ms
-    /// that closing throws away, and only `ProcessLoopbackCapture` exposes the
-    /// call that hands it over first — so a recording's tracks end up to that
-    /// much shorter than its picture.
-    /// [Issue #320](https://github.com/wildware-uk/clipped/issues/320) is
-    /// exposing it on the two captures a session opens; this trait grows a
-    /// `finish` when it exists.
+    /// The engine keeps up to 200 ms of captured audio nobody has collected,
+    /// and [`close`](Self::close) throws it away — the last fraction of a
+    /// second before somebody pressed stop, which is the part they were
+    /// watching ([issue #320](https://github.com/wildware-uk/clipped/issues/320)).
+    ///
+    /// **This closes nothing and hands nothing back.** It only stops the
+    /// capture looking forwards; the audio arrives through
+    /// [`read`](Self::read), as ordinary buffers, until the capture closes
+    /// itself and reads begin reporting [`AudioError::NotOpen`]. The one caller
+    /// that has to get this right is [`pump`], and a `finish` followed straight
+    /// by a `close` is worth nothing at all: that was the arrangement that made
+    /// `ProcessLoopbackCapture`'s own drain a no-op in every recording ever
+    /// made, while every document said the game's tracks kept their tail.
+    ///
+    /// Required rather than defaulted, so that a capture added later cannot
+    /// inherit "does not drain" without saying so.
+    fn finish(&mut self);
+
+    /// Stops capturing and releases the device, discarding anything not yet
+    /// collected.
+    ///
+    /// [`finish`](Self::finish) and a read loop is how a recording ends; this
+    /// is what releases the device once there is nothing left to hand over.
     fn close(&mut self);
 
     /// Which agreement this capture scopes itself through, for the
@@ -163,6 +198,10 @@ impl AudioCapture for clipped_audio::windows::SystemAudioCapture {
         Self::read(self, timeout)
     }
 
+    fn finish(&mut self) {
+        Self::finish(self);
+    }
+
     fn close(&mut self) {
         Self::close(self);
     }
@@ -171,6 +210,10 @@ impl AudioCapture for clipped_audio::windows::SystemAudioCapture {
 impl AudioCapture for clipped_audio::windows::MicrophoneCapture {
     fn read(&mut self, timeout: Duration) -> Result<Capture<'_>, AudioError> {
         Self::read(self, timeout)
+    }
+
+    fn finish(&mut self) {
+        Self::finish(self);
     }
 
     fn close(&mut self) {
@@ -183,17 +226,11 @@ impl AudioCapture for clipped_audio::windows::ProcessLoopbackCapture {
         Self::read(self, timeout)
     }
 
-    /// Hands over what the engine is still holding, then releases the device.
-    ///
-    /// The one capture that can. `finish` drains the buffered audio that a bare
-    /// `close` throws away — up to 200 ms of it — so a game track and an
-    /// other-system-audio track end where the recording ends rather than a
-    /// fifth of a second early. The trait's contract is only that `close`
-    /// releases the device, and this satisfies it by doing more; the two
-    /// endpoint captures cannot yet, which is
-    /// [issue #320](https://github.com/wildware-uk/clipped/issues/320).
-    fn close(&mut self) {
+    fn finish(&mut self) {
         Self::finish(self);
+    }
+
+    fn close(&mut self) {
         Self::close(self);
     }
 
@@ -852,10 +889,44 @@ fn pump(
         "recording an audio source"
     );
 
-    while !stop.load(Ordering::Relaxed) {
+    // What the thread is doing, rather than whether it should still be running.
+    // Being asked to stop is the *start* of the last thing this thread does, not
+    // the end of it: the audio engine is holding up to 200 ms that has been
+    // captured and not collected, and leaving without it is the defect issue
+    // #320 is about. So the stop request begins a drain, and the same loop body
+    // places and queues what the drain hands over — same timeline, same
+    // placement, same queue — until the capture says there is no more.
+    let mut draining: Option<Instant> = None;
+
+    loop {
+        if draining.is_none() && stop.load(Ordering::Relaxed) {
+            open.capture.finish();
+            draining = Some(Instant::now() + DRAIN_LIMIT);
+        }
+        if draining.is_some_and(|by| Instant::now() >= by) {
+            // See `DRAIN_LIMIT`. Nothing here has ever been observed to reach
+            // it, which is why reaching it is worth a line.
+            tracing::warn!(
+                audio_track = open.source.track_name(),
+                limit_ms = DRAIN_LIMIT.as_millis(),
+                "this audio source was still handing over buffered audio when the recording had \
+                 to release its device; the track may end a fraction of a second early. Please \
+                 report this"
+            );
+            break;
+        }
+
         let audio = match open.capture.read(READ_TIMEOUT) {
             Ok(Capture::Samples(audio)) => audio,
+            // Nothing this time round. While recording that is an idle
+            // endpoint; while draining it is the end of the drain, because a
+            // capture handing over its backlog does not wait for anything and
+            // has already closed itself by the time it says this.
+            Ok(Capture::Idle) if draining.is_some() => break,
             Ok(Capture::Idle) => continue,
+            // The drain finished and the capture closed itself. Ordinary, and
+            // not the failure the arm below reports.
+            Err(AudioError::NotOpen) if draining.is_some() => break,
             Ok(Capture::FormatChanged(format)) => {
                 // Once. `clipped-audio` keeps the timeline running as silence
                 // from here, so the track stays the length of the recording and

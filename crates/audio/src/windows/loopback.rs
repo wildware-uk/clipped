@@ -93,10 +93,41 @@ impl SystemAudioCapture {
         self.endpoint.read(timeout)
     }
 
-    /// Stops capturing and releases the endpoint.
+    /// Ends the capture by handing over what the audio engine still holds.
     ///
-    /// Idempotent, and does the same thing as dropping the capture. A closed
-    /// capture cannot be reopened; open a new one.
+    /// The audio engine keeps up to 200 ms of captured audio nobody has asked
+    /// for. A capture that is simply closed loses it, which is the last
+    /// fraction of a second before the user stopped recording — often the part
+    /// they pressed the key for
+    /// ([issue #320](https://github.com/wildware-uk/clipped/issues/320)).
+    ///
+    /// **This does not close anything by itself.** It leaves the capture
+    /// readable: [`read`](Self::read) then hands over the packets that were
+    /// queued, in order and on the same timeline as everything before them,
+    /// and once they run out the capture closes itself and the next read
+    /// reports [`AudioError::NotOpen`]. A caller that calls this and then
+    /// [`close`](Self::close) without reading in between has thrown the audio
+    /// away exactly as before, so the loop that reads to `NotOpen` is the whole
+    /// of the fix.
+    ///
+    /// It never waits for the device. Nothing is reopened during a drain and no
+    /// silence is synthesised for time passing, so an endpoint that has been
+    /// unplugged ends the drain immediately rather than holding up the end of a
+    /// recording.
+    ///
+    /// Idempotent, and pointless after [`close`](Self::close): a closed capture
+    /// has already let go of the endpoint and this cannot get it back.
+    pub fn finish(&mut self) {
+        self.endpoint.begin_drain();
+    }
+
+    /// Stops capturing and releases the endpoint, discarding anything not yet
+    /// collected.
+    ///
+    /// [`finish`](Self::finish) is the ordinary way to end a recording; this is
+    /// for a caller that wants the endpoint gone now. Idempotent, and does the
+    /// same thing as dropping the capture. A closed capture cannot be reopened;
+    /// open a new one.
     pub fn close(&mut self) {
         self.endpoint.close();
     }
