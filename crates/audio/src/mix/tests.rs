@@ -178,29 +178,115 @@ fn a_source_that_cannot_be_placed_is_refused_when_it_is_added() {
         Err(MixError::UnmixableLayout { source: 6, mix: 2 })
     );
 
-    let forty_four = AudioFormat::new(
-        NonZeroU32::new(44_100).expect("44.1 kHz is not zero"),
+    // And the message says what to do about it rather than naming a constant.
+    let message = MixError::UnmixableLayout { source: 6, mix: 2 }.to_string();
+    assert!(
+        message.contains("own track"),
+        "a refusal should say the source is still recorded: {message}"
+    );
+}
+
+/// A stereo format at `rate`, for the sources a mix has to take at rates that
+/// are not its own.
+fn stereo_at(rate: u32) -> AudioFormat {
+    AudioFormat::new(
+        NonZeroU32::new(rate).expect("a sample rate is not zero"),
         NonZeroU16::new(2).expect("stereo is not zero channels"),
         ChannelMask::from_bits(0x3),
         SampleFormat::Float32,
-    );
-    assert_eq!(
-        mixer.add_source(AudioSource::Microphone, forty_four, Level::UNITY),
-        Err(MixError::SampleRateMismatch {
-            source: 44_100,
-            mix: 48_000
-        })
+    )
+}
+
+#[test]
+fn a_source_at_another_rate_is_taken_into_the_mix_rather_than_refused() {
+    // A 44.1 kHz headset microphone beside a 48 kHz render endpoint is ordinary
+    // hardware. Refusing it left the microphone out of the one track a player
+    // that takes a track arbitrarily takes — the exact failure the compatibility
+    // mix exists to prevent, arriving by another route.
+    let mut mixer = mixer(2);
+    let microphone = mixer
+        .add_source(AudioSource::Microphone, stereo_at(44_100), Level::UNITY)
+        .expect("a source at another rate belongs in the mix");
+
+    // A tenth of a second of 44.1 kHz audio: 4410 frames in, and it has to
+    // occupy a tenth of a second of the *mix* — 4800 frames — not 4410 of them,
+    // or every source at another rate would slide against the rest of the
+    // recording for as long as the recording lasted.
+    let samples = vec![0.5_f32; 4_410 * 2];
+    mixer
+        .contribute(microphone, at(0), &samples)
+        .expect("the mix takes samples at the source's own rate");
+
+    let (mixed, _) = take_all(&mut mixer);
+    let frames = mixed.len() / 2;
+    // Short of 4800 by the filter's own width — the last few dozen frames need
+    // input this packet has not been followed by yet, and arrive with the next
+    // one. What matters is that it is 4800 rather than 4410: a mix that took
+    // the source's frame count for its own would run 8% fast against every
+    // other source in the recording, which over an hour is five minutes.
+    assert!(
+        frames.abs_diff(4_800) <= 48,
+        "a tenth of a second at 44.1 kHz should occupy a tenth of a second of a 48 kHz mix, \
+         and occupied {frames} frames",
     );
 
-    // And both messages say what to do about it rather than naming a constant.
-    let message = MixError::SampleRateMismatch {
-        source: 44_100,
-        mix: 48_000,
+    // And it is the source's audio in there, not silence of the right length.
+    // Measured away from the two ends: a block of constant that starts and
+    // stops abruptly is a step at each end, and a windowed sinc rings at a step
+    // — that overshoot is the filter behaving correctly, not the level.
+    let middle = &mixed[2_000..mixed.len() - 2_000];
+    for sample in middle {
+        assert!(
+            (f64::from(*sample) - 0.5).abs() < 0.01,
+            "the converted source should arrive at its own amplitude, and one sample was \
+             {sample}",
+        );
     }
-    .to_string();
+}
+
+#[test]
+fn a_source_at_another_rate_stays_where_the_source_said_it_was() {
+    // The reason the conversion is not simply "produce more frames": a
+    // converted source has to land at the moment its capture stamped it, and
+    // keep landing there packet after packet. A filter that reported its own
+    // delay as part of the audio would put the microphone a third of a
+    // millisecond late for ever; one that placed by output frames rather than
+    // by the source's own span would slide by 8% a second.
+    let mut mixer = mixer(2);
+    let game = mixer
+        .add_source(AudioSource::Game, format(2), Level::UNITY)
+        .expect("the mix takes a source at its own rate");
+    let microphone = mixer
+        .add_source(AudioSource::Microphone, stereo_at(44_100), Level::UNITY)
+        .expect("a source at another rate belongs in the mix");
+
+    // A second of each, in 10 ms packets, both silent except that the
+    // microphone is a step from zero to 0.5 at exactly half a second.
+    for packet in 0..100_u64 {
+        mixer
+            .contribute(game, at(millis(packet * 10)), &vec![0.0_f32; 480 * 2])
+            .expect("the game contributes");
+        let level = if packet >= 50 { 0.5 } else { 0.0 };
+        mixer
+            .contribute(microphone, at(millis(packet * 10)), &vec![level; 441 * 2])
+            .expect("the microphone contributes");
+    }
+
+    let (mixed, _) = take_all(&mut mixer);
+    let first_loud = mixed
+        .chunks_exact(2)
+        .position(|frame| frame[0].abs() > 0.25)
+        .expect("the step is in the mix");
+
+    // 24,000 frames is half a second of the mix, and it lands there to within a
+    // handful of frames — a tenth of a millisecond. The tolerance is tight on
+    // purpose: leaving the conversion'''s own delay in would put the step 35
+    // frames late, and a tolerance loose enough to allow that would be a test
+    // that asserted nothing about the one thing this is here to check.
     assert!(
-        message.contains("44100 Hz") && message.contains("48000 Hz"),
-        "{message}"
+        first_loud.abs_diff(24_000) < 8,
+        "a step half a second into a 44.1 kHz source should be half a second into the mix, \
+         and arrived at frame {first_loud}",
     );
 }
 
@@ -438,6 +524,40 @@ fn a_silent_stretch_is_the_length_it_lasted_and_costs_no_samples() {
         "silence from one source must not shorten the mix"
     );
     assert!(mixed.iter().all(|sample| (sample - 0.25).abs() < 1e-6));
+}
+
+#[test]
+fn a_silent_stretch_of_a_source_at_another_rate_lasts_as_long_as_it_really_did() {
+    // The counterpart of the test above, and the one place a rate conversion
+    // has to reason about frames it never sees: `contribute_silence` is given a
+    // count in the *source's* frames, and how far the mix may be emitted to
+    // depends on turning it into the time it really covered. Counting 22,050
+    // frames of a 44.1 kHz source as 22,050 frames of a 48 kHz mix makes every
+    // quiet stretch 8% short, and the mix stops just before the end of each of
+    // them for as long as the recording lasts.
+    let mut mixer = mixer(2);
+    let game = mixer
+        .add_source(AudioSource::Game, format(2), Level::UNITY)
+        .expect("a source is added");
+    let microphone = mixer
+        .add_source(AudioSource::Microphone, stereo_at(44_100), Level::UNITY)
+        .expect("a source at another rate belongs in the mix");
+
+    // Half a second in which the game plays and the 44.1 kHz microphone is
+    // silent. 22,050 of its frames are half a second, whatever the mix's rate.
+    mixer
+        .contribute(game, at(0), &steady(0.25, RATE as usize / 2))
+        .expect("placed");
+    mixer
+        .contribute_silence(microphone, at(0), 22_050)
+        .expect("silence is placed like anything else");
+
+    let (mixed, _) = take_all(&mut mixer);
+    assert_eq!(
+        mixed.len() / 2,
+        RATE as usize / 2,
+        "a silent 44.1 kHz source must not hold a 48 kHz mix short of where it reached"
+    );
 }
 
 #[test]

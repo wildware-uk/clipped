@@ -290,6 +290,16 @@ Pro 2.4 GHz wireless headset as the default endpoint at 48 kHz, capture of a
 | 90 s | 9,008 | −0.947 ms | −0.361 ms | −4.250 ppm (−0.255 ms/min) | 0.0649 ppm | 0 |
 | **30 min** | **180,009** | **−8.415 ms** | **−7.833 ms** | **−4.346 ppm (−0.261 ms/min)** | **0.0007 ppm** | **0** |
 
+**Both of those rows predate the drift correction, and that is what makes them
+worth keeping.** They are what this endpoint's crystal does when nothing is
+holding it: `clipped-audio` counted frames, the frames were slightly slow, and
+the track fell behind at four parts per million. Since
+[issue #30](https://github.com/wildware-uk/clipped/issues/30) landed, the same
+test measures what is *left after* the correction, which is a different quantity
+and a much smaller one — see [What an hour measures](#what-an-hour-measures)
+below. Anything comparing a fresh run against these two numbers is comparing a
+corrected pipeline against an uncorrected one.
+
 The thirty-minute run captured 53,993 video frames covering 1799.713 s of it
 alongside 1800.090 s of audio, with no synthesised silence, no dropped frames and
 no subject restarts.
@@ -346,6 +356,41 @@ performance-counter readings" looks like when it is checked rather than
 asserted. (The ninety-second run printed 33.3336 ms for the same quantity: a fit
 over eighty-nine sampled frames of an application's own timer, rather than a
 measurement of the reference clock.)
+
+### What an hour measures
+
+[Issue #30](https://github.com/wildware-uk/clipped/issues/30) asks for the drift
+over a sixty-minute recording, and the correction it added is what a sixty-minute
+recording now measures. Same machine, same endpoint, same subject as the table
+above, `CLIPPED_AV_SYNC_SECONDS=3600`:
+
+| Run | Endpoint buffers | Peak A/V offset | Final A/V offset | Drift rate | Standard error | Discontinuities | Synthesised |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **60 min** | 360,006 | −2.956 ms | **−2.387 ms** | **−0.656 ppm (−0.039 ms/min)** | 0.0003 ppm | 0 | 0 |
+| **60 min** | 360,009 | −3.357 ms | **−2.780 ms** | **−0.787 ppm (−0.047 ms/min)** | 0.0003 ppm | 0 | 0 |
+
+The first captured 3600.062 s of audio beside 107,989 video frames covering
+3599.687 s; the second, 3600.093 s beside 107,993 frames covering 3599.703 s.
+Neither restarted its subject or missed a video frame. The two rates agree to
+0.13 ppm, comfortably inside the run-to-run spread recorded above.
+
+Against the −4.346 ppm the same endpoint measured uncorrected, that is about six
+sevenths of the drift removed. Left alone an hour would have ended roughly
+16 ms out and would have crossed the 20 ms deadband — and taken a 20 ms step —
+about eighty minutes in; corrected, an hour ends under 3 ms out with nothing to
+step.
+
+**And it is a rate rather than an event.** The run also prints sixty separate
+fits, one per minute, which is the only way to tell a steadily wrong clock from
+one that was right and then jumped: both produce the same slope over an hour,
+and they want different fixes. In both runs all sixty have the same sign — −0.43
+to −0.91 ppm in the first, −0.31 to −0.87 ppm in the second — against a
+per-minute standard error of 0.12 ppm, and the offset walks to its final value
+with no jump in it. That is a crystal, which is what resampling corrects.
+
+The caveats above still apply in full: it is relative, no file is written, the
+run-to-run spread is far wider than any single run's standard error, and it is
+one crystal in one machine.
 
 ## The absolute offset: what the drift measurement cannot see
 
@@ -632,6 +677,11 @@ CLIPPED_REQUIRE_AUDIO=1 cargo test -p clipped-video-pattern --test av_sync \
 
 # The long drift run: thirty minutes, and silent.
 CLIPPED_AV_SYNC_SECONDS=1800 CLIPPED_REQUIRE_AUDIO=1 \
+    cargo test -p clipped-video-pattern --test av_sync \
+    -- --ignored --nocapture --test-threads=1 av_offset_stays
+
+# The hour issue #30 asks for. Same test, same output, sixty minutes.
+CLIPPED_AV_SYNC_SECONDS=3600 CLIPPED_REQUIRE_AUDIO=1 \
     cargo test -p clipped-video-pattern --test av_sync \
     -- --ignored --nocapture --test-threads=1 av_offset_stays
 

@@ -39,15 +39,17 @@
 //! microphone processing and the optional raw microphone track are
 //! [issue #31](https://github.com/wildware-uk/clipped/issues/31) and
 //! [issue #32](https://github.com/wildware-uk/clipped/issues/32).
-//! [Issue #30](https://github.com/wildware-uk/clipped/issues/30) is a source's
-//! own clock staying aligned with the reference clock over a long recording
-//! (`timeline` and `resample`); it does not make the mix able to carry a
-//! source captured at a genuinely different rate from its own, which is still
-//! refused when the source is added (see [`Mixer::add_source`]). Nothing
-//! consumes the mix yet: a recording session opens the captures and writes
-//! their tracks (`clipped-session`), and giving the mix track its samples is
-//! the remaining half of
-//! [issue #29](https://github.com/wildware-uk/clipped/issues/29).
+//! [Issue #30](https://github.com/wildware-uk/clipped/issues/30) is two
+//! different things that both change how many frames a buffer occupies, and
+//! they are worth keeping apart: a source's own clock staying aligned with the
+//! reference clock over a long recording (`timeline` and `resample`), and a
+//! source captured at a genuinely different rate from the mix's being converted
+//! to it (`mix::rate`). The first happens on every capture and the second only
+//! on the mix's copy of a source whose rate differs — neither changes what an
+//! isolated track contains. What consumes the mix is `clipped-session`'s
+//! muxing, which registers one source per declared audio track and writes the
+//! blocks this produces to track 1
+//! ([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
 //!
 //! # Responsibilities
 //!

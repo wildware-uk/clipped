@@ -129,6 +129,80 @@ the endpoint's buffer and filling over it would mean trimming real samples away
 again. The silence is handed over in 100 ms instalments, so a consumer that
 stalled for a minute does not cause a minute of zeroed samples to be allocated.
 
+### What an hour of real drift correction measures
+
+Everything above was argued and unit tested against synthetic packet sequences.
+[Issue #30](https://github.com/wildware-uk/clipped/issues/30) asks for the
+number a real recording produces, so here it is: one uninterrupted hour, on real
+hardware, with the correction running.
+
+**The conditions**, because a drift figure without them is a number about
+nothing. Windows 11 build 26200. The default render endpoint was a Razer
+BlackShark V2 Pro 2.4 GHz wireless headset, presenting a 48 kHz mix format, and
+it was recorded through WASAPI loopback — so the clock being measured is that
+headset's crystal. The reference is the performance counter, which is the clock
+Windows Graphics Capture stamps video frames with and the clock WASAPI reports
+buffer positions on, so "how far the audio has moved against the picture" and
+"how far the audio has moved against the performance counter" are the same
+question (`docs/av-sync.md`). The subject was a 1280×720 30 fps pattern window
+on a non-primary display. The measurement is `tests/capture/av_sync.rs` with
+`CLIPPED_AV_SYNC_SECONDS=3600`; `docs/testing.md` has the command.
+
+**Sampled at every endpoint buffer, which is every 10 ms — 360,006 times over
+the hour** — and reported both as one least-squares fit over all of them and as
+sixty separate fits, one per minute. The per-minute report is the part that
+answers a question the single fit cannot: whether the drift is a rate or an
+event.
+
+**Two hours were run, not one**, because a single number from a single hour
+cannot be told apart from an accident of that hour.
+
+| | First hour | Second hour |
+| --- | --- | --- |
+| Audio captured | 3600.062 s, 172,802,996 frames, **0 synthesised** | 3600.093 s, 172,804,454 frames, **0 synthesised** |
+| Video captured | 3599.687 s, 107,989 frames, 0 restarts, 0 missed | 3599.703 s, 107,993 frames, 0 restarts, 0 missed |
+| Observations | 360,006, **0 discontinuities**, 0 step corrections | 360,009, **0 discontinuities**, 0 step corrections |
+| A/V offset after an hour | **−2.387 ms** (audio leading the picture) | **−2.780 ms** |
+| Worst it reached | −2.956 ms | −3.357 ms |
+| Fitted drift rate | **−0.656 ppm, −0.039 ms/min** (standard error 0.0003 ppm) | **−0.787 ppm, −0.047 ms/min** (standard error 0.0003 ppm) |
+| Tolerance | −40 ms to +60 ms (EBU R37), 17 hours away at this rate | 14 hours away |
+
+The two agree to 0.13 ppm, which is well inside the third-of-a-part-per-million
+spread `docs/av-sync.md` records between repeat runs on this endpoint, and both
+are six or seven times smaller than what the same endpoint measured before the
+correction existed. The second hour was deliberately run with the machine
+compiling and running tests throughout: it still synthesised no silence, missed
+no video frame and recorded no discontinuity, which is worth knowing separately
+from the rate.
+
+**It is linear, not stepped.** In both hours every one of the sixty per-minute
+fits has the same sign, and they sit between −0.43 and −0.91 ppm in the first
+and between −0.31 and −0.87 ppm in the second, against a per-minute standard
+error of 0.12 ppm — so the minute-to-minute variation is barely outside the
+noise of measuring a minute. The offset walks steadily to its final value with
+no jump anywhere in it, and neither run recorded a discontinuity or a deadband
+correction. That is a residual crystal error being tracked, not an event: it is
+the shape resampling is the right answer to, and the shape that says nothing
+else went wrong for an hour.
+
+**What it is worth against the correction being off.** The same endpoint,
+measured before the continuous correction existed, drifted at −4.35 ppm
+(−0.261 ms/min) — `docs/av-sync.md` records that run and the three others
+around it. Uncorrected, an hour of it is about −15.7 ms and the 20 ms deadband
+fires after roughly eighty minutes, putting the whole accumulated error back in
+one step. Corrected, the hour ends 2.4 ms out with nothing to step. So the
+correction removes about **six sevenths** of this endpoint's drift, and what is
+left is a seventh of a frame of video.
+
+**What this does not say.** It is two hours on one crystal in one machine, and
+the run-to-run spread on this endpoint is about a third of a part per million —
+a three-minute run on the same build measured −0.75 ppm — so the honest
+precision is a tenth of a part per million and the fourth digit of any single
+run is noise. It is also a measurement of the *timestamps the pipeline
+produces*, not of a finished file; what a muxer does with them afterwards is
+`docs/muxing.md`. And it says nothing about a second machine, which is the
+obvious next measurement and has not been taken.
+
 ### The default endpoint can move without anything failing
 
 A capture client keeps working when its endpoint stops being the default. That
@@ -205,16 +279,18 @@ range and nothing downstream has to clip. The sample rate and channel count are
 passed through untouched, and the endpoint's `dwChannelMask` is reported as a
 `ChannelMask` so that a 5.1 recording is not labelled by guesswork.
 
-**Sample rate and channel count are still untouched, but every source's own
-samples are now nudged by a fraction of a percent to stay aligned with the
-reference clock** (issue #30, [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
-That is a correction against drift within one source's declared rate, not a
-conversion between two different declared rates: two sources captured at
-genuinely different sample rates still cannot be combined without a real
-resampling stage, which is why the compatibility mix still refuses one (see
-[What it will not do](#the-compatibility-mix)). Downmixing is a decision about
-what the user hears, which this crate is not entitled to make on its own
-(AGENTS.md section 21).
+**A capture's declared sample rate and channel count are still untouched, but
+every source's own samples are now nudged by a fraction of a percent to stay
+aligned with the reference clock** (issue #30,
+[above](#loopback-delivers-nothing-while-the-endpoint-is-silent)). That is a
+correction against drift within one source's declared rate. Converting between
+two *different* declared rates is a separate thing, and it happens in exactly
+one place: the compatibility mix, on the copy it holds, so that a 44.1 kHz
+microphone is in the default track of a recording made on a 48 kHz endpoint (see
+[Sources at different sample rates](#the-compatibility-mix)). No track a
+recording contains is resampled between rates — a 44.1 kHz capture is a 44.1 kHz
+track. Downmixing is a decision about what the user hears, which this crate is
+not entitled to make on its own (AGENTS.md section 21).
 
 ## Device changes during a recording
 
@@ -247,12 +323,19 @@ silence in somebody's recording.
 
 The last row of the second kind — a different sample rate — is the one
 compromise. A track's format is fixed when the capture opens, because a muxer
-that has written a stream header cannot be handed 44.1 kHz halfway through, and
-this crate has no rate-conversion resampler: issue #30 keeps one source's own
-clock aligned with the reference clock over a long recording, which is a
-different problem from converting between two endpoints that disagree about
-the shape of a frame. Changing shape underneath the caller would be worse than
-silence, and ending the recording over a headset would be worse still, so the
+that has written a stream header cannot be handed 44.1 kHz halfway through.
+
+There is a rate converter in this crate now
+([issue #30](https://github.com/wildware-uk/clipped/issues/30), see
+[Sources at different sample rates](#the-compatibility-mix)), and it is
+deliberately **not** wired in here. The compatibility mix converts a source's
+rate because the mix is a derived track that is entitled to be a combination of
+its sources; a capture's own track is not, and running a device change through a
+resampler would mean that half of somebody's microphone track was the samples
+their microphone produced and half was samples this crate invented, with nothing
+in the file to say where the join was. Doing that quietly is what AGENTS.md
+section 22 rules out. Changing shape underneath the caller would be worse than
+silence, ending the recording over a headset would be worse still, so the
 capture says what happened, keeps the timeline running, and waits.
 
 Opening is the one asymmetry: `SystemAudioCapture::open` fails with
@@ -830,15 +913,41 @@ than asserting it. There is no look-ahead, deliberately: a true brickwall limite
 delays the signal by a few milliseconds, and a mix that is late against the
 picture to avoid an artefact nobody can hear is a bad trade.
 
-**What it will not do.** It does not convert between sample rates, so a source
-captured at a rate the mix is not being written at is refused when it is
-*added* — before the recording starts, with a message saying so — rather than
-dropped from the mix during it. [Issue #30](https://github.com/wildware-uk/clipped/issues/30)
-keeps a single source's own clock from drifting against the reference clock
-over a long recording ([above](#loopback-delivers-nothing-while-the-endpoint-is-silent));
-it does not convert between two sources that were never at the same rate to
-begin with, which is a genuine resampling stage this mixer still does not
-have. Channel layouts are handled for the cases a recording actually produces:
+**Sources at different sample rates.** A 44.1 kHz headset microphone beside a
+48 kHz render endpoint is ordinary hardware, so the mix converts a source whose
+rate is not its own rather than refusing it. It used to refuse it, and the
+consequence was worse than it sounds: the source was left out of the
+compatibility mix, so the one track a player that takes a track arbitrarily
+takes had no microphone in it, and the only sign was a log line.
+
+The conversion is a windowed-sinc interpolator in
+`crates/audio/src/mix/rate.rs`, 64 taps with a Blackman window and 256
+interpolated fractional positions, and it is worth being exact about what it
+costs:
+
+| | |
+| --- | --- |
+| Passband | flat to within 0.01 dB from 100 Hz to 18 kHz, 44.1 kHz to 48 kHz, measured by `the_passband_is_flat_across_everything_a_person_can_hear` |
+| Images | more than 60 dB down. Linear interpolation — which is what `src/resample.rs` does, for a different job — leaves the image of a 10 kHz tone about 23 dB down, which is plainly audible |
+| Aliasing when converting *down* | the cutoff follows the lower of the two rates, so content above the output's Nyquist frequency is removed rather than folded back into the audible band |
+| Delay | 32 input frames, which is a constant and is therefore subtracted: a converted source lands where its capture stamped it, to within a tenth of a millisecond |
+| Work | 64 multiply-accumulates per output frame per channel — about 6 million a second for a stereo source at 48 kHz — paid **only** by a source whose rate differs from the mix's |
+
+**What it does not touch is the source's own track.** The conversion happens on
+the copy the mixer holds; `Mixer::contribute` takes `&[f32]` and the borrow
+checker is what enforces that. A 44.1 kHz microphone is still written to its own
+track as 44.1 kHz samples, unresampled and unmixed, which is what AGENTS.md
+section 22 is about. The compatibility mix is a combination by definition, and
+this is the one place a combination is allowed to happen.
+
+That is a different problem from
+[the clock correction](#loopback-delivers-nothing-while-the-endpoint-is-silent),
+which keeps a single source's own clock from drifting against the reference
+clock and applies to every capture whether or not any rate conversion is
+happening.
+
+**What it will not do.** Channel layouts are handled for the cases a recording
+actually produces:
 channel for channel, a mono source spread across every channel of the mix, and
 any source folded into a mono mix. A genuine downmix — 5.1 into stereo — needs
 a coefficient table, which is a decision about what the user hears, and is
@@ -1076,6 +1185,15 @@ cargo test -p clipped-audio
   ratio converging on `frames * ratio` rather than drifting away from it; a
   reset discarding carried state rather than blending it into the next
   packet. Also machine-independent.
+- **The rate conversion**, in `src/mix/rate.rs`: a tone keeping its frequency
+  and its amplitude across 44.1 kHz to 48 kHz, the image a linear interpolator
+  would leave at 13.9 kHz measuring 60 dB down instead, content above the
+  output's Nyquist frequency being removed rather than folded back into the
+  audible band, a constant staying constant at every fractional position, the
+  two channels of a stereo source staying out of each other, the frame count
+  over ten minutes tracking the ratio rather than its own rounding, and a reset
+  starting from silence. Every one of them measures the samples rather than
+  counting them, and all of them run on a machine with no sound card.
 - **The conversions**, in `src/format.rs` and `src/windows/endpoint.rs`: every
   endpoint sample format converting to the same amplitude, 24-bit sign
   extension, the mix format Windows actually reports here, a 44.1 kHz 5.1
@@ -1347,17 +1465,12 @@ Written during M2, alongside the code:
   the track off (SPEC.md section 13). What the mix does with what it is given is
   written above; the remaining half of
   [issue #29](https://github.com/wildware-uk/clipped/issues/29) is the wiring.
-- A drift measurement taken from an actual multi-hour recording on real
-  hardware, the way the numbers elsewhere on this page were taken, rather than
-  from the synthetic packet sequences `crates/audio/src/timeline.rs` and
-  `crates/audio/src/resample.rs` are unit tested against
-  ([issue #30](https://github.com/wildware-uk/clipped/issues/30) — the
-  continuous correction itself, and what it replaced, are described
-  [above](#loopback-delivers-nothing-while-the-endpoint-is-silent)).
-  Converting between two sources at genuinely different declared sample rates
-  — as opposed to correcting one source's own clock against the reference
-  clock, which is what is built — is a separate resampling stage neither this
-  crate nor the compatibility mix has.
+- A drift measurement over longer than an hour, and on a second machine. What
+  has been measured is [one hour on one
+  endpoint](#what-an-hour-of-real-drift-correction-measures)
+  ([issue #30](https://github.com/wildware-uk/clipped/issues/30)); what that
+  cannot say is whether a second crystal behaves the same way, and only a
+  second machine can.
 - Following an endpoint whose mix format differs from the one a recording
   started with, which today produces silence and a `Capture::FormatChanged`.
 - Per-source processing — gain, mute, noise suppression, gate, compressor,

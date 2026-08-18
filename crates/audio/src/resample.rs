@@ -19,8 +19,11 @@
 //! can do is round off a sample that is already almost exactly where its
 //! neighbour is. A higher-order resampler buys quality that matters when
 //! converting between genuinely different rates — 44.1 kHz to 48 kHz, say —
-//! which is not what this module is for (`crate::format` still refuses that;
-//! see its module documentation). For a correction this small, linear
+//! which is not what this module is for. `crate::mix::rate` is: it is a
+//! windowed-sinc interpolator, it is twenty times the work per frame, and it is
+//! run only on the compatibility mix's copy of a source whose rate is not the
+//! mix's, while this module runs on every capture. For a correction this small,
+//! linear
 //! interpolation is the simple thing AGENTS.md section 1 asks to prefer, and
 //! it needs no new dependency (AGENTS.md section 10).
 //!

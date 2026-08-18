@@ -25,7 +25,7 @@
 //! [`Mixer::contribute`] takes `&[f32]`, and the borrow checker is what enforces
 //! it.
 //!
-//! # The three problems it actually has to solve
+//! # The problems it actually has to solve
 //!
 //! **Sources arrive on different clocks and at different times.** A microphone
 //! opened half a second after the game, or a source that produces its first
@@ -34,6 +34,16 @@
 //! the mix it is added to — and never appended. Concatenating instead would
 //! make the mix a recording of the same session with every source sliding
 //! against every other.
+//!
+//! **Sources arrive at different sample rates.** A 44.1 kHz headset microphone
+//! beside a 48 kHz render endpoint is ordinary hardware, and a mix that refused
+//! one of them left the microphone out of the one track a player that takes a
+//! track arbitrarily is going to take — which is the failure this whole module
+//! exists to prevent, arriving by another route. So a source at another rate is
+//! converted to the mix's ([`rate`]), on the copy this module holds. What that
+//! costs and what it does to the samples is that module; what it does *not*
+//! touch is the source's own track, which still gets the capture's own samples
+//! at the capture's own rate.
 //!
 //! **Sources clip when they sum.** Two sources at −6 dBFS are exactly full
 //! scale and three are past it. [`limiter`] holds the result under the ceiling
@@ -64,13 +74,10 @@
 //!
 //! # What it does not do
 //!
-//! It does not resample and it does not remix channel layouts beyond the two
-//! cases a recording actually produces — a mono microphone into a stereo mix,
-//! and a mix folded to mono. Reconciling capture clocks that genuinely run at
-//! different rates is
-//! [issue #30](https://github.com/wildware-uk/clipped/issues/30), and a source
-//! this module cannot place is refused when it is added rather than silently
-//! left out of the mix later (AGENTS.md section 27).
+//! It does not remix channel layouts beyond the two cases a recording actually
+//! produces — a mono microphone into a stereo mix, and a mix folded to mono. A
+//! source this module cannot place is refused when it is added rather than
+//! silently left out of the mix later (AGENTS.md section 27).
 //!
 //! # Example
 //!
@@ -100,6 +107,7 @@
 
 mod level;
 mod limiter;
+mod rate;
 
 #[cfg(test)]
 mod tests;
@@ -114,6 +122,7 @@ use crate::time::AudioTimestamp;
 pub use level::Level;
 
 use limiter::Limiter;
+use rate::RateConverter;
 
 /// How long the mix waits for a source that has stopped contributing before it
 /// carries on without it.
@@ -170,18 +179,6 @@ pub struct MixSourceId(usize);
 pub enum MixError {
     /// The handle does not belong to this mixer.
     UnknownSource,
-    /// The source's sampling rate is not the mix's.
-    ///
-    /// Refused when the source is added rather than resampled: reconciling
-    /// capture clocks is [issue #30](https://github.com/wildware-uk/clipped/issues/30),
-    /// and a mix that quietly played a 44.1 kHz microphone at 48 kHz would put
-    /// somebody's voice in the recording nine percent sharp.
-    SampleRateMismatch {
-        /// What the source produces, in hertz.
-        source: u32,
-        /// What the mix is being written at, in hertz.
-        mix: u32,
-    },
     /// The source's channel layout is not one that can be placed into the mix's.
     ///
     /// A mono source goes into any mix, a source with the mix's own channel
@@ -215,12 +212,6 @@ impl fmt::Display for MixError {
             Self::UnknownSource => {
                 formatter.write_str("that audio source does not belong to this mix")
             }
-            Self::SampleRateMismatch { source, mix } => write!(
-                formatter,
-                "this source is captured at {source} Hz and the compatibility mix is being \
-                 written at {mix} Hz; Clipped does not resample between capture clocks yet, so \
-                 the source cannot be mixed"
-            ),
             Self::UnmixableLayout { source, mix } => write!(
                 formatter,
                 "a {source}-channel source cannot be placed into a {mix}-channel mix without a \
@@ -280,6 +271,14 @@ struct MixSource {
     format: AudioFormat,
     placement: Placement,
     level: Level,
+    /// Converts this source's samples to the mix's rate, or [`None`] when it is
+    /// already at the mix's rate — which is the ordinary case, and pays nothing.
+    converter: Option<RateConverter>,
+    /// How far behind its input [`converter`](Self::converter) runs, in
+    /// nanoseconds, and zero without one. Subtracted from every contribution's
+    /// timestamp so the conversion adds no offset of its own; see
+    /// [`RateConverter::delay_frames`].
+    conversion_delay: u64,
     /// The position on the shared clock this source has contributed up to, or
     /// [`None`] if it has contributed nothing at all yet.
     frontier: Option<u64>,
@@ -405,6 +404,11 @@ pub struct Mixer {
     /// The block last handed over, reused so that steady-state mixing allocates
     /// nothing.
     block: Vec<f32>,
+    /// Where a rate-converted contribution is put before it is placed. Owned by
+    /// the mixer rather than by each source so that there is one of them
+    /// however many sources need converting, and reused for the same reason
+    /// [`block`](Self::block) is.
+    converted: Vec<f32>,
     limiter: Limiter,
     report: MixReport,
 }
@@ -448,6 +452,7 @@ impl Mixer {
             emitted: 0,
             pending: Vec::new(),
             block: Vec::new(),
+            converted: Vec::new(),
             limiter: Limiter::new(format.sample_rate()),
             report: MixReport::default(),
         }
@@ -471,32 +476,47 @@ impl Mixer {
     /// `source` says which track it is, for the `audio_source` field this
     /// crate's diagnostics carry (docs/logging.md).
     ///
+    /// A source at a rate the mix is not being written at is **converted to the
+    /// mix's rate** rather than refused. That combination is ordinary hardware
+    /// — a 44.1 kHz headset microphone beside a 48 kHz render endpoint — and the
+    /// alternative left the microphone out of the one track a player that takes
+    /// a track arbitrarily is going to take. What is converted is the copy this
+    /// mix holds: `src/mix/rate.rs` says what the conversion costs and what it
+    /// does to the samples, and the source's own isolated track is not touched
+    /// by any of it.
+    ///
     /// # Errors
     ///
-    /// [`MixError::SampleRateMismatch`] and [`MixError::UnmixableLayout`] when
-    /// the source cannot be placed into this mix's format. Refused here, before
-    /// the recording starts, rather than dropped quietly during it: a caller
-    /// that is told can record the source on its own track and say that the mix
-    /// does not contain it, which is the honest outcome (AGENTS.md section 27).
+    /// [`MixError::UnmixableLayout`] when the source's channel layout cannot be
+    /// placed into this mix's. Refused here, before the recording starts,
+    /// rather than dropped quietly during it: a caller that is told can record
+    /// the source on its own track and say that the mix does not contain it,
+    /// which is the honest outcome (AGENTS.md section 27).
     pub fn add_source(
         &mut self,
         source: AudioSource,
         format: AudioFormat,
         level: Level,
     ) -> Result<MixSourceId, MixError> {
-        if format.sample_rate() != self.format.sample_rate() {
-            return Err(MixError::SampleRateMismatch {
-                source: format.sample_rate().get(),
-                mix: self.format.sample_rate().get(),
-            });
-        }
         let placement = Placement::of(format.channels().get(), self.format.channels().get())?;
+        let converter = (format.sample_rate() != self.format.sample_rate()).then(|| {
+            RateConverter::new(
+                format.sample_rate().get(),
+                self.format.sample_rate().get(),
+                format.channels().get(),
+            )
+        });
+        let conversion_delay = converter.as_ref().map_or(0, |converter| {
+            format.frames_to_nanos(converter.delay_frames())
+        });
 
         self.sources.push(MixSource {
             source,
             format,
             placement,
             level,
+            converter,
+            conversion_delay,
             frontier: None,
             reported_late: false,
         });
@@ -565,16 +585,71 @@ impl Mixer {
         at: AudioTimestamp,
         samples: &[f32],
     ) -> Result<(), MixError> {
-        let channels = usize::from(self.source(source)?.format.channels().get());
+        let format = self.source(source)?.format;
+        let channels = usize::from(format.channels().get());
         if samples.len() % channels != 0 {
             return Err(MixError::PartialFrame {
                 samples: samples.len(),
                 channels: channels as u16,
             });
         }
+        // The span these samples cover comes from the *source's* format, which
+        // is the only thing that knows how long one of its frames lasts. It is
+        // what the mix's own frame count is derived from below, so a source at
+        // another rate occupies the time it really occupies rather than the
+        // time the same number of the mix's frames would.
+        let span = format.frames_to_nanos((samples.len() / channels) as u64);
+
+        if self.sources[source.0].converter.is_some() {
+            // Taken out and put back so that the conversion can borrow the
+            // source and the buffer at once; the buffer's capacity survives the
+            // round trip, so steady-state conversion still allocates nothing.
+            let mut converted = core::mem::take(&mut self.converted);
+            let delay = self.sources[source.0].conversion_delay;
+            self.sources[source.0]
+                .converter
+                .as_mut()
+                .expect("the converter was there a line ago")
+                .process(samples, &mut converted);
+            // Never before the mix's own first frame: at the start of a
+            // recording the correction would otherwise put the filter's
+            // fade-in ahead of the anchor, where it would be counted as a
+            // source arriving late and reported as one. Clamping moves that
+            // fade-in a fraction of a millisecond later, once, and leaves every
+            // packet after the first exactly where the correction puts it.
+            let shifted = at.as_nanos().saturating_sub(delay);
+            let shifted = self.anchor.map_or(shifted, |anchor| shifted.max(anchor));
+            let result = self.mix_in(
+                source,
+                AudioTimestamp::from_nanos(shifted),
+                &converted,
+                span,
+            );
+            self.converted = converted;
+            return result;
+        }
+
+        self.mix_in(source, at, samples, span)
+    }
+
+    /// Adds one source's samples, already in the mix's sample rate, to the
+    /// accumulator.
+    ///
+    /// `span` is how long the samples this came from really lasted, which is
+    /// not the same as how long `samples` lasts once a rate conversion has
+    /// changed the frame count by a fraction of a frame either way. The mix
+    /// places by `span`, because that is what the source's clock said.
+    fn mix_in(
+        &mut self,
+        source: MixSourceId,
+        at: AudioTimestamp,
+        samples: &[f32],
+        span: u64,
+    ) -> Result<(), MixError> {
+        let channels = usize::from(self.source(source)?.format.channels().get());
         let frames = (samples.len() / channels) as u64;
 
-        let Some(placed) = self.place(source, at, frames)? else {
+        let Some(placed) = self.place(source, at, frames, span)? else {
             return Ok(());
         };
         let level = self.sources[source.0].level.as_linear();
@@ -637,10 +712,21 @@ impl Mixer {
         at: AudioTimestamp,
         frames: u64,
     ) -> Result<(), MixError> {
+        let format = self.source(source)?.format;
+        let span = format.frames_to_nanos(frames);
+        if let Some(converter) = self.sources[source.0].converter.as_mut() {
+            // Silence is a stretch of the source the endpoint never described,
+            // so the packet after it is not adjacent in time to the packet
+            // before it. Interpolating across that join would blend two sounds
+            // that were never next to each other, which is the case
+            // `RateConverter::reset` exists for.
+            converter.reset();
+        }
+
         // Placed exactly like audio, so a silent stretch advances this source's
         // position in the mix and nothing else. `place` allocates the frames the
         // silence covers only when a later contribution needs them.
-        self.advance(source, at, frames)?;
+        self.advance(source, at, self.format.nanos_to_frames(span), span)?;
         Ok(())
     }
 
@@ -744,8 +830,9 @@ impl Mixer {
         source: MixSourceId,
         at: AudioTimestamp,
         frames: u64,
+        span: u64,
     ) -> Result<Option<Placed>, MixError> {
-        let Some(placed) = self.advance(source, at, frames)? else {
+        let Some(placed) = self.advance(source, at, frames, span)? else {
             return Ok(None);
         };
 
@@ -759,11 +846,18 @@ impl Mixer {
 
     /// Works out where a contribution belongs and moves the source's position
     /// on, without touching the accumulator.
+    ///
+    /// `frames` is counted in the *mix's* frames, because that is what the
+    /// accumulator is indexed by. `span` is how long the source said its own
+    /// samples lasted, which is what its position is moved on by: the two are
+    /// the same number of nanoseconds for a source at the mix's rate, and
+    /// deliberately independent for one that is not.
     fn advance(
         &mut self,
         source: MixSourceId,
         at: AudioTimestamp,
         frames: u64,
+        span: u64,
     ) -> Result<Option<Placed>, MixError> {
         self.source(source)?;
         if frames == 0 {
@@ -819,7 +913,7 @@ impl Mixer {
             self.report.discarded_frames += frames - skipped - placeable;
         }
 
-        let ends_at = at + format.frames_to_nanos(frames);
+        let ends_at = at + span;
         let frontier = &mut self.sources[source.0].frontier;
         *frontier = Some(frontier.map_or(ends_at, |reached| reached.max(ends_at)));
 
