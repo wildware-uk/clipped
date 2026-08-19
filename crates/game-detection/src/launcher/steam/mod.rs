@@ -74,6 +74,7 @@
 //!   need it, which an earlier version of this module had wrong; [`icon`] says
 //!   where it actually is.
 
+mod appinfo;
 mod error;
 mod icon;
 #[cfg(windows)]
@@ -122,6 +123,12 @@ pub struct Steam {
     libraries: Vec<PathBuf>,
     apps: Vec<SteamApp>,
     problems: Vec<SteamError>,
+    /// What Steam calls each application, where it says.
+    ///
+    /// Empty whenever `appinfo.vdf` could not be read or is a revision this
+    /// build does not know, and empty means "no opinion about anything" —
+    /// see [`appinfo`].
+    app_types: appinfo::AppTypes,
 }
 
 /// One application Steam has a manifest for.
@@ -280,11 +287,28 @@ impl Steam {
             "read the local Steam installation"
         );
 
+        let app_types = appinfo::AppTypes::read(root);
+        if app_types.is_empty() {
+            // Not a failure, and deliberately not a warning: it is what happens
+            // on a Steam whose catalogue this build cannot read, and the whole
+            // design is that detection then behaves exactly as it did before
+            // the catalogue was consulted at all (issue #671).
+            debug!(
+                "Steam said nothing about what its applications are, so every one it installed                  is taken to be a game"
+            );
+        } else {
+            debug!(
+                typed_applications = app_types.len(),
+                "read what Steam calls each application"
+            );
+        }
+
         Ok(Self {
             root: root.to_path_buf(),
             libraries,
             apps,
             problems,
+            app_types,
         })
     }
 
@@ -387,6 +411,20 @@ impl Steam {
     ) -> ProcessCandidate<'a> {
         let candidate = ProcessCandidate::new(executable_name).with_path(executable_path);
         match self.app_for_path(executable_path) {
+            // Steam types this one as something nobody plays, so it is not
+            // claimed at all. Since issue #664 a claim alone is enough to start
+            // recording, and `SteamVR`, `Source SDK Base 2006`, a dedicated
+            // server and an editor are all applications by every other measure
+            // Steam exposes (issue #671).
+            //
+            // Not claiming is deliberately weaker than refusing: the candidate
+            // still carries its name and path, so a catalogue entry written for
+            // one of these on purpose still matches it on the lower rungs.
+            Some(app)
+                if self.app_types.kind_of(&app.app_id) == Some(appinfo::AppKind::NotPlayable) =>
+            {
+                candidate
+            }
             Some(app) => candidate.from_launcher(LauncherKind::Steam, &app.app_id),
             None => candidate,
         }

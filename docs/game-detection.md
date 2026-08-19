@@ -496,9 +496,15 @@ all of this, which is the reason to write one.
 name, per-game defaults, a child-process list and a `not_the_game` list, none of
 which can be derived from a claim. The claim is the floor, not the ceiling.
 
-**What is still not a game.** A process no launcher claims. Nothing installed
-it, so there is no evidence it is one, and that is most of what runs on a
-desktop.
+**What is still not a game.** Two things. A process no launcher claims — nothing
+installed it, so there is no evidence it is one, and that is most of what runs on
+a desktop. And an application Steam itself types as something nobody plays
+([#671]): `SteamVR`, `Source SDK Base 2006`, a dedicated server and an editor
+are all applications by every measure `appmanifest` exposes, so the type is read
+from `appcache/appinfo.vdf` instead. Steam is not asked whether something is a
+game so much as told, and only when it says so plainly: an unrecognised type, an
+unreadable file and a revision this build has never seen all mean *no opinion*,
+and detection then behaves exactly as it would without the file.
 
 ### What a launcher may not claim
 
@@ -1632,3 +1638,4 @@ Both halves are addressed, because either alone would leave it:
   avoid.
 [#459]: https://github.com/wildware-uk/clipped/issues/459
 [#664]: https://github.com/wildware-uk/clipped/issues/664
+[#671]: https://github.com/wildware-uk/clipped/issues/671
