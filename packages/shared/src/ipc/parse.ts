@@ -61,6 +61,8 @@ import type {
   JsonObject,
   JsonValue,
   LibraryClip,
+  ClipDocument,
+  ClipDocumentSaved,
   LibraryEventLane,
   RestoredItem,
   TrashEmptied,
@@ -412,6 +414,10 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'library_events':
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
+    case 'library_clip_document':
+      return { reply: 'library_clip_document', clip: readClipDocument(reply['clip']) };
+    case 'clip_document_saved':
+      return { reply: 'clip_document_saved', saved: readClipDocumentSaved(reply['saved']) };
     case 'library_trash':
       return { reply: 'library_trash', trash: readTrashListing(reply['trash']) };
     case 'restored':
@@ -1302,6 +1308,39 @@ function readEventMark(value: JsonValue | undefined): LibraryEventMark {
     at: numberField(mark, 'at', what),
     kind: stringField(mark, 'kind', what),
     source: stringField(mark, 'source', what),
+  };
+}
+
+/**
+ * One clip's edit document.
+ *
+ * `document` is read as a plain string and parsed by nothing here. It is the
+ * JSON `clipped_edit` writes, and `apps/desktop/src/editor/document.ts` is the
+ * one place in this window that knows its shape — reading it twice, in two
+ * places, is how the two would come to disagree.
+ */
+function readClipDocument(value: JsonValue | undefined): ClipDocument {
+  const clip = object(value, "a clip's edit document");
+  const what = "a clip's edit document";
+  const converted = optionalNumberField(clip, 'converted_from', what);
+  return {
+    clip: stringField(clip, 'clip', what),
+    document: stringField(clip, 'document', what),
+    // Kept absent rather than defaulted, because a zero would read as "format
+    // 0" and any number at all reads as "this was converted".
+    ...(converted === undefined ? {} : { converted_from: converted }),
+    synthesised: booleanField(clip, 'synthesised', what),
+  };
+}
+
+/** What a save did. */
+function readClipDocumentSaved(value: JsonValue | undefined): ClipDocumentSaved {
+  const saved = object(value, 'a saved edit');
+  const what = 'a saved edit';
+  const superseded = optionalNumberField(saved, 'superseded', what);
+  return {
+    clip: stringField(saved, 'clip', what),
+    ...(superseded === undefined ? {} : { superseded }),
   };
 }
 

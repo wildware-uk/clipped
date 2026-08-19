@@ -42,9 +42,10 @@ use crate::diagnostics::Diagnostics;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
-    EmptyTrash, FavouriteMark, LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage,
-    LibrarySessions, LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock,
-    TrashEmptied, TrashListing,
+    ClipDocument, ClipDocumentSaved, EmptyTrash, FavouriteMark, LibraryClipDocument,
+    LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
+    LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SaveClipDocument, SetFavourite,
+    SetLock, TrashEmptied, TrashListing,
 };
 use crate::message::Request;
 use crate::playback::{OpenPlayback, PlaybackStream};
@@ -85,6 +86,21 @@ pub enum Command {
 
     /// The game events of one recording, placed in its file.
     LibraryEvents(LibraryEvents),
+    /// Read one clip's edit document: what the clip *is*, as text.
+    ///
+    /// The command the editor opens a clip with. The document lives in a
+    /// column of the library index and the window can reach neither the column
+    /// nor the crate that reads it, so the recorder converts an older one,
+    /// builds a starting one for a clip that has never been edited, and hands
+    /// back the text (`docs/editing.md`, issue #306).
+    LibraryClipDocument(LibraryClipDocument),
+    /// Store an edited document against a clip.
+    ///
+    /// The only command in this protocol that changes what a clip *is*, and it
+    /// changes nothing else: no recording is modified, moved, truncated or
+    /// re-encoded by it (AGENTS.md sections 56 and 57). A document the recorder
+    /// cannot read is refused and the stored one is left exactly as it was.
+    SaveClipDocument(SaveClipDocument),
     /// What is in the trash: everything deleted and not yet emptied.
     ///
     /// A read, like the three above it. Restoring and emptying are separate
@@ -223,6 +239,8 @@ impl Command {
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
             Self::LibraryEvents(_) => "library_events",
+            Self::LibraryClipDocument(_) => "library_clip_document",
+            Self::SaveClipDocument(_) => "save_clip_document",
             Self::LibraryTrash(_) => "library_trash",
             Self::RestoreFromTrash(_) => "restore_from_trash",
             Self::EmptyTrash(_) => "empty_trash",
@@ -265,6 +283,8 @@ impl Command {
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
+            "library_clip_document" => Ok(Self::LibraryClipDocument(parse_params(request)?)),
+            "save_clip_document" => Ok(Self::SaveClipDocument(parse_params(request)?)),
             "library_trash" => Ok(Self::LibraryTrash(parse_params(request)?)),
             "restore_from_trash" => Ok(Self::RestoreFromTrash(parse_params(request)?)),
             "empty_trash" => Ok(Self::EmptyTrash(parse_params(request)?)),
@@ -313,6 +333,8 @@ impl Command {
             Self::GetSettings(request) => serde_json::to_value(request),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
+            Self::LibraryClipDocument(request) => serde_json::to_value(request),
+            Self::SaveClipDocument(request) => serde_json::to_value(request),
             Self::GetStorage(request) => serde_json::to_value(request),
             Self::LibraryTrash(request) => serde_json::to_value(request),
             Self::RestoreFromTrash(request) => serde_json::to_value(request),
@@ -743,6 +765,25 @@ pub enum Reply {
         /// Always sent, so that "none" and "not asked" are told apart by
         /// whether the reply arrived rather than by guessing at an empty field.
         lane: LibraryEventLane,
+    },
+    /// One clip's edit document.
+    LibraryClipDocument {
+        /// The document as text, and how it was arrived at.
+        ///
+        /// A clip that cannot produce one is a refusal rather than this reply
+        /// with an empty string: an editor drawing an empty timeline over a
+        /// clip it failed to open is indistinguishable from a broken one
+        /// (AGENTS.md section 27).
+        clip: ClipDocument,
+    },
+    /// An edited document was stored.
+    ///
+    /// Sent only after the write has been committed, for the reason
+    /// [`Self::ReplaySaved`] is: a window that said "saved" before that would
+    /// be telling somebody their edit was safe when it was not.
+    ClipDocumentSaved {
+        /// Which clip, and what was kept.
+        saved: ClipDocumentSaved,
     },
     /// What the library occupies, and what a limit would do about it.
     Storage {

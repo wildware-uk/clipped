@@ -350,6 +350,125 @@ pub struct LibraryGame {
     pub missing: u64,
 }
 
+/// Asking for one clip's edit document.
+///
+/// The document is what a clip *is* — which recordings to play, which parts of
+/// them, in which order, how loud each track is and what is drawn over the
+/// picture — and it is stored as text in a column of the library index
+/// (`docs/editing.md`, "Where a document lives"). The window cannot read that
+/// column: it has no file-system permission and may not link
+/// `clipped-library` or `clipped-edit`, which
+/// `tests/integration/tests/workspace_layering.rs` asserts. So it asks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryClipDocument {
+    /// The clip to open, as the library identifies it.
+    ///
+    /// A string carrying [`LibraryClip::clip_id`], for the reason
+    /// [`LibraryEvents::recording`] is one: the identifier a window was given
+    /// travels back exactly as it arrived, rather than being turned into a
+    /// number and back on the way.
+    pub clip: String,
+}
+
+/// One clip's edit document, as text.
+///
+/// # Why text and not a parsed document
+///
+/// `docs/editing.md` settles it: "a document crosses the IPC boundary as the
+/// same JSON, rather than being converted into a second representation for the
+/// desktop application". Restating the model here would be a second
+/// implementation of it (AGENTS.md section 55) that could disagree with
+/// `crates/edit` — and this crate may not link `clipped-edit` to prevent that,
+/// because both are at layer 0 of README.md's dependency table.
+///
+/// So this carries the string, and the window's own reader
+/// (`apps/desktop/src/editor/document.ts`) is what parses it.
+///
+/// # What the text is guaranteed to be
+///
+/// **The version this recorder writes**, always. A stored document older than
+/// the recorder's build is converted before it is sent, and
+/// [`Self::converted_from`] says so; one *newer* than the recorder's build is
+/// refused rather than sent, because a recorder that cannot read a document
+/// cannot honestly hand it to a window either.
+///
+/// That is what makes the window's own refusal of an older document correct
+/// rather than a limitation: it never sees one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipDocument {
+    /// The clip this is, echoed from the request.
+    ///
+    /// Echoed so that a window which asked about two clips can tell the
+    /// answers apart without holding the question, which is what
+    /// [`LibraryEventMark::recording`] is for on a mark.
+    pub clip: String,
+    /// The document itself, as `clipped_edit::EditDocument::write` writes it.
+    pub document: String,
+    /// The format the *stored* text was in, when it was older than this one.
+    ///
+    /// Absent is the ordinary case: the stored text was already the version
+    /// this build writes and nothing was converted.
+    ///
+    /// **Present does not mean anything was written.** Reading converts in
+    /// memory only; the stored text is still the older one, and stays that way
+    /// until somebody saves. It is here because a window that knows the clip it
+    /// is showing came from an older format can say so, and because the same
+    /// number comes back from a save as
+    /// [`ClipDocumentSaved::superseded`] — the moment the original is actually
+    /// kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from: Option<u32>,
+    /// Whether the library held no document for this clip and this is a
+    /// starting one.
+    ///
+    /// True for a saved replay: a clip made before there was an editor is a
+    /// file and a window of a recording, with `clips.edit` still NULL. The
+    /// recorder builds the document that means "this recording, this span, no
+    /// edits" rather than leaving the window to invent one, because two builds
+    /// inventing it separately would disagree about what an unedited clip is.
+    ///
+    /// **Nothing has been stored.** The clip's row is untouched until a save,
+    /// so a user who opens a replay and closes it again has changed nothing.
+    pub synthesised: bool,
+}
+
+/// Storing an edited document against a clip.
+///
+/// The other direction of [`LibraryClipDocument`], and the one with the
+/// data-safety rule attached. Nothing here touches a recording: a clip is
+/// metadata over recordings that are never modified, moved, truncated or
+/// re-encoded because somebody edited one (AGENTS.md sections 56 and 57).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveClipDocument {
+    /// The clip to store it against, as the library identifies it.
+    pub clip: String,
+    /// The document, as the window has it.
+    ///
+    /// Validated before anything is written — `crates/edit` validates on every
+    /// read *and* every write — so text that is not a document this build can
+    /// read is refused and the stored one is left exactly as it was. A window
+    /// cannot corrupt a clip by sending nonsense; it can only fail to save.
+    pub document: String,
+}
+
+/// What a save did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipDocumentSaved {
+    /// The clip, echoed from the request.
+    pub clip: String,
+    /// The format the text this save replaced was in, when it was older than
+    /// the one now stored and was therefore **kept**.
+    ///
+    /// This is `docs/editing.md`'s rule paid: "the caller decides whether to
+    /// store the result, and must keep the original when it does". Present
+    /// means a copy of the older text is in the index beside the new one and
+    /// will not be overwritten by a later save. Absent means there was nothing
+    /// older to keep — either the stored text was already this version, or
+    /// there was no stored text at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

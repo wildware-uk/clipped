@@ -191,6 +191,23 @@ pub enum ErrorCode {
     /// a drive that is not plugged in — the fabricated state AGENTS.md section
     /// 27 forbids.
     LibraryUnavailable,
+    /// `edit_unreadable` — a clip's edit document is there and this build
+    /// cannot read it, and the message says what to do about it.
+    ///
+    /// Separate from [`Self::InvalidParameters`] because nothing is wrong with
+    /// the request: the clip exists and was asked for correctly. Separate from
+    /// [`Self::LibraryUnavailable`] because the library opened fine — it is one
+    /// clip that will not, and every other clip in the library still will.
+    ///
+    /// The case it is really for is the one that has to be survivable: a
+    /// document saved by a **newer** Clipped, opened on a machine the user has
+    /// not updated yet. That is not a fault, it is a version skew, and the only
+    /// correct response is to say so and change nothing — an older build that
+    /// rewrote a document it did not understand is precisely how somebody loses
+    /// the edit they made on their other machine (AGENTS.md sections 43 and
+    /// 56). A window that could not tell this from a corrupt library would
+    /// offer the wrong remedy for it.
+    EditUnreadable,
     /// `internal` — the recorder is at fault and cannot say more usefully.
     Internal,
     /// A code this build has never heard of, kept verbatim.
@@ -223,6 +240,7 @@ impl ErrorCode {
             Self::ExportFailed => "export_failed",
             Self::PlaybackFailed => "playback_failed",
             Self::LibraryUnavailable => "library_unavailable",
+            Self::EditUnreadable => "edit_unreadable",
             Self::Internal => "internal",
             Self::Other(code) => code,
         }
@@ -255,6 +273,7 @@ impl From<String> for ErrorCode {
             "export_failed" => Self::ExportFailed,
             "playback_failed" => Self::PlaybackFailed,
             "library_unavailable" => Self::LibraryUnavailable,
+            "edit_unreadable" => Self::EditUnreadable,
             "internal" => Self::Internal,
             _ => Self::Other(code),
         }

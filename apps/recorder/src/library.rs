@@ -53,12 +53,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
+use clipped_edit::{EditDocument, EditDocumentError, RecordingId, SourceSpan, SourceTime};
 use clipped_ipc::{
-    CategoryUsage, ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark,
-    LibraryEvents, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
-    LibrarySessions, LockMark, Preview, ProtectedGroup, ProtocolError, RecordingList,
-    RestoreFromTrash, RestoredItem, SetFavourite, SetLock, StorageLimits, StorageRecording,
-    StorageReport, TrashEmptied, TrashListing, TrashedItem, MAX_FRAME_BYTES, MOST_LISTED,
+    CategoryUsage, ClipDocument, ClipDocumentSaved, ErrorCode, FavouriteMark, LibraryClip,
+    LibraryClipDocument, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
+    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LockMark, Preview,
+    ProtectedGroup, ProtocolError, RecordingList, RestoreFromTrash, RestoredItem, SaveClipDocument,
+    SetFavourite, SetLock, StorageLimits, StorageRecording, StorageReport, TrashEmptied,
+    TrashListing, TrashedItem, MAX_FRAME_BYTES, MOST_LISTED,
 };
 use clipped_library::favourites::Favourite;
 use clipped_library::index::{
@@ -635,6 +637,287 @@ impl LibraryReader {
         })
     }
 
+    /// One clip's edit document, as text the window's reader can parse.
+    ///
+    /// This is what opens a clip in the editor (issue #306). The document lives
+    /// in `clips.edit` and the window can reach neither the column nor
+    /// `clipped_edit`, so everything that has to be decided about it is decided
+    /// here — in one place, which is the point.
+    ///
+    /// # Three things this does that the window must not
+    ///
+    /// **It converts.** A document written by an older build is brought forward
+    /// through `crates/edit`'s migration chain and sent at the current version,
+    /// with [`ClipDocument::converted_from`] saying what it was. In memory
+    /// only: nothing is written, and the stored text is still the older one
+    /// until somebody saves. That is what makes the window's own refusal of an
+    /// older document correct rather than a gap — it never receives one.
+    ///
+    /// **It synthesises.** A clip with no document at all is a saved replay,
+    /// made before there was an editor: a file, and a window of the recording
+    /// it came from. The document that means "this recording, this span, no
+    /// edits" is built here, from the columns migration 0004 keeps beside
+    /// `edit` for exactly this kind of question, and
+    /// [`ClipDocument::synthesised`] says so. It is built here and nowhere else
+    /// on purpose: two builds inventing a starting document separately would
+    /// disagree about what an unedited clip is, and the disagreement would only
+    /// show up the first time somebody saved one.
+    ///
+    /// **It refuses.** A document this build cannot read — one from a newer
+    /// Clipped above all — is [`ErrorCode::EditUnreadable`] with the sentence
+    /// `crates/edit` writes for it, and nothing is changed. An editor drawn
+    /// over an empty timeline instead would be indistinguishable from a broken
+    /// one (AGENTS.md section 27).
+    ///
+    /// Nothing here opens, reads or writes a media file. A document is metadata
+    /// over recordings that are never touched (AGENTS.md sections 56 and 57).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] if the clip is not named by an
+    /// identifier this library uses, if there is no such clip, if it is in the
+    /// trash, or if it has neither a document nor a recording to build one
+    /// from; [`ErrorCode::EditUnreadable`] if the stored document will not
+    /// open; and [`ErrorCode::LibraryUnavailable`] if the index could not be
+    /// read.
+    pub fn clip_document(
+        &self,
+        request: &LibraryClipDocument,
+    ) -> Result<ClipDocument, ProtocolError> {
+        // Before the database is opened, for the reason `events` parses its
+        // identifier first: a malformed one is the caller's mistake and worth
+        // saying so even on a machine whose library cannot be read.
+        let clip = clip_identifier(&request.clip, "library_clip_document")?;
+
+        let stored = self.with_database(|database| {
+            database
+                .connection()
+                .query_row(
+                    "SELECT clips.edit, \
+                            clips.title, \
+                            clips.deleted_at, \
+                            clips.source_recording_id, \
+                            clips.source_start_seconds, \
+                            clips.source_end_seconds, \
+                            recordings.duration_seconds \
+                     FROM clips \
+                     LEFT JOIN recordings \
+                         ON recordings.recording_id = clips.source_recording_id \
+                     WHERE clips.clip_id = ?1",
+                    [clip],
+                    |row| {
+                        Ok(StoredClip {
+                            edit: row.get(0)?,
+                            title: row.get(1)?,
+                            deleted_at: row.get(2)?,
+                            source_recording_id: row.get(3)?,
+                            source_start_seconds: row.get(4)?,
+                            source_end_seconds: row.get(5)?,
+                            recording_duration_seconds: row.get(6)?,
+                        })
+                    },
+                )
+                .map_err(|error| match error {
+                    clipped_storage::rusqlite::Error::QueryReturnedNoRows => no_such_clip(clip),
+                    other => unreadable(other),
+                })
+        })?;
+
+        if let Some(deleted_at) = stored.deleted_at.as_deref() {
+            // A clip in the trash is one somebody deleted. Opening it in an
+            // editor would offer to edit something that is on its way out, and
+            // a save against it would resurrect an edit into a row the next
+            // empty destroys. Putting it back first is the honest order, and it
+            // is a thing the user can actually do (issue #450).
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                format!(
+                    "clip {clip} was deleted on {deleted_at} and is in the trash. Restore it \
+                     before editing it."
+                ),
+            ));
+        }
+
+        match stored.edit.as_deref() {
+            Some(text) => {
+                let loaded =
+                    EditDocument::read(text).map_err(|error| unreadable_edit(clip, &error))?;
+                Ok(ClipDocument {
+                    clip: request.clip.clone(),
+                    // Written out again rather than sent verbatim, so that what
+                    // crosses is always the version this build writes: for a
+                    // converted document the stored text is the *old* one, and
+                    // sending it would hand the window exactly the thing it
+                    // refuses.
+                    document: loaded
+                        .document
+                        .write()
+                        .map_err(|error| unreadable_edit(clip, &error))?,
+                    converted_from: loaded.migrated.map(|migrated| migrated.from),
+                    synthesised: false,
+                })
+            }
+            None => Ok(ClipDocument {
+                clip: request.clip.clone(),
+                document: starting_document(clip, &stored)?,
+                converted_from: None,
+                synthesised: true,
+            }),
+        }
+    }
+
+    /// Stores an edited document against a clip.
+    ///
+    /// # What a save may not do
+    ///
+    /// It may not touch a recording, and cannot: this writes one `TEXT` column
+    /// of one row and opens no file (AGENTS.md sections 56 and 57).
+    ///
+    /// It may not store text that will not open again. The document is read and
+    /// validated first — `crates/edit` validates on every read *and* every
+    /// write — and what is stored is what the writer produced, so a window
+    /// sending nonsense fails to save rather than corrupting a clip. The stored
+    /// document is left exactly as it was in that case, which is what the
+    /// refusal says.
+    ///
+    /// And it may not lose the older text it replaced. When the document being
+    /// overwritten was in an older format, a copy of it goes into
+    /// `clips.edit_superseded` in the same transaction — `docs/editing.md`'s
+    /// "the caller decides whether to store the result, and must keep the
+    /// original when it does", paid. The copy is written once and never
+    /// overwritten: it holds the only text this build could not have produced,
+    /// and a second save replacing it with text this build wrote would destroy
+    /// the thing it is for.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] if the clip is not named by an
+    /// identifier this library uses, if there is no such clip, or if it is in
+    /// the trash; [`ErrorCode::EditUnreadable`] if the document sent will not
+    /// open, or if the one already stored will not, naming what to do about it;
+    /// and [`ErrorCode::LibraryUnavailable`] if the index could not be written.
+    pub fn save_clip_document(
+        &self,
+        request: &SaveClipDocument,
+        now: SystemTime,
+    ) -> Result<ClipDocumentSaved, ProtocolError> {
+        let clip = clip_identifier(&request.clip, "save_clip_document")?;
+
+        // Read, convert and validate before the database is opened at all. A
+        // document that will not open is the caller's mistake, and refusing it
+        // here means there is no path from a bad request to a write.
+        let incoming = EditDocument::read(&request.document)
+            .map_err(|error| refused_document(&error))?
+            .document;
+        let text = incoming.write().map_err(|error| refused_document(&error))?;
+
+        let at = rfc3339(now);
+
+        self.with_database_mut(|database| {
+            let transaction = database.transaction().map_err(|error| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    format!("the recording library could not be written: {error}"),
+                )
+            })?;
+
+            let (stored, deleted_at, already_kept): (Option<String>, Option<String>, bool) =
+                transaction
+                    .query_row(
+                        "SELECT edit, deleted_at, edit_superseded IS NOT NULL \
+                         FROM clips WHERE clip_id = ?1",
+                        [clip],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|error| match error {
+                        clipped_storage::rusqlite::Error::QueryReturnedNoRows => no_such_clip(clip),
+                        other => unreadable(other),
+                    })?;
+
+            if let Some(deleted_at) = deleted_at.as_deref() {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidParameters,
+                    format!(
+                        "clip {clip} was deleted on {deleted_at} and is in the trash. Restore it \
+                         before saving an edit to it."
+                    ),
+                ));
+            }
+
+            // What version the text about to be replaced was in. A document
+            // that will not read at all is refused rather than overwritten:
+            // this build cannot tell whether it is older or newer, and
+            // overwriting the one case it must not — a document from a build
+            // ahead of this one — is how somebody loses the edit they made on
+            // their other machine (AGENTS.md sections 43 and 56).
+            let superseding = match stored.as_deref() {
+                None => None,
+                Some(previous) => EditDocument::read(previous)
+                    .map_err(|error| unreadable_edit(clip, &error))?
+                    .migrated
+                    .map(|migrated| migrated.from),
+            };
+
+            let changed = match (superseding, already_kept) {
+                // The case the column exists for, and the only one that writes
+                // it: older text, and nothing kept for this clip yet.
+                //
+                // `AND edit_superseded IS NULL` in the statement is deliberate
+                // belt-and-braces and not the guard: this arm is, and removing
+                // the clause on its own breaks no test because the arm already
+                // makes the case unreachable. It is kept so that the statement
+                // is safe on its own terms — the next caller to reach for it
+                // gets write-once behaviour without having to know about this
+                // match — and it is documented as redundant so nobody mistakes
+                // it for the protection and relaxes the arm.
+                (Some(from), false) => transaction
+                    .execute(
+                        "UPDATE clips \
+                         SET edit = ?2, \
+                             edit_superseded = ?3, \
+                             edit_superseded_at = ?4, \
+                             edit_superseded_version = ?5 \
+                         WHERE clip_id = ?1 AND edit_superseded IS NULL",
+                        clipped_storage::rusqlite::params![
+                            clip,
+                            &text,
+                            stored.as_deref(),
+                            &at,
+                            from
+                        ],
+                    )
+                    .map_err(unreadable)?,
+                // Nothing older to keep, or an original already kept by an
+                // earlier save. Either way the copy is left alone.
+                _ => transaction
+                    .execute(
+                        "UPDATE clips SET edit = ?2 WHERE clip_id = ?1",
+                        clipped_storage::rusqlite::params![clip, &text],
+                    )
+                    .map_err(unreadable)?,
+            };
+
+            if changed == 0 {
+                return Err(no_such_clip(clip));
+            }
+
+            transaction.commit().map_err(|error| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    format!("the edit could not be saved: {error}"),
+                )
+            })?;
+
+            Ok(ClipDocumentSaved {
+                clip: request.clip.clone(),
+                // Only when the copy was actually written by *this* save. A
+                // reply saying an original was kept when an earlier save kept
+                // it would be a different claim about a different text.
+                superseded: if already_kept { None } else { superseding },
+            })
+        })
+    }
+
     /// Runs a read against the open database, opening it if this is the first
     /// question or if the last attempt failed.
     ///
@@ -864,6 +1147,180 @@ impl LibraryReader {
 
         write(held.as_mut().expect("the database was just opened"))
     }
+}
+
+/// The columns a clip's document is read or built from.
+///
+/// `title` and the three `source_*` fields are what migration 0004 deliberately
+/// keeps beside `edit` rather than folding into it, so that a question about a
+/// clip does not mean parsing a document. Building a starting document is
+/// exactly such a question.
+struct StoredClip {
+    /// The document, or `None` for a clip made before there was an editor.
+    edit: Option<String>,
+    /// What the clip is called, if anything.
+    title: Option<String>,
+    /// When it was deleted, for a clip that is in the trash.
+    deleted_at: Option<String>,
+    /// The recording it was cut from, when the library still knows.
+    source_recording_id: Option<i64>,
+    /// Where in that recording it starts.
+    source_start_seconds: Option<f64>,
+    /// And where it ends.
+    source_end_seconds: Option<f64>,
+    /// How long the whole recording is, for a clip that names no window.
+    recording_duration_seconds: Option<f64>,
+}
+
+/// The clip a request names, or why it names none.
+///
+/// Shaped like `events`' parse of a recording identifier, and refusing for the
+/// same reason: a window was handed this number by the index and sending
+/// something else back is a fault worth naming rather than a lookup that
+/// happens to find nothing.
+fn clip_identifier(clip: &str, command: &str) -> Result<i64, ProtocolError> {
+    clip.parse().map_err(|_| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "`{command}` was given `{clip}`, which is not a clip identifier this library uses"
+            ),
+        )
+    })
+}
+
+/// A clip the index does not have.
+fn no_such_clip(clip: i64) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidParameters,
+        format!("this library has no clip {clip}"),
+    )
+}
+
+/// A document that is stored and will not open.
+///
+/// The sentence comes from `crates/edit`, which is where the reason lives:
+/// a version this build is too old for says so and says to update, and a
+/// document that is not one at all says what the parser made of it. Restating
+/// either here would be a second, worse copy of a message the model already
+/// writes carefully.
+fn unreadable_edit(clip: i64, error: &EditDocumentError) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::EditUnreadable,
+        format!("clip {clip} could not be opened: {error}"),
+    )
+}
+
+/// A document the window sent that will not open.
+///
+/// [`ErrorCode::EditUnreadable`] rather than `invalid_parameters`, even though
+/// this one really is the caller's parameter, because the sentence the user
+/// needs is the same one and the remedy is the same one. What matters more is
+/// the second half of the message: **nothing was stored**. A save that refused
+/// has to say the clip is untouched, or the only safe thing to do with an
+/// editor that will not save is to close it and hope (AGENTS.md section 56).
+fn refused_document(error: &EditDocumentError) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::EditUnreadable,
+        format!("this edit was not saved: {error} The clip is exactly as it was."),
+    )
+}
+
+/// The document of a clip nobody has ever edited.
+///
+/// "This recording, this window of it, no edits" — which is what a saved replay
+/// is, and `EditDocument::from_recording` is the constructor written for
+/// exactly that (SPEC.md section 20). It is not a second edit model built here;
+/// it is the one the rest of Clipped uses, given the numbers the clip's row
+/// already holds.
+///
+/// A clip that names no recording cannot have one built: there is nothing for
+/// the document to play. That is refused rather than answered with an empty
+/// document, because an empty document is a legitimate thing — a clip somebody
+/// deleted everything from — and handing one back here would tell the user
+/// their clip was empty when the truth is that the library lost track of what
+/// it was cut from (issue #591).
+fn starting_document(clip: i64, stored: &StoredClip) -> Result<String, ProtocolError> {
+    let nothing_to_build = |why: &str| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!("clip {clip} has no edit document, and {why}, so there is nothing to open."),
+        )
+    };
+
+    let recording = stored.source_recording_id.ok_or_else(|| {
+        nothing_to_build("the library no longer knows which recording it came from")
+    })?;
+
+    // A clip that names no window of its recording is the whole of it. That is
+    // the honest reading of two NULLs beside a `source_recording_id`, and it is
+    // the state `save_replay` leaves a row in before anything trims it.
+    let start = stored.source_start_seconds.unwrap_or(0.0);
+    let end = match stored.source_end_seconds {
+        Some(end) => end,
+        None => stored
+            .recording_duration_seconds
+            .ok_or_else(|| nothing_to_build("neither it nor its recording says how long it is"))?,
+    };
+
+    let span = SourceSpan::new(seconds_to_source_time(start), seconds_to_source_time(end))
+        .ok_or_else(|| {
+            nothing_to_build(&format!(
+                "the window it names — {start}s to {end}s — is empty or backwards"
+            ))
+        })?;
+
+    EditDocument::from_recording(
+        stored
+            .title
+            .clone()
+            .unwrap_or_else(|| "Untitled".to_owned()),
+        RecordingId::new(recording.to_string()),
+        span,
+    )
+    .write()
+    .map_err(|error| {
+        ProtocolError::new(
+            ErrorCode::EditUnreadable,
+            format!("clip {clip} could not be opened: {error}"),
+        )
+    })
+}
+
+/// Seconds off a `REAL` column as a moment on a recording's own timeline.
+///
+/// Clamped at zero rather than wrapping, because the column is `REAL` and a
+/// negative in it is a corrupt row rather than a time; the span check
+/// downstream is what refuses the result. Rounded rather than truncated so that
+/// a clip stored as 4.9999999 seconds does not open a nanosecond short of where
+/// it was cut.
+fn seconds_to_source_time(seconds: f64) -> SourceTime {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped into range on the line above, which is what makes the cast total"
+    )]
+    SourceTime::from_nanos(
+        (seconds * 1_000_000_000.0)
+            .round()
+            .clamp(0.0, u64::MAX as f64) as u64,
+    )
+}
+
+/// An instant as this database writes them.
+///
+/// The same shape `clipped_library`'s own writers use for `favourited_at` and
+/// `locked_at`, because `edit_superseded_at` sits in the same table and a
+/// second convention two columns apart would be read by the same query.
+fn rfc3339(at: SystemTime) -> String {
+    let seconds = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    time::OffsetDateTime::from_unix_timestamp(seconds)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 /// A lock a panic elsewhere left poisoned.
@@ -1801,6 +2258,514 @@ mod tests {
             games[0].bytes, 0,
             "a file nobody can find is not occupying the space it used to"
         );
+    }
+
+    /// A format 1 document, carrying the `soloed` version 2 drops.
+    ///
+    /// Taken from `crates/edit`'s own migration test rather than invented, so
+    /// that "an older document" here means the same thing it means there.
+    const A_FORMAT_ONE_DOCUMENT: &str = r#"{
+      "schema_version": 1,
+      "title": "Ace",
+      "aspect_ratio": null,
+      "sources": [{ "id": 0, "recording": "1" }],
+      "segments": [
+        {
+          "source": 0,
+          "span": { "start": 0, "end": 10000000000 },
+          "speed": { "numerator": 1, "denominator": 1 },
+          "crop": null,
+          "rotation": "none"
+        }
+      ],
+      "audio_tracks": [
+        {
+          "name": "Game",
+          "inputs": [{ "source": 0, "stream": 0 }],
+          "gain_db": -3.5,
+          "muted": false,
+          "soloed": false,
+          "fade_in": 0,
+          "fade_out": 1000000000
+        }
+      ],
+      "overlays": []
+    }"#;
+
+    /// A document from a build ahead of this one.
+    ///
+    /// The version is deliberately far ahead rather than `SCHEMA_VERSION + 1`,
+    /// so that the test keeps meaning "newer" after the next migration ships.
+    const A_DOCUMENT_FROM_THE_FUTURE: &str = r#"{
+      "schema_version": 9999,
+      "title": "Made on the machine that was up to date",
+      "sources": [],
+      "segments": []
+    }"#;
+
+    /// A library holding one sitting, one recording and one clip.
+    ///
+    /// Written as SQL for the reason `library_with_an_unexported_highlight` is:
+    /// what is under test is the read and the write, and the row is the row
+    /// whichever writer made it. `edit` is the parameter because every case
+    /// below differs only in what is in that column.
+    fn library_with_a_clip(name: &str, edit: Option<&str>) -> TestLibrary {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
+        {
+            let database = Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, started_at) VALUES ('sitting', ?1)",
+                    params!["2026-08-11T20:14:00+01:00"],
+                )
+                .expect("the sitting is written");
+            connection
+                .execute(
+                    "INSERT INTO recordings \
+                         (recording_id, session_id, session_index, path, started_at, \
+                          duration_seconds) \
+                     VALUES (1, 'sitting', 1, ?1, ?2, 120.0)",
+                    params![r"D:\clips\mirage.mkv", "2026-08-11T20:14:00+01:00"],
+                )
+                .expect("the recording is written");
+            connection
+                .execute(
+                    "INSERT INTO clips \
+                         (clip_id, session_id, source_recording_id, title, created_at, \
+                          source_start_seconds, source_end_seconds, duration_seconds, edit) \
+                     VALUES (3, 'sitting', 1, 'Ace on Mirage', ?1, 4.0, 34.0, 30.0, ?2)",
+                    params!["2026-08-11T21:02:00+01:00", edit],
+                )
+                .expect("the clip is written");
+        }
+
+        TestLibrary {
+            reader: LibraryReader::at(Some(path)),
+            _directory: directory,
+        }
+    }
+
+    /// What `clips.edit` holds now.
+    fn stored_edit(library: &TestLibrary, clip: i64) -> Option<String> {
+        library
+            .with_database(|database| {
+                database
+                    .connection()
+                    .query_row("SELECT edit FROM clips WHERE clip_id = ?1", [clip], |row| {
+                        row.get(0)
+                    })
+                    .map_err(unreadable)
+            })
+            .expect("the clip is readable")
+    }
+
+    /// What was kept when a converted document replaced an older one.
+    fn superseded_edit(library: &TestLibrary, clip: i64) -> Option<String> {
+        library
+            .with_database(|database| {
+                database
+                    .connection()
+                    .query_row(
+                        "SELECT edit_superseded FROM clips WHERE clip_id = ?1",
+                        [clip],
+                        |row| row.get(0),
+                    )
+                    .map_err(unreadable)
+            })
+            .expect("the clip is readable")
+    }
+
+    /// Asking for one clip's document.
+    fn ask(library: &TestLibrary, clip: &str) -> Result<ClipDocument, ProtocolError> {
+        library.clip_document(&LibraryClipDocument {
+            clip: clip.to_owned(),
+        })
+    }
+
+    /// Saving one.
+    fn save(
+        library: &TestLibrary,
+        clip: &str,
+        document: &str,
+    ) -> Result<ClipDocumentSaved, ProtocolError> {
+        library.save_clip_document(
+            &SaveClipDocument {
+                clip: clip.to_owned(),
+                document: document.to_owned(),
+            },
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_786_000_000),
+        )
+    }
+
+    #[test]
+    fn a_stored_document_reaches_the_window_with_what_is_in_it() {
+        // The acceptance criterion this whole command exists for, and the
+        // assertion is deliberately about the *contents*: a test that only
+        // checked the call succeeded would pass against a build that answered
+        // with an empty document, which is exactly the state issue #306 says
+        // must not be drawn as a clip (AGENTS.md section 27).
+        let stored = EditDocument::from_recording(
+            "Ace on Mirage",
+            RecordingId::new("1"),
+            SourceSpan::new(
+                SourceTime::from_nanos(4_000_000_000),
+                SourceTime::from_nanos(34_000_000_000),
+            )
+            .expect("a span"),
+        )
+        .write()
+        .expect("it writes");
+        let library = library_with_a_clip("clip-document-stored", Some(&stored));
+
+        let answer = ask(&library, "3").expect("a clip with a document opens");
+
+        assert_eq!(answer.clip, "3");
+        assert_eq!(answer.converted_from, None, "nothing needed converting");
+        assert!(
+            !answer.synthesised,
+            "this document was stored, not built here"
+        );
+
+        let document = EditDocument::read(&answer.document)
+            .expect("what crossed the boundary is a document")
+            .document;
+        assert_eq!(
+            document.sources.len(),
+            1,
+            "the clip plays one recording and the answer has to carry it"
+        );
+        assert_eq!(
+            document.sources[0].recording,
+            RecordingId::new("1"),
+            "the answer names the recording the clip was cut from"
+        );
+        assert_eq!(
+            document.segments.len(),
+            1,
+            "the clip is one segment and the answer has to carry it"
+        );
+        assert_eq!(
+            document.segments[0].span.start(),
+            SourceTime::from_nanos(4_000_000_000),
+            "the segment starts where the stored document said"
+        );
+        assert_eq!(
+            document.segments[0].span.end(),
+            SourceTime::from_nanos(34_000_000_000),
+            "and ends where it said"
+        );
+    }
+
+    #[test]
+    fn a_clip_nobody_has_edited_is_given_a_starting_document_by_the_recorder() {
+        // A saved replay: `clips.edit` is NULL. Somebody has to decide what
+        // "unedited" means and it is this process, once — the window inventing
+        // its own would mean two builds disagreeing the first time one was
+        // saved.
+        let library = library_with_a_clip("clip-document-synthesised", None);
+
+        let answer = ask(&library, "3").expect("a replay opens in the editor");
+
+        assert!(
+            answer.synthesised,
+            "the window has to be able to say this clip has never been edited"
+        );
+        assert_eq!(answer.converted_from, None);
+
+        let document = EditDocument::read(&answer.document)
+            .expect("a built document is a document")
+            .document;
+        assert_eq!(document.title, "Ace on Mirage", "the clip keeps its name");
+        // Named before anything is indexed, and this is the assertion that
+        // matters. A build that answered with an *empty* document — no sources,
+        // no segments — is a build the editor draws as a clip with a dead
+        // playhead, and it is indistinguishable from a broken one. Left to
+        // `document.segments[0]` the failure would read "index out of bounds",
+        // which names nothing.
+        assert_eq!(
+            document.sources.len(),
+            1,
+            "a starting document declares the recording the clip was cut from, and this one \
+             declares none, so the editor would open a clip that plays nothing"
+        );
+        assert_eq!(
+            document.sources[0].recording,
+            RecordingId::new("1"),
+            "and it has to be the recording the clip's row names"
+        );
+        assert_eq!(
+            document.segments.len(),
+            1,
+            "a starting document has the one segment that is the clip, and this one has none, \
+             so the editor would draw an empty timeline"
+        );
+        assert_eq!(
+            document.segments[0].span.start(),
+            SourceTime::from_nanos(4_000_000_000),
+            "the starting document is the window the clip was cut from, not the whole recording"
+        );
+        assert_eq!(
+            document.segments[0].span.end(),
+            SourceTime::from_nanos(34_000_000_000)
+        );
+
+        assert_eq!(
+            stored_edit(&library, 3),
+            None,
+            "opening a clip must not write one; the row is untouched until somebody saves"
+        );
+    }
+
+    #[test]
+    fn an_older_document_is_converted_before_it_crosses_and_says_it_was() {
+        // The window refuses a document older than its own build, on purpose
+        // (`apps/desktop/src/editor/document.ts`): it cannot store the
+        // conversion, so converting there would show a document nothing agreed
+        // to. That refusal is only correct because of this — the window never
+        // receives one.
+        let library = library_with_a_clip("clip-document-converted", Some(A_FORMAT_ONE_DOCUMENT));
+
+        let answer = ask(&library, "3").expect("a format 1 clip still opens");
+
+        assert_eq!(
+            answer.converted_from,
+            Some(1),
+            "the window is told the stored text is older than what it was given"
+        );
+        assert!(
+            !answer.document.contains("soloed"),
+            "the converted document must not carry a solo anywhere: {}",
+            answer.document
+        );
+        assert!(
+            answer.document.contains(r#""schema_version": 2"#),
+            "what crossed has to be the version this build writes: {}",
+            answer.document
+        );
+        assert_eq!(
+            stored_edit(&library, 3).as_deref(),
+            Some(A_FORMAT_ONE_DOCUMENT),
+            "reading converts in memory only; the stored text is still the original"
+        );
+    }
+
+    #[test]
+    fn a_document_from_a_newer_build_is_refused_and_says_to_update() {
+        // The case that must never be smoothed over. Opening it as best it can
+        // and saving it back is how somebody loses the edit they made on the
+        // machine that was up to date (AGENTS.md sections 43 and 56).
+        let library = library_with_a_clip("clip-document-newer", Some(A_DOCUMENT_FROM_THE_FUTURE));
+
+        let refusal = ask(&library, "3").expect_err("a newer document is not readable");
+
+        assert_eq!(refusal.code, ErrorCode::EditUnreadable);
+        assert!(
+            refusal.message.contains("Update Clipped"),
+            "the refusal has to say what to do about it: {}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("Nothing has been changed"),
+            "and that nothing was touched: {}",
+            refusal.message
+        );
+        assert_eq!(
+            stored_edit(&library, 3).as_deref(),
+            Some(A_DOCUMENT_FROM_THE_FUTURE),
+            "and nothing was"
+        );
+    }
+
+    #[test]
+    fn a_clip_this_library_does_not_have_is_refused_by_number() {
+        let library = library_with_a_clip("clip-document-absent", None);
+
+        let refusal = ask(&library, "404").expect_err("there is no clip 404");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("404"),
+            "the refusal names what was asked for: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn an_edited_document_is_stored_and_comes_back() {
+        // The other half of the round trip, end to end through the two methods
+        // a window has: what was saved is what opens.
+        let library = library_with_a_clip("clip-document-save", None);
+        let opened = ask(&library, "3").expect("a replay opens");
+        let mut document = EditDocument::read(&opened.document)
+            .expect("it is a document")
+            .document;
+        document.title = "Ace on Mirage, trimmed".to_owned();
+        let edited = document.write().expect("it writes");
+
+        let saved = save(&library, "3", &edited).expect("an edit saves");
+
+        assert_eq!(saved.clip, "3");
+        assert_eq!(
+            saved.superseded, None,
+            "there was no stored document to keep"
+        );
+
+        let reopened = ask(&library, "3").expect("the saved clip opens");
+        assert!(
+            !reopened.synthesised,
+            "the clip now has a document of its own"
+        );
+        assert_eq!(
+            EditDocument::read(&reopened.document)
+                .expect("it is a document")
+                .document
+                .title,
+            "Ace on Mirage, trimmed",
+            "the edit that was saved is the edit that comes back"
+        );
+    }
+
+    #[test]
+    fn saving_over_an_older_document_keeps_the_older_text() {
+        // `docs/editing.md`: "the caller decides whether to store the result,
+        // and must keep the original when it does". This is the caller, and
+        // this is it doing so.
+        let library = library_with_a_clip("clip-document-supersede", Some(A_FORMAT_ONE_DOCUMENT));
+        let opened = ask(&library, "3").expect("a format 1 clip opens");
+
+        let saved = save(&library, "3", &opened.document).expect("the converted document saves");
+
+        assert_eq!(
+            saved.superseded,
+            Some(1),
+            "the reply has to say the older text was kept"
+        );
+        assert_eq!(
+            superseded_edit(&library, 3).as_deref(),
+            Some(A_FORMAT_ONE_DOCUMENT),
+            "and the kept text is the original, byte for byte"
+        );
+        assert!(
+            stored_edit(&library, 3).is_some_and(|text| text.contains(r#""schema_version": 2"#)),
+            "while the clip itself is now at the version this build writes"
+        );
+    }
+
+    #[test]
+    fn a_second_save_does_not_overwrite_the_original_that_was_kept() {
+        // The kept text is the only copy of a document this build could not
+        // have produced. Replacing it on the next save with text this build
+        // wrote would destroy exactly the thing it exists for.
+        let library =
+            library_with_a_clip("clip-document-supersede-twice", Some(A_FORMAT_ONE_DOCUMENT));
+        let opened = ask(&library, "3").expect("a format 1 clip opens");
+        save(&library, "3", &opened.document).expect("the first save");
+
+        let mut document = EditDocument::read(&opened.document)
+            .expect("it is a document")
+            .document;
+        document.title = "Edited again".to_owned();
+        let again = document.write().expect("it writes");
+
+        let saved = save(&library, "3", &again).expect("the second save");
+
+        assert_eq!(
+            saved.superseded, None,
+            "this save kept nothing; an earlier one did, and saying otherwise would be a claim \
+             about a different text"
+        );
+        assert_eq!(
+            superseded_edit(&library, 3).as_deref(),
+            Some(A_FORMAT_ONE_DOCUMENT),
+            "the format 1 original is still there, unchanged by the second save"
+        );
+    }
+
+    #[test]
+    fn a_document_the_recorder_cannot_parse_is_refused_and_nothing_is_stored() {
+        // A window that sent nonsense must not be able to corrupt a clip. It
+        // can only fail to save, and the refusal says the clip is untouched so
+        // that the honest thing to do is retry rather than give up.
+        let stored = EditDocument::from_recording(
+            "Ace on Mirage",
+            RecordingId::new("1"),
+            SourceSpan::new(
+                SourceTime::from_nanos(0),
+                SourceTime::from_nanos(30_000_000_000),
+            )
+            .expect("a span"),
+        )
+        .write()
+        .expect("it writes");
+        let library = library_with_a_clip("clip-document-nonsense", Some(&stored));
+
+        let refusal = save(&library, "3", "{ this is not JSON")
+            .expect_err("text that is not a document does not save");
+
+        assert_eq!(refusal.code, ErrorCode::EditUnreadable);
+        assert!(
+            refusal.message.contains("The clip is exactly as it was"),
+            "the refusal has to say nothing was stored: {}",
+            refusal.message
+        );
+        assert_eq!(
+            stored_edit(&library, 3).as_deref(),
+            Some(stored.as_str()),
+            "and nothing was"
+        );
+    }
+
+    #[test]
+    fn a_document_at_a_version_the_recorder_does_not_know_is_refused_on_save() {
+        let library = library_with_a_clip("clip-document-save-newer", None);
+
+        let refusal = save(&library, "3", A_DOCUMENT_FROM_THE_FUTURE)
+            .expect_err("a document from a newer build does not save");
+
+        assert_eq!(refusal.code, ErrorCode::EditUnreadable);
+        assert!(
+            refusal.message.contains("Update Clipped"),
+            "the refusal has to say what to do: {}",
+            refusal.message
+        );
+        assert_eq!(
+            stored_edit(&library, 3),
+            None,
+            "and the clip is still the one nobody has edited"
+        );
+    }
+
+    #[test]
+    fn a_clip_in_the_trash_is_not_opened_or_saved_to() {
+        // Editing something on its way out would offer work the next empty
+        // destroys. Putting it back first is the honest order and the user can
+        // do it (issue #450).
+        let library = library_with_a_clip("clip-document-trashed", None);
+        library
+            .with_database(|database| {
+                database
+                    .connection()
+                    .execute(
+                        "UPDATE clips SET deleted_at = ?1 WHERE clip_id = 3",
+                        params!["2026-08-14T10:00:00+01:00"],
+                    )
+                    .map_err(unreadable)
+            })
+            .expect("the clip is deleted");
+
+        let refused_open = ask(&library, "3").expect_err("a deleted clip does not open");
+        assert_eq!(refused_open.code, ErrorCode::InvalidParameters);
+        assert!(
+            refused_open.message.contains("Restore it"),
+            "the refusal names the way out: {}",
+            refused_open.message
+        );
+
+        let refused_save = save(&library, "3", A_FORMAT_ONE_DOCUMENT)
+            .expect_err("and does not take an edit either");
+        assert_eq!(refused_save.code, ErrorCode::InvalidParameters);
     }
 
     #[test]

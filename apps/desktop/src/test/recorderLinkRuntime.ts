@@ -44,6 +44,22 @@ export interface Invocation {
 export interface CommandAnswers {
   /** What `library_events` answers, given the request. */
   readonly events?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `library_clip_document` answers, given the clip asked for.
+   *
+   * A rejection by default, like every other library read: a stub that quietly
+   * handed back a document would let an editor test pass while the recorder was
+   * never asked, and "here is your clip" is the biggest claim this window makes.
+   */
+  readonly clipDocument?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `save_clip_document` answers, given the clip and the document.
+   *
+   * A rejection by default, and this one matters most: a stub that answered
+   * would let a test watch a save succeed while nothing was ever sent, which is
+   * an editor that silently discards work.
+   */
+  readonly saveClipDocument?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_sessions` answers, given the request. */
   readonly sessions?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_games` answers. */
@@ -331,6 +347,12 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'library_events') {
         return commands.events?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'library_clip_document') {
+        return commands.clipDocument?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'save_clip_document') {
+        return commands.saveClipDocument?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'library_trash') {
         return commands.trash?.() ?? Promise.reject(NO_LIBRARY_STUBBED);

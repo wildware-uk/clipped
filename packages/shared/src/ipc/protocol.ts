@@ -139,6 +139,7 @@ export const FEATURES = [
   'automatic',
   'previews',
   'storage',
+  'editing',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -166,6 +167,8 @@ export const COMMANDS = [
   'library_sessions',
   'library_games',
   'library_events',
+  'library_clip_document',
+  'save_clip_document',
   'library_trash',
   'restore_from_trash',
   'empty_trash',
@@ -218,6 +221,7 @@ export const ERROR_CODES = [
   'export_failed',
   'playback_failed',
   'library_unavailable',
+  'edit_unreadable',
   'internal',
 ] as const;
 
@@ -263,6 +267,8 @@ export const REPLIES = [
   'library_sessions',
   'library_games',
   'library_events',
+  'library_clip_document',
+  'clip_document_saved',
   'library_trash',
   'restored',
   'trash_emptied',
@@ -1337,6 +1343,82 @@ export interface LibraryEventLane {
 }
 
 /**
+ * Asking for one clip's edit document.
+ *
+ * The clip is named by the index's own identifier, carried as a string exactly
+ * as `LibraryEvents` carries a recording's.
+ */
+export interface LibraryClipDocument {
+  /** The clip to open, as the library identifies it. */
+  readonly clip: string;
+}
+
+/**
+ * One clip's edit document, as text.
+ *
+ * # Why text
+ *
+ * `docs/editing.md` settles it: a document crosses this boundary as the same
+ * JSON `clipped_edit` writes, rather than being converted into a second
+ * representation for the window. `src/editor/document.ts` is the reader for it,
+ * and it is the only thing in this window that knows the shape of a document.
+ *
+ * # What the text is guaranteed to be
+ *
+ * The version this window's reader understands. A stored document older than
+ * the recorder's build is converted before it is sent — {@link convertedFrom}
+ * says so — and one newer than the recorder's build is refused rather than
+ * sent. That is what makes the reader's own refusal of an older document
+ * correct rather than a gap: it never receives one.
+ */
+export interface ClipDocument {
+  /** The clip this is, echoed from the request. */
+  readonly clip: string;
+  /** The document itself, as `clipped_edit` writes one. */
+  readonly document: string;
+  /**
+   * The format the stored text was in, when it was older than the text above.
+   *
+   * Absent in the ordinary case. **Present does not mean anything was written**
+   * — reading converts in memory only, and the stored text is still the older
+   * one until somebody saves.
+   */
+  readonly converted_from?: number;
+  /**
+   * Whether the library held no document and this is a starting one.
+   *
+   * True for a saved replay: a clip made before there was an editor. The
+   * recorder builds "this recording, this span, no edits" rather than leaving
+   * the window to invent one, so that two builds cannot disagree about what an
+   * unedited clip is. Nothing has been stored.
+   */
+  readonly synthesised: boolean;
+}
+
+/** Storing an edited document against a clip. */
+export interface SaveClipDocument {
+  /** The clip to store it against. */
+  readonly clip: string;
+  /** The document, as this window has it. */
+  readonly document: string;
+}
+
+/** What a save did. */
+export interface ClipDocumentSaved {
+  /** The clip, echoed from the request. */
+  readonly clip: string;
+  /**
+   * The format the text this save replaced was in, when it was older and was
+   * therefore kept.
+   *
+   * Present means a copy of the older text is in the index beside the new one
+   * and will not be overwritten by a later save. Absent means there was nothing
+   * older to keep.
+   */
+  readonly superseded?: number;
+}
+
+/**
  * One thing waiting in the trash.
  *
  * The window may not link `clipped-library`, so this is the projection a screen
@@ -1788,6 +1870,22 @@ export interface LibraryEventsReply {
   readonly reply: 'library_events';
   /** The events, placed in that recording's file. */
   readonly lane: LibraryEventLane;
+}
+
+/** One clip's edit document. */
+export interface LibraryClipDocumentReply {
+  /** The tag. */
+  readonly reply: 'library_clip_document';
+  /** The document as text, and how it was arrived at. */
+  readonly clip: ClipDocument;
+}
+
+/** An edited document was stored. */
+export interface ClipDocumentSavedReply {
+  /** The tag. */
+  readonly reply: 'clip_document_saved';
+  /** Which clip, and what was kept. */
+  readonly saved: ClipDocumentSaved;
 }
 
 /**
@@ -2400,6 +2498,8 @@ export type Reply =
   | LibrarySessionsReply
   | LibraryGamesReply
   | LibraryEventsReply
+  | LibraryClipDocumentReply
+  | ClipDocumentSavedReply
   | LibraryTrashReply
   | RestoredReply
   | TrashEmptiedReply

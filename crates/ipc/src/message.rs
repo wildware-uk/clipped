@@ -171,6 +171,23 @@ pub mod features {
         /// empty library, which is exactly the confusion the library commands
         /// are shaped to avoid.
         LIBRARY = "library";
+        /// The recorder can serve a clip's edit document and store an edited
+        /// one: `library_clip_document` and `save_clip_document`.
+        ///
+        /// A UI asks for this before offering to open a clip at all, for the
+        /// reason the others give: a recorder built before
+        /// [issue #306](https://github.com/wildware-uk/clipped/issues/306) has
+        /// neither command and would refuse both with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// after an editor had already been drawn over a clip it will never be
+        /// able to save.
+        ///
+        /// It is one capability and not two deliberately. A recorder that could
+        /// serve a document but not take one back would be an editor that
+        /// silently discards work, which is worse than one that does not open;
+        /// nothing should be able to advertise the half of this that reads
+        /// without the half that writes.
+        EDITING = "editing";
         /// The recorder can copy a finished recording into MP4:
         /// `export_recording`.
         ///

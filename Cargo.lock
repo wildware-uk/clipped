@@ -419,6 +419,7 @@ name = "clipped-recorder"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-edit",
  "clipped-encoder",
  "clipped-game-detection",
  "clipped-hotkeys",
@@ -527,6 +528,7 @@ dependencies = [
 name = "clipped-workspace-tests"
 version = "0.1.0"
 dependencies = [
+ "clipped-edit",
  "serde_json",
 ]
 

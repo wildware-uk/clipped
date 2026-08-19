@@ -96,7 +96,13 @@ import type {
   KnownCommandName,
   KnownErrorDetailName,
   KnownEventName,
+  ClipDocument,
+  ClipDocumentSaved,
+  ClipDocumentSavedReply,
   LibraryClip,
+  LibraryClipDocument,
+  LibraryClipDocumentReply,
+  SaveClipDocument,
   LibraryGame,
   LibraryEventsReply,
   LibraryTrashReply,
@@ -475,6 +481,27 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     favourite: 'required',
     tags: 'required',
   }),
+  library_clip_document: fields<LibraryClipDocument>({
+    clip: 'required',
+  }),
+  clip_document: fields<ClipDocument>({
+    clip: 'required',
+    document: 'required',
+    // Optional, and this is what holds the mirror to it: the ordinary answer is
+    // a document that needed no converting, and a reader that made the field
+    // required would refuse every frame but the unusual one.
+    converted_from: 'optional',
+    synthesised: 'required',
+  }),
+  save_clip_document: fields<SaveClipDocument>({
+    clip: 'required',
+    document: 'required',
+  }),
+  clip_document_saved: fields<ClipDocumentSaved>({
+    clip: 'required',
+    // Optional for the same reason: most saves have nothing older to keep.
+    superseded: 'optional',
+  }),
   trashed_item: fields<TrashedItem>({
     kind: 'required',
     id: 'required',
@@ -665,6 +692,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.library_events': fields<LibraryEventsReply>({
     reply: 'required',
     lane: 'required',
+  }),
+  'reply.library_clip_document': fields<LibraryClipDocumentReply>({
+    reply: 'required',
+    clip: 'required',
+  }),
+  'reply.clip_document_saved': fields<ClipDocumentSavedReply>({
+    reply: 'required',
+    saved: 'required',
   }),
   'reply.library_trash': fields<LibraryTrashReply>({
     reply: 'required',
@@ -928,6 +963,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'library_clip_document',
+    params: 'library_clip_document',
+    reply: 'reply.library_clip_document',
+    available_in_this_build: true,
+  },
+  {
+    name: 'save_clip_document',
+    params: 'save_clip_document',
+    reply: 'reply.clip_document_saved',
+    available_in_this_build: true,
+  },
+  {
     name: 'library_trash',
     params: 'library_trash',
     reply: 'reply.library_trash',
@@ -1088,6 +1135,21 @@ function replyDiscriminant(reply: Reply): string {
       return 'library_games';
     case 'plugins':
       return 'plugins';
+    case 'library_clip_document':
+      // Two, because a window draws them differently: a clip whose document the
+      // library held, and one that had none and was given a starting document.
+      // The second is a clip nobody has ever edited, and an editor that could
+      // not tell them apart could not say so.
+      return reply.clip.synthesised
+        ? 'library_clip_document.synthesised'
+        : 'library_clip_document.stored';
+    case 'clip_document_saved':
+      // And two here: whether the older text was kept is the whole point of the
+      // reply, and collapsing them would reach the same discriminant for a save
+      // that preserved a document and one that had nothing to preserve.
+      return reply.saved.superseded === undefined
+        ? 'clip_document_saved'
+        : 'clip_document_saved.superseded';
     case 'library_events':
       // One discriminant, unlike `library_sessions`: an empty lane is not a
       // different shape, it is the same shape carrying nothing. What tells
