@@ -277,6 +277,14 @@ pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
 pub use replay::{start_buffer, ReplayRecording, ReplaySaveError};
+// Re-exported rather than redefined, and rather than left to callers to take a
+// dependency on `clipped-capture` for. `RecordingSettings` is told which capture
+// method to use and which one to try first, and `RecordingReport` says which one
+// ran; a caller that can build the first and read the second cannot do either
+// without the vocabulary they are spelled in. `apps/recorder` is exactly that
+// caller and deliberately does not depend on `clipped-capture` (AGENTS.md
+// sections 5 and 44).
+pub use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 pub use report::{
     AudioSyncReport, AudioTrackReport, EndReason, RecordingReport, SystemAudioFallback,
     SystemAudioFallbackCause,

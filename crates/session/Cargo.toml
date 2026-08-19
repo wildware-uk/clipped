@@ -143,9 +143,14 @@ serde_json.workspace = true
 # a date out of a Unix timestamp by hand is exactly the kind of thing not to
 # hand-roll, and `apps/recorder` already depends on this crate for the same
 # reason. Taken from the workspace, which says why the version is pinned there.
+# `parsing` is here for one value and one only: the moment a per-game capture
+# memory was established, which is written into `settings.json` as RFC 3339 and
+# has to be read back out of it (`config::capture_memory`). A settings file a
+# person may open is worth a readable stamp rather than a count of seconds.
 time = { workspace = true, features = [
     "std",
     "formatting",
+    "parsing",
     "local-offset",
     "macros",
 ] }

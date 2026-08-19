@@ -15,7 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use clipped_capture::{CaptureTarget, FrameSize, TargetHandle, TargetKind, TargetProperties};
+use clipped_capture::{
+    CaptureMethod, CaptureMethodSetting, CaptureTarget, FrameSize, TargetHandle, TargetKind,
+    TargetProperties,
+};
 use clipped_encoder::{Codec, EncoderKind};
 use clipped_windows::WindowHandle;
 
@@ -356,6 +359,8 @@ pub struct RecordingSettings {
     codec: CodecPreference,
     encoder: EncoderPreference,
     capture_cursor: bool,
+    capture_method: CaptureMethodSetting,
+    remembered_capture_method: Option<CaptureMethod>,
     system_audio: AudioSourceSetting,
     microphone: AudioSourceSetting,
     compatibility_mix: bool,
@@ -411,6 +416,8 @@ impl RecordingSettings {
             codec: CodecPreference::Automatic,
             encoder: EncoderPreference::Automatic,
             capture_cursor: false,
+            capture_method: CaptureMethodSetting::Automatic,
+            remembered_capture_method: None,
             compatibility_mix: true,
             system_audio: AudioSourceSetting::Off,
             microphone: AudioSourceSetting::Off,
@@ -469,6 +476,49 @@ impl RecordingSettings {
     pub const fn with_encoder(mut self, encoder: EncoderPreference) -> Self {
         self.encoder = encoder;
         self
+    }
+
+    /// Sets which capture method to use, or leaves it to selection.
+    ///
+    /// [`CaptureMethodSetting::Automatic`] unless said otherwise, which is what
+    /// SPEC.md section 8 shows and what nearly every recording wants.
+    /// [`CaptureMethodSetting::Forced`] is a pin and disables fallback by
+    /// design: a forced method that cannot capture the target fails the
+    /// recording rather than quietly recording through a different one
+    /// (`clipped_capture::CaptureMethodSetting`).
+    #[must_use]
+    pub const fn with_capture_method(mut self, method: CaptureMethodSetting) -> Self {
+        self.capture_method = method;
+        self
+    }
+
+    /// Sets the method to try *first*, ahead of the published preference order.
+    ///
+    /// This is not [`Self::with_capture_method`] and must not be confused with
+    /// it. It is the method a previous recording of the same game was observed
+    /// to end on ([issue
+    /// #286](https://github.com/wildware-uk/clipped/issues/286)), so a game
+    /// whose first recording fell back does not pay for the same fall back
+    /// again. It changes the order candidates are asked in and nothing else: a
+    /// remembered method this machine can no longer offer, or that fails to
+    /// start, falls back exactly as if nothing had been remembered, and it is
+    /// ignored outright when [`Self::with_capture_method`] pinned one.
+    #[must_use]
+    pub const fn with_remembered_capture_method(mut self, method: Option<CaptureMethod>) -> Self {
+        self.remembered_capture_method = method;
+        self
+    }
+
+    /// Which capture method to use, or [`CaptureMethodSetting::Automatic`].
+    #[must_use]
+    pub const fn capture_method(&self) -> CaptureMethodSetting {
+        self.capture_method
+    }
+
+    /// The method to try first, if a previous recording of this game left one.
+    #[must_use]
+    pub const fn remembered_capture_method(&self) -> Option<CaptureMethod> {
+        self.remembered_capture_method
     }
 
     /// Includes or excludes the mouse cursor, where the backend can.

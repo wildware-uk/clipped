@@ -127,6 +127,21 @@ impl CaptureMethod {
             Self::DesktopDuplication => "desktop_duplication",
         }
     }
+
+    /// The method a [`log_value`](Self::log_value) names, if it names one.
+    ///
+    /// The read side of the one spelling, so that a value written into a log
+    /// line, a settings file or a support bundle can be read back as the same
+    /// method rather than through a second table of the same three words
+    /// (AGENTS.md section 55). [`None`] for anything else, which is what lets a
+    /// reader treat an unrecognised method as "nothing is remembered" instead of
+    /// as a failure.
+    #[must_use]
+    pub fn from_log_value(value: &str) -> Option<Self> {
+        Self::PREFERENCE_ORDER
+            .into_iter()
+            .find(|method| method.log_value() == value)
+    }
 }
 
 impl fmt::Display for CaptureMethod {
@@ -211,6 +226,18 @@ mod tests {
             CaptureMethodSetting::Forced(CaptureMethod::DesktopDuplication).to_string(),
             "Desktop Duplication"
         );
+    }
+
+    #[test]
+    fn every_method_reads_back_from_the_word_it_is_written_as() {
+        for method in CaptureMethod::PREFERENCE_ORDER {
+            assert_eq!(
+                CaptureMethod::from_log_value(method.log_value()),
+                Some(method)
+            );
+        }
+        assert_eq!(CaptureMethod::from_log_value("Desktop Duplication"), None);
+        assert_eq!(CaptureMethod::from_log_value(""), None);
     }
 
     #[test]

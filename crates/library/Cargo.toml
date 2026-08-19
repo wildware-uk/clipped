@@ -136,9 +136,11 @@ serde_json.workspace = true
 # `clipped-session` stamps sessions with it — so this is the same dependency
 # rather than a second one (AGENTS.md sections 10 and 55). Dual MIT/Apache-2.0.
 #
-# `parsing` is the feature `clipped-session` does not need and this crate does:
-# the recorder only ever writes these strings, and the index is the first thing
-# that has to read one back.
+# `parsing` was for a long time the feature only this crate needed, because the
+# recorder only ever wrote these strings. `clipped-session` takes it now too,
+# for one value: the moment a per-game capture memory was established, which it
+# writes into `settings.json` and reads back out
+# (`clipped_session::config::capture_memory`, issue #286).
 # Diagnostics, through the facade every crate calls directly (docs/logging.md).
 # Indexing runs unattended on a background thread, so what it decided about a
 # file nobody can find afterwards is only knowable from the log. MIT.

@@ -8,7 +8,9 @@
 use core::time::Duration;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 use clipped_encoder::{Codec, EncoderKind};
 use clipped_hotkeys::HotkeyAction;
 
@@ -673,7 +675,26 @@ fn fully_populated() -> Configuration {
         )
         .expect("Ctrl+F8 is nobody's");
     configuration.set_hotkeys(hotkeys);
+
+    // The one thing in a settings file the user did not write. It is here so
+    // that the round trip covers it with everything else — a section the writer
+    // and the reader disagreed about would otherwise be invisible.
+    configuration.remember_capture_method(
+        &game("counter-strike-2"),
+        CaptureMethodSetting::Automatic,
+        CaptureMethod::DesktopDuplication,
+        remembered_at(),
+    );
     configuration
+}
+
+/// The moment `fully_populated`'s capture memory was established.
+///
+/// Whole seconds, because that is what an RFC 3339 stamp written at second
+/// resolution carries back; a fractional moment would fail the round trip for a
+/// reason that has nothing to do with the section under test.
+fn remembered_at() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725)
 }
 
 /// One value per setting that is *not* the shipped default, written the way
@@ -830,6 +851,119 @@ fn every_setting_survives_being_written_and_read_back() {
             "{key} did not survive the round trip"
         );
     }
+    assert_eq!(
+        reader
+            .current()
+            .capture_memory(&game("counter-strike-2"))
+            .map(|memory| (memory.method(), memory.since())),
+        Some((CaptureMethod::DesktopDuplication, remembered_at())),
+        "what Clipped remembered about capturing this game did not survive the round trip, so \
+         the next recording of it after a restart falls back again"
+    );
+}
+
+#[test]
+fn saving_a_games_settings_does_not_erase_what_was_remembered_about_capturing_it() {
+    // The reason the memory is a section of its own rather than a ninth
+    // per-game setting. `set_game` replaces a game's layer with whatever the
+    // settings screen built, and a memory living inside `Preferences` would go
+    // with it every time the user changed that game's frame rate.
+    let counter_strike = game("counter-strike-2");
+    let mut configuration = Configuration::defaults();
+    configuration.remember_capture_method(
+        &counter_strike,
+        CaptureMethodSetting::Automatic,
+        CaptureMethod::DesktopDuplication,
+        remembered_at(),
+    );
+
+    configuration.set_game(counter_strike.clone(), framerate(144));
+
+    assert_eq!(
+        configuration.remembered_capture_method(&counter_strike, remembered_at()),
+        Some(CaptureMethod::DesktopDuplication),
+        "saving this game's settings threw away the capture method that worked for it"
+    );
+}
+
+#[test]
+fn forgetting_a_game_forgets_what_was_remembered_about_capturing_it_too() {
+    // "Forget this game" that left an observation behind would go on steering
+    // the next recording from a section the user cannot see they still have.
+    let counter_strike = game("counter-strike-2");
+    let mut configuration = Configuration::defaults();
+    configuration.set_game(counter_strike.clone(), framerate(144));
+    configuration.remember_capture_method(
+        &counter_strike,
+        CaptureMethodSetting::Automatic,
+        CaptureMethod::DesktopDuplication,
+        remembered_at(),
+    );
+
+    configuration.clear_game(&counter_strike);
+
+    assert_eq!(
+        configuration.capture_memory(&counter_strike),
+        None,
+        "the game was forgotten and Clipped still remembers how to capture it"
+    );
+}
+
+#[test]
+fn a_memory_that_is_only_confirmed_still_expires_on_time() {
+    // The distinction that makes the fortnight mean anything. A game recorded
+    // every day on the method it was recorded on last time re-confirms the same
+    // answer daily; if each confirmation moved the stamp, the memory would
+    // never expire and a machine whose driver was fixed would be stuck on the
+    // worse backend for ever.
+    let counter_strike = game("counter-strike-2");
+    let day = Duration::from_secs(24 * 60 * 60);
+    let mut configuration = Configuration::defaults();
+    assert!(configuration.remember_capture_method(
+        &counter_strike,
+        CaptureMethodSetting::Automatic,
+        CaptureMethod::DesktopDuplication,
+        remembered_at(),
+    ));
+
+    for elapsed in 1..14 {
+        let now = remembered_at() + day * elapsed;
+        assert_eq!(
+            configuration.remembered_capture_method(&counter_strike, now),
+            Some(CaptureMethod::DesktopDuplication),
+            "the memory should still be in force after {elapsed} days"
+        );
+        assert!(
+            !configuration.remember_capture_method(
+                &counter_strike,
+                CaptureMethodSetting::Automatic,
+                CaptureMethod::DesktopDuplication,
+                now,
+            ),
+            "confirming what is already known is not news and must not be saved"
+        );
+    }
+
+    assert_eq!(
+        configuration.remembered_capture_method(&counter_strike, remembered_at() + MEMORY_LIFETIME),
+        None,
+        "a memory confirmed daily never expired, so this game can never go back to the \
+         preferred capture method"
+    );
+
+    // And the re-trial re-establishes it, rather than leaving a stamp that is
+    // expired for ever and a preference order re-tried on every recording.
+    let after = remembered_at() + MEMORY_LIFETIME;
+    assert!(configuration.remember_capture_method(
+        &counter_strike,
+        CaptureMethodSetting::Automatic,
+        CaptureMethod::DesktopDuplication,
+        after,
+    ));
+    assert_eq!(
+        configuration.remembered_capture_method(&counter_strike, after),
+        Some(CaptureMethod::DesktopDuplication)
+    );
 }
 
 #[test]

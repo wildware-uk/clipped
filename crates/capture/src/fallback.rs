@@ -80,6 +80,22 @@
 //! replaced by a different one, for the same reason
 //! [`SelectionError::ForcedMethodRejected`] exists: an explicit setting is
 //! obeyed or reported, never quietly swapped.
+//!
+//! # Starting somewhere other than the top of the order
+//!
+//! [`start_preferring`](CaptureFallback::start_preferring) takes a method to try
+//! *first*, ahead of [`CaptureMethod::PREFERENCE_ORDER`], and that is the whole
+//! of what it does: the method still has to pass the same two tests every other
+//! candidate passes, it is still opened the same way, and a failure still falls
+//! through to the ordinary order. It is a re-ranking, not a pin — which is why
+//! it is a separate argument from [`CaptureMethodSetting`] rather than a third
+//! variant of it. A pin is what the user asked for and is obeyed or reported; a
+//! preference is what this machine was observed to be able to do, and being
+//! wrong about it costs one fall back rather than a recording
+//! ([issue #286](https://github.com/wildware-uk/clipped/issues/286)).
+//!
+//! It is ignored outright under [`CaptureMethodSetting::Forced`]: something the
+//! user chose is not something an observation may re-rank.
 
 use core::fmt;
 use core::time::Duration;
@@ -531,13 +547,72 @@ impl<'candidates> CaptureFallback<'candidates> {
         config: &CaptureConfig,
         setting: CaptureMethodSetting,
     ) -> Result<StartedCapture<'candidates>, FallbackError> {
+        Self::start_preferring(candidates, target, config, setting, None)
+    }
+
+    /// The same, trying `remembered` before the preference order.
+    ///
+    /// `remembered` is a method something outside this crate observed to work on
+    /// this machine for this target — the method the last recording of the same
+    /// game ended on ([issue
+    /// #286](https://github.com/wildware-uk/clipped/issues/286)). It changes
+    /// *which candidate is asked first* and nothing else:
+    ///
+    /// - it is ignored unless `setting` is [`CaptureMethodSetting::Automatic`],
+    ///   because a method the user pinned is not one an observation may
+    ///   re-rank;
+    /// - it is ignored when no candidate is registered for it, or when that
+    ///   candidate cannot address this target or answers
+    ///   [`Availability::Unavailable`](crate::Availability::Unavailable) — the
+    ///   same two tests [`select`] applies to every candidate. A remembered
+    ///   method that this machine can no longer offer therefore falls back to
+    ///   the ordinary order rather than failing the recording;
+    /// - it is ignored after it has been tried, so a remembered method that
+    ///   cannot be *started* is retired like any other and the next candidate
+    ///   comes from the published order. That fall-through is kept as a
+    ///   [`MethodChange`] exactly as a fall-through from the top of the order
+    ///   is, so a report still says why the method running is not the method
+    ///   preferred.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::start`]. A remembered method adds no failure of its own.
+    pub fn start_preferring(
+        candidates: &[&'candidates dyn CaptureBackendFactory],
+        target: &CaptureTarget,
+        config: &CaptureConfig,
+        setting: CaptureMethodSetting,
+        remembered: Option<CaptureMethod>,
+    ) -> Result<StartedCapture<'candidates>, FallbackError> {
         let candidates = candidates.to_vec();
         let mut retired: Vec<CaptureMethod> = Vec::new();
         let mut attempts: Vec<Attempt> = Vec::new();
         let mut preferred: Option<(CaptureMethod, String)> = None;
+        // Taken rather than read, so that it applies to the first choice alone.
+        // A remembered method that fails to start has had its turn; the loop
+        // that follows is the published order, which is what makes a stale
+        // memory cost one attempt rather than every attempt.
+        let mut remembered = remembered;
 
         loop {
-            let method = choose(&candidates, &retired, target, setting)?.method();
+            let method = match remembered
+                .take()
+                .and_then(|method| usable(&candidates, target, setting, method))
+            {
+                Some(method) => {
+                    // Said out loud, because otherwise a support bundle shows a
+                    // recording running on the second-preferred method with
+                    // nothing to explain it: there is no `MethodChange` here,
+                    // and there should not be — nothing fell over.
+                    tracing::info!(
+                        capture_backend = method.log_value(),
+                        "starting on the capture method that worked for this target last time, \
+                         rather than on the most preferred one"
+                    );
+                    method
+                }
+                None => choose(&candidates, &retired, target, setting)?.method(),
+            };
 
             match open(&candidates, method, target, config, None) {
                 Ok((backend, format)) => {
@@ -990,6 +1065,37 @@ fn choose(
         .map(|candidate| *candidate as &dyn BackendDeclaration)
         .collect();
     select(&declarations, target.properties(), setting).map_err(FallbackError::Selection)
+}
+
+/// The remembered method, when this machine can still offer it.
+///
+/// Deliberately [`select`] over a one-candidate list rather than a test written
+/// here: a remembered method has to clear exactly the bar every other candidate
+/// clears, and a second copy of "can this backend address this target" is how
+/// the two answers come to disagree (AGENTS.md section 55). [`None`] is not a
+/// failure — it means the ordinary preference order decides, which is what a
+/// caller wants for a memory that has gone stale.
+fn usable(
+    candidates: &[&dyn CaptureBackendFactory],
+    target: &CaptureTarget,
+    setting: CaptureMethodSetting,
+    remembered: CaptureMethod,
+) -> Option<CaptureMethod> {
+    // A pinned method is the user's answer, and an observation does not get to
+    // re-rank it. `select` would obey the pin anyway; refusing here is what
+    // makes that a stated rule rather than a consequence.
+    if setting != CaptureMethodSetting::Automatic {
+        return None;
+    }
+
+    let declaration = candidates
+        .iter()
+        .find(|candidate| candidate.method() == remembered)
+        .map(|candidate| *candidate as &dyn BackendDeclaration)?;
+
+    select(&[declaration], target.properties(), setting)
+        .ok()
+        .map(|selection| selection.method())
 }
 
 /// Creates and initialises one backend, refusing one whose frames the recording

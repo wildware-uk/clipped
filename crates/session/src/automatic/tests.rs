@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use clipped_capture::CaptureMethod;
+use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 use clipped_encoder::{Codec, EncoderKind};
 use clipped_game_detection::catalogue::{Catalogue, EntrySource};
 use clipped_game_detection::{LaunchGroup, LaunchId, ProcessExit, ProcessSnapshot, WatchEvent};
@@ -336,6 +336,7 @@ fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
     RecordingOutcome::Recorded(Box::new(RecordingReport {
         output: Some(output.to_path_buf()),
         capture_method: CaptureMethod::WindowsGraphicsCapture,
+        capture_setting: CaptureMethodSetting::Automatic,
         encoder: EncoderKind::Nvenc,
         codec: Codec::H264,
         width: 1280,
@@ -491,6 +492,136 @@ fn a_session_ends_once_the_game_has_been_gone_for_the_grace_period() {
     let session = ended_session(&closed).expect("the session ends when the grace expires");
     assert_eq!(session.recordings().len(), 1);
     assert!(harness.manager.active_session().is_none());
+}
+
+/// The same, for a recording that ended on a particular capture method.
+fn recorded_on(output: &Path, method: CaptureMethod) -> RecordingOutcome {
+    let RecordingOutcome::Recorded(mut report) = recorded(output, EndReason::TargetLost) else {
+        unreachable!("`recorded` builds a `Recorded` outcome")
+    };
+    report.capture_method = method;
+    RecordingOutcome::Recorded(report)
+}
+
+#[test]
+fn the_next_recording_of_a_game_is_told_the_method_the_last_one_ended_on() {
+    // Issue #286's wiring, at the seam the driver actually sees. The manager
+    // owns the configuration and knows which game a recording belonged to, so
+    // it is what learns; a settings file is not its to open, so what it does
+    // with the answer is ask for it to be saved.
+    let mut harness = Harness::new("remember-capture-method");
+    let first = started(&mut harness, 11, t(0));
+
+    let started_with = harness
+        .manager
+        .configuration()
+        .capture_memory(&crate::config::GameKey::parse("test-game").expect("a game key"));
+    assert!(
+        started_with.is_none(),
+        "nothing should be remembered about a game that has never been recorded"
+    );
+
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    let finished = harness.finished(
+        &first,
+        recorded_on(Path::new("one.mkv"), CaptureMethod::DesktopDuplication),
+        t(11),
+    );
+
+    assert!(
+        finished.iter().any(|action| action
+            == &SessionAction::RememberCaptureMethod {
+                game: crate::config::GameKey::parse("test-game").expect("a game key"),
+                method: CaptureMethod::DesktopDuplication,
+            }),
+        "the driver was never asked to save the method that worked, so it will be forgotten \
+         when the recorder stops: {finished:?}"
+    );
+
+    let relaunched = harness
+        .manager
+        .observe(&launch(&[(12, "test-game.exe")]), t(15));
+    let second = one_start(&relaunched);
+
+    assert_eq!(
+        second.remembered_capture_method,
+        Some(CaptureMethod::DesktopDuplication),
+        "the next recording of this game was not told which method worked, so it will start on \
+         the one that failed"
+    );
+}
+
+#[test]
+fn a_recording_that_confirms_what_was_already_remembered_asks_for_no_save() {
+    // The common case, and the reason `remember_capture_method` answers with a
+    // bool at all: a game recorded a dozen times an evening on the method it
+    // was recorded on last time has nothing new to say, and a driver that
+    // rewrote the settings file after every recording would be writing the same
+    // three words to a user's disk all evening.
+    let mut harness = Harness::new("remember-capture-method-once");
+
+    let first = started(&mut harness, 11, t(0));
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    let learned = harness.finished(
+        &first,
+        recorded_on(Path::new("one.mkv"), CaptureMethod::DesktopDuplication),
+        t(11),
+    );
+    assert!(
+        learned
+            .iter()
+            .any(|action| matches!(action, SessionAction::RememberCaptureMethod { .. })),
+        "the first recording had something to teach: {learned:?}"
+    );
+
+    let relaunched = harness
+        .manager
+        .observe(&launch(&[(12, "test-game.exe")]), t(15));
+    let second = one_start(&relaunched).recording.clone();
+    harness.observe(&exit(12, "test-game.exe"), t(20));
+    let again = harness.finished(
+        &second,
+        recorded_on(Path::new("two.mkv"), CaptureMethod::DesktopDuplication),
+        t(21),
+    );
+
+    assert!(
+        !again
+            .iter()
+            .any(|action| matches!(action, SessionAction::RememberCaptureMethod { .. })),
+        "a recording that only confirmed what was already known asked for the settings file to \
+         be rewritten: {again:?}"
+    );
+}
+
+#[test]
+fn a_remembered_method_is_offered_again_once_it_has_expired() {
+    // Drivers get fixed. A memory nothing ever revisits is a permanent
+    // downgrade bought with one bad afternoon, so after `MEMORY_LIFETIME` the
+    // published preference order is tried again — and whatever that recording
+    // ends on is remembered afresh.
+    let mut harness = Harness::new("remember-capture-method-expires");
+    let first = started(&mut harness, 11, t(0));
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    harness.finished(
+        &first,
+        recorded_on(Path::new("one.mkv"), CaptureMethod::DesktopDuplication),
+        t(11),
+    );
+
+    // The memory was established at t(11), so a fortnight after *that* is the
+    // first moment it should stop steering anything.
+    let expires = 11 + crate::config::MEMORY_LIFETIME.as_secs();
+    let relaunched = harness
+        .manager
+        .observe(&launch(&[(12, "test-game.exe")]), t(expires));
+
+    assert_eq!(
+        one_start(&relaunched).remembered_capture_method,
+        None,
+        "a fortnight-old memory is still steering this game's recordings, so a machine whose \
+         graphics driver was fixed would never go back to the preferred method"
+    );
 }
 
 #[test]

@@ -1450,6 +1450,30 @@ impl Driver {
                         "a stop arrived for a recording that is no longer running"
                     ),
                 },
+                SessionAction::RememberCaptureMethod { game, method } => {
+                    // The manager has already applied it to the configuration
+                    // it holds, so the next recording of this game prefers it
+                    // whether or not this write happens. What this does is make
+                    // it outlive the process.
+                    //
+                    // Through the settings file service rather than a store of
+                    // this driver's own: it is the one thing in the process
+                    // holding a `ConfigurationStore`, and going around it would
+                    // mean two writers racing over one file — including with
+                    // the Settings screen (`crate::settings`). A `watch` run
+                    // with no window attached has none, which is why this is a
+                    // `debug` line and not a warning: nothing was lost that the
+                    // next recording of this session needs.
+                    match self.recordings.as_ref() {
+                        Some(recordings) => recordings.remember_capture_method(&game, method),
+                        None => tracing::debug!(
+                            game = game.as_str(),
+                            capture_backend = method.log_value(),
+                            "there is no settings file to record the capture method in, so it \
+                             will be preferred for the rest of this run and not after it"
+                        ),
+                    }
+                }
                 SessionAction::SessionEnded(session) => {
                     report_session(&session);
                     // The sidecar is on disk by now — the manager wrote it
@@ -2038,7 +2062,12 @@ where
     // for, which is `watch --framerate 144` recording at 60.
     let settings = request
         .settings
-        .apply_configured_to(settings_for(&config, &window));
+        .apply_configured_to(settings_for(&config, &window))
+        // Not part of `apply_configured_to`, and deliberately: it is not a
+        // setting. It is what a previous recording of this game was observed to
+        // end on, and it only changes which capture candidate is asked first
+        // (issue #286).
+        .with_remembered_capture_method(request.remembered_capture_method);
 
     // Here, and not when the recording was asked for: this is the moment there
     // is something a bookmark could mark. From now until the recording ends,

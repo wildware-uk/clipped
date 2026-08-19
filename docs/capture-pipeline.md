@@ -1347,19 +1347,40 @@ was finished — after a fallback that is not the one selection chose — and
 `RecordingReport::capture_changes` is `CaptureStatus::changes()`, empty for the
 ordinary recording where nothing happened.
 
+### Remembering per game what worked
+
+`CaptureFallback::start_preferring` takes a method to try ahead of
+`CaptureMethod::PREFERENCE_ORDER`. It is a re-ranking and not a pin: the method
+faces the same two tests every other candidate faces, and a failure falls
+through to the ordinary order and is reported as a `MethodChange` with
+`FallbackTrigger::InitialisationFailed`. It is ignored outright under
+`CaptureMethodSetting::Forced`, because something the user chose is not
+something an observation may re-rank.
+
+Where the method comes from is deliberately not this crate's business. The value
+is `RecordingReport::capture_method` — what was running when the file was
+finished — and the place it is kept is per-game configuration
+(`docs/configuration.md`, the `capture` section). `SessionManager` is what joins
+the two: it holds the configuration, it knows which game a recording belonged to,
+and `recording_finished` is where a recording's answer arrives. It applies the
+answer to the configuration it holds and emits
+`SessionAction::RememberCaptureMethod` so the driver — which owns the settings
+file — can make it outlive the process
+([issue #286](https://github.com/wildware-uk/clipped/issues/286)).
+
+A method is remembered only from a recording that reached an ending and captured
+at least one frame; a capture that produced nothing proves nothing about the
+backend that produced it.
+
 ### What is not built
 
-- **Remembering per game what worked.** The issue asks for it and it is not here:
-  the value to remember is `status().current_method()`, and the place to keep it
-  is per-game configuration, which is `clipped-config`'s
-  ([issue #108](https://github.com/wildware-uk/clipped/issues/108)) rather than
-  this crate's. [Issue #286](https://github.com/wildware-uk/clipped/issues/286)
-  covers storing it and preferring it at the next launch of that game.
-- **The desktop UI showing the current method.** The recording now knows it and
-  the report carries it; nothing carries it to the window
-  ([issue #302](https://github.com/wildware-uk/clipped/issues/302) is the
-  diagnostics command, and `apps/desktop/src/diagnostics.ts` still draws
-  "Capture backend — Not reported").
+- **The desktop UI saying that a method was remembered.** A recording that
+  starts on a remembered method has no `MethodChange` to explain it — nothing
+  fell over — so the Diagnostics screen shows `Current method: Desktop
+  Duplication` for a game the user never configured, with only `Automatic`
+  beside it. `clipped_capture` says so in the log, and the settings file says so
+  in words anybody can read, but the window is not told: `clipped_ipc::CaptureAccount`
+  has no field for it.
 
 ## A window nothing is drawing: minimised, occluded, or on a display that has gone
 
