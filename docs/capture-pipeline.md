@@ -1598,5 +1598,10 @@ has not caught up:
   multi-monitor and ultrawide behaviour
   ([issue #98](https://github.com/wildware-uk/clipped/issues/98)).
 
+Which of the behaviours above anybody has actually *run*, on what hardware, and
+which have never been tried at all — a DirectX 12, Vulkan or OpenGL subject, an
+ultrawide panel, a rotated display — is
+[compatibility.md](compatibility.md), milestone 13's matrix.
+
 Related decisions: [ADR 0001](adr/0001-mkv-archival-container.md) for the
 container the pipeline writes into.

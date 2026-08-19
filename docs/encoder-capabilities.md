@@ -121,9 +121,15 @@ inference, not a measurement, and
 `windows/dxgi.rs` checks it against the machine it runs on by creating that
 device and asking which adapter it landed on.
 
-What this does **not** do is make the other encoder work. Capturing on that
-adapter, or copying every frame across the bus to reach it, is the larger
-question issue #443 carries and neither is built.
+What this does **not** do is make the other encoder work *by itself*. Copying
+every frame across the bus to reach it is built —
+`clipped_encoder::open_across_adapters` and `windows/bridge.rs`, measured at
+2.97 ms a frame at 720p and 7.84 ms at 4K — but it is spent only on an encoder a
+recording **named**, with no substitute allowed. Automatic never bridges: an
+encoder on capture's own adapter costs nothing, and handing a copy per frame to
+a recording that did not ask for one would be worse than choosing the other
+encoder. Capturing on the encoder's adapter instead, which would avoid the copy
+altogether, is the half of issue #443 that is still not built.
 
 ## Asking the encoder itself
 

@@ -325,6 +325,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/releasing.md](docs/releasing.md) | When a release may happen, what a version means, and the gates a tag has to pass |
 | [docs/packaging.md](docs/packaging.md) | What the installer carries beside the window, and how it gets there |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
+| [docs/compatibility.md](docs/compatibility.md) | What has actually been recorded, on what hardware, and what nobody has been able to test |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
 | [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its matching rules and how to add a game |
