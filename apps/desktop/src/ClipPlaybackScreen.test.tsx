@@ -1,9 +1,11 @@
+import type { LibrarySession } from '@clipped/shared';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
+import { SAMPLE_LANE, SAMPLE_MARKS } from './test/eventMarkFixture';
 import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
 
 /**
@@ -503,5 +505,176 @@ describe('the clip playback screen', () => {
       runtime.invocations.filter((invocation) => invocation.command === 'recording_preview'),
     ).toHaveLength(0);
     expect(main.querySelector('video')?.hasAttribute('poster')).toBe(false);
+  });
+});
+
+/**
+ * The recording's timeline, and the marks on it (issue #65).
+ *
+ * These are the whole path, and they are here rather than beside the component
+ * because the path is the claim: the Library hands a row over, the address
+ * carries the *index's own* key, `library_events` is asked with that key, the
+ * marks come back, and pressing one moves the element. Every one of those five
+ * is a place this could be wrong in a way that compiles.
+ *
+ * The marks are the recorder's own exemplar out of `protocol-schema.json`, so a
+ * field renamed in `crates/ipc/src/library.rs` fails here.
+ *
+ * A media element in jsdom loads nothing, so its `duration` is `NaN` and it
+ * never fires `loadedmetadata`. Both are stood up by hand below - it is the one
+ * thing in these cases that is not the real platform, and without it there is
+ * nothing to place a mark against. What is asserted around it is real:
+ * `currentTime` is a property jsdom keeps, so a seek that landed in the wrong
+ * place is a seek these cases can see.
+ */
+describe('the marks on a recording', () => {
+  beforeEach(() => {
+    window.location.hash = '';
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.location.hash = '';
+  });
+
+  /** The sitting the Library draws, holding the recording the exemplar is about. */
+  function session(): LibrarySession {
+    return {
+      session_id: 'cs2-20260811-201400',
+      game_id: 'cs2',
+      game_name: 'Counter-Strike 2',
+      started_at: '2026-08-11T20:14:00+01:00',
+      favourite: false,
+      recordings: [
+        {
+          // The exemplar's marks are on this recording, and the Library puts
+          // this number in the address when Play is pressed.
+          recording_id: Number(SAMPLE_MARKS[0]?.recording ?? 0),
+          session_index: 1,
+          path: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+          started_at: '2026-08-11T20:14:00+01:00',
+          favourite: false,
+          tags: [],
+        },
+      ],
+      clips: [],
+    };
+  }
+
+  /** The three answers a recording with marks on it needs. */
+  function answering() {
+    return stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve({ sessions: [session()] }),
+      openPlayback: () => opened('http://clip.localhost/1', 1),
+      events: () => Promise.resolve(SAMPLE_LANE),
+    });
+  }
+
+  /**
+   * Opens the Library, presses Play, and gives back the player.
+   *
+   * The real way in. A screen opened at its address directly has no row and no
+   * library key, which is a case of its own below.
+   */
+  async function playFromLibrary() {
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(screen.getByRole('link', { name: 'Library' }));
+    await user.click(await screen.findByRole('button', { name: /^Play / }));
+
+    const main = screen.getByRole('main');
+    const player = await waitFor(() => {
+      const found = main.querySelector('video');
+      expect(found).not.toBeNull();
+      return found as HTMLVideoElement;
+    });
+    return { user, main, player };
+  }
+
+  /** Tells the element how long the recording is, as a real one would. */
+  function reportLength(player: HTMLVideoElement, seconds: number): void {
+    Object.defineProperty(player, 'duration', { configurable: true, value: seconds });
+    act(() => {
+      player.dispatchEvent(new Event('loadedmetadata'));
+    });
+  }
+
+  it('asks the library for the marks on the recording the Library handed over', async () => {
+    const runtime = answering();
+
+    await playFromLibrary();
+
+    // The index's own key, as a string, and nothing else: the recorder parses
+    // it as an `i64` before it opens the database.
+    await waitFor(() => {
+      expect(runtime.invocations).toContainEqual({
+        command: 'library_events',
+        args: { recording: SAMPLE_MARKS[0]?.recording },
+      });
+    });
+  });
+
+  it('moves the player to the mark that was pressed, and not to the start', async () => {
+    answering();
+
+    const { user, main, player } = await playFromLibrary();
+    reportLength(player, 60);
+
+    const lane = await within(main).findByRole('list', { name: /^Marks on / });
+    const markers = within(lane).getAllByRole('button');
+    expect(markers).toHaveLength(SAMPLE_MARKS.length);
+
+    /*
+     * The second mark, not the first: a build that seeks to zero, and a build
+     * that always seeks to the earliest mark, both pass a case that presses the
+     * first one.
+     */
+    const second = markers[1];
+    const expected = (SAMPLE_MARKS[1]?.at ?? 0) / 1_000_000_000;
+
+    await user.click(second!);
+
+    expect(
+      player.currentTime,
+      `pressing "${second?.getAttribute('aria-label') ?? ''}" should put the player at ${String(expected)}s`,
+    ).toBe(expected);
+    expect(player.currentTime, 'and not at the start of the recording').not.toBe(0);
+  });
+
+  it('says who reported each mark, in words, without relying on a colour', async () => {
+    answering();
+
+    const { main, player } = await playFromLibrary();
+    reportLength(player, 60);
+
+    const lane = await within(main).findByRole('list', { name: /^Marks on / });
+    for (const marker of within(lane).getAllByRole('button')) {
+      expect(marker).toHaveAccessibleName(/reported by the .+ plugin$/);
+    }
+    expect(within(main).getByRole('list', { name: 'What the marks are' })).toBeVisible();
+  });
+
+  it('asks nothing, and says why, for a recording the library did not name', async () => {
+    // An interrupted recording is named by the identifier the *recorder* gave
+    // it, which is not the key the index holds it under. Sending it would spend
+    // a round trip to be told the parameters were invalid, and would put "your
+    // library could not be read" on a screen whose library is perfectly well.
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      openPlayback: () => opened('http://clip.localhost/1', 1),
+    });
+    openClip('r-7');
+    runtime.emit(INTERRUPTION);
+
+    const main = screen.getByRole('main');
+    await waitFor(() => {
+      expect(main.querySelector('video')).not.toBeNull();
+    });
+
+    expect(
+      runtime.invocations.filter((invocation) => invocation.command === 'library_events'),
+    ).toHaveLength(0);
+    expect(within(main).getByText(/not the one the library indexes it under/)).toBeVisible();
+    expect(within(main).queryByRole('list', { name: /^Marks on / })).toBeNull();
   });
 });

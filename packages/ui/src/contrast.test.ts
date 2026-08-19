@@ -432,6 +432,58 @@ describe('the editor', () => {
 });
 
 /*
+ * The playback screen's recording timeline (issue #65). Each marker is an
+ * outline saying that something happened at that second and who reported it, so
+ * WCAG 1.4.11 applies to all four of them exactly as it does to a cut on the
+ * editor's timeline - they carry information rather than separating anything.
+ *
+ * The four are measured against the strip's own ground, which is
+ * `--color-surface` and not the window's, and the stem is measured too: it is
+ * the part that says *where* on the recording the mark is.
+ */
+describe('the recording timeline', () => {
+  const STRIP: Painted = ['styles', '\\.clipped-marks__lane', 'background'];
+
+  const NON_TEXT: readonly (readonly [string, Painted, Painted])[] = [
+    [
+      'a game integration’s mark',
+      ['styles', '\\.clipped-marks__glyph--plugin path', 'fill'],
+      STRIP,
+    ],
+    ['a mark of Clipped’s own', ['styles', '\\.clipped-marks__glyph--clipped path', 'fill'], STRIP],
+    ['a label of the user’s own', ['styles', '\\.clipped-marks__glyph--you path', 'fill'], STRIP],
+    [
+      'a marker standing for more than one source',
+      ['styles', '\\.clipped-marks__glyph--several path', 'fill'],
+      STRIP,
+    ],
+    [
+      'the stem that says where on the recording a marker is',
+      ['styles', '\\.clipped-marks__mark::after', 'background'],
+      STRIP,
+    ],
+  ];
+
+  it.each(NON_TEXT)('draws %s at 3:1 or better', (_name, ink, ground) => {
+    expect(ratioBetween(ink, ground)).toBeGreaterThanOrEqual(AA_NON_TEXT);
+  });
+
+  /*
+   * The two lines of words the timeline draws: the ends of the strip, and what
+   * a marker moved the player to. Both are read rather than glanced at, so both
+   * are held to body text's ratio.
+   */
+  const PAIRINGS: readonly (readonly [string, Painted, Painted])[] = [
+    ['the two ends of the strip', ['styles', '\\.clipped-marks__span', 'color'], WINDOW],
+    ['what a marker moved the player to', ['styles', '\\.clipped-marks__sought', 'color'], WINDOW],
+  ];
+
+  it.each(PAIRINGS)('draws %s at 4.5:1 or better', (_name, ink, ground) => {
+    expect(ratioBetween(ink, ground)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+});
+
+/*
  * The library's thumbnails (issue #448). The tile that stands in for a
  * recording with no picture holds one word, and that word is the whole of how
  * "not made yet" is told from "there will not be one" — #448's second

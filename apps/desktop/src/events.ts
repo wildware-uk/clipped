@@ -1,11 +1,16 @@
 /**
- * Game events as the timeline draws them (issue #71).
+ * Game events as a timeline draws them (issues #71 and #65).
  *
  * A plugin reports that something happened at a moment on a recording's
  * timeline (`docs/plugin-api.md`); `clipped_library::events` turns that moment
  * into a position in one of the session's files. What arrives here is the
  * result: a recording, a position in it, and the two fields a mark is drawn and
  * named from.
+ *
+ * Two screens read it. The Editor places these marks on an edit document
+ * (`editor/timeline.ts`, issue #71); the playback screen places them on the
+ * recording itself (`recordingMarks.ts`, issue #65). Neither is allowed its
+ * own vocabulary, which is why this file sits above both of them.
  *
  * # The vocabulary is open, and this file is the reason that matters
  *
@@ -126,4 +131,85 @@ export function countByKind(marks: readonly EventMark[]): ReadonlyMap<string, nu
     counts.set(mark.kind, (counts.get(mark.kind) ?? 0) + 1);
   }
   return counts;
+}
+
+/**
+ * Who put a mark on a timeline.
+ *
+ * Three, because they are three different claims and a screen that ran them
+ * together would let one speak for another: `plugin` is a game integration
+ * saying what happened in the game, `clipped` is the application saying what it
+ * did, and `you` is a name somebody typed. `crates/plugins/src/report.rs`
+ * refuses a plugin that tries to report the third — the whole reason that guard
+ * exists is so that this distinction can be drawn here.
+ */
+export type MarkOrigin = 'you' | 'clipped' | 'plugin';
+
+/** The application's own source, `EventSource::APPLICATION`. */
+export const APPLICATION_SOURCE = 'clipped';
+
+/** What `EventKind::UserLabelled` serialises with, `USER_LABEL_PREFIX`. */
+export const USER_LABEL_PREFIX = 'user:';
+
+/** What a mark is called, and who it came from. */
+export interface MarkDescription {
+  /** What to call it. A user's own words, a vocabulary label, or the raw tag. */
+  readonly label: string;
+  /** Which of the three put it there. */
+  readonly origin: MarkOrigin;
+  /**
+   * Who, in words, to be read after the label: `reported by the
+   * counter-strike-2 plugin`.
+   *
+   * A phrase rather than a name because it is what a screen reader announces,
+   * and "counter-strike-2" on its own does not say that a plugin claimed it.
+   */
+  readonly by: string;
+  /** The one-word category, for a legend and for a filter. */
+  readonly word: string;
+}
+
+/**
+ * What one mark is called and who it came from, decided from the two fields the
+ * recorder sent and from nothing else.
+ *
+ * # The kind is read before the source, and that order is the point
+ *
+ * A user's label is *written by the application*, so its `source` is `clipped`
+ * exactly like a mark Clipped placed on its own account
+ * (`crates/events/src/event.rs`). The source alone cannot tell "you typed this"
+ * from "Clipped noticed this"; the kind can, because `EventKind::UserLabelled`
+ * has a wire form of its own — `user:` and then the words
+ * (`crates/events/src/kind.rs`). Reading the source first would attribute
+ * somebody's own note to the application.
+ *
+ * # Nothing here is recomputed
+ *
+ * `EventSource::plugin` refuses `clipped` and anything under `clipped.`
+ * (`crates/events/src/event.rs`), so "not the application" *is* "a plugin" —
+ * this window is reading a distinction the producer already made rather than
+ * guessing at one. Anything else is a plugin identifier, verbatim, and it is
+ * shown verbatim: a manifest identifier is what a plugin author would search
+ * for when a mark of theirs is in the wrong place.
+ */
+export function describeMark(mark: EventMark): MarkDescription {
+  if (mark.kind.startsWith(USER_LABEL_PREFIX)) {
+    const label = mark.kind.slice(USER_LABEL_PREFIX.length);
+    return {
+      // The raw tag when there are no words after the prefix. A blank mark on a
+      // timeline is a mark nobody can find again.
+      label: label === '' ? mark.kind : label,
+      origin: 'you',
+      by: 'labelled by you',
+      word: 'Yours',
+    };
+  }
+
+  const { label } = describeKind(mark.kind);
+
+  if (mark.source === APPLICATION_SOURCE || mark.source.startsWith(`${APPLICATION_SOURCE}.`)) {
+    return { label, origin: 'clipped', by: 'marked by Clipped', word: 'Clipped' };
+  }
+
+  return { label, origin: 'plugin', by: `reported by the ${mark.source} plugin`, word: 'Plugin' };
 }

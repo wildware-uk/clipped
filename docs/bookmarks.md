@@ -12,10 +12,18 @@ recorder answers, the file it writes, and the two decisions that make the
 feature either useful or annoying — *when* a bookmark is, and *how accurate*
 that is.
 
-**What does not exist yet.** Drawing bookmarks on a timeline and jumping to one
-is [issue #65](https://github.com/wildware-uk/clipped/issues/65). Indexing them
-into the SQLite library is M6's job and the `bookmarks` table is already there
-waiting for it (`docs/storage.md`).
+**What does not exist yet.** A recording now has a timeline in the window and
+pressing a mark on it seeks to that moment
+([issue #65](https://github.com/wildware-uk/clipped/issues/65),
+[desktop-ui.md](desktop-ui.md)) — but **a bookmark is not on it.** That timeline
+draws what the library holds as *game events*, and a bookmark is not one: it is a
+`BookmarkFile` beside the recording, and nothing turns it into an event or into a
+`game_events` row. The playback screen says so in a sentence under the strip
+rather than drawing a lane for bookmarks that would always be empty. Producing
+them as events is the other half of
+[issue #71](https://github.com/wildware-uk/clipped/issues/71); indexing them into
+the SQLite library is M6's job and the `bookmarks` table is already there waiting
+for it (`docs/storage.md`).
 
 **`Ctrl`+`F9` reaches the recorder** as of
 [issue #232](https://github.com/wildware-uk/clipped/issues/232). The recorder

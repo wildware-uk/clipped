@@ -10,7 +10,7 @@ import {
 } from 'react';
 
 import { recordingOf, type AudioTrack, type EditDocument } from './document';
-import { countByKind, describeKind, kindsPresent, type EventMark } from './events';
+import { countByKind, describeKind, kindsPresent, type EventMark } from '../events';
 import { ExportDialog } from './ExportDialog';
 import {
   boundaries,

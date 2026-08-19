@@ -51,8 +51,15 @@ import {
   type TextOverlay,
 } from './document';
 
-/** A thousand million: one second of the document's nanoseconds. */
-export const NANOS_PER_SECOND = 1_000_000_000;
+/*
+ * The nanosecond and the timecode are not this screen's own: the playback
+ * screen's timeline places marks with the same two (issue #65). They are
+ * re-exported so that everything reading a position off a timeline still reads
+ * it from here.
+ */
+import { formatTimecode, NANOS_PER_SECOND } from '../timecode';
+
+export { formatTimecode, NANOS_PER_SECOND };
 
 /** Where a position on the edited timeline comes from. */
 export interface Placement {
@@ -366,19 +373,6 @@ export function previousBoundary(found: readonly number[], atNanos: number): num
 /** The boundary after `atNanos`, or the end of the clip. */
 export function nextBoundary(found: readonly number[], atNanos: number): number {
   return found.find((boundary) => boundary > atNanos) ?? found[found.length - 1] ?? 0;
-}
-
-/** `nanos` as `mm:ss.mmm`, or `h:mm:ss.mmm` once a clip runs past the hour. */
-export function formatTimecode(nanos: number): string {
-  const totalMs = Math.floor(nanos / 1_000_000);
-  const ms = totalMs % 1000;
-  const totalSeconds = Math.floor(totalMs / 1000);
-  const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
-  const hours = Math.floor(totalSeconds / 3600);
-  const pad = (value: number, width = 2): string => String(value).padStart(width, '0');
-  const withoutHours = `${pad(minutes)}:${pad(seconds)}.${pad(ms, 3)}`;
-  return hours === 0 ? withoutHours : `${String(hours)}:${withoutHours}`;
 }
 
 /** `nanos` as a tick label: whole seconds once the ticks are that far apart. */

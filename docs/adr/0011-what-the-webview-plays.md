@@ -97,9 +97,55 @@ Matroska.
 
 Every seek landed on the time it was given and none took longer than 30 ms. The
 element asks for the range it needs and reads it; nothing rewinds the file, and
-nothing waits for the whole of it. What a seek is *not* is frame-accurate: the
-picture that comes up is the nearest keyframe at or before the position, which
-is the practical limit SPEC.md section 42's "where practical" leaves room for.
+nothing waits for the whole of it.
+
+#### Correction, 2026-08-19: a seek *is* frame-accurate
+
+This section originally went on to say that "what a seek is not is
+frame-accurate: the picture that comes up is the nearest keyframe at or before
+the position". **That was never measured, and it is wrong** — which is the same
+mistake, in the same record, as facts 2 and 3 above. `HTMLMediaElement.fastSeek`
+is the keyframe-only one; assigning to `currentTime` is not, and Chromium
+decodes forward from the keyframe to the frame that was asked for.
+
+Measured on 2026-08-19 for
+[#65](https://github.com/wildware-uk/clipped/issues/65), because that issue's
+first criterion is "clicking a marker seeks accurately" and a figure was owed.
+The subject was a Clipped-shaped file — 40 s of Matroska, AV1 320×180 at 30 fps,
+`pcm_s16le` stereo, **a keyframe every 2 s**, which is
+`KeyframeInterval::DEFAULT` — in which every frame is one flat colour encoding
+its own index, so the frame actually on screen can be read back off a canvas.
+It was served over byte ranges to the same headless Edge build, and each seek was
+followed by two `requestAnimationFrame`s before the canvas was read.
+
+| Asked for | `currentTime` after | Frame wanted | Frame shown | Keyframe before it | ms |
+| --- | --- | --- | --- | --- | --- |
+| 1.9333333 s | 1.933333 | 58 | **58** | 30 | 60.5 |
+| 3.5333333 s | 3.533333 | 106 | **106** | 90 | 32.5 |
+| 7.1 s | 7.1 | 213 | **213** | 180 | 32.9 |
+| 11.4666667 s | 11.466666 | 344 | 343 | 330 | 33.2 |
+| 21.4666667 s | 21.466666 | 644 | 643 | 630 | 33.1 |
+| 33.9666667 s | 33.966666 | 1019 | 1018 | 990 | 33.8 |
+| 5.0 s | 5 | 150 | **150** | 150 | 32.9 |
+| 12.0333333 s | 12.033333 | 361 | **361** | 360 | 34.1 |
+
+Not one of them showed the keyframe: at 1.93 s the keyframe is 28 frames back
+and frame 58 was on screen. The three that are one frame early are the three
+whose target lands exactly on a frame boundary — 344 ÷ 30 is 11.46666…, the
+element reported `11.466666`, and frame 343 is the correct frame for *that*
+position. They are the harness's rounding, not the engine's.
+
+**So the figure this record now offers is: the position is exact to the
+precision `currentTime` holds — about a microsecond, which at 60 fps is a
+five-hundredth of a frame — and the picture is the frame at that position.** What
+SPEC.md section 42 still wants beyond this is a transport of Clipped's own, which
+is [#52](https://github.com/wildware-uk/clipped/issues/52), not a more accurate
+seek.
+
+One caveat this measurement does **not** remove: it was run against headless
+Edge rather than inside the Clipped window, exactly like the one above, and
+against one build. A recording whose keyframes are further apart costs a seek
+more time — the decoder has more frames to walk — but not accuracy.
 
 ## Decision
 
@@ -210,9 +256,10 @@ lossless PCM, and this record does not touch ADR 0001. The window's permissions:
 `capabilities/default.json` gains nothing, because a URI scheme this process
 registers is not a permission the interface holds.
 
-**What is still owed.** Frame-accurate seeking and keyboard shortcuts of
-Clipped's own (SPEC.md section 42) — what is drawn is the element's transport,
-which seeks to a keyframe; and a poster frame
+**What is still owed.** Keyboard shortcuts and a transport of Clipped's own
+(SPEC.md section 42) — what is drawn is the element's transport. *Frame-accurate
+seeking* is no longer on this list: the correction above measured it and the
+element already gives it. A poster frame
 ([#57](https://github.com/wildware-uk/clipped/issues/57)) and a waveform
 ([#66](https://github.com/wildware-uk/clipped/issues/66)), which are files beside
 the recording and need a route into the window of their own.
