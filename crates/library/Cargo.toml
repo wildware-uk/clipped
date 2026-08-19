@@ -29,12 +29,6 @@ tracing.workspace = true
 # dependency direction.
 clipped-logging.workspace = true
 
-# How much of a volume is free, and how large it is: `GetDiskFreeSpaceExW`.
-# Target-specific so that the platform-neutral half of this crate still compiles
-# and its unit tests still run on a contributor's other machine; the call itself
-# lives behind `#[cfg(windows)]` in `src/accounting/windows/` (AGENTS.md
-# section 5). The feature list is the exact set of namespaces that file names.
-# Dual MIT/Apache-2.0.
 # The calendar a `date:` term is compared against (`src/search/date.rs`).
 # `time::Date` is exactly what this needs — a date with no time and no zone,
 # ordered chronologically, validated against the Gregorian calendar — and
@@ -89,11 +83,21 @@ clipped-background.workspace = true
 # distributes them (ADR 0004). MIT.
 rusty_ffmpeg.workspace = true
 
+# How much of a volume is free, and how large it is. Accounting cannot judge two
+# of the three limits SPEC.md section 27 configures without it, and there is no
+# portable way to ask — so the question goes to `clipped_windows`, which is the
+# layer platform queries belong in (AGENTS.md section 5) and where issue #277
+# put the one `GetDiskFreeSpaceExW` in the workspace. It had been made here as
+# well, and in `clipped-session`, which needs the same two numbers to decide
+# whether a recording can still be finished; neither crate may depend on the
+# other for it, and both may depend on layer 0.
+#
+# Target-specific so that the platform-neutral half of this crate still compiles
+# and its unit tests still run on a contributor's other machine: everything
+# except this one measurement does, which is what keeps that boundary checkable
+# rather than claimed (`accounting::VolumeError::Unsupported`).
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",
-] }
+clipped-windows.workspace = true
 
 [build-dependencies]
 # This crate links FFmpeg, so it needs the runtime DLLs beside its own test and
@@ -146,6 +150,23 @@ tracing.workspace = true
 # docs/testing.md). Its `TemporaryDirectory` is what those tests write into,
 # rather than a sixth copy of "a directory that deletes itself".
 clipped-media-validation.workspace = true
+
+# `examples/scan_cost.rs` asks two questions the library itself never asks: what
+# a file costs the volume rather than what it contains
+# (`GetFileInformationByHandleEx` with `FILE_STANDARD_INFO`), and what the
+# volume's cluster size is (`GetDiskFreeSpaceW`, which takes the root of a
+# volume and answers with sectors — a different call, and a different question,
+# from the free space in `clipped_windows::volume_free_space`). Both are how the
+# overhead figures in docs/storage-management.md were measured.
+#
+# A dev-dependency because that is the whole truth about it: nothing this crate
+# ships names the Windows API any more (issue #277), and a normal dependency
+# would say otherwise. Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [lints]
 workspace = true

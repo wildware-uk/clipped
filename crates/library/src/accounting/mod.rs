@@ -157,9 +157,6 @@ mod scan;
 mod status;
 mod volume;
 
-#[cfg(windows)]
-mod windows;
-
 pub use category::StorageCategory;
 pub use error::{LimitError, RootsError, VolumeError};
 pub use inventory::{Completeness, FileEntry, PartialReason, StorageInventory, UnavailableRoot};

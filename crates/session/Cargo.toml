@@ -107,6 +107,12 @@ clipped-hotkeys.workspace = true
 # section 5 puts platform code there and section 55 forbids the second copy, so
 # this crate names that one rather than reaching for `GetWindowThreadProcessId`
 # itself. Layer 0, so the direction is the one README.md's table allows.
+#
+# And how much room is left on the drive a recording is being written to
+# (`volume_free_space`, `src/disk.rs`, #277). `clipped-library` asks the same
+# question of the same API for storage accounting, and this crate reaching for
+# the library to ask it would put the SQLite index underneath a recording's
+# stop condition (ADR 0002).
 clipped-windows.workspace = true
 clipped-logging.workspace = true
 tracing.workspace = true
@@ -144,7 +150,7 @@ time = { workspace = true, features = [
     "macros",
 ] }
 
-# Two Windows calls, and only two.
+# One Windows call, and only one.
 #
 # `ID3D11Texture2D::GetDevice` is how a session finds the device a captured
 # frame lives on so that it can open an encoder against the same one.
@@ -153,18 +159,16 @@ time = { workspace = true, features = [
 # answer that and the way `crates/capture`'s own tests do it. Anything else
 # would mean a second device and a cross-adapter copy of every frame.
 #
-# `GetDiskFreeSpaceExW` is how a recording knows to stop before the drive it is
-# writing to fills up, which is what keeps the *trailer* from being the write
-# that fails (#103, `src/disk.rs`). `clipped-library` makes the same call for
-# storage accounting; consolidating them into `clipped-windows` is #277, and
-# `src/windows/volume.rs` says why the recording engine does not simply depend
-# on the media library to ask it.
+# There were two until #277. `GetDiskFreeSpaceExW` — how a recording knows to
+# stop before the drive it is writing to fills up, which is what keeps the
+# *trailer* from being the write that fails (#103, `src/disk.rs`) —
+# `clipped-library` made for storage accounting as well, and both copies moved
+# to `clipped_windows::volume_free_space`.
 #
 # The feature list is exactly what `src/windows/` names. Dual MIT/Apache-2.0.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
-    "Win32_Storage_FileSystem",
 ] }
 
 # The two plugins `src/plugins/tests.rs` runs, compiled from

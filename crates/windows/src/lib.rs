@@ -10,6 +10,7 @@
 //! - COM/WinRT apartment initialisation and lifetime.
 //! - Safe wrappers over raw Windows handles and interfaces.
 //! - Process, window and monitor queries used by higher layers.
+//! - Volume queries, for the callers that have to know how much room is left.
 //!
 //! # Not responsible for
 //!
@@ -40,6 +41,15 @@
 //! [`foreground_target`], which is what a press of the "Start or stop
 //! recording" hotkey turns into a target, in a process that may have no window
 //! open at all.
+//! How much room is left on the drive a recording is being written to
+//! ([issue #277](https://github.com/wildware-uk/clipped/issues/277)) — see
+//! [`volume_free_space`], which the recording engine and storage accounting
+//! both call and neither owns. That is the point of it being here: the
+//! recorder must be able to ask how full a disk is without linking the media
+//! library and the SQLite index behind it (ADR 0002), and until #277 the
+//! answer to that was a second copy of the call. See
+//! `tests/integration/tests/disk_space_reads.rs` for the list a third would
+//! have to be added to.
 //! COM and
 //! WinRT apartment handling arrives with the first capture backend
 //! ([issue #12](https://github.com/wildware-uk/clipped/issues/12)), which is
@@ -134,6 +144,7 @@ mod process;
 mod process_table;
 mod process_tree;
 mod selection;
+mod volume;
 mod window;
 
 pub use error::WindowsError;
@@ -148,6 +159,7 @@ pub use process::{process_image_name, process_image_path};
 pub use process_table::{process_table, ProcessTableEntry};
 pub use process_tree::{ProcessTree, TreeChange};
 pub use selection::{resolve, ResolveError, TargetSelector};
+pub use volume::{volume_free_space, VolumeSpace, VolumeUnavailable};
 pub use window::{
     enable_per_monitor_dpi_awareness, enumerate_windows, is_window, window_geometry,
     window_process, DpiAwareness, Exclusion, WindowGeometry, WindowHandle, WindowInfo,

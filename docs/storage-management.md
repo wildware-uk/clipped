@@ -279,10 +279,14 @@ a **maximum usage larger than the disk** can never bite, so a user who set one
 believes they have a quota and does not. Both are refused with a message naming
 both numbers.
 
-Free space and volume size come from `GetDiskFreeSpaceExW`, asked of the nearest
-existing ancestor of the recording location — a recording directory that has not
-been created yet is an ordinary first-run state, and the question is really about
-the drive.
+Free space and volume size come from `clipped_windows::volume_free_space`, which
+is `GetDiskFreeSpaceExW` asked of the nearest existing ancestor of the recording
+location — a recording directory that has not been created yet is an ordinary
+first-run state, and the question is really about the drive. It is at the
+platform layer rather than here because the recording engine asks the same
+question for an unrelated reason, and must be able to ask it without linking the
+library index (issue #277); `tests/integration/tests/disk_space_reads.rs` is what
+keeps a third copy of the call from appearing.
 
 ## Breached, satisfied, or unknown
 

@@ -25,7 +25,12 @@
 //!
 //! [`judge`] is the whole of it, and it is a pure function of two numbers so
 //! that every threshold below is tested without a disk, on any platform
-//! (AGENTS.md section 25). Only [`free_space`] needs Windows.
+//! (AGENTS.md section 25). Only [`free_space`] needs Windows, and it no longer
+//! makes the call itself: `clipped_windows::volume_free_space` does, for this
+//! crate and for `clipped_library::accounting`, which needs the same two
+//! numbers to judge an entirely different thing (issue #277). The recorder can
+//! therefore ask how full a disk is without the media library and the SQLite
+//! index behind it (ADR 0002).
 
 use core::fmt;
 use core::time::Duration;
@@ -64,38 +69,14 @@ const WARNING_MULTIPLE: u64 = 4;
 pub(crate) const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How large a volume is, and how much of it is free.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VolumeSpace {
-    total_bytes: u64,
-    free_bytes: u64,
-}
-
-impl VolumeSpace {
-    /// A volume of `total_bytes` with `free_bytes` free.
-    ///
-    /// Free space above the total is clamped to the total. It should not
-    /// happen, and on a volume with a per-user quota it can, because the
-    /// operating system reports what is available *to this user*.
-    #[must_use]
-    pub fn new(total_bytes: u64, free_bytes: u64) -> Self {
-        Self {
-            total_bytes,
-            free_bytes: free_bytes.min(total_bytes),
-        }
-    }
-
-    /// The size of the volume in bytes.
-    #[must_use]
-    pub const fn total_bytes(&self) -> u64 {
-        self.total_bytes
-    }
-
-    /// How many bytes are free, as available to the account Clipped runs as.
-    #[must_use]
-    pub const fn free_bytes(&self) -> u64 {
-        self.free_bytes
-    }
-}
+///
+/// The platform layer's type rather than one of this crate's, because it is
+/// the platform layer's answer: two numbers Windows reports, with no policy of
+/// this crate's in them. A `VolumeSpace` of this crate's own would be a second
+/// name for the same pair (AGENTS.md section 55), and the clamp its
+/// constructor applies — free space above the total, which a per-user quota
+/// can produce — is a fact about the API rather than about recording.
+pub use clipped_windows::VolumeSpace;
 
 /// What the free space on a volume means for a recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,27 +142,21 @@ impl std::error::Error for VolumeUnreadable {}
 /// does exist is asked instead — the drive is what the question is really
 /// about.
 ///
+/// The walk itself is `clipped_windows::volume_free_space`'s, not this crate's:
+/// storage accounting needs the same rule for the same reason, and issue #277
+/// left one copy of it at the bottom of the stack. What stays here is what the
+/// recording does about the answer.
+///
 /// # Errors
 ///
 /// [`VolumeUnreadable`] when nothing along the path could be read, which is
 /// what a disconnected drive looks like.
 #[cfg(windows)]
 pub fn free_space(path: &Path) -> Result<VolumeSpace, VolumeUnreadable> {
-    let mut first_failure = None;
-
-    for candidate in path.ancestors() {
-        match crate::windows::volume::free_space(candidate) {
-            Ok(space) => return Ok(space),
-            Err(error) => {
-                first_failure.get_or_insert(error);
-            }
-        }
-    }
-
-    Err(first_failure.unwrap_or_else(|| VolumeUnreadable {
-        path: path.to_path_buf(),
-        reason: "the path has no components to ask about".to_owned(),
-    }))
+    clipped_windows::volume_free_space(path).map_err(|error| VolumeUnreadable {
+        path: error.path,
+        reason: error.reason,
+    })
 }
 
 /// Recording is a Windows feature; this build has no way to ask.
@@ -279,13 +254,6 @@ mod tests {
         // "warn early" into "never warn".
         assert_eq!(judge(u64::MAX, u64::MAX), SpaceVerdict::Exhausted);
         assert_eq!(judge(u64::MAX, u64::MAX / 2), SpaceVerdict::Low);
-    }
-
-    #[test]
-    fn free_space_above_the_total_is_clamped_rather_than_reported() {
-        let space = VolumeSpace::new(100, 200);
-        assert_eq!(space.free_bytes(), 100);
-        assert_eq!(space.total_bytes(), 100);
     }
 
     #[test]

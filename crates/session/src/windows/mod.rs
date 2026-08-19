@@ -9,12 +9,13 @@
 //! it came from is the join, and it is a Direct3D call
 //! ([`device`]).
 //!
-//! The other one is how much room is left where the recording is being written
-//! ([`volume`]). A disk filling up is the most likely way a long recording ends
-//! badly and the one where doing nothing is destructive, so the recording asks
-//! rather than waiting to be told — and asking is a Windows call as well. What
-//! is *decided* from the answer is platform-neutral and lives in
-//! [`crate::disk`].
+//! It is the only one. How much room is left where a recording is being
+//! written used to be the second — a disk filling up is the most likely way a
+//! long recording ends badly, so the recording asks rather than waiting to be
+//! told — but that call was `clipped-library`'s as well, and both copies moved
+//! down to `clipped_windows::volume_free_space`
+//! ([issue #277](https://github.com/wildware-uk/clipped/issues/277)). What is
+//! *decided* from the answer never moved: it is platform-neutral and lives in
+//! [`crate::disk`], which is where the recording's own threshold is judged.
 
 pub(crate) mod device;
-pub(crate) mod volume;
