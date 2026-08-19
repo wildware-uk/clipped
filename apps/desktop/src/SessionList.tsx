@@ -1,17 +1,18 @@
 import type { LibraryRecording, LibrarySession } from '@clipped/shared';
 import { useRef, type ReactNode } from 'react';
 
-import {
-  footageSeconds,
-  formatBytes,
-  formatDuration,
-  formatMoment,
-  missingCount,
-  presentBytes,
-} from './library';
+import { footageSeconds, formatBytes, formatDuration, formatMoment, presentBytes } from './library';
 import type { Favourites, FavouriteTarget } from './favourites';
 import type { Locks, LockTarget } from './locks';
-import { canActOn, fileName, type RecordingActions } from './recordingActions';
+import {
+  absenceLabel,
+  absenceReason,
+  absentBecause,
+  canActOn,
+  fileName,
+  type AbsentBecause,
+  type RecordingActions,
+} from './recordingActions';
 import { Thumbnail } from './Thumbnail';
 import { useSessionWindow } from './virtualWindow';
 
@@ -294,9 +295,8 @@ function RecordingRow({
    * identically, and a keyboard user cannot tell apart (AGENTS.md section 46).
    */
   const of = `${fileName(recording.path)}, ${session.game_name ?? 'not recognised'}`;
-  const why = available
-    ? undefined
-    : 'This file could not be found the last time Clipped looked for it.';
+  const absent = absentBecause(recording);
+  const why = absent === undefined ? undefined : absenceReason(absent);
 
   return (
     <tr>
@@ -319,7 +319,7 @@ function RecordingRow({
         {recording.size_bytes !== undefined && available && (
           <span className="clipped-muted"> · {formatBytes(recording.size_bytes)}</span>
         )}
-        {!available && <span className="clipped-muted"> · file missing</span>}
+        {absent !== undefined && <span className="clipped-muted"> · {absenceLabel(absent)}</span>}
       </td>
       <td>
         {onPlay !== undefined && (
@@ -571,18 +571,36 @@ function FavouriteButton({
 }
 
 /**
- * What a sitting's files amount to, and how many of them have gone.
+ * What a sitting's files amount to, and what became of the ones that are not
+ * there.
  *
  * Written out rather than shown as an icon or a colour, because "3 recordings, 1
  * file missing" is the sentence somebody has to read to know their footage was
  * moved or deleted.
+ *
+ * A recording that never started is counted separately and worded differently
+ * (issue #673). A sitting of five failures once read "5 recordings, 5 files
+ * missing", which told its owner they had lost five recordings they never had —
+ * and the real fault, an encoder that would not open, went unmentioned.
  */
 function describeFiles(session: LibrarySession): string {
   const count = session.recordings.length;
   const recordings = `${String(count)} recording${count === 1 ? '' : 's'}`;
-  const missing = missingCount(session);
-  if (missing === 0) {
+
+  const absent = session.recordings
+    .map((recording) => absentBecause(recording))
+    .filter((because): because is AbsentBecause => because !== undefined);
+  if (absent.length === 0) {
     return recordings;
   }
-  return `${recordings}, ${String(missing)} file${missing === 1 ? '' : 's'} missing`;
+
+  const gone = absent.filter((because) => because === 'file-gone').length;
+  const parts: string[] = [];
+  if (absent.length - gone > 0) {
+    parts.push(`${String(absent.length - gone)} did not record`);
+  }
+  if (gone > 0) {
+    parts.push(`${String(gone)} file${gone === 1 ? '' : 's'} missing`);
+  }
+  return `${recordings}, ${parts.join(', ')}`;
 }

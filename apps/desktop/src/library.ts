@@ -464,11 +464,6 @@ export function presentBytes(session: LibrarySession): number {
   );
 }
 
-/** How many of a sitting's files could not be found. */
-export function missingCount(session: LibrarySession): number {
-  return session.recordings.filter((recording) => recording.missing_since !== undefined).length;
-}
-
 /**
  * A duration in seconds, as `1 h 49 m` or `24 s`.
  *
