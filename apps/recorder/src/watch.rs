@@ -2323,12 +2323,15 @@ fn report_session(session: &Session) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::time::Duration;
 
     use clipped_game_detection::catalogue::EntrySource;
     use clipped_game_detection::{LaunchGroup, LaunchId, ProcessSnapshot};
-    use clipped_ipc::{CommandHandler, RecorderStatus};
+    use clipped_ipc::{ApplySettings, CommandHandler, EventPublisher, RecorderStatus};
+
+    use crate::library::LibraryIndexer;
     use clipped_session::config::{
         AudioDeviceSetting, GameKey, Preferences, ResolutionSetting, SettingSource,
     };
@@ -2934,6 +2937,124 @@ name = "test-game.exe"
             "the stand-in engine reports a failure: {outcome:?}"
         );
         started.expect("the recording engine was asked to record something")
+    }
+
+    #[test]
+    fn a_setting_saved_while_the_recorder_runs_reaches_the_driver_on_its_next_pass() {
+        // The seam four fixes rest on, asserted for the first time.
+        //
+        // `tests/integration/tests/settings_reach_the_running_recorder.rs`
+        // checks that somebody *answered* the propagation question for every
+        // setting, and its own documentation is explicit that it cannot check
+        // the propagation itself — "nothing static can". Nothing dynamic did
+        // either: the only driver test with a settings file builds one with
+        // `recordings: None`, so `take_the_settings_the_user_saved` returned at
+        // its first line and the refresh ran in no test at all (issue #648).
+        //
+        // A regression here would look exactly like the four defects that guard
+        // exists for — #608, #623, #647 and the hotkeys one — and every answer
+        // in that file would still read as true while being false in fact.
+        let directory = TestDirectory::new("saved-mid-run");
+        let settings_file = directory.settings_file();
+        ConfigurationStore::at(&settings_file)
+            .store(Configuration::defaults())
+            .expect("the settings file can be written");
+
+        let settings = Arc::new(crate::settings::SettingsFile::at(&settings_file));
+        let recordings = Arc::new(crate::serve::RecordingState::new(
+            EventPublisher::new(),
+            Arc::new(LibraryIndexer::at(
+                Some(directory.recordings().join("library.db")),
+                vec![directory.recordings()],
+            )),
+            Arc::clone(&settings),
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+        ));
+
+        let mut driver = Driver::new(
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+            AutomaticSettings::new(directory.recordings()),
+            // What the driver started with: the defaults, before any save.
+            Configuration::defaults(),
+            RecordingPlan::from(&args()),
+            Vec::new(),
+            Some(Arc::clone(&recordings)),
+        );
+
+        // The driver has to have looked once, or the first pass after a save is
+        // indistinguishable from the first pass ever.
+        driver.take_the_settings_the_user_saved();
+        assert_eq!(
+            driver.manager.configuration().global().framerate(),
+            None,
+            "nothing has been saved yet"
+        );
+
+        let mut values = BTreeMap::new();
+        values.insert("framerate".to_owned(), Some("120".to_owned()));
+        settings
+            .apply(&ApplySettings { game: None, values })
+            .expect("120 is a framerate the settings file accepts");
+
+        driver.take_the_settings_the_user_saved();
+
+        assert_eq!(
+            driver.manager.configuration().global().framerate(),
+            Some(120),
+            "a setting saved while the recorder runs has to reach the manager on its next pass, \
+             or the next automatically-started recording is made with what the recorder started \
+             with (issue #51, SPEC.md section 45)"
+        );
+    }
+
+    #[test]
+    fn a_pass_with_nothing_saved_does_not_re_read_the_settings() {
+        // The other half, and what the generation is for: without it this would
+        // clone the configuration once a second for the life of the process,
+        // which is the cost `RecordingState::settings_generation` documents
+        // avoiding (AGENTS.md section 20).
+        let directory = TestDirectory::new("nothing-saved");
+        let settings_file = directory.settings_file();
+        ConfigurationStore::at(&settings_file)
+            .store(Configuration::defaults())
+            .expect("the settings file can be written");
+
+        let settings = Arc::new(crate::settings::SettingsFile::at(&settings_file));
+        let recordings = Arc::new(crate::serve::RecordingState::new(
+            EventPublisher::new(),
+            Arc::new(LibraryIndexer::at(
+                Some(directory.recordings().join("library.db")),
+                vec![directory.recordings()],
+            )),
+            Arc::clone(&settings),
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+        ));
+
+        let mut driver = Driver::new(
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+            AutomaticSettings::new(directory.recordings()),
+            Configuration::defaults(),
+            RecordingPlan::from(&args()),
+            Vec::new(),
+            Some(Arc::clone(&recordings)),
+        );
+
+        driver.take_the_settings_the_user_saved();
+        let generation = recordings.settings_generation();
+
+        driver.take_the_settings_the_user_saved();
+
+        assert_eq!(
+            recordings.settings_generation(),
+            generation,
+            "a pass that read the settings again would have moved nothing, but this asserts the \
+             cheap half was cheap: the generation is what the driver compares, and nothing else \
+             may touch it"
+        );
     }
 
     #[test]
