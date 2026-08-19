@@ -109,6 +109,9 @@ fn is_this_file(source: &Path) -> bool {
 /// writes them in.
 ///
 /// - `crates/<crate>/tests/<file>.rs` — a crate's own integration test.
+/// - `test-apps/<application>/tests/<file>.rs` — a test application's own,
+///   which `docs/testing.md` cites as often as either of the others and which
+///   nothing checked until this line was added.
 /// - `tests/<anything>/<file>.rs` — the suites that live at the root, which is
 ///   where the capture, media and workspace tests are. They are cited as often
 ///   as the first kind, in `docs/` most of all, and were not checked at all
@@ -118,7 +121,7 @@ fn is_this_file(source: &Path) -> bool {
 /// checks below share one pass over the repository.
 fn citations(text: &str) -> Vec<(String, Option<String>)> {
     let mut found = Vec::new();
-    for prefix in ["crates/", "tests/"] {
+    for prefix in ["crates/", "test-apps/", "tests/"] {
         collect(text, prefix, &mut found);
     }
     found.sort();
@@ -183,6 +186,9 @@ fn is_a_test_file(path: &str) -> bool {
     match segments.as_slice() {
         // `crates/<crate>/tests/<file>.rs`.
         ["crates", _, "tests", _] => true,
+        // `test-apps/<application>/tests/<file>.rs`. The same shape, for the
+        // controlled subjects that carry their own measurements.
+        ["test-apps", _, "tests", _] => true,
         // `tests/<suite>/…/<file>.rs`, but not `tests/<suite>/src/<file>.rs`,
         // which is a harness's own code rather than a test.
         ["tests", rest @ ..] => rest.len() >= 2 && !rest.contains(&"src"),
@@ -304,6 +310,25 @@ mod tests {
                     Some("the_desktop_names_one_crate".to_owned())
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn a_test_applications_own_test_is_a_citation_too() {
+        // `docs/testing.md` cites these as freely as it cites the crates', and
+        // means the same thing by them: this file measures that. A test
+        // application's source is still not a citation — only what is under its
+        // `tests/`.
+        let found = citations(
+            "`test-apps/process-tree-audio/tests/bounded_waits.rs` drives              test-apps/video-pattern/src/steady_tone.rs",
+        );
+
+        assert_eq!(
+            found,
+            vec![(
+                "test-apps/process-tree-audio/tests/bounded_waits.rs".to_owned(),
+                None
+            )]
         );
     }
 

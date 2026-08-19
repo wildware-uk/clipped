@@ -23,6 +23,7 @@
 //! | --- | --- | --- |
 //! | [`pattern`] | The pattern: how a frame is drawn and how one is read back | Anywhere. It is pixel arithmetic, and its tests need no GPU |
 //! | [`harness`] | Starting the application from a test and stopping it afterwards | Anywhere |
+//! | [`child_output`] | Reading a test application's standard output with every wait bounded, shared with the audio subject's harness | Anywhere |
 //! | The renderer and the run loop | A Direct3D 11 window presenting the pattern at a fixed rate | Windows |
 //! | The tone output | `--tone` only: a short sound placed at the moment a named frame is presented, so that a recording of this application has an event whose sound and picture are simultaneous at the source | Windows |
 //! | [`steady_tone`] | `--steady-tone` only: one frequency held for the whole run, so that a recording of this application is a *source* an audio isolation test can look for on a track | Windows |
@@ -57,6 +58,7 @@
 //! `crates/capture/examples/wgc_probe.rs`. `docs/testing.md` records what the
 //! two share and why they are still separate programs.
 
+pub mod child_output;
 pub mod harness;
 pub mod pattern;
 #[cfg(windows)]

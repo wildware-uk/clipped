@@ -29,7 +29,21 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 use clap::Parser;
+use clipped_video_pattern::child_output::{self, Lines, NoLine};
 use clipped_video_pattern::steady_tone::{self, AMPLITUDE, FREQUENCY};
+
+/// How long a parent waits for a player it started to say what it is doing.
+///
+/// Bounded for the reason the harness's waits are: what a player does before it
+/// can announce anything is open a shared-mode audio endpoint, and a parent
+/// blocked for ever on a player that never came back would be a parent that
+/// stops answering its own standard input — a test hanging on a subject that is
+/// still running, which is the worst of both.
+///
+/// Shorter than the ten seconds every test gives `spawn_child`, so that a
+/// player which cannot report is reported *by its parent*, with a reason,
+/// rather than by the test merely running out of patience.
+const PLAYER_PATIENCE: Duration = Duration::from_secs(8);
 
 /// A controlled subject for process-scoped audio capture tests.
 #[derive(Debug, Parser)]
@@ -68,7 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parent(options: &Options, limit: Option<Duration>) -> Result<(), Box<dyn std::error::Error>> {
     announce(&format!("ready pid={} role=parent", std::process::id()))?;
 
-    let mut children = Vec::new();
+    // Each child is kept with the lines it is printing: dropping the receiver
+    // would end the thread draining its standard output, and a child whose
+    // output nobody reads eventually blocks trying to write to it.
+    let mut children: Vec<(Child, Lines)> = Vec::new();
     for line in commands(limit) {
         let command = line.trim();
         if command == "stop" {
@@ -84,9 +101,11 @@ fn parent(options: &Options, limit: Option<Duration>) -> Result<(), Box<dyn std:
         }
     }
 
-    for mut child in children {
+    for (mut child, _lines) in children {
         // A child has no reason to outlive its parent, and a test that
-        // panicked is exactly when one would.
+        // panicked is exactly when one would. The wait is after the kill, which
+        // is what keeps it bounded: it reaps a process that is already being
+        // terminated rather than waiting on one that is running.
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -117,7 +136,10 @@ fn spawn_request(command: &str, default: f32) -> Option<f32> {
 }
 
 /// Starts a player as this process's own child and reports what it said.
-fn spawn_player(options: &Options, frequency: f32) -> Result<Child, Box<dyn std::error::Error>> {
+fn spawn_player(
+    options: &Options,
+    frequency: f32,
+) -> Result<(Child, Lines), Box<dyn std::error::Error>> {
     let mut child = Command::new(std::env::current_exe()?)
         .arg("--play")
         .args(["--frequency", &frequency.to_string()])
@@ -126,27 +148,38 @@ fn spawn_player(options: &Options, frequency: f32) -> Result<Child, Box<dyn std:
         .stdout(Stdio::piped())
         .spawn()?;
 
+    // Drained on a thread from here on, so that a child which keeps talking
+    // never blocks writing to a pipe nobody is reading.
+    let stdout = child.stdout.take().expect("standard output was piped");
+    let lines = child_output::reading(stdout)?;
+
     // The child's first line is its own `ready` or `unavailable`, and it is
     // passed straight through: a test that asked for a tone has to be able to
     // tell "playing" from "this machine cannot", and the child is the only one
-    // that knows.
-    let stdout = child.stdout.take().expect("standard output was piped");
-    let mut reader = BufReader::new(stdout);
-    let mut first = String::new();
-    reader.read_line(&mut first)?;
-    announce(&format!("child pid={} {}", child.id(), first.trim()))?;
-
-    // Whatever it says afterwards is drained, because a child whose standard
-    // output nobody reads eventually blocks trying to write to it.
-    std::thread::spawn(move || {
-        for line in reader.lines() {
-            if line.is_err() {
-                break;
-            }
+    // that knows. A child that says neither within `PLAYER_PATIENCE` is
+    // reported as unavailable in the same shape and killed, because a wedged
+    // player is not a reason to stop answering the test.
+    match child_output::next_line_within(&lines, PLAYER_PATIENCE) {
+        Ok(first) => announce(&format!("child pid={} {first}", child.id()))?,
+        Err(reason) => {
+            let detail = match reason {
+                NoLine::Silent(patience) => format!(
+                    "the player said nothing within {:.1}s",
+                    patience.as_secs_f64()
+                ),
+                NoLine::Ended => "the player exited without saying anything".to_owned(),
+                NoLine::Unreadable(error) => {
+                    format!("the player'''s output could not be read: {error}")
+                }
+            };
+            let pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            announce(&format!("child pid={pid} unavailable reason={detail}"))?;
         }
-    });
+    }
 
-    Ok(child)
+    Ok((child, lines))
 }
 
 /// The player: renders the tone until it is told to stop.

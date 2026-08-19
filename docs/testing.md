@@ -1,10 +1,14 @@
 # Testing capture against controlled test applications
 
-**Status: three of the four test applications AGENTS.md section 26 names exist,
-and the tests in `tests/capture/` and `tests/audio/` drive them.**
+**Status: every capability AGENTS.md section 26 asks a test application for
+exists, in three programs rather than the four it sketches.**
 `test-apps/video-pattern`, `test-apps/fullscreen-dx11` and
-`test-apps/process-tree-audio` are built and documented here. The fourth is not,
-and [the last section](#what-is-not-built-yet) says why and where it is tracked.
+`test-apps/process-tree-audio` are built and documented here, and the tests in
+`tests/capture/` and `tests/audio/` drive them. There is no
+`test-apps/audio-generator` and there is no longer a reason to write one:
+[the last section](#the-fourth-application-and-why-it-is-not-being-built) says
+which of its jobs each of the other three took, and where the one job none of
+them could do actually went.
 
 The other half of testing a recorder is what comes _out_ of it, which is
 [validating produced media](#validating-produced-media) — one harness, used by
@@ -35,12 +39,36 @@ arrived twice — with nobody watching.
 | `test-apps/fullscreen-dx11` | The same pattern covering a whole display, exclusively where Windows allows it           | `cargo run -p clipped-fullscreen-dx11 --bin fullscreen-dx11 -- --help` |
 | `test-apps/process-tree-audio` | A silent parent that starts a child which plays a tone, so that process-scoped capture can be proved against a known process *tree* | `cargo run -p clipped-process-tree-audio --bin process-tree-audio -- --help` |
 
-Both are ordinary workspace members, so `cargo build --workspace`,
+All three are ordinary workspace members, so `cargo build --workspace`,
 `cargo clippy --workspace --all-targets` and `cargo fmt --all` cover them. A
 test application nobody compiles is a capture test that has quietly stopped
 running.
 
-### Rules both of them follow
+### Rules all three follow
+
+- **They never outlive whoever started them.** A run ends at its `--seconds`
+  deadline, when standard input closes or carries `stop`, or at Ctrl-C — and
+  every one of those paths gives back whatever the run took, whether that is a
+  display or an audio endpoint, before the process exits. A test that panics
+  still closes the pipe, and the application notices. `process-tree-audio` ends
+  its children on the way out for the same reason, on every path including a
+  panic.
+- **They say what they did on standard output**, in a line-based protocol, so
+  that driving one from a test needs no guessing. Diagnostics go to standard
+  error, so a driver parsing the protocol cannot be derailed by a warning.
+- **Every wait their harnesses make is bounded.** A subject that starts and then
+  says nothing must fail a test rather than hang it, which means no harness here
+  may block on a pipe read: standard output is drained by a thread from the
+  moment the process starts and read through
+  [`clipped_video_pattern::child_output`] with a timeout. Both harnesses use
+  that one mechanism.
+
+[`clipped_video_pattern::child_output`]: ../test-apps/video-pattern/src/child_output.rs
+
+### Rules the two window subjects follow
+
+`video-pattern` and `fullscreen-dx11` present a window; `process-tree-audio`
+has none, and none of these applies to it.
 
 - **They go on a display that is not the primary one**, when the machine has
   one, and they are always-on-top everywhere except fullscreen. That is not
@@ -48,18 +76,12 @@ running.
   Windows Graphics Capture stops delivering frames for a minimised window, and
   the run stops measuring capture and starts measuring Alt-Tab. `--monitor
 primary` overrides it.
-- **They never outlive whoever started them.** A run ends at its `--seconds`
-  deadline, when standard input closes or carries `stop`, at Ctrl-C, or when the
-  window is closed — and every one of those paths gives back the display and
-  destroys the window before the process exits. A test that panics still closes
-  the pipe, and the application notices.
+- **Closing the window ends the run**, and the display is given back and the
+  window destroyed before the process exits.
 - **They are per-monitor DPI aware**, so the pattern is drawn in the same
   physical pixels a capture backend sees. Without that, a display scaled above
   100% would have Windows stretch every cell of the pattern and the decoder
   would be reading a resampled image.
-- **They say what they did on standard output**, in a line-based protocol, so
-  that driving one from a test needs no guessing. Diagnostics go to standard
-  error, so a driver parsing the protocol cannot be derailed by a warning.
 
 ## `video-pattern`
 
@@ -213,6 +235,93 @@ moved the answer. The evidence is under "Exclusive fullscreen" in
 [tests/capture/README.md](../tests/capture/README.md). Running the application
 or the test on its own does not produce a grant, however awake the machine is.
 
+## `process-tree-audio`
+
+The audio subject, and the only one of the three with no window. It is
+deliberately **two** processes, because the thing process-scoped audio capture
+has to get right is that a game is not one process: a launcher starts it, it
+starts helpers, and the process that actually renders the sound is often not the
+one anybody named. The parent plays nothing at all; on request it starts a
+child, and the child is what makes the noise.
+
+```text
+process-tree-audio                                  # the parent: silent, waits for `spawn`
+process-tree-audio --play                           # a player: renders a tone at once
+process-tree-audio --play --frequency 1373 --seconds 10
+
+cargo run -p clipped-process-tree-audio --bin process-tree-audio -- --help
+```
+
+`spawn` on the parent's standard input starts a player as its own child, at the
+moment a test chooses — which is how "the game spawned a helper that makes the
+noise" happens after a capture is already running. `spawn 1699` names the tone,
+and a parent takes as many as it is sent: a second child playing something the
+first is not is the only way a test can tell the audio that joined from the
+audio that was already there.
+
+Two of them, started separately, are how isolation is asserted: each is its own
+process tree, so a capture scoped to one must hold that one's tone and not the
+other's.
+
+### The protocol a test drives it through
+
+```text
+ready pid=1234 role=parent
+ready pid=5678 role=player frequency=997 amplitude=0.04 rate=48000 channels=2
+child pid=5678 ready pid=5678 role=player frequency=997 ...
+child pid=5678 unavailable reason=...
+ignored command=...
+stopped
+```
+
+A parent passes its child's first line straight through behind `child pid=`,
+because a test that asked for a tone has to be able to tell "playing" from "this
+machine cannot", and the child is the only one that knows. A machine with no
+usable output endpoint answers `unavailable reason=` rather than failing, which
+is a reason for a test to skip rather than to fail (AGENTS.md section 25).
+
+**It makes a noise**, quietly — about −28 dBFS — and only while a player is
+running. The waveform, the loop that feeds it to the endpoint and the
+frequencies live in `clipped_video_pattern::steady_tone`, shared with
+`video-pattern --steady-tone` so that the two subjects cannot drift apart in
+what they play or how loudly. The default is 997 Hz, with 1373 Hz and 1699 Hz
+for the sources a test is asserting the *absence* of; that module says why those
+rather than AGENTS.md section 26's 440/880/1320 Hz, which are a musical A and
+its harmonics and lost to background music on a real machine.
+
+### How a test drives it
+
+```rust
+use core::time::Duration;
+use clipped_process_tree_audio::harness::ToneSubject;
+
+let mut parent = ToneSubject::start(env!("CARGO_BIN_EXE_process-tree-audio"), &[])?;
+let tree_root = parent.pid();
+
+// Start capturing `tree_root` here, and only then ask for the child that
+// makes the noise.
+let (child, tone) = parent.spawn_child(Duration::from_secs(10))?;
+
+parent.stop();  // and both of them are gone
+```
+
+`ToneSubject` is `TestApp`'s counterpart for a subject with no window, and it
+carries the same two guarantees. `Drop` closes standard input, waits, and kills
+the process, so there is no path — panic included — on which a subject outlives
+the test that started it or is left holding an audio endpoint. And every wait it
+makes is bounded: `start` gives the subject thirty seconds to announce itself
+and `spawn_child` takes the time a caller is prepared to wait for a child, after
+which each fails with a sentence naming the wait that expired rather than
+blocking for ever.
+
+**A player does not survive its parent**, even when the parent is terminated
+rather than asked. The parent holds the write end of its child's standard
+input, Windows closes it when the parent dies, and the player reads that as
+"stop" — measured at **216 ms** from a `TerminateProcess` on the parent to the
+player leaving the process table. That is the path that matters, because it is
+the one a harness takes when a subject has stopped answering: the tone stops
+without anybody having to notice it.
+
 ## The capture tests
 
 `tests/capture/` holds the tests that point a real capture backend at these
@@ -233,18 +342,20 @@ applications and ask what landed on each of its tracks:
 | `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both. Also **where the tracks end** — within a packet of the picture, which nothing had measured against a produced recording before [#320](https://github.com/wildware-uk/clipped/issues/320) |
 | `system_audio_fallback.rs` | What a machine that **cannot** scope a capture to a process records: that it records at all rather than failing, that its one track holds both tones — everything the machine played — and that the track is called `System Audio` and not `Game` or `Other System Audio`, neither of which would be true of it. In the same run, that a failure this build cannot classify still refuses the recording. The failure is forced with `CLIPPED_FORCE_AUDIO_SCOPING_FAILURE`, because every machine here is far past the Windows build where scoping stopped being optional ([#604](https://github.com/wildware-uk/clipped/issues/604)) |
 
-`test-apps/process-tree-audio` has two of its own, which ask narrower questions
-with no recording involved:
+`test-apps/process-tree-audio` has three of its own, which ask narrower
+questions with no recording involved:
 
 | Test                              | What it decides                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `process_loopback_isolation.rs`   | That a capture scoped to a *parent* picks up a tone played by a child it started afterwards, and not one played by an unrelated tree                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mid_recording_joiner.rs`         | Issue [#27](https://github.com/wildware-uk/clipped/issues/27)'s second acceptance criterion, against a tree that is **already audible**: that a process joining it mid-recording is heard on the game's track within a bounded time, that it is *not* also on the complement's — both sides are opened from one `open_pair` — and what the join costs the audio that was already flowing. It is what found [#626](https://github.com/wildware-uk/clipped/issues/626) and then what characterised it: the cost is **1,504 frames of exact digital zeros** — 31.33 ms — in the track of whichever tap's stream set changed, and a stream *leaving* costs the same as one joining. Two tests now: the joiner, and audio starting and stopping outside the tree. Both pin the size so it cannot creep, and both now check the **count** `CaptureStats::unflagged_dropouts` keeps of it — non-zero on the tap whose stream set changed, and zero on the tap beside it that lost nothing over the same window |
+| `bounded_waits.rs`                | That a subject which stops talking fails its test rather than hanging it. `ToneSubject` used to wait for a line with a blocking `read_line`, and `spawn_child` documented a deadline it did not have: it was looked at only *between* lines, so it expired against a talkative subject and never at all against a silent one, which is the only case a deadline is for. Three subjects built out of `cmd` stand in for a wedged one — one that never announces itself, one that announces itself and then answers nothing, and one that answers everything except what was asked — because `process-tree-audio` always answers, which is the point of it. It needs no audio device and no recording |
 
-Both need an output endpoint and a Windows that can scope a capture to a
-process. The first runs by default; the second is `#[ignore]`d, because it takes
-four seconds and its answer is a set of numbers somebody should read rather than
-a green tick:
+The first two need an output endpoint and a Windows that can scope a capture to
+a process. `process_loopback_isolation.rs` runs by default;
+`mid_recording_joiner.rs` is `#[ignore]`d, because it takes four seconds and its
+answer is a set of numbers somebody should read rather than a green tick.
+`bounded_waits.rs` needs neither an endpoint nor a recording and runs everywhere:
 
 ```text
 cargo test -p clipped-process-tree-audio
@@ -1096,42 +1207,77 @@ repository can make one do it on request. That is recorded as an open unknown in
 page that says which of the commands in this file anybody has ever run, on what
 hardware, and what came out of them.
 
-## What is not built yet
+## The fourth application, and why it is not being built
 
-AGENTS.md section 26 names four test applications. **Three exist.**
-`test-apps/process-tree-audio` arrived with process-scoped capture in
-[issue #26](https://github.com/wildware-uk/clipped/issues/26): a parent that
-plays nothing and a child that plays a tone, so that scoping can be proved
-against a known shape rather than against Discord. Its
-`tests/process_loopback_isolation.rs` starts it, records it and analyses the
-result, with nobody watching; `tests/mid_recording_joiner.rs` does the same for a
-tree that gains a second noisy member while the capture is running, which is
-[issue #27](https://github.com/wildware-uk/clipped/issues/27)'s second criterion.
-The parent takes as many children as it is sent, each on a frequency the caller
-names, which is what makes the second of those measurable at all.
+AGENTS.md section 26 sketches four test applications by name. **Three exist**,
+and `test-apps/audio-generator` is not going to. This section is the argument
+rather than a promise, because a name left on a list is an invitation to write
+the program under it, and the fourth would now be the third program in this
+repository that plays a sine wave.
 
-The one still missing is `test-apps/audio-generator`, which was left out on
-purpose rather than stubbed:
+[Issue #23](https://github.com/wildware-uk/clipped/issues/23) built the video
+half and left the audio half out on purpose:
 
-- An audio generator with no audio capture to test would have been written
-  against a guess at what M2 needs and rewritten by the first test that used it,
-  and a directory of empty programs is worse than three good ones. It is
-  [issue #136](https://github.com/wildware-uk/clipped/issues/136), in M2, with
-  the tone plan from AGENTS.md section 26 (440 Hz, 880 Hz, 1320 Hz) written into
-  its acceptance criteria. Much of what it was for is now covered from the other
-  end: `crates/session/src/audio/tests.rs` scripts sources through the real
-  muxing path and asserts tone isolation by frequency analysis,
-  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks, and
-  `tests/audio/track_isolation.rs` does it against real endpoints and real
-  processes with `video-pattern --steady-tone` as the source.
+> An audio generator with no audio capture to test is a program nobody runs: it
+> would have been written against a guess at what M2 needs and rewritten by the
+> first test that used it.
 
-The generator that is missing is a **microphone** one, and no test application
-could ever have been it: a simulated microphone needs a capture endpoint to
-render into, which is a virtual audio device rather than a program. What closed
-that gap was not a generator but a way to find such a device safely —
+That deferral was right, and what happened in the two milestones since is that
+each test which needed a tone added exactly the tone it needed to a program that
+already existed. `process-tree-audio` arrived with process-scoped capture in
+[issue #26](https://github.com/wildware-uk/clipped/issues/26); `video-pattern`
+grew `--steady-tone` so that a window and a sound could come out of one process
+tree; `steady_tone` learnt to render into a *named* endpoint so that a
+microphone could be simulated. Taken capability by capability, everything
+[issue #136](https://github.com/wildware-uk/clipped/issues/136) asks
+`audio-generator` for is here already:
+
+| What the fourth application was to do | Where that lives now |
+| --- | --- |
+| Emit a tone at a given frequency | `process-tree-audio --play --frequency <HERTZ>`, or `video-pattern --steady-tone <HERTZ>` where the sound has to come from the same process tree as a window |
+| At a given amplitude | `process-tree-audio --play --amplitude <FRACTION>` |
+| For a given duration | `process-tree-audio --play --seconds <SECONDS>`, or until its standard input closes |
+| On a given endpoint | `clipped_video_pattern::steady_tone::SteadyToneOutput::start_on`, which is how `tests/audio/track_isolation.rs` puts a tone on the render half of a virtual audio device |
+| Announce itself on standard output so a test can start it, capture it and stop it with nobody watching | `process-tree-audio`'s protocol, driven by `clipped_process_tree_audio::harness::ToneSubject` |
+| Be the noise that is *not* the game, for an isolation assertion | A second `process-tree-audio --play` on another frequency, which is what `test-apps/process-tree-audio/tests/process_loopback_isolation.rs` starts |
+| The three-source isolation test — a tone per track, asserted by frequency analysis rather than by a person listening | `tests/audio/track_isolation.rs` against real endpoints and real processes; `crates/session/src/audio/tests.rs` and `crates/muxer/tests/multi_track_audio.rs` against scripted ones |
+
+The tone plan in section 26 is 440 Hz, 880 Hz and 1320 Hz, and the tests that use
+those numbers are the ones whose samples are *synthesised* — nothing else is
+playing in a buffer a test filled itself. The tests that play into a real
+endpoint use 997 Hz, 1373 Hz and 1699 Hz instead, and
+`test-apps/video-pattern/src/steady_tone.rs` says why: 880 and 1320 are the
+harmonics of 440, 440 is a musical A, and music playing on a developer's machine
+once put enough energy in that bin to fail a test in `crates/audio`. The plan is
+honoured in what it was for — three mutually distinguishable sources, one per
+track — and not in its arithmetic.
+
+**The one job none of the three could do was never a program.** A simulated
+microphone needs a signal arriving on a *capture* endpoint, and no test
+application can be a capture endpoint: what is needed is a virtual audio device,
+whose render half reappears on its input half. What closed that gap was
+therefore not a generator but a way to find such a device safely —
 `test-apps/video-pattern/src/virtual_audio.rs` and the probe in
-`tests/audio/track_isolation.rs`, described above — so the microphone leg is now
-measured wherever one is installed, and skipped, loudly, where one is not.
+`tests/audio/track_isolation.rs`, described above — after which the existing
+tone renderer, pointed at the device's render half, was all the generator that
+was ever needed. The machine's real microphone is never opened (AGENTS.md
+section 14), and a machine with no virtual device skips, loudly.
+
+So `tests/audio/track_isolation.rs` is section 26's illustration, running: three
+mutually unrelated tones, one per source, each asserted onto its own track and
+out of the other two by Goertzel filter, with nobody listening.
+
+**If a gap does appear, it is a flag rather than a program.** The only thing on
+the list above that no *command line* can reach today is naming an endpoint —
+`SteadyToneOutput::start_on` is a library call, and the tests that want it are
+in-process. When something needs a tone on a named endpoint from a *separate*
+process — [issue #316](https://github.com/wildware-uk/clipped/issues/316),
+recording a named output endpoint, and
+[issue #141](https://github.com/wildware-uk/clipped/issues/141), system audio
+surviving an output-device change, are the two candidates — the answer is
+`--endpoint` on `process-tree-audio`, which already announces itself, already
+has a harness and is already the process-shaped subject. Adding it before a test
+asks for it would be the mistake #23 refused to make, one program further along.
 
 Anything else this document describes is built. Where it describes something
 that is not, it says so — a document that quietly describes intentions as facts
