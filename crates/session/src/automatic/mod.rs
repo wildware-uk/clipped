@@ -142,6 +142,7 @@ use std::time::{Duration, SystemTime};
 
 use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 use clipped_events::GameEvent;
+use clipped_game_detection::catalogue::LauncherKind;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
 use clipped_game_detection::launcher::Launchers;
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
@@ -1049,12 +1050,7 @@ impl SessionManager {
     /// A launch the watcher reported.
     fn launched(&mut self, group: &LaunchGroup, now: SystemTime, actions: &mut Vec<SessionAction>) {
         let Some(matched) = self.match_launch(group) else {
-            tracing::debug!(
-                launch = group.id.get(),
-                processes = group.processes.len(),
-                image = group.newest().image_name.as_str(),
-                "a launch matched no game in the catalogue"
-            );
+            self.report_unrecognised(group);
             return;
         };
 
@@ -1073,6 +1069,81 @@ impl SessionManager {
         }
 
         self.start_session(matched, now, actions);
+    }
+
+    /// Says that a launch was seen and will not be recorded.
+    ///
+    /// A launch the catalogue does not claim is not a game and never becomes a
+    /// session, which is the decision `identify_process` documents. On a real
+    /// machine that is the *usual* outcome rather than the exceptional one —
+    /// the shipped catalogue names a few dozen games and a Steam library holds
+    /// hundreds — so the one thing this must not be is quiet.
+    ///
+    /// It was quiet. This was a `debug!`, and a shipped build runs at `info`,
+    /// so the only record of the common case was compiled in and never emitted.
+    /// "Clipped is not recording my games" was then unanswerable from a log
+    /// ([issue #664](https://github.com/wildware-uk/clipped/issues/664)).
+    ///
+    /// The distinction that makes the line worth reading is whether a launcher
+    /// claimed the process. A launcher saying "this path is application 427520"
+    /// is the machine telling us the thing is a game, and the catalogue having
+    /// no entry for it is then a gap in our data rather than a judgement about
+    /// the process — a different sentence, and a different remedy, from a stray
+    /// executable nothing installed.
+    ///
+    /// Neither branch names a path. The image *name* is what a catalogue entry
+    /// is written against, and the path is the user's disk (AGENTS.md section
+    /// 13).
+    fn report_unrecognised(&self, group: &LaunchGroup) {
+        let newest = group.newest();
+
+        match self.unrecognised(group) {
+            Unrecognised::ClaimedBy { kind, app_id } => tracing::info!(
+                launch = group.id.get(),
+                processes = group.processes.len(),
+                image = newest.image_name.as_str(),
+                launcher = kind.as_str(),
+                app_id = app_id.as_str(),
+                "a game this launcher installed has no entry in the catalogue, so it was not                  recorded"
+            ),
+            Unrecognised::Unclaimed => tracing::debug!(
+                launch = group.id.get(),
+                processes = group.processes.len(),
+                image = newest.image_name.as_str(),
+                "a launch matched no game in the catalogue, and no launcher claims it"
+            ),
+        }
+    }
+
+    /// Whether a launcher claims a launch the catalogue could not place.
+    ///
+    /// Split from the reporting above so that the part which can be wrong — did
+    /// the launcher claim actually reach us — is a value a test can assert on.
+    /// The alternative is asserting on log output, which needs a global
+    /// subscriber and would make this decision testable only in a binary that
+    /// installs one.
+    fn unrecognised(&self, group: &LaunchGroup) -> Unrecognised {
+        let newest = group.newest();
+        let Some(path) = newest
+            .image_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+        else {
+            // No readable path is no claim: `candidate_for` matches on the
+            // directory a launcher installed into, and there is nothing here to
+            // compare against one.
+            return Unrecognised::Unclaimed;
+        };
+
+        self.launchers
+            .candidate_for(&newest.image_name, &path)
+            .launcher()
+            .map_or(Unrecognised::Unclaimed, |(kind, app_id)| {
+                Unrecognised::ClaimedBy {
+                    kind,
+                    app_id: app_id.to_owned(),
+                }
+            })
     }
 
     /// The same game, back inside its session's restart grace.
@@ -1535,6 +1606,28 @@ fn identify_process(
                 .collect(),
         ),
     }
+}
+
+/// What a launch the catalogue could not place turned out to be.
+///
+/// Only ever reported, never acted on: whether a launcher-installed game with
+/// no catalogue entry should be recorded is
+/// [issue #664](https://github.com/wildware-uk/clipped/issues/664) and is not
+/// decided here. This type exists so that the reporting can tell the two cases
+/// apart, and so that a test can check it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unrecognised {
+    /// A launcher says it installed this, so the machine considers it a game
+    /// and the catalogue simply has no entry for it.
+    ClaimedBy {
+        /// Which launcher.
+        kind: LauncherKind,
+        /// That launcher's own identifier for the application.
+        app_id: String,
+    },
+    /// Nothing installed by a launcher, so there is no evidence it is a game at
+    /// all.
+    Unclaimed,
 }
 
 /// The settings that apply to one game, from the layers the user configured.
