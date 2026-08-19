@@ -40,7 +40,14 @@ export interface WaitingOnProps {
 /** What a screen owes, against the work that lands each part of it. */
 export function WaitingOn({ heading, rows }: WaitingOnProps): ReactNode {
   return (
-    <table className="clipped-table">
+    /*
+     * Named, because every screen that draws one of these now draws a second
+     * table beside it -- what has actually been recorded -- and a table a
+     * screen reader announces as "table" is one a keyboard user cannot tell
+     * from the other (AGENTS.md section 46). The heading is the name: it is
+     * already the sentence that says what the table is.
+     */
+    <table className="clipped-table" aria-label={heading}>
       <thead>
         <tr>
           <th scope="col">{heading}</th>
