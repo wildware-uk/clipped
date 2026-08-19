@@ -43,7 +43,7 @@
 //! present happens there. The only things that cross a thread boundary are the
 //! two stop flags in [`crate::app`], which are atomics.
 
-use windows::core::{w, Interface, PCWSTR};
+use windows::core::{w, Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
@@ -137,7 +137,21 @@ pub(crate) struct PatternWindow {
     presented: u32,
     /// Whether `SetFullscreenState(true)` was granted, so that [`Drop`] knows
     /// whether it has a display mode to give back.
+    ///
+    /// Followed rather than assumed after it is set: Windows takes the display
+    /// back on its own, and this is compared against
+    /// `IDXGISwapChain::GetFullscreenState` before every present
+    /// ([issue #178](https://github.com/wildware-uk/clipped/issues/178)).
     exclusive: bool,
+    /// How many times Windows changed the presentation this application did not
+    /// ask it to.
+    ///
+    /// Reported rather than swallowed. A capture test reads `exclusive=yes` from
+    /// the `ready` line and would otherwise have no way to learn the display was
+    /// handed back a frame later — so it could not tell "captured a window that
+    /// owns its display" from "captured a borderless window" (AGENTS.md section
+    /// 16).
+    involuntary_transitions: u32,
     /// Set when the window has been destroyed or asked to close, so the run
     /// loop stops presenting into a swap chain whose window has gone.
     closed: bool,
@@ -363,6 +377,7 @@ impl PatternWindow {
             height,
             presented: 0,
             exclusive: false,
+            involuntary_transitions: 0,
             closed: false,
         })
     }
@@ -468,9 +483,18 @@ impl PatternWindow {
         // SAFETY: no view of the back buffers is outstanding — `present` takes
         // one and drops it before returning — which is `ResizeBuffers`' one
         // precondition.
+        //
+        // The flags are the ones the swap chain was created with rather than
+        // `Default::default()`. They should match, and they did not (issue
+        // #178).
         unsafe {
-            self.swap_chain
-                .ResizeBuffers(0, 0, 0, DXGI_FORMAT_B8G8R8A8_UNORM, Default::default())
+            self.swap_chain.ResizeBuffers(
+                0,
+                0,
+                0,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH,
+            )
         }
         .map_err(|source| AppError::windows("IDXGISwapChain::ResizeBuffers", source))?;
         self.follow_swap_chain_size()?;
@@ -526,8 +550,90 @@ impl PatternWindow {
         Ok(())
     }
 
+    /// Follows a fullscreen or windowed transition this application did not ask
+    /// for.
+    ///
+    /// Flip-model swap chains require `ResizeBuffers` after **every** such
+    /// transition, including the ones Windows makes on its own. Without this the
+    /// first one kills the application — `Present` returns `0x887A0001` and the
+    /// DXGI info queue says exactly why:
+    ///
+    /// ```text
+    /// IDXGISwapChain::Present: The application has not called ResizeBuffers or
+    /// re-created the SwapChain after a fullscreen or windowed transition.
+    /// ```
+    ///
+    /// The trigger found in the wild was a display Windows had powered off: the
+    /// compositor drops to about 4 Hz, `GetFullscreenState` goes `TRUE` for
+    /// exactly one presented frame and then `FALSE`, and a capture test pointed
+    /// at this application is left with no subject
+    /// ([issue #178](https://github.com/wildware-uk/clipped/issues/178)).
+    ///
+    /// Asked before the back buffer is taken, because releasing every view of
+    /// the buffers is `ResizeBuffers`' one precondition.
+    ///
+    /// A swap chain that cannot be asked is left alone: that is a device already
+    /// in a state this cannot mend, and `Present` will report it in its own
+    /// words a moment later rather than being pre-empted here.
+    fn follow_involuntary_transition(&mut self) -> Result<(), AppError> {
+        let mut fullscreen = BOOL(0);
+        // SAFETY: `self.swap_chain` is live; `GetFullscreenState` writes into a
+        // live local and no output is asked for.
+        if unsafe {
+            self.swap_chain
+                .GetFullscreenState(Some(&mut fullscreen), None)
+        }
+        .is_err()
+        {
+            return Ok(());
+        }
+
+        let now = fullscreen.as_bool();
+        if now == self.exclusive {
+            return Ok(());
+        }
+
+        self.involuntary_transitions = self.involuntary_transitions.saturating_add(1);
+        eprintln!(
+            "[warn] Windows {} the display without being asked, so this run is presenting {} \
+             from frame {} onwards",
+            if now { "took" } else { "gave back" },
+            if now {
+                "exclusively"
+            } else {
+                "as a borderless window covering the display"
+            },
+            self.presented
+        );
+        self.exclusive = now;
+
+        // SAFETY: no view of the back buffers is outstanding — this runs before
+        // `GetBuffer` — which is `ResizeBuffers`' one precondition. The flags
+        // are the ones the swap chain was created with.
+        unsafe {
+            self.swap_chain.ResizeBuffers(
+                0,
+                0,
+                0,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH,
+            )
+        }
+        .map_err(|source| {
+            AppError::windows("IDXGISwapChain::ResizeBuffers after a transition", source)
+        })?;
+        self.follow_swap_chain_size()
+    }
+
+    /// How many times Windows changed the presentation on its own.
+    pub(crate) const fn involuntary_transitions(&self) -> u32 {
+        self.involuntary_transitions
+    }
+
     /// Draws frame `index` and presents it.
     fn present(&mut self, index: u32) -> Result<(), AppError> {
+        self.follow_involuntary_transition()?;
+
         // SAFETY: `self.swap_chain` is live and buffer zero is its back buffer.
         // The returned texture is owned here and released at the end of this
         // function, which is what leaves `ResizeBuffers` a clean slate.

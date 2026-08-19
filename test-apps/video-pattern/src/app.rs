@@ -400,6 +400,15 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
 
     let exclusive = window.is_exclusive();
     let frames = window.presented();
+    // How many times Windows changed the presentation without being asked.
+    //
+    // On the `stopped` line rather than only in a warning, because a capture
+    // test reads `exclusive=yes` from `ready` and would otherwise have no way
+    // to learn the display was handed back a frame later - so it could not tell
+    // "captured a window that owns its display" from "captured a borderless
+    // window" (issue #178, AGENTS.md section 16). The harness parses fields by
+    // name and ignores ones it does not know, so this is additive.
+    let involuntary = window.involuntary_transitions();
     // Explicit, before the summary is printed: the `stopped` line means the
     // display has been given back and the window has gone, which is what lets a
     // test treat the line as permission to stop worrying about this process.
@@ -408,7 +417,9 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
     // this process is making no more noise on a machine somebody is using.
     drop(steady);
 
-    announce(&format!("stopped frames={frames} reason={reason}"));
+    announce(&format!(
+        "stopped frames={frames} reason={reason} involuntary-transitions={involuntary}"
+    ));
 
     Ok(Summary {
         frames,
