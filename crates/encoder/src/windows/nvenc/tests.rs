@@ -630,13 +630,56 @@ fn a_full_session_table_is_reported_and_leaves_nothing_behind() {
         "a full session table should be recognised rather than passed through: {error}"
     );
 
-    let Some((second, _)) = exhaust() else {
-        panic!("the second pass opened more sessions than the first, which cannot happen");
-    };
-    assert!(
-        second >= first,
-        "the first pass opened {first} sessions and the second only {second}, so the failed open \
-         in between kept something the driver never got back"
+    // Whether the table comes back.
+    //
+    // `second >= first`, asked once, is not only a statement about this
+    // process. The session table belongs to the *driver*, so anything else on
+    // the machine that opens a session between the two passes takes a slot this
+    // one then cannot have — and the assertion failed, blaming a leak for what
+    // was contention. It was seen twice on this project's machine, where a
+    // second checkout running the suite at the same time is routine, and on a
+    // contributor's machine the other party is OBS, a browser or a game
+    // ([issue #236](https://github.com/wildware-uk/clipped/issues/236)).
+    //
+    // The two are told apart by asking more than once, because they differ in
+    // kind rather than in size:
+    //
+    // - **A leak is permanent.** Every failed open would keep a slot the driver
+    //   never gets back, so once one has happened *no* later pass can reach
+    //   `first` again, however many times it is tried.
+    // - **Contention is transient.** Whatever took a slot gives it back, so a
+    //   pass that is not obstructed reaches `first`.
+    //
+    // So the answer is the best of several attempts rather than the first, which
+    // is the same argument `crates/logging/tests/hot_loop_cost.rs` makes about a
+    // contended host — and, as there, a real regression is present in every
+    // attempt so taking the best still shows it.
+    const ATTEMPTS: usize = 4;
+
+    let mut reached = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let Some((count, _)) = exhaust() else {
+            // The table stopped being fillable at all between passes. That is a
+            // machine that freed a card rather than anything about this code,
+            // and it cannot be told from one that did.
+            unsupported_here(
+                "the session table stopped being fillable between passes, so whether a failed \
+                 open kept anything cannot be told here",
+            );
+            return;
+        };
+        reached.push(count);
+        if count >= first {
+            return;
+        }
+    }
+
+    panic!(
+        "the first pass opened {first} sessions and no later pass reached that again \
+         ({reached:?}), so a failed open kept something the driver never got back. A leak \
+         shows as exactly one slot fewer per failed open and never recovers; something else \
+         on this machine holding a session shows as an arbitrary shortfall that comes back \
+         within {ATTEMPTS} attempts"
     );
 }
 
