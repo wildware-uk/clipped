@@ -188,8 +188,38 @@ The same happens, naming `scripts/fetch-ffmpeg.ps1`, when the FFmpeg build is
 not installed.
 
 The installer is a per-user one: `installMode` is Tauri's default `currentUser`,
-so it needs no administrator, installs under `%LOCALAPPDATA%`, and writes its
-uninstall entry under `HKEY_CURRENT_USER`.
+so it installs under `%LOCALAPPDATA%` and writes its uninstall entry under
+`HKEY_CURRENT_USER`.
+
+**It does not follow that an upgrade needs no administrator.** NSIS reuses the
+`InstallLocation` recorded by the previous install, so a copy that ended up
+somewhere else stays there. One was found in `C:\Program Files\Clipped` with its
+uninstall entry under `HKEY_CURRENT_USER` — half matching this configuration and
+half not — and every unelevated run against it could write nothing.
+
+## Checks before anything is copied
+
+[`installer.nsh`](../apps/desktop/src-tauri/installer.nsh) is hooked in through
+`bundle > windows > nsis > installerHooks` and runs as `NSIS_HOOK_PREINSTALL`,
+before any file is written. It refuses, with a non-zero exit code, when either
+of the two things that stop an install from working is true:
+
+- the install directory cannot be written by this account, which is what an
+  unelevated upgrade of a `Program Files` copy hits;
+- a previous Clipped is still holding `clipped-recorder.exe` or
+  `clipped-desktop.exe` open, which is what an upgrade over a running
+  application hits.
+
+Both are tested by *attempting the write*, not by reading an ACL or listing
+processes: the question is whether the copies that follow will succeed, and only
+an attempt answers it.
+
+This exists because an NSIS installer whose `File` instructions all fail still
+reaches the end of its section and still exits **0**
+([issue #663](https://github.com/wildware-uk/clipped/issues/663)). A silent
+success is worse than a failure: the version does not change either, so nothing
+available to the user distinguishes an update that happened from one that did
+not.
 
 ## What is not solved here
 
