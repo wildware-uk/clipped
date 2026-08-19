@@ -73,8 +73,16 @@ export function Waveform({ preview, of }: WaveformProps): ReactNode {
 
   const tracks = preview.tracks ?? [];
   if (tracks.length === 0) {
-    // A supported answer and not a failure: every recording Clipped writes
-    // today has no sound at all, until multi-track audio (issue #180).
+    // A supported answer and not a failure. This said "every recording Clipped
+    // writes today has no sound at all, until multi-track audio (issue #180)" —
+    // true when it was written and false since #180 closed. A recording now
+    // carries a track per source, and `tests/audio/track_isolation.rs` measures
+    // three of them.
+    //
+    // The state is still reachable, which is why the branch stays: a recording
+    // made with `--microphone none` and system audio off has no sound in it, and
+    // so does one whose audio the analyser could not decode
+    // (`crates/waveform/src/analyse.rs`).
     return <p className="clipped-panel__body">This recording has no sound in it.</p>;
   }
 
