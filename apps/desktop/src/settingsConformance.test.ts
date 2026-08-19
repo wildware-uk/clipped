@@ -44,6 +44,7 @@ const MESSAGE_RS = source('crates/ipc/src/message.rs');
 const SERVE_RS = source('apps/recorder/src/serve.rs');
 const NOTIFICATIONS_RS = source('crates/session/src/config/notifications.rs');
 const STORAGE_RS = source('crates/session/src/config/storage.rs');
+const ACTION_RS = source('crates/hotkeys/src/action.rs');
 
 /**
  * The braced block that follows `marker`, or a failure naming what has moved.
@@ -162,12 +163,29 @@ describe('the settings the screen names', () => {
       'NotificationCategory::key no longer returns any key',
     ).toBeGreaterThan(0);
 
+    // Nor are the hotkeys, and for the sharpest version of the reason: a hotkey
+    // is global only because Windows registers a combination once for a
+    // process, so a per-game binding could not be honoured. The recorder sends
+    // one key per action, prefixed, and both halves are read — the prefix from
+    // the recorder and the action names from `clipped-hotkeys` — so a rename on
+    // either side fails here rather than drawing a control over a key nothing
+    // reads (issue #233).
+    const prefix = constant('apps/recorder/src/settings.rs', RECORDER_SETTINGS_RS, 'HOTKEY_PREFIX');
+    const hotkeys = quoted(
+      blockAfter(
+        'crates/hotkeys/src/action.rs',
+        ACTION_RS,
+        "pub const fn name(self) -> &'static str",
+      ),
+    ).map((action) => `${prefix}${action}`);
+    expect(hotkeys.length, 'HotkeyAction::name no longer returns any action').toBeGreaterThan(0);
+
     // Both directions. A setting the configuration API gains and this screen
     // does not list is one nobody can change from the window, which is the
     // failure this whole issue was about; one the screen lists and the recorder
     // never sends is a control that would never be drawn.
     expect([...KEYS_DRAWN_AS_CONTROLS].sort()).toEqual(
-      [...modelled, directory, ...limits, ...notifications].sort(),
+      [...modelled, directory, ...limits, ...hotkeys, ...notifications].sort(),
     );
   });
 

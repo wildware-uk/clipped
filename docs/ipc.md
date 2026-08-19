@@ -2089,6 +2089,30 @@ second reader (AGENTS.md section 55) — and the file that exists on a machine
 which ran that build is migrated into `settings.json` and deleted the first time
 a link attaches.
 
+#### The seven that change what a key does
+
+A hotkey crosses as `hotkey_` followed by the action's name —
+`hotkey_save_replay`, `hotkey_add_bookmark`, and one for each of the seven
+actions `get_hotkeys` reports. The value is a combination such as `Ctrl+F10`,
+`none` for deliberately bound to nothing, or `null` for Reset. They are not
+`SettingKey`s: a hotkey is global only, because Windows registers a combination
+once for a process and a per-game binding could not be honoured.
+
+Saving one **registers it**, before the reply is sent. `apply_settings` saves
+the combination and then rebinds the running hotkey service, so a key changed
+from the window works on the next press rather than the next start
+([#233](https://github.com/wildware-uk/clipped/issues/233)). A combination
+another Clipped action already holds is refused with `invalid_parameters` and
+nothing is written; one **Windows** refuses is saved and reported on the next
+`get_hotkeys` as a conflict, with the action left on the combination it had —
+the recorder registers the new combination before releasing the old one, so a
+refusal costs the change and never the binding.
+
+`get_hotkeys` and these rows answer different questions and are both worth
+drawing. These say what the settings file asks for; `get_hotkeys` says what
+Windows gave this process, which is where a combination Discord or Steam owns
+shows up.
+
 `apply_settings` sends only what changed. `null` clears a setting, which is
 Reset: it returns the setting to the value Clipped ships with *and* keeps
 following it, which writing today's default in as a value would not.

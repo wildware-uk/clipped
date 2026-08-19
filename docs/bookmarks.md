@@ -21,9 +21,9 @@ waiting for it (`docs/storage.md`).
 [issue #232](https://github.com/wildware-uk/clipped/issues/232). The recorder
 registers the combination and a press sends the same `add_bookmark` the tray's
 menu item and the window send — one command, one set of rules, one kind of
-failure (`docs/hotkeys.md`). Binding it to something else still means editing
-the settings file and restarting Clipped, which is
-[issue #233](https://github.com/wildware-uk/clipped/issues/233).
+failure (`docs/hotkeys.md`). Binding it to something else is a control on the
+Settings screen, and saving one registers it without restarting Clipped
+([issue #233](https://github.com/wildware-uk/clipped/issues/233)).
 
 ## When is a bookmark?
 

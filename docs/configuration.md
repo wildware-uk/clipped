@@ -449,6 +449,30 @@ conflict detection, a combination another application already owns, can only be
 discovered by asking Windows and belongs to `clipped_hotkeys::HotkeyService`
 (`docs/hotkeys.md`).
 
+### Changing one without restarting
+
+Global only does not mean start-up only. A binding crosses `get_settings` and
+`apply_settings` as `hotkey_` followed by the action's name —
+`hotkey_save_replay`, `hotkey_add_bookmark` — carrying a combination such as
+`Ctrl+F10`, `none` for deliberately unbound, or `null` to follow the default
+again. It is not a `SettingKey`, for a sharper version of the reason the
+recording directory is not one: `SettingKey` is the set of settings a _game_ may
+override, and a hotkey never can.
+
+Saving one **registers it**. `apply_settings` saves the combination and then
+rebinds the running hotkey service, which posts the request to the thread that
+owns the message loop — `RegisterHotKey` is bound to the thread that called it —
+and waits for Windows to answer before the reply is sent. So a combination
+changed from the window works on the next press
+([#233](https://github.com/wildware-uk/clipped/issues/233)).
+
+A combination Windows refuses costs the change and not the binding: the new one
+is registered before the old one is released, so the action stays where it was
+and the refusal shows on the next `get_hotkeys`, which is read out of the live
+registration rather than a stored report. What
+[#54](https://github.com/wildware-uk/clipped/issues/54) still adds is a control
+that _captures_ a combination rather than one that is typed.
+
 ## The file
 
 `%LOCALAPPDATA%\Clipped\settings.json` — the same per-user directory the logs,
@@ -693,6 +717,38 @@ Note the deliberate asymmetry in the last two rows. A _content_ the reader canno
 understand means the file belongs to somebody — a newer build, or the user's own
 hand — and this build does not get to replace it. A _write_ that failed says
 nothing about what is in the file, so the next save simply tries again.
+
+## When a change takes effect
+
+Every setting a user can change, and what re-reads it once they have. This is
+the question a settings document should answer and the one this document did
+not: four settings were found frozen at start-up — the microphone and every
+per-game setting, the recording directory, the storage limits and the hotkey
+bindings — each separately, each after review, and each because nothing read it
+a second time
+([#648](https://github.com/wildware-uk/clipped/issues/648)).
+
+| Setting | What re-reads it after a save |
+| --- | --- |
+| every per-game setting: `resolution`, `framerate`, `codec`, `encoder`, `microphone`, `system_audio`, `replay_window_seconds` | the **next recording**. A recording started from the window resolves it as it starts; the automatic recorder compares `SettingsFile::generation` on every watcher pass and refreshes its copy when it moves ([#51](https://github.com/wildware-uk/clipped/issues/51)) |
+| `capture_target` | **nothing** — every recording captures the game's own window whatever this says, and the settings screen draws that sentence instead of a control ([#61](https://github.com/wildware-uk/clipped/issues/61)) |
+| `storage.maximum_usage_bytes`, `storage.minimum_free_space_bytes`, `storage.maximum_age_days` | the **storage sweep**, after every reconciliation. `apply_settings` pushes the saved limits to the library indexer ([#95](https://github.com/wildware-uk/clipped/issues/95)) |
+| `storage.recording_directory` | the **next sitting**. Held while one is open and taken up when it ends, which the row's `not_yet_in_force` says on screen ([#609](https://github.com/wildware-uk/clipped/issues/609)) |
+| `storage.trash_directory` | the **storage sweep**, out of the same limits push. No settings command carries it; it is edited by hand |
+| `notifications.*` | the **next notification**. The desktop application reads them when it decides whether to show a toast ([#252](https://github.com/wildware-uk/clipped/issues/252)) |
+| `hotkeys.*` | the **running registration**, during the save. `apply_settings` rebinds the hotkey service, so the combination is registered with Windows before the reply is sent ([#233](https://github.com/wildware-uk/clipped/issues/233)) |
+
+Nothing in this build takes effect only at the next start. A setting that did
+would be allowed — some genuinely cannot be changed under a running process —
+but it would have to say so, and say what tells the user, because a control
+that silently needs a restart is worse than no control (AGENTS.md section 27).
+
+The table is not the guard.
+`tests/integration/tests/settings_reach_the_running_recorder.rs` is: it derives
+the list of settings from `SettingKey`, from the fields of `StorageSettings`
+and `AutomaticSettings`, from `NotificationCategory` and from `HotkeyAction`,
+and fails until every one of them has an answer. A new setting fails that test
+before it can reach anybody's machine.
 
 ## Applying a setting to a recording
 

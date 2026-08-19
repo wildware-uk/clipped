@@ -41,14 +41,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use clipped_hotkeys::{Bindings, Hotkey, HotkeyAction, ACTIONS};
 use clipped_ipc::settings::{
     ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
     SettingEntry, SettingsView,
 };
 use clipped_ipc::{ErrorCode, ProtocolError};
 use clipped_session::config::{
-    Configuration, ConfigurationStore, GameKey, NotificationCategory, NotificationSettings,
-    Preferences, SettingKey, StorageSettings,
+    Configuration, ConfigurationStore, GameKey, HotkeyOverride, HotkeyOverrides,
+    NotificationCategory, NotificationSettings, Preferences, SettingKey, StorageSettings,
 };
 use clipped_session::{CaptureMethod, CaptureMethodSetting};
 
@@ -74,6 +75,44 @@ pub const MINIMUM_FREE_SPACE: &str = "minimum_free_space_bytes";
 
 /// The key holding how old a recording may get, in whole days.
 pub const MAXIMUM_AGE_DAYS: &str = "maximum_age_days";
+
+/// What a hotkey's key is called in the settings the window sets.
+///
+/// Not a [`SettingKey`] either, and for a sharper version of the reason the
+/// recording directory is not one: `SettingKey` is the set of settings a *game*
+/// may override, and a hotkey never can. Windows registers a combination once
+/// for the process, so a per-game binding is one that could not be honoured —
+/// which is why `hotkeys` is a global-only section of the settings file
+/// (`clipped_session::config::hotkeys`, `docs/configuration.md`) and stays one.
+///
+/// Prefixed rather than sent under the action's own name, because the file
+/// spells them `save_replay` inside a `hotkeys` object and these keys are one
+/// flat namespace shared with the per-game settings and the notification
+/// switches. `save_replay` on its own would also be a protocol command name
+/// (`docs/ipc.md`), and two things with one name in one namespace is how a
+/// window comes to save a setting nothing reads.
+pub const HOTKEY_PREFIX: &str = "hotkey_";
+
+/// The key `action`'s binding has in the settings the window sets.
+#[must_use]
+pub fn hotkey_key(action: HotkeyAction) -> String {
+    format!("{HOTKEY_PREFIX}{}", action.name())
+}
+
+/// The action a settings key names, if it names one.
+fn hotkey_action(key: &str) -> Option<HotkeyAction> {
+    HotkeyAction::from_name(key.strip_prefix(HOTKEY_PREFIX)?)
+}
+
+/// What a hotkey is spelled as when it is deliberately bound to nothing.
+///
+/// The same word the storage limits and `system_audio` use for the same idea,
+/// and for the same reason: a [`SettingEntry::value`] may never be blank,
+/// because a window has to be able to draw the answer rather than an empty
+/// field. Clearing it with `null` is Reset, which is a different thing — it
+/// stops the file saying anything, so the action follows whatever Clipped ships
+/// with, today and after the day the default changes.
+pub const UNBOUND: &str = "none";
 
 /// What a limit is spelled as when there is not one.
 ///
@@ -292,6 +331,7 @@ impl SettingsFile {
         let mut global = configuration.global().clone();
         let mut storage = configuration.storage().clone();
         let mut notifications = configuration.notifications().clone();
+        let mut hotkeys = configuration.hotkeys().clone();
 
         for (key, value) in &request.values {
             match key.as_str() {
@@ -300,6 +340,14 @@ impl SettingsFile {
                     set_limit(&mut storage, key, value.as_deref())?;
                 }
                 name => {
+                    // Before the per-game settings, because a hotkey is not
+                    // one: the combinations are a global-only section, and this
+                    // is where the whole request would be refused if two of
+                    // them named one combination (issue #233).
+                    if let Some(action) = hotkey_action(name) {
+                        set_hotkey(&mut hotkeys, action, value.as_deref())?;
+                        continue;
+                    }
                     if let Some(category) = NotificationCategory::from_key(name) {
                         set_notification(&mut notifications, category, value.as_deref())?;
                         continue;
@@ -318,6 +366,7 @@ impl SettingsFile {
         configuration.set_global(global);
         configuration.set_storage(storage);
         configuration.set_notifications(notifications);
+        configuration.set_hotkeys(hotkeys);
 
         store.store(configuration).map_err(|error| {
             ProtocolError::new(
@@ -457,6 +506,55 @@ fn set_setting(
     Ok(())
 }
 
+/// Points one action at a combination, unbinds it, or clears it.
+///
+/// The three states are the file's own, and they are three rather than two for
+/// the reason the per-game settings have three: *unset* has to be
+/// distinguishable from *deliberately unbound*, so that somebody who has never
+/// touched Save Replay follows the default when the default changes, and
+/// somebody who cleared it stays cleared (`clipped_session::config::hotkeys`).
+///
+/// Saving is only half of it. What makes this a control rather than a note in a
+/// file is `serve`, which rebinds the running service after the save
+/// (`crate::hotkeys::RegisteredHotkeys::apply`, issue #233); before that a
+/// combination saved here reached Windows only at the next start, with nothing
+/// on screen saying so (AGENTS.md section 27).
+fn set_hotkey(
+    overrides: &mut HotkeyOverrides,
+    action: HotkeyAction,
+    value: Option<&str>,
+) -> Result<(), ProtocolError> {
+    let binding = match value.map(str::trim) {
+        // Reset: stop saying anything about this action at all.
+        None => None,
+        Some(text) if text.is_empty() || text.eq_ignore_ascii_case(UNBOUND) => {
+            Some(HotkeyOverride::Unbound)
+        }
+        Some(text) => Some(HotkeyOverride::Bound(text.parse::<Hotkey>().map_err(
+            |error| {
+                // `clipped_hotkeys`' own sentence, which already says what a
+                // combination looks like and which keys can be bound (AGENTS.md
+                // section 45).
+                ProtocolError::new(
+                    ErrorCode::InvalidParameters,
+                    format!("`{}` cannot be `{text}`: {error}", hotkey_key(action)),
+                )
+            },
+        )?)),
+    };
+
+    // Refused here rather than when the service is asked to rebind, because
+    // "at the moment you set it" is where a refusal is useful — and because a
+    // saved file that points one combination at two actions is one this
+    // recorder registers *nothing* from at its next start
+    // (`crate::hotkeys::start`). The conflict `clipped_session` reports names
+    // both actions, including when the combination is one another action holds
+    // only by default.
+    overrides
+        .set(action, binding)
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
+}
+
 /// Switches one notification category on or off, or clears it.
 fn set_notification(
     notifications: &mut NotificationSettings,
@@ -562,6 +660,7 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
 
     settings.push(recording_directory_entry(configuration.storage()));
     settings.extend(storage_limit_entries(configuration.storage()));
+    settings.extend(hotkey_entries(configuration));
     settings.extend(notification_entries(configuration.notifications()));
 
     SettingsView {
@@ -637,6 +736,78 @@ fn storage_limit_entries(storage: &StorageSettings) -> Vec<SettingEntry> {
             not_yet_in_force: None,
         },
     ]
+}
+
+/// One row per hotkey action: what it is bound to, and what would change it.
+///
+/// `applies` is `true` for all seven, and what reads them is this process's own
+/// hotkey service: `serve` registers them at start-up and rebinds them when one
+/// is saved, so a combination typed here reaches Windows before the reply to
+/// the save does (`crate::hotkeys`, issue #233).
+///
+/// **This is not the hotkey list the screen already draws.** That one is
+/// `get_hotkeys`, and it answers a different question — what Windows *gave*
+/// this process, which is where a combination another application owns shows
+/// up. These rows are what the settings file asks for. The two disagreeing is
+/// the normal, meaningful case: an action can be configured to `Ctrl`+`F10` and
+/// reported as a conflict, and collapsing them into one row would leave nowhere
+/// to say so (AGENTS.md section 27).
+///
+/// Every action gets a row, including the ones no build performs yet. A key
+/// that is registered and does nothing when pressed reports itself, and the
+/// list above is where that is said; leaving the binding unconfigurable as well
+/// would only mean somebody could not move a dead key off a combination they
+/// wanted for something else.
+fn hotkey_entries(configuration: &Configuration) -> Vec<SettingEntry> {
+    // Only reachable from a settings file somebody edited by hand *and* got
+    // past the reader, which validates the whole `hotkeys` section as it reads
+    // it (`clipped_session::config::document::read_hotkeys`). Drawing the
+    // shipped defaults and saying nothing would be the worst of the three
+    // options here, so the rows are drawn from what the file says and every one
+    // of them carries the reason it is not in force.
+    let resolved = configuration.resolve_hotkeys();
+    let unavailable = resolved.as_ref().err().map(|error| {
+        format!(
+            "no hotkey is registered, because the `hotkeys` section of the settings file points \
+             one combination at two actions: {error} Fix the file and restart Clipped"
+        )
+    });
+    let defaults = Bindings::defaults();
+
+    ACTIONS
+        .into_iter()
+        .map(|action| {
+            // The same fold `resolve` performs — the override if there is one,
+            // the default otherwise — reached through `resolve` wherever it
+            // could be, and written out only for the row that has to be drawn
+            // when the whole set failed to resolve (AGENTS.md section 55).
+            let (binding, overridden) = resolved.as_ref().map_or_else(
+                |_| match configuration.hotkeys().get(action) {
+                    Some(written) => (written.hotkey(), true),
+                    None => (defaults.binding(action), false),
+                },
+                |resolved| {
+                    let answer = resolved.binding(action);
+                    (answer.get(), answer.is_overridden())
+                },
+            );
+
+            SettingEntry {
+                key: hotkey_key(action),
+                label: action.label().to_owned(),
+                value: binding.map_or_else(|| UNBOUND.to_owned(), |hotkey| hotkey.to_string()),
+                overridden,
+                choices: Vec::new(),
+                accepted: format!(
+                    "a combination such as Ctrl+F10 — one key, with any of Ctrl, Alt, Shift and \
+                     Win — or `{UNBOUND}` to leave it bound to nothing"
+                ),
+                applies: unavailable.is_none(),
+                unavailable: unavailable.clone(),
+                not_yet_in_force: None,
+            }
+        })
+        .collect()
 }
 
 /// The notification switches' rows.
@@ -1484,6 +1655,138 @@ mod tests {
             );
             assert_eq!(row.choices, vec!["true".to_owned(), "false".to_owned()]);
         }
+    }
+
+    #[test]
+    fn every_hotkey_action_is_a_row_the_window_can_type_a_combination_into() {
+        // Issue #233's remaining half, from the settings side: before this the
+        // recorder sent no hotkey at all, so the settings screen could not
+        // offer one and the only way to change a binding was to edit the file
+        // by hand and restart. Walked over `ACTIONS` so that an action added
+        // without a row fails here.
+        let directory = TestDirectory::new("hotkey-rows");
+        let file = SettingsFile::at(directory.file());
+        let view = file.view().expect("a view of the defaults");
+
+        let defaults = Bindings::defaults();
+        for action in ACTIONS {
+            let row = entry(&view, &hotkey_key(action));
+            assert_eq!(row.label, action.label());
+            assert_eq!(
+                row.value,
+                defaults
+                    .binding(action)
+                    .map_or_else(|| UNBOUND.to_owned(), |hotkey| hotkey.to_string()),
+                "{action} should start on whatever Clipped ships with",
+            );
+            assert!(!row.overridden, "{action} was not configured by anybody");
+            assert!(
+                row.applies && row.unavailable.is_none(),
+                "the recorder registers {action}, so it must not be drawn as a dead control",
+            );
+        }
+    }
+
+    #[test]
+    fn a_combination_saved_from_the_window_is_the_one_the_file_carries() {
+        let directory = TestDirectory::new("hotkey-saved");
+        let file = SettingsFile::at(directory.file());
+
+        let saved = file
+            .apply(&change(
+                &hotkey_key(HotkeyAction::TakeScreenshot),
+                Some("Ctrl+Shift+F8"),
+            ))
+            .expect("nothing else holds Ctrl+Shift+F8");
+        let row = entry(&saved, &hotkey_key(HotkeyAction::TakeScreenshot));
+        assert_eq!(row.value, "Ctrl+Shift+F8");
+        assert!(row.overridden, "the user set this one");
+
+        // Through a second reader, because what is saved is what the next start
+        // registers: a value that only ever existed in this process's copy
+        // would leave the file and the keyboard disagreeing (issue #233).
+        let reread = SettingsFile::at(directory.file())
+            .configuration()
+            .resolve_hotkeys()
+            .expect("the file resolves");
+        assert_eq!(
+            reread
+                .binding(HotkeyAction::TakeScreenshot)
+                .get()
+                .map(|hotkey| hotkey.to_string()),
+            Some("Ctrl+Shift+F8".to_owned()),
+        );
+    }
+
+    #[test]
+    fn a_hotkey_is_unbound_by_the_word_for_it_and_returned_to_the_default_by_a_reset() {
+        let directory = TestDirectory::new("hotkey-unbound");
+        let file = SettingsFile::at(directory.file());
+        let key = hotkey_key(HotkeyAction::SaveReplay);
+
+        let unbound = file
+            .apply(&change(&key, Some(UNBOUND)))
+            .expect("an action can be bound to nothing");
+        let row = entry(&unbound, &key);
+        assert_eq!(row.value, UNBOUND);
+        assert!(
+            row.overridden,
+            "deliberately unbound is a thing the user said, not the absence of one — the two \
+             differ the day the shipped default changes",
+        );
+
+        let reset = file
+            .apply(&change(&key, None))
+            .expect("a reset is accepted");
+        assert_eq!(entry(&reset, &key).value, "Ctrl+F10");
+        assert!(!entry(&reset, &key).overridden);
+    }
+
+    #[test]
+    fn a_combination_another_action_already_holds_is_refused_and_saves_nothing() {
+        // The refusal has to happen here, at the moment it is set. A file that
+        // points one combination at two actions is one `crate::hotkeys::start`
+        // registers *nothing* from, so accepting it would cost the user every
+        // hotkey they have at their next start.
+        let directory = TestDirectory::new("hotkey-conflict");
+        let file = SettingsFile::at(directory.file());
+        let key = hotkey_key(HotkeyAction::TakeScreenshot);
+
+        let refusal = file
+            .apply(&change(&key, Some("Ctrl+F10")))
+            .expect_err("Ctrl+F10 is Save Replay's, by default");
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("Ctrl+F10"),
+            "the refusal should name the combination: {}",
+            refusal.message,
+        );
+
+        assert_eq!(
+            entry(&file.view().expect("the view reads"), &key).value,
+            UNBOUND,
+            "a refused change must leave the file exactly as it was, and Take screenshot ships \
+             bound to nothing",
+        );
+    }
+
+    #[test]
+    fn a_combination_this_build_cannot_bind_is_refused_in_the_words_that_say_why() {
+        let directory = TestDirectory::new("hotkey-invalid");
+        let file = SettingsFile::at(directory.file());
+
+        let refusal = file
+            .apply(&change(
+                &hotkey_key(HotkeyAction::AddBookmark),
+                Some("Ctrl"),
+            ))
+            .expect_err("modifiers alone are not a combination");
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("Ctrl+F10"),
+            "the refusal should show what a combination looks like: {}",
+            refusal.message,
+        );
     }
 
     #[test]

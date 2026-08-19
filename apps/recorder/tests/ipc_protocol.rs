@@ -1403,6 +1403,220 @@ fn row<'a>(hotkeys: &'a [HotkeyBinding], action: &str) -> &'a HotkeyBinding {
         .unwrap_or_else(|| panic!("`{action}` should be in the report: {hotkeys:?}"))
 }
 
+/// Turns "this machine could not register a hotkey" from a pass into a failure,
+/// exactly as `crates/hotkeys/tests/windows_hotkeys.rs` does and through the
+/// same variable, so that one machine's answer covers both suites.
+const REQUIRE_HOTKEYS: &str = "CLIPPED_REQUIRE_HOTKEYS";
+
+/// How many spare function keys there are to choose from: `F13` to `F24`, which
+/// no keyboard has and nothing binds.
+const SPARE_FUNCTION_KEYS: u32 = 12;
+
+/// The two combinations the rebind test moves a binding between.
+///
+/// **This is how the test avoids the recorder the person at the keyboard is
+/// running.** That recorder holds `Ctrl`+`F10` and `Ctrl`+`F9` — the shipped
+/// defaults — and a test that started a recorder on the defaults would ask
+/// Windows for combinations it has already given away, so every row would come
+/// back a conflict and the rebind would prove nothing. The recorder this test
+/// starts is given a settings file naming these instead, and its other actions
+/// are unbound, so it asks for nothing anybody else has.
+///
+/// Derived from this process's identifier for the reason
+/// `crates/hotkeys/tests/windows_hotkeys.rs` derives its own that way: two
+/// checkouts running the suite at once must not fight over one registration.
+fn combinations_for_this_process() -> (String, String) {
+    let first = std::process::id() % SPARE_FUNCTION_KEYS;
+    let second = (first + 1) % SPARE_FUNCTION_KEYS;
+    (
+        format!("Ctrl+Alt+Shift+F{}", first + 13),
+        format!("Ctrl+Alt+Shift+F{}", second + 13),
+    )
+}
+
+/// Writes the settings file a recorder started under `home` will read, with
+/// `save_replay` on `combination` and every other action bound to nothing.
+fn write_hotkeys_file(home: &Path, combination: &str) {
+    let directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&directory).expect("the recorder's directory can be made");
+    std::fs::write(
+        directory.join("settings.json"),
+        // `null` is a deliberate unbinding rather than an absent key, which is
+        // what keeps `add_bookmark` off the `Ctrl`+`F9` it holds by default
+        // (`docs/configuration.md`).
+        format!(
+            "{{\n  \"version\": 1,\n  \"hotkeys\": {{\n    \"save_replay\": \"{combination}\",\n \
+             \"add_bookmark\": null\n  }}\n}}\n"
+        ),
+    )
+    .expect("the settings file can be written");
+}
+
+/// Whether something on this machine holds `combination`, asked by trying to
+/// register it here.
+///
+/// This is the question the whole rebind test turns on, and it is not one the
+/// recorder can be asked: the recorder's report says what it *asked for*, and a
+/// report is what a recorder that changed nothing but its own bookkeeping would
+/// also produce. `RegisterHotKey` is the only witness, so this process becomes
+/// the second application competing for the combination and reports what
+/// Windows said.
+///
+/// [`None`] when no combination could be registered here at all, which is a
+/// machine this test cannot run on rather than an answer.
+fn is_held_by_something(combination: &str) -> Option<bool> {
+    let hotkey: clipped_hotkeys::Hotkey = combination
+        .parse()
+        .expect("a combination this test writes down");
+    let mut bindings = clipped_hotkeys::Bindings::empty();
+    bindings
+        .bind(clipped_hotkeys::HotkeyAction::SaveReplay, hotkey)
+        .expect("one binding cannot collide with itself");
+
+    let (service, events) =
+        clipped_hotkeys::HotkeyService::start(&bindings, clipped_hotkeys::Handlers::new()).ok()?;
+    drop(events);
+    let state = service
+        .registration()
+        .statuses()
+        .iter()
+        .find(|status| status.action() == clipped_hotkeys::HotkeyAction::SaveReplay)
+        .expect("every action has a status")
+        .state()
+        .clone();
+    // Before the answer is used, so that this process is never left holding a
+    // combination the recorder is about to be asked for.
+    service.stop();
+
+    match state {
+        clipped_hotkeys::BindingState::Bound => Some(false),
+        clipped_hotkeys::BindingState::Conflict(_) => Some(true),
+        // Unreachable: the binding above is not `None`.
+        clipped_hotkeys::BindingState::Unbound => None,
+    }
+}
+
+/// Reports that this machine cannot run the hotkey half of a test, and fails
+/// under [`REQUIRE_HOTKEYS`].
+fn cannot_register(reason: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_HOTKEYS).is_none_or(|value| value.is_empty()),
+        "{REQUIRE_HOTKEYS} is set, so this must not be skipped: {reason}"
+    );
+    // Through `stderr()` rather than `eprintln!`, which libtest captures: a skip
+    // nobody sees is the failure this exists to prevent.
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "SKIPPED (hotkeys): {reason}");
+}
+
+/// Issue #233: a binding changed from the window takes effect on this recorder,
+/// without restarting it.
+///
+/// Everything before this issue made that impossible by construction rather
+/// than by omission. `serve` read the configuration once, registered from it
+/// before the ready line, and published the report into a `OnceLock` — so the
+/// only way to change a combination was to edit `settings.json` and start
+/// Clipped again, and the settings screen could not offer the control at all
+/// because `hotkeys` was not a settable key.
+///
+/// **The proof is `RegisterHotKey`, not the report.** A recorder that saved the
+/// setting, redrew its own report and left Windows pointing the old combination
+/// at itself would satisfy every assertion made against `get_hotkeys` alone;
+/// that recorder is exactly what this repository shipped until now. So this
+/// test competes for both combinations from its own process, before and after,
+/// and the two answers have to swap over.
+#[test]
+fn a_hotkey_changed_over_the_protocol_is_registered_without_restarting_the_recorder() {
+    let (first, second) = combinations_for_this_process();
+    let home = scratch_home("rebind");
+    write_hotkeys_file(&home, &first);
+
+    let recorder = ServedRecorder::start_under("rebind", Some(&home));
+    // Registration happens before the ready line — it has to, or a window
+    // connecting the instant it appears races it (`crate::serve`) — so this
+    // line is already in the stream by the time the client connects, and
+    // waiting for it is not a race with the thing under test. It is here to
+    // fail loudly on the machine where nothing registered at all, rather than
+    // leaving that to look like a rebind that did not happen.
+    recorder.wait_for("the global hotkeys were registered");
+
+    let mut client = recorder.client();
+    let before = row(&hotkey_report(&mut client), "save_replay").clone();
+    assert_eq!(
+        before.hotkey.as_deref(),
+        Some(first.as_str()),
+        "the recorder should have registered what its settings file names: {before:?}",
+    );
+
+    match is_held_by_something(&first) {
+        None => {
+            cannot_register("no combination can be registered in this session at all");
+            drop(client);
+            recorder.stop();
+            return;
+        }
+        Some(false) => {
+            cannot_register(&format!(
+                "the recorder did not get {first} — something else on this machine holds it, so \
+                 there is no registration to move: {before:?}"
+            ));
+            drop(client);
+            recorder.stop();
+            return;
+        }
+        Some(true) => {}
+    }
+
+    // The change, exactly as the settings screen sends one.
+    let saved = settings_of(
+        client
+            .call(&IpcCommand::ApplySettings(change(
+                "hotkey_save_replay",
+                Some(&second),
+            )))
+            .expect("a combination is a value the settings file can hold"),
+    );
+    assert_eq!(
+        setting(&saved, "hotkey_save_replay").value,
+        second,
+        "the reply should carry what was saved",
+    );
+
+    // What the recorder says, which is read out of the live registration rather
+    // than out of the file (`crate::hotkeys::RegisteredHotkeys::report`).
+    let after = row(&hotkey_report(&mut client), "save_replay").clone();
+    assert_eq!(
+        after.hotkey.as_deref(),
+        Some(second.as_str()),
+        "the recorder still reports the old combination, so nothing rebound it: {after:?}",
+    );
+
+    // And what Windows says, which is the half a report cannot fake. Both
+    // directions: holding the new one is not enough on its own, because a
+    // recorder that registered the new combination and never released the old
+    // one would leave the user with a key they thought they had moved.
+    assert_eq!(
+        is_held_by_something(&second),
+        Some(true),
+        "the recorder does not hold {second}, so the change reached its settings file and its \
+         report and stopped there — which is what issue #233 is: {after:?}",
+    );
+    assert_eq!(
+        is_held_by_something(&first),
+        Some(false),
+        "the recorder is still holding {first} after being moved off it, so the combination the \
+         user gave up is one nothing can have until Clipped is restarted",
+    );
+
+    drop(client);
+    let diagnostics = recorder.stop();
+    assert!(
+        diagnostics.contains("a hotkey was rebound"),
+        "a rebind is a thing that happened to the user's keyboard and belongs in the log \
+         (AGENTS.md section 15):\n{diagnostics}",
+    );
+}
+
 #[test]
 fn starting_a_recording_of_something_that_is_not_there_is_refused_by_the_real_handler() {
     // No GPU is needed to prove that `start_recording` reaches the recorder's

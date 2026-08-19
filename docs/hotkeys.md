@@ -7,12 +7,13 @@ already owns, and delivers presses to handlers without making anything wait;
 ([issue #232](https://github.com/wildware-uk/clipped/issues/232)), and with
 `--watch-for-games` that is also the process recording the game — so a press
 reaches a recording nobody had to start
-([issue #421](https://github.com/wildware-uk/clipped/issues/421)). The screen
-that *binds* a combination is still
-[issue #54](https://github.com/wildware-uk/clipped/issues/54), and changing one
-without restarting the recorder is
-[issue #233](https://github.com/wildware-uk/clipped/issues/233); until then the
-bindings come from the settings file, read once when the recorder starts.
+([issue #421](https://github.com/wildware-uk/clipped/issues/421)). A binding
+changed from the Settings screen is registered while the recorder runs
+([issue #233](https://github.com/wildware-uk/clipped/issues/233)):
+`apply_settings` saves the combination and then rebinds the service, so it
+works on the next press rather than the next start. The control that *captures*
+a combination, instead of one it is typed into, is still
+[issue #54](https://github.com/wildware-uk/clipped/issues/54).
 
 A hotkey is the only part of Clipped a user touches while they are playing. It
 has to work through a fullscreen game, it has to say something useful when it
