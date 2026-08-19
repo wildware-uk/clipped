@@ -1,4 +1,5 @@
-//! The default output endpoint, opened for shared-mode rendering.
+//! An output endpoint — by default *the* default one — opened for shared-mode
+//! rendering.
 //!
 //! # Why this is a module rather than two loops
 //!
@@ -34,10 +35,11 @@
 //! tone. A caller that only ever releases silent buffers has nothing to get
 //! wrong and asks for [`Samples::Silence`].
 
+use windows::core::HSTRING;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
-    WAVEFORMATEXTENSIBLE,
+    eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice,
+    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::{
@@ -63,7 +65,7 @@ pub enum Samples {
     Silence,
 }
 
-/// A shared-mode render stream on the default output device.
+/// A shared-mode render stream on one output device.
 #[derive(Debug)]
 pub struct RenderStream {
     client: IAudioClient,
@@ -88,6 +90,25 @@ impl RenderStream {
     /// write. Every one of those is a legitimate outcome a caller reports and
     /// carries on from (AGENTS.md section 16).
     pub fn open(samples: Samples) -> Result<Self, String> {
+        Self::open_on(None, samples)
+    }
+
+    /// Opens one named render endpoint, or the default when `endpoint` is
+    /// [`None`], and starts it.
+    ///
+    /// The identifier is the one `IMMDevice::GetId` reports, which is what
+    /// [`crate::virtual_audio`] carries. Naming an endpoint is what lets a
+    /// caller play into the *render* half of a virtual audio device — a sound
+    /// that comes back out of the machine's capture half rather than out of its
+    /// speakers, which is the only way a test can decide what a microphone
+    /// hears without opening a real one (AGENTS.md section 14).
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), plus: there is no endpoint with that
+    /// identifier, which is what a device removed between being listed and
+    /// being opened looks like from here.
+    pub fn open_on(endpoint: Option<&str>, samples: Samples) -> Result<Self, String> {
         // SAFETY: `CoIncrementMTAUsage` takes a process-wide reference to the
         // multi-threaded apartment. The reference is deliberately never given
         // back, which is what makes it safe to take from a thread that will
@@ -100,9 +121,14 @@ impl RenderStream {
             // for.
             let enumerator: IMMDeviceEnumerator =
                 unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
-            // SAFETY: both arguments are values of the enumerations named, and
-            // the enumerator is live.
-            let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
+            let device: IMMDevice = match endpoint {
+                // SAFETY: the string is NUL-terminated for as long as the call
+                // runs, and `GetDevice` copies nothing out of it.
+                Some(id) => unsafe { enumerator.GetDevice(&HSTRING::from(id)) }?,
+                // SAFETY: both arguments are values of the enumerations named,
+                // and the enumerator is live.
+                None => unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?,
+            };
             // SAFETY: `device` is live; the interface is fixed by the return
             // type.
             let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
@@ -160,20 +186,18 @@ impl RenderStream {
             }))
         })();
 
+        let which = endpoint.map_or_else(
+            || "the default output device".to_owned(),
+            |id| format!("the output endpoint {id}"),
+        );
         let stream = match opened {
             Ok(Some(stream)) => stream,
             Ok(None) => {
-                return Err(
-                    "the default output device does not present 32-bit float samples, \
-                            which is all this can play"
-                        .to_owned(),
-                )
-            }
-            Err(error) => {
                 return Err(format!(
-                    "the default output device would not accept a render stream: {error}"
+                    "{which} does not present 32-bit float samples, which is all this can play"
                 ))
             }
+            Err(error) => return Err(format!("{which} would not accept a render stream: {error}")),
         };
 
         // SAFETY: `client` is initialised and has not been started.

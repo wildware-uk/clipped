@@ -26,9 +26,10 @@
 //! | The renderer and the run loop | A Direct3D 11 window presenting the pattern at a fixed rate | Windows |
 //! | The tone output | `--tone` only: a short sound placed at the moment a named frame is presented, so that a recording of this application has an event whose sound and picture are simultaneous at the source | Windows |
 //! | [`steady_tone`] | `--steady-tone` only: one frequency held for the whole run, so that a recording of this application is a *source* an audio isolation test can look for on a track | Windows |
-//! | [`render_stream`] | The default output endpoint, opened once for the tone output, the steady tone and the drift measurement's silent stream | Windows |
+//! | [`render_stream`] | An output endpoint — the default one, or a named one — opened once for the tone output, the steady tone and the drift measurement's silent stream | Windows |
+//! | [`virtual_audio`] | Which endpoints belong to a software device rather than to hardware, so that a test can feed a simulated microphone without ever opening a real one | Windows |
 //!
-//! Only the last three are platform code, and they are compiled only on Windows
+//! Only the last four are platform code, and they are compiled only on Windows
 //! (AGENTS.md section 5). Everything the pattern promises can therefore be
 //! tested on any machine, which is what stops the pattern and the decoder
 //! drifting apart between capture runs.
@@ -62,6 +63,8 @@ pub mod pattern;
 pub mod render_stream;
 #[cfg(windows)]
 pub mod steady_tone;
+#[cfg(windows)]
+pub mod virtual_audio;
 
 #[cfg(windows)]
 mod app;

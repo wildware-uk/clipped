@@ -122,8 +122,31 @@ impl SteadyToneOutput {
     ///
     /// Why this machine cannot play a tone, as a sentence. See [`play`].
     pub fn start(frequency: f32, amplitude: f32) -> Result<Self, String> {
+        Self::start_on(None, frequency, amplitude)
+    }
+
+    /// Opens one named output endpoint, or the default when `endpoint` is
+    /// [`None`], and starts playing `frequency` on it.
+    ///
+    /// The identifier is [`crate::virtual_audio::Endpoint::id`]. Playing into a
+    /// *named* endpoint is what makes a simulated microphone possible: a tone
+    /// rendered into the output half of a virtual audio device reappears on its
+    /// input half, so a recording can hold a microphone track whose contents a
+    /// test decided — with no real capture endpoint opened and nobody's room
+    /// recorded (AGENTS.md section 14).
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start), plus: there is no output endpoint with that
+    /// identifier.
+    pub fn start_on(
+        endpoint: Option<&str>,
+        frequency: f32,
+        amplitude: f32,
+    ) -> Result<Self, String> {
         let running = Arc::new(AtomicBool::new(true));
         let (ready, started) = channel();
+        let endpoint = endpoint.map(ToOwned::to_owned);
 
         let thread = std::thread::Builder::new()
             .name("video-pattern-steady-tone".to_owned())
@@ -131,11 +154,18 @@ impl SteadyToneOutput {
                 let running = Arc::clone(&running);
                 move || {
                     let mut ready = Some(ready);
-                    let played = play(frequency, amplitude, None, &running, |rate, channels| {
-                        if let Some(ready) = ready.take() {
-                            let _ = ready.send(Ok((rate, channels)));
-                        }
-                    });
+                    let played = play_on(
+                        endpoint.as_deref(),
+                        frequency,
+                        amplitude,
+                        None,
+                        &running,
+                        |rate, channels| {
+                            if let Some(ready) = ready.take() {
+                                let _ = ready.send(Ok((rate, channels)));
+                            }
+                        },
+                    );
                     // Only reached without the endpoint having started when
                     // opening it failed, and then this is the only report there
                     // will ever be.
@@ -216,7 +246,24 @@ pub fn play(
     running: &AtomicBool,
     announce: impl FnOnce(u32, u16),
 ) -> Result<Played, String> {
-    let stream = RenderStream::open(Samples::Float32)?;
+    play_on(None, frequency, amplitude, limit, running, announce)
+}
+
+/// Plays `frequency` on one named output endpoint, or the default when
+/// `endpoint` is [`None`], until `running` is cleared or `limit` has passed.
+///
+/// # Errors
+///
+/// As [`play`], plus: there is no output endpoint with that identifier.
+pub fn play_on(
+    endpoint: Option<&str>,
+    frequency: f32,
+    amplitude: f32,
+    limit: Option<Duration>,
+    running: &AtomicBool,
+    announce: impl FnOnce(u32, u16),
+) -> Result<Played, String> {
+    let stream = RenderStream::open_on(endpoint, Samples::Float32)?;
     let rate = stream.rate();
     let channels = stream.channels();
     announce(rate, channels);
