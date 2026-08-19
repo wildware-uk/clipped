@@ -670,6 +670,125 @@ fn a_pinned_method_is_restarted_but_never_replaced() {
     );
 }
 
+/// A failure the Desktop Duplication backend can be scripted to start with.
+fn duplication_refused() -> CaptureError {
+    unsupported(CaptureMethod::DesktopDuplication)
+}
+
+#[test]
+fn a_remembered_method_is_asked_before_the_preference_order() {
+    // Issue #286. Both backends are healthy and Windows Graphics Capture is the
+    // one selection prefers, so the memory is the only thing that can decide.
+    let wgc = FakeFactory::new(CaptureMethod::WindowsGraphicsCapture, counter());
+    let duplication = FakeFactory::new(CaptureMethod::DesktopDuplication, counter());
+    let candidates: [&dyn CaptureBackendFactory; 2] = [&wgc, &duplication];
+
+    let started = CaptureFallback::start_preferring(
+        &candidates,
+        &window(),
+        &CaptureConfig::default(),
+        CaptureMethodSetting::Automatic,
+        Some(CaptureMethod::DesktopDuplication),
+    )
+    .expect("both backends are available");
+
+    assert_eq!(started.method(), CaptureMethod::DesktopDuplication);
+    assert_eq!(
+        wgc.creations(),
+        0,
+        "the preferred method was opened anyway, so remembering saved nothing"
+    );
+    assert_eq!(
+        started.into_parts().0.changes(),
+        &[],
+        "starting where the memory said is not a fall back and must not be reported as one"
+    );
+}
+
+#[test]
+fn a_remembered_method_the_machine_cannot_offer_leaves_the_preference_order_alone() {
+    // A memory that has gone stale — a backend this build no longer registers,
+    // a target this one cannot address — must cost nothing. It is tested
+    // against the candidate list *before* it is acted on, so the recording
+    // never opens a backend it will have to fall through.
+    let wgc = FakeFactory::new(CaptureMethod::WindowsGraphicsCapture, counter());
+    let candidates: [&dyn CaptureBackendFactory; 1] = [&wgc];
+
+    let started = CaptureFallback::start_preferring(
+        &candidates,
+        &window(),
+        &CaptureConfig::default(),
+        CaptureMethodSetting::Automatic,
+        Some(CaptureMethod::DesktopDuplication),
+    )
+    .expect("a memory of a method that is gone must not stop capture starting");
+
+    assert_eq!(started.method(), CaptureMethod::WindowsGraphicsCapture);
+    assert_eq!(
+        started.into_parts().0.changes(),
+        &[],
+        "the memory was acted on and then fallen through, rather than never being acted on"
+    );
+}
+
+#[test]
+fn a_remembered_method_never_overrules_a_pinned_one() {
+    // Issue #286's third acceptance criterion, in the direction that matters at
+    // the moment a recording starts: what the user chose beats what Clipped
+    // observed. `Forced` is obeyed or reported, never re-ranked.
+    let wgc = FakeFactory::new(CaptureMethod::WindowsGraphicsCapture, counter());
+    let duplication = FakeFactory::new(CaptureMethod::DesktopDuplication, counter());
+    let candidates: [&dyn CaptureBackendFactory; 2] = [&wgc, &duplication];
+
+    let started = CaptureFallback::start_preferring(
+        &candidates,
+        &window(),
+        &CaptureConfig::default(),
+        CaptureMethodSetting::Forced(CaptureMethod::WindowsGraphicsCapture),
+        Some(CaptureMethod::DesktopDuplication),
+    )
+    .expect("the pinned backend starts");
+
+    assert_eq!(
+        started.method(),
+        CaptureMethod::WindowsGraphicsCapture,
+        "a method Clipped remembered was used in place of the one the user pinned"
+    );
+    assert_eq!(duplication.creations(), 0);
+}
+
+#[test]
+fn a_remembered_method_that_will_not_start_falls_through_and_says_so() {
+    // The memory passes both of `select`'s tests and then the backend refuses
+    // to be created — the case the two tests cannot catch. The recording is
+    // made on the ordinary preference order, and the fall-through is reported
+    // like any other, because "Windows Graphics Capture" in a recording that
+    // was going to start on Desktop Duplication is otherwise a fact with no
+    // explanation attached.
+    let wgc = FakeFactory::new(CaptureMethod::WindowsGraphicsCapture, counter());
+    let duplication = FakeFactory::new(CaptureMethod::DesktopDuplication, counter())
+        .planning([Plan::FailsToStart(duplication_refused)]);
+    let candidates: [&dyn CaptureBackendFactory; 2] = [&wgc, &duplication];
+
+    let started = CaptureFallback::start_preferring(
+        &candidates,
+        &window(),
+        &CaptureConfig::default(),
+        CaptureMethodSetting::Automatic,
+        Some(CaptureMethod::DesktopDuplication),
+    )
+    .expect("the other backend can record this");
+
+    assert_eq!(started.method(), CaptureMethod::WindowsGraphicsCapture);
+    assert_eq!(duplication.creations(), 1, "the memory was never tried");
+
+    let changes = started.into_parts().0.changes().to_vec();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].from(), CaptureMethod::DesktopDuplication);
+    assert_eq!(changes[0].to(), CaptureMethod::WindowsGraphicsCapture);
+    assert_eq!(changes[0].trigger(), FallbackTrigger::InitialisationFailed);
+}
+
 #[test]
 fn nothing_left_to_try_says_so_rather_than_naming_nothing() {
     let wgc =

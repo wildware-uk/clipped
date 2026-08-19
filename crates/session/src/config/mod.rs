@@ -99,6 +99,7 @@
 //! the global layer is [issue
 //! #247](https://github.com/wildware-uk/clipped/issues/247).
 
+mod capture_memory;
 mod document;
 mod error;
 mod game;
@@ -112,7 +113,11 @@ mod store;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
+use clipped_capture::{CaptureMethod, CaptureMethodSetting};
+
+pub use capture_memory::{CaptureMemory, MEMORY_LIFETIME};
 pub use document::{Loaded, FILE_NAME, SCHEMA_VERSION};
 pub use error::{ConfigurationError, Section, SettingError};
 pub use game::{GameKey, InvalidGameKey};
@@ -158,9 +163,32 @@ pub struct Configuration {
     /// desktop application is what reads them, over the protocol
     /// ([issue #252](https://github.com/wildware-uk/clipped/issues/252)).
     notifications: NotificationSettings,
+    /// What Clipped observed about capturing each game, as opposed to what the
+    /// user chose. A section of its own for the reasons `capture_memory` gives,
+    /// the first of which is that a settings screen must not offer to reset a
+    /// value nobody set.
+    capture: BTreeMap<GameKey, CaptureMemory>,
     /// Top-level keys from a newer build, kept and written back (AGENTS.md
     /// section 56).
     unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// Everything a settings file was read into, on its way to a
+/// [`Configuration`].
+///
+/// A struct rather than a list of arguments, and not only because there are
+/// eight of them: two of them are `BTreeMap`s keyed by [`GameKey`] holding
+/// different things, and a pair like that passed positionally is a pair a
+/// caller can swap without the compiler noticing.
+pub(crate) struct Parts {
+    pub(crate) global: Preferences,
+    pub(crate) games: BTreeMap<GameKey, Preferences>,
+    pub(crate) hotkeys: HotkeyOverrides,
+    pub(crate) plugins: PluginConsents,
+    pub(crate) storage: StorageSettings,
+    pub(crate) notifications: NotificationSettings,
+    pub(crate) capture: BTreeMap<GameKey, CaptureMemory>,
+    pub(crate) unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Configuration {
@@ -211,8 +239,98 @@ impl Configuration {
     /// This is the one place a per-game section is dropped, unrecognised keys
     /// included, and it is a thing the user has to have asked for — "forget
     /// this game" — rather than something an edit does on their behalf.
+    ///
+    /// What Clipped remembered about capturing that game goes with them, for
+    /// the same reason: "forget this game" that left an observation behind
+    /// would go on steering the next recording from a section the user cannot
+    /// see they still have.
     pub fn clear_game(&mut self, game: &GameKey) -> Option<Preferences> {
+        self.capture.remove(game);
         self.games.remove(game)
+    }
+
+    /// The capture method to try first for `game`, if one was remembered and is
+    /// still worth trying.
+    ///
+    /// [`None`] means "decide by the published preference order", which is the
+    /// answer for a game nothing has been recorded of and for a memory older
+    /// than [`MEMORY_LIFETIME`]. It is a preference and not a pin: the capture
+    /// layer still applies the same tests to it as to any other candidate,
+    /// still falls back when it cannot start, and ignores it outright under a
+    /// method the user pinned
+    /// (`clipped_capture::CaptureFallback::start_preferring`). That last rule
+    /// is stated there rather than repeated here, because there is where the
+    /// pin is known.
+    ///
+    /// `now` is passed rather than read because whether a memory has expired is
+    /// the sort of thing a test has to be able to state rather than wait for
+    /// (AGENTS.md section 25); it is the same discipline
+    /// [`crate::automatic::SessionManager`] holds itself to.
+    #[must_use]
+    pub fn remembered_capture_method(
+        &self,
+        game: &GameKey,
+        now: SystemTime,
+    ) -> Option<CaptureMethod> {
+        self.capture
+            .get(game)
+            .filter(|memory| !memory.is_expired(now))
+            .map(CaptureMemory::method)
+    }
+
+    /// Records that a recording of `game` ended on `method`, and says whether
+    /// that changed anything.
+    ///
+    /// `true` means the memory is new or different and the configuration is
+    /// worth saving. `false` means there was nothing to learn, and it is the
+    /// answer for the overwhelmingly common recording: the same method as last
+    /// time, remembered already, still fresh. That matters — a caller that
+    /// wrote the settings file after every recording would rewrite a user's
+    /// file dozens of times a session to store the same three words.
+    ///
+    /// Nothing is remembered when the user pinned a method. What a pinned
+    /// recording ended on is not an observation about the machine, it is the
+    /// setting being obeyed, and writing it back would turn a choice the user
+    /// made into one Clipped made (issue #286's third acceptance criterion).
+    ///
+    /// The stamp only moves when the answer does, or when the previous answer
+    /// had already expired — see `capture_memory` for why a memory that is
+    /// re-stamped on every confirmation is a memory that never expires.
+    pub fn remember_capture_method(
+        &mut self,
+        game: &GameKey,
+        setting: CaptureMethodSetting,
+        method: CaptureMethod,
+        now: SystemTime,
+    ) -> bool {
+        if setting != CaptureMethodSetting::Automatic {
+            return false;
+        }
+        if self
+            .capture
+            .get(game)
+            .is_some_and(|memory| memory.method() == method && !memory.is_expired(now))
+        {
+            return false;
+        }
+        self.capture
+            .insert(game.clone(), CaptureMemory::new(method, now));
+        true
+    }
+
+    /// What was remembered about `game`, expired or not.
+    ///
+    /// The unfiltered form, for a diagnostic that has to be able to say "this
+    /// was remembered on the third and has since expired" rather than only
+    /// "nothing is remembered".
+    #[must_use]
+    pub fn capture_memory(&self, game: &GameKey) -> Option<&CaptureMemory> {
+        self.capture.get(game)
+    }
+
+    /// Every game something has been remembered about, in identifier order.
+    pub fn capture_memories(&self) -> impl Iterator<Item = (&GameKey, &CaptureMemory)> {
+        self.capture.iter()
     }
 
     /// Every game the settings say anything about, in identifier order.
@@ -274,15 +392,17 @@ impl Configuration {
     }
 
     /// Assembles a configuration the file reader has already validated.
-    pub(crate) const fn from_parts(
-        global: Preferences,
-        games: BTreeMap<GameKey, Preferences>,
-        hotkeys: HotkeyOverrides,
-        plugins: PluginConsents,
-        storage: StorageSettings,
-        notifications: NotificationSettings,
-        unknown: BTreeMap<String, serde_json::Value>,
-    ) -> Self {
+    pub(crate) fn from_parts(parts: Parts) -> Self {
+        let Parts {
+            global,
+            games,
+            hotkeys,
+            plugins,
+            storage,
+            notifications,
+            capture,
+            unknown,
+        } = parts;
         Self {
             global,
             games,
@@ -290,6 +410,7 @@ impl Configuration {
             plugins,
             storage,
             notifications,
+            capture,
             unknown,
         }
     }

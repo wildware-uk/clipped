@@ -16,7 +16,7 @@ use core::fmt;
 use core::time::Duration;
 use std::path::{Path, PathBuf};
 
-use clipped_capture::{CaptureMethod, MethodChange, SyncState};
+use clipped_capture::{CaptureMethod, CaptureMethodSetting, MethodChange, SyncState};
 use clipped_encoder::{Codec, EncoderKind};
 
 /// Why a recording ended.
@@ -510,6 +510,7 @@ impl fmt::Display for SystemAudioFallback {
 pub struct RecordingReport {
     pub(crate) output: Option<PathBuf>,
     pub(crate) capture_method: CaptureMethod,
+    pub(crate) capture_setting: CaptureMethodSetting,
     pub(crate) encoder: EncoderKind,
     pub(crate) codec: Codec,
     pub(crate) width: u32,
@@ -557,6 +558,20 @@ impl RecordingReport {
     #[must_use]
     pub const fn capture_method(&self) -> CaptureMethod {
         self.capture_method
+    }
+
+    /// What the user asked for: `Automatic`, or a method they pinned.
+    ///
+    /// The first of SPEC.md section 8's two lines, where
+    /// [`capture_method`](Self::capture_method) is the second. Both are kept
+    /// because they answer different questions about the same recording, and
+    /// one of them decides whether the other is worth remembering: what a
+    /// recording running under a pin ended on is the setting being obeyed, not
+    /// an observation about the machine
+    /// ([issue #286](https://github.com/wildware-uk/clipped/issues/286)).
+    #[must_use]
+    pub const fn capture_setting(&self) -> CaptureMethodSetting {
+        self.capture_setting
     }
 
     /// Every capture backend restart and replacement, in the order they
@@ -886,6 +901,7 @@ mod tests {
         RecordingReport {
             output: Some(PathBuf::from(r"D:\clips\session.mkv")),
             capture_method: CaptureMethod::WindowsGraphicsCapture,
+            capture_setting: CaptureMethodSetting::Automatic,
             encoder: EncoderKind::Nvenc,
             codec: Codec::H264,
             width: 1280,

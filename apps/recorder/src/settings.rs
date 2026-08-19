@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use clipped_ipc::settings::{
     ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
@@ -46,9 +47,10 @@ use clipped_ipc::settings::{
 };
 use clipped_ipc::{ErrorCode, ProtocolError};
 use clipped_session::config::{
-    Configuration, ConfigurationStore, NotificationCategory, NotificationSettings, Preferences,
-    SettingKey, StorageSettings,
+    Configuration, ConfigurationStore, GameKey, NotificationCategory, NotificationSettings,
+    Preferences, SettingKey, StorageSettings,
 };
+use clipped_session::{CaptureMethod, CaptureMethodSetting};
 
 /// The key the recording directory has in the settings file.
 ///
@@ -307,6 +309,78 @@ impl SettingsFile {
         self.generation.fetch_add(1, Ordering::Relaxed);
 
         Ok(view_of(store.current(), store.path()))
+    }
+
+    /// Records that a recording of `game` ended on `method`, so that the next
+    /// recording of it starts there.
+    ///
+    /// This is the one thing in this module the *user* did not ask for, and it
+    /// goes through the same store and the same lock as everything they did —
+    /// the settings screen and this must not race over one file, and a second
+    /// writer with a store of its own is how they would.
+    ///
+    /// It never fails a recording, and it never fails loudly. The recording is
+    /// already made; what is at stake is whether the next one of the same game
+    /// loses a second or two falling back, which is worth a warning in the log
+    /// and nothing more (AGENTS.md section 17). In particular a settings file
+    /// this build could not read is *not* replaced, exactly as a save from the
+    /// settings screen is not — [`ConfigurationStore::store`] refuses, and
+    /// refusing to write a note is a far smaller loss than overwriting a file a
+    /// newer Clipped wrote (AGENTS.md section 56).
+    pub fn remember_capture_method(&self, game: &GameKey, method: CaptureMethod) {
+        let remembered = || -> Result<bool, String> {
+            // The same lock and the same refusal every other caller here gets,
+            // rather than a second copy of "Clipped has nowhere to keep
+            // settings on this machine" that could come to read differently.
+            let mut store = self.locked().map_err(|error| error.to_string())?;
+
+            // Read first, for the reason `apply` reads first: what is on disk
+            // may be newer than what this process last saw, and a note is added
+            // on top of it rather than instead of it.
+            store.load().map_err(|error| error.to_string())?;
+
+            let mut configuration = store.current().clone();
+            // The same decision the session manager already made, made again
+            // against what the file actually holds — which may have changed, and
+            // may already say this. `false` here means there is nothing to
+            // write, which is the answer for nearly every recording.
+            if !configuration.remember_capture_method(
+                game,
+                CaptureMethodSetting::Automatic,
+                method,
+                SystemTime::now(),
+            ) {
+                return Ok(false);
+            }
+            store
+                .store(configuration)
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        };
+
+        match remembered() {
+            Ok(true) => {
+                // The generation, for the same reason `apply` bumps it: the
+                // automatic recorder holds a copy of the configuration, and this
+                // is how it is told the copy is stale. It has already applied
+                // this to its own copy, so the bump is what keeps the two from
+                // drifting rather than what delivers the change.
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    game = game.as_str(),
+                    capture_backend = method.log_value(),
+                    "the capture method this game records with was saved"
+                );
+            }
+            Ok(false) => {}
+            Err(detail) => tracing::warn!(
+                game = game.as_str(),
+                capture_backend = method.log_value(),
+                detail,
+                "the capture method this game records with could not be saved, so the next \
+                 recording of it may fall back again"
+            ),
+        }
     }
 
     fn locked(&self) -> Result<std::sync::MutexGuard<'_, ConfigurationStore>, ProtocolError> {
@@ -703,6 +777,79 @@ mod tests {
             .find(|entry| entry.key == key)
             .unwrap_or_else(|| panic!("the view carries {key}"))
             .clone()
+    }
+
+    #[test]
+    fn the_capture_method_that_worked_is_written_to_the_file_and_survives_a_restart() {
+        // The half of issue #286 that outlives the process. The session manager
+        // applies what it learned to the configuration it holds, which is enough
+        // for the rest of the run; this is what makes the next run start on the
+        // method that worked rather than re-learning it.
+        let directory = TestDirectory::new("remember-capture-method");
+        let game = GameKey::parse("counter-strike-2").expect("a game key");
+        let file = SettingsFile::at(directory.file());
+
+        file.remember_capture_method(&game, CaptureMethod::DesktopDuplication);
+
+        // Through a second store over the same path, which is a restart in
+        // everything but name: nothing of the first is carried over.
+        let mut restarted = ConfigurationStore::at(directory.file());
+        restarted.load().expect("the file this just wrote reads");
+        assert_eq!(
+            restarted
+                .current()
+                .remembered_capture_method(&game, SystemTime::now()),
+            Some(CaptureMethod::DesktopDuplication),
+            "the capture method that worked was not on disk, so the next run of the recorder \
+             will fall back all over again"
+        );
+    }
+
+    #[test]
+    fn remembering_a_capture_method_leaves_the_settings_the_user_chose_alone() {
+        // It writes through the same store as the settings screen and reads the
+        // file before it writes, so a note added on a recorder's own initiative
+        // must not cost the user a setting they saved a moment earlier.
+        let directory = TestDirectory::new("remember-keeps-settings");
+        let game = GameKey::parse("counter-strike-2").expect("a game key");
+        let file = SettingsFile::at(directory.file());
+        file.apply(&change("framerate", Some("144")))
+            .expect("144 is in range");
+
+        file.remember_capture_method(&game, CaptureMethod::DesktopDuplication);
+
+        let view = file.view().expect("the view reads");
+        assert_eq!(
+            entry(&view, "framerate").value,
+            "144",
+            "remembering a capture method threw away a setting the user had saved"
+        );
+        assert_eq!(
+            file.configuration()
+                .remembered_capture_method(&game, SystemTime::now()),
+            Some(CaptureMethod::DesktopDuplication),
+            "the note was not kept, so this proves nothing about the setting surviving beside it"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_this_build_cannot_read_is_not_replaced_by_a_note() {
+        // A file a newer Clipped wrote is worth far more than knowing which
+        // capture backend worked, and this write is one nobody asked for
+        // (AGENTS.md section 56).
+        let directory = TestDirectory::new("remember-refuses-unreadable");
+        let game = GameKey::parse("counter-strike-2").expect("a game key");
+        let newer = r#"{"version": 9999, "global": {}}"#;
+        fs::write(directory.file(), newer).expect("the file can be written");
+
+        SettingsFile::at(directory.file())
+            .remember_capture_method(&game, CaptureMethod::DesktopDuplication);
+
+        assert_eq!(
+            fs::read_to_string(directory.file()).expect("the file is still there"),
+            newer,
+            "a settings file this build could not read was overwritten with a note about capture"
+        );
     }
 
     #[test]

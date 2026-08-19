@@ -392,6 +392,12 @@ one that is not there is `Loaded::Absent` and the defaults, not an error.
       "enabled": true,
       "consented_to": "loopback listen 127.0.0.1:3212"
     }
+  },
+  "capture": {
+    "counter-strike-2": {
+      "method": "desktop_duplication",
+      "since": "2026-08-16T10:14:02+01:00"
+    }
   }
 }
 ```
@@ -404,6 +410,51 @@ JSON rather than TOML because `clipped-session` already writes JSON for a
 session's sidecar (`docs/sessions.md`) and already depends on `serde_json`; a
 second serialisation format in one crate would be a dependency and a set of
 quoting rules bought for nothing.
+
+### `capture`
+
+The one section of this file the user did not write, and the only value in
+Clipped's configuration that Clipped writes on their behalf. It records, per
+game, the capture method a recording of that game was observed to end on, and
+when that answer was established — so the next recording of the same game
+_starts_ there instead of spending a second or two falling back to it again
+(issue [#286](https://github.com/wildware-uk/clipped/issues/286)).
+
+It is deliberately **not** a per-game setting in `games`, for three reasons:
+
+- a settings screen would offer a Reset control for a choice the user never
+  made, which is the control that silently means something else that AGENTS.md
+  section 27 is about;
+- `Configuration::set_game` replaces a game's layer with what the settings
+  screen built, so a memory living inside it would be erased every time the user
+  changed that game's frame rate;
+- it does not inherit. "Windows Graphics Capture could not capture
+  Counter-Strike here" says nothing about Minecraft, because whether a backend
+  can capture a target depends on that target.
+
+**It is a preference and never a pin.** It changes which capture candidate is
+asked first and nothing else: a remembered method this machine can no longer
+offer, or that fails to start, falls back exactly as if nothing had been
+remembered, and it is ignored outright for a game whose method the user pinned
+(`clipped_capture::CaptureFallback::start_preferring`). Being wrong about it
+costs one fall back on one recording — which is what remembering nothing costs
+on _every_ recording.
+
+**It is forgotten after a fortnight.** Drivers update and hardware changes, and
+a memory nothing ever revisits is a permanent downgrade bought with one bad
+afternoon; after `clipped_session::config::MEMORY_LIFETIME` the published
+preference order is tried afresh and whatever that recording ends on is
+remembered anew. `since` is when the answer was last _established_ and not when
+it was last confirmed — a game recorded every evening on the same method keeps
+its original stamp, or the fortnight would never elapse. It is also cleared
+outright by "forget this game" (`Configuration::clear_game`).
+
+An entry this build cannot read is **dropped**, where an unreadable `plugins`
+entry is kept and an unreadable `storage` limit refuses the whole file. The
+difference is whose value it is: this section is Clipped's own note about a
+machine and can be made again by recording the game once, so neither losing the
+user's real settings over it nor writing back a note nothing can interpret is
+worth doing.
 
 ### `plugins`
 
@@ -743,6 +794,14 @@ survives it"](#failure-and-what-survives-it)).
 - **`capture_target`** decides which handle the _caller_ resolves — the game's
   window, or the display it is on via `clipped_windows::monitor_for_window` — so
   it is read before a recording's target exists.
+- **The remembered capture method** is not a setting at all and does not live in
+  a `ResolvedSettings`. It rides on `RecordingRequest::remembered_capture_method`
+  and is applied with
+  `RecordingSettings::with_remembered_capture_method`, because it is something
+  Clipped observed about this machine rather than something the user configured
+  — and because a value folded into `ResolvedSettings` would show up on the
+  settings screen as a choice with a Reset control (see
+  [`capture`](#capture)).
 - **`replay_window_seconds`** becomes a `clipped_replay::ReplayConfig` when a
   recording opens a replay buffer, which needs the bitrate the encoder session
   was opened with; `record_with_replay` is where that meets. Who reads it:
@@ -803,6 +862,7 @@ standing when it did not — the two rows of the table above.
 | `crates/session/src/config/hotkeys.rs`     | The hotkey layer and its three states                        |
 | `crates/session/src/config/notifications.rs` | Which failures interrupt the user                          |
 | `crates/session/src/config/game.rs`        | How a settings file names a game                             |
+| `crates/session/src/config/capture_memory.rs` | What Clipped observed about capturing each game           |
 | `crates/session/src/config/document.rs`    | The file format, versions and migration                      |
 | `crates/session/src/config/store.rs`       | Reading, saving, and what survives a bad file                |
 | `crates/session/src/config/tests.rs`       | Inheritance, validation, migration and the file              |

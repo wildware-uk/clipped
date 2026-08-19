@@ -208,20 +208,32 @@ pub(crate) fn parse(
         Section::Document,
     )?);
 
+    // Dropped rather than kept or refused, unlike all three of the sections
+    // above, because it is the one section the user did not write: an entry
+    // this build cannot read is a note Clipped made about a machine and can
+    // make again by recording the game once (`super::capture_memory`).
+    let capture = super::capture_memory::read(take_object(
+        path,
+        &mut document,
+        "capture",
+        Section::Document,
+    )?);
+
     // Whatever is left is a key from a newer build, or the version, which is
     // rewritten rather than kept.
     document.remove("version");
     let unknown = document.into_iter().collect();
 
-    let configuration = Configuration::from_parts(
+    let configuration = Configuration::from_parts(crate::config::Parts {
         global,
         games,
         hotkeys,
         plugins,
         storage,
         notifications,
+        capture,
         unknown,
-    );
+    });
     let loaded = if version == SCHEMA_VERSION {
         Loaded::AsWritten
     } else {
@@ -261,6 +273,14 @@ pub(crate) fn render(configuration: &Configuration) -> String {
     let storage = super::storage::write(configuration.storage());
     if !storage.is_empty() {
         document.insert("storage".to_owned(), Value::Object(storage));
+    }
+    // Written only when something has been remembered, for the same reason and
+    // one of its own: a settings file that grows an empty `capture` section on
+    // the first save is a file that invites the question "what is this?" from
+    // somebody who has nothing in it.
+    let capture = super::capture_memory::write(configuration.capture_memories());
+    if !capture.is_empty() {
+        document.insert("capture".to_owned(), Value::Object(capture));
     }
     // Written only when something is set, for the same reason: a user who has
     // never switched a notification off should not find a section explaining

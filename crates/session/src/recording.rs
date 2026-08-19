@@ -74,7 +74,7 @@ use std::time::Instant;
 
 use clipped_capture::{
     registered_backends, Acquisition, CaptureBackend, CaptureClock, CaptureConfig, CaptureError,
-    CaptureFallback, CaptureMethod, CaptureMethodSetting, CapturedFrame, DisplayAwake, FrameFormat,
+    CaptureFallback, CaptureMethod, CapturedFrame, DisplayAwake, FrameFormat,
 };
 use clipped_encoder::{Codec, Resolution, SourceFrame, SourceTexture, SurfaceKind, VideoEncoder};
 use clipped_logging::{RedactedPath, SessionContext, SessionId};
@@ -146,11 +146,19 @@ pub(crate) fn record(
     // would have worked.
     let target = settings.target().target()?;
     let config = CaptureConfig::default().with_capture_cursor(settings.capture_cursor());
-    let started = CaptureFallback::start(
+    // `start_preferring` rather than `start`: a recording is told two separate
+    // things about capture, and conflating them is how a remembered method
+    // becomes a pin. `capture_method` is what the user asked for and is obeyed
+    // or reported; `remembered_capture_method` is what a previous recording of
+    // the same game was observed to end on, which only decides *which candidate
+    // is asked first* and falls back like any other
+    // ([issue #286](https://github.com/wildware-uk/clipped/issues/286)).
+    let started = CaptureFallback::start_preferring(
         registered_backends(),
         &target,
         &config,
-        CaptureMethodSetting::Automatic,
+        settings.capture_method(),
+        settings.remembered_capture_method(),
     )
     .map_err(SessionError::from)?;
 
@@ -762,6 +770,11 @@ fn record_frames(
         // `capture_changes` below is what makes the answer explicable rather
         // than surprising (issue #285's third criterion).
         capture_method: status.current_method(),
+        // What was *asked for*, beside what happened. Without it a caller
+        // holding a report cannot tell a method that was chosen from a method
+        // that was pinned, and "remember what worked" must not remember a
+        // recording that was obeying an instruction (issue #286).
+        capture_setting: status.setting(),
         capture_changes: status.changes().to_vec(),
         // Carried out of `audio::open` rather than re-derived here: by the time
         // the file is finished the only trace of a machine that could not scope
@@ -2005,10 +2018,11 @@ fn session_id() -> SessionId {
 mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::time::SystemTime;
 
     use clipped_capture::{
-        CaptureTarget, CaptureTimestamp, FrameSize, FrameTexture, PixelFormat, SourceClock,
-        TextureKind,
+        CaptureMethodSetting, CaptureTarget, CaptureTimestamp, FrameSize, FrameTexture,
+        PixelFormat, SourceClock, TextureKind,
     };
     use clipped_encoder::{
         BitRate, EncodeError, EncodedPacket, EncoderConfig, EncoderKind, FrameRate, PictureKind,
@@ -2020,6 +2034,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
     use super::*;
+    use crate::config::{Configuration, GameKey};
 
     /// What a scripted backend hands back from one `acquire`.
     #[derive(Debug, Clone, Copy)]
@@ -2540,6 +2555,7 @@ mod tests {
         RecordingReport {
             output: Some(output),
             capture_method: CaptureMethod::WindowsGraphicsCapture,
+            capture_setting: CaptureMethodSetting::Automatic,
             encoder: clipped_encoder::EncoderKind::Nvenc,
             codec: Codec::Av1,
             width: 1320,
@@ -4044,6 +4060,68 @@ mod tests {
         }
     }
 
+    /// Records with two *healthy* backends, having been told which to try first.
+    ///
+    /// The counterpart to [`recording_that_recovers`]: nothing here fails, so
+    /// what the recording ends on is entirely a question of which candidate was
+    /// asked. `remembered` goes in the same two places `record` puts it — onto
+    /// the `RecordingSettings` and from there into
+    /// `CaptureFallback::start_preferring` — so the test exercises the wiring a
+    /// real recording uses rather than calling the capture layer directly.
+    fn recording_preferring(
+        purpose: &str,
+        remembered: Option<CaptureMethod>,
+        polls: u64,
+    ) -> (
+        RecordingReport,
+        TemporaryRecording,
+        &'static ScriptedFactory,
+        &'static ScriptedFactory,
+    ) {
+        let first = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        let second = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        let clock = counter();
+        let wgc = leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, clock)
+                .painting(first, 0x80)
+                .planning([vec![Step::Drew; 40]]),
+        );
+        let duplication = leaked(
+            ScriptedFactory::new(CaptureMethod::DesktopDuplication, clock)
+                .painting(second, 0x40)
+                .planning([vec![Step::Drew; 40]]),
+        );
+
+        let recording = TemporaryRecording::new(purpose);
+        let settings = loop_settings(&recording).with_remembered_capture_method(remembered);
+
+        // The two lines `record` runs, with a scripted candidate list in place
+        // of `registered_backends()`. Reading both values off the settings is
+        // the point: a test that passed `remembered` to the capture layer by
+        // hand would still pass with the plumbing through `RecordingSettings`
+        // taken out.
+        let (fallback, backend, format) = CaptureFallback::start_preferring(
+            candidates(&[wgc, duplication]),
+            &scripted_target(),
+            &CaptureConfig::default(),
+            settings.capture_method(),
+            settings.remembered_capture_method(),
+        )
+        .expect("a scripted candidate list starts")
+        .into_parts();
+
+        let report = record_frames(
+            &settings,
+            &StopAfter::polls(polls),
+            fallback,
+            backend,
+            format,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect("two healthy scripted backends record");
+        (report, recording, wgc, duplication)
+    }
+
     /// Asserts that `recording` is a Matroska file with a decodable H.264 track
     /// of at least `frames` pictures in it.
     ///
@@ -4216,6 +4294,169 @@ mod tests {
         // adjacent: the pictures after the change decode against the codec
         // header written before it.
         decodes_at_least(&recovered.recording, report.frames_encoded());
+    }
+
+    #[test]
+    fn a_second_recording_of_the_same_game_starts_on_the_method_the_first_one_fell_back_to() {
+        // Issue #286, end to end and in the order it happens: a recording falls
+        // back, what it ended on is remembered against the game, and the next
+        // recording of that game *starts* there.
+        //
+        // The second half is the one worth stating carefully. Windows Graphics
+        // Capture is healthy in the second recording and is the method selection
+        // prefers, so nothing but the memory can keep it from being chosen —
+        // and the recording is driven through `record_frames` with settings
+        // built the way `record` builds them, rather than by handing a method to
+        // the capture layer.
+        let game = GameKey::parse("counter-strike-2").expect("a game key");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725);
+        let mut configuration = Configuration::defaults();
+
+        let first = recording_that_recovers(
+            "remembered-capture-fell-back",
+            0x40,
+            vec![vec![
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Fails(opted_out),
+            ]],
+            vec![vec![Step::Drew; 20]],
+            60,
+        )
+        .unwrap_or_else(|(error, _recording)| {
+            panic!("the first recording should have survived its backend failing: {error}")
+        });
+        assert_eq!(
+            first.report.capture_method(),
+            CaptureMethod::DesktopDuplication,
+            "the first recording has to end somewhere other than where it started, or the second \
+             one proves nothing"
+        );
+
+        assert!(
+            configuration.remember_capture_method(
+                &game,
+                first.report.capture_setting(),
+                first.report.capture_method(),
+                now,
+            ),
+            "a game nothing was known about, and a recording that fell back, is something to \
+             learn from"
+        );
+
+        let (report, _recording, wgc, duplication) = recording_preferring(
+            "remembered-capture-starts-there",
+            configuration.remembered_capture_method(&game, now),
+            60,
+        );
+
+        assert_eq!(
+            report.capture_method(),
+            CaptureMethod::DesktopDuplication,
+            "the second recording of this game started on Windows Graphics Capture, which failed \
+             last time, rather than on Desktop Duplication, which worked"
+        );
+        assert_eq!(
+            report.capture_changes(),
+            &[],
+            "the second recording fell back as well, which is the second or two issue #286 \
+             exists to stop losing"
+        );
+        assert_eq!(
+            wgc.creations(),
+            0,
+            "the method that failed last time was opened again, so nothing was saved by \
+             remembering"
+        );
+        assert_eq!(
+            duplication.creations(),
+            1,
+            "the remembered method should have been the one and only backend opened"
+        );
+    }
+
+    #[test]
+    fn a_remembered_method_this_machine_no_longer_offers_falls_back_rather_than_failing() {
+        // Issue #286's second acceptance criterion. The memory names a method
+        // no candidate is registered for at all — a build that dropped a
+        // backend, a machine that lost Desktop Duplication — and the recording
+        // still happens, on whatever the published order can offer.
+        let first = test_device().expect("no Direct3D 11 device could be created, on WARP either");
+        let wgc = leaked(
+            ScriptedFactory::new(CaptureMethod::WindowsGraphicsCapture, counter())
+                .painting(first, 0x80)
+                .planning([vec![Step::Drew; 40]]),
+        );
+
+        let recording = TemporaryRecording::new("remembered-capture-gone");
+        let settings = loop_settings(&recording)
+            .with_remembered_capture_method(Some(CaptureMethod::DesktopDuplication));
+        let (fallback, backend, format) = CaptureFallback::start_preferring(
+            candidates(&[wgc]),
+            &scripted_target(),
+            &CaptureConfig::default(),
+            settings.capture_method(),
+            settings.remembered_capture_method(),
+        )
+        .expect("a remembered method that is gone must not stop a capture starting")
+        .into_parts();
+
+        let report = record_frames(
+            &settings,
+            &StopAfter::polls(60),
+            fallback,
+            backend,
+            format,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect("the recording should have been made on the backend that is here");
+
+        assert_eq!(
+            report.capture_method(),
+            CaptureMethod::WindowsGraphicsCapture,
+            "a memory of a method this machine no longer offers must fall back to the ordinary \
+             preference order"
+        );
+        assert!(
+            report.frames_encoded() > 0,
+            "the recording produced no video at all"
+        );
+        // And it cost nothing to discover. Falling back *after* asking for a
+        // method nothing is registered for records the fall-through as a
+        // `MethodChange`, so an empty list is what says the memory was tested
+        // against the candidate list before it was acted on rather than after —
+        // which is the difference between a stale memory costing nothing and a
+        // stale memory costing the very attempt issue #286 exists to save.
+        assert_eq!(
+            report.capture_changes(),
+            &[],
+            "the recording asked for the remembered method, was turned down and fell through, \
+             instead of never asking for a method this machine cannot offer"
+        );
+        drop(recording);
+    }
+
+    #[test]
+    fn a_method_a_pinned_recording_ended_on_is_not_remembered_over_the_pin() {
+        // Issue #286's third acceptance criterion. A recording made under
+        // `CaptureMethodSetting::Forced` ended on the method it was told to use;
+        // that is the setting being obeyed and says nothing about the machine,
+        // so there is nothing to learn and nothing to write.
+        let game = GameKey::parse("counter-strike-2").expect("a game key");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725);
+        let mut configuration = Configuration::defaults();
+
+        assert!(
+            !configuration.remember_capture_method(
+                &game,
+                CaptureMethodSetting::Forced(CaptureMethod::DesktopDuplication),
+                CaptureMethod::DesktopDuplication,
+                now,
+            ),
+            "what a pinned recording ended on is the pin, not an observation"
+        );
+        assert_eq!(configuration.remembered_capture_method(&game, now), None);
     }
 
     #[test]

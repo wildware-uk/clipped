@@ -140,6 +140,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 use clipped_events::GameEvent;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
 use clipped_game_detection::launcher::Launchers;
@@ -239,6 +240,18 @@ pub struct RecordingRequest {
     /// and a [`SessionAction`] is returned from every call the driver makes,
     /// most of which start nothing.
     pub settings: Box<ResolvedSettings>,
+    /// The capture method a previous recording of this game was observed to end
+    /// on, if one was and it is still worth trying.
+    ///
+    /// Not a setting, which is why it does not travel inside `settings`: it is
+    /// something Clipped observed about this machine rather than something the
+    /// user configured, and it is applied by
+    /// [`RecordingSettings::with_remembered_capture_method`](crate::RecordingSettings::with_remembered_capture_method)
+    /// — which changes the order candidates are asked in and nothing else. A
+    /// remembered method that this machine can no longer offer falls back
+    /// exactly as if nothing had been remembered
+    /// ([issue #286](https://github.com/wildware-uk/clipped/issues/286)).
+    pub remembered_capture_method: Option<CaptureMethod>,
 }
 
 /// What the manager wants done.
@@ -265,6 +278,28 @@ pub enum SessionAction {
     /// list of every session since login is memory nobody asked for
     /// (AGENTS.md section 59). Its sidecar has already been written.
     SessionEnded(Box<Session>),
+
+    /// Save that a recording of this game ended on this capture method.
+    ///
+    /// The manager has already applied it to the configuration it holds, so
+    /// the *next* recording of the same game prefers it whether or not this
+    /// action is acted on. What the action asks for is that it outlive the
+    /// process ([issue
+    /// #286](https://github.com/wildware-uk/clipped/issues/286)).
+    ///
+    /// It is an action rather than a write because a settings file is not the
+    /// manager's to open: the manager is a state machine that touches nothing
+    /// but its own session sidecar, and the driver is what holds the
+    /// `ConfigurationStore` and serialises writes to it against the settings
+    /// screen's. It is emitted only when something actually changed, so the
+    /// ordinary recording — the same method as last time, remembered already —
+    /// asks for no write at all.
+    RememberCaptureMethod {
+        /// Which game, as a settings file names it.
+        game: GameKey,
+        /// The method that worked.
+        method: CaptureMethod,
+    },
 }
 
 /// What a recording turned out to be, as the driver reports it.
@@ -778,6 +813,28 @@ impl SessionManager {
         }
 
         let stopping = self.stopping;
+        // What this recording proved about capturing this game, before the
+        // outcome is summarised into the shape a session keeps — the summary
+        // does not carry it, and the report is about to be dropped.
+        //
+        // "Worked" is: the recording reached an ending, it captured at least one
+        // frame, and this is the method that was running when it did. A capture
+        // that produced nothing proves nothing, and a recording that failed
+        // before its first frame proves less than nothing. It is deliberately
+        // *not* "survived the whole recording": the commonest way a broken
+        // backend is discovered is a recording somebody stopped ten seconds in,
+        // and refusing to learn from those would mean never learning from the
+        // case this exists for. Being wrong costs one fall back on the next
+        // recording, which is exactly what remembering nothing costs on every
+        // recording.
+        let worked = match &outcome {
+            RecordingOutcome::Recorded(report) if report.frames_captured() > 0 => {
+                Some((report.capture_setting(), report.capture_method()))
+            }
+            RecordingOutcome::Recorded(_)
+            | RecordingOutcome::NoWindow { .. }
+            | RecordingOutcome::Failed { .. } => None,
+        };
         let summary = outcome.summarise();
         let delay = restart_delay_after(&summary, self.settings.recording_restart_delay());
         let produced_a_file = summary.produced_a_file();
@@ -803,6 +860,8 @@ impl SessionManager {
             "a recording of the session ended"
         );
 
+        let game = key_for(active.session.game());
+
         if !stopping {
             if active.subject.alive && !active.no_window && !active.stop_asked_for {
                 // The game is still running, so the session is not over: the
@@ -817,11 +876,48 @@ impl SessionManager {
             }
         }
 
+        if let Some(action) = self.remember(game, worked, now) {
+            actions.push(action);
+        }
+
         if stopping {
             self.close_active(SessionEndReason::RecorderStopping, now, &mut actions);
         }
         actions.extend(self.advance(now));
         actions
+    }
+
+    /// Records what a finished recording proved about capturing its game, and
+    /// asks for it to be saved when it was something new.
+    ///
+    /// The manager applies it to the configuration it holds *and* emits the
+    /// action, rather than either one alone. Applying it is what makes the next
+    /// recording of the same game prefer the method that worked even where
+    /// nothing is holding a settings file — `clipped-recorder watch` run on its
+    /// own has no store to write to. Emitting it is what makes the answer
+    /// outlive the process.
+    fn remember(
+        &mut self,
+        game: Option<GameKey>,
+        worked: Option<(CaptureMethodSetting, CaptureMethod)>,
+        now: SystemTime,
+    ) -> Option<SessionAction> {
+        let game = game?;
+        let (setting, method) = worked?;
+
+        if !self
+            .configuration
+            .remember_capture_method(&game, setting, method, now)
+        {
+            return None;
+        }
+
+        tracing::info!(
+            game = game.as_str(),
+            capture_backend = method.log_value(),
+            "this game's next recording will start on the capture method this one ended on"
+        );
+        Some(SessionAction::RememberCaptureMethod { game, method })
     }
 
     /// Stops everything, because the recorder is stopping.
@@ -1194,7 +1290,21 @@ impl SessionManager {
         // the recording is made with is this value and not the configuration,
         // so a settings change while it runs reaches the next recording rather
         // than this one.
-        let settings = resolve_for(&self.configuration, active.session.game());
+        // Named once and used twice, rather than looked up either side: a game
+        // whose identifier a settings file cannot hold says so in the log, and
+        // saying it twice for one recording would read as two problems.
+        let key = key_for(active.session.game());
+        let settings = match key.as_ref() {
+            Some(key) => self.configuration.resolve_for(key),
+            None => self.configuration.resolve_global(),
+        };
+        // Read at the same moment and from the same configuration, for the same
+        // reason: what a recording is started with is the answer as it stood
+        // when it started. `now` decides whether the memory has expired, which
+        // is why it is threaded here rather than read from a clock.
+        let remembered_capture_method = key
+            .as_ref()
+            .and_then(|game| self.configuration.remembered_capture_method(game, now));
 
         active.started_recordings += 1;
         let index = active.started_recordings;
@@ -1227,6 +1337,7 @@ impl SessionManager {
             image_name: active.subject.image_name.clone(),
             output,
             settings: Box::new(settings),
+            remembered_capture_method,
         }))
     }
 
@@ -1448,12 +1559,25 @@ fn identify_process(
 ///   identifier is unusual would lose footage over a spelling (AGENTS.md
 ///   sections 15 and 16).
 fn resolve_for(configuration: &Configuration, game: &GameIdentity) -> ResolvedSettings {
+    match key_for(game) {
+        Some(key) => configuration.resolve_for(&key),
+        None => configuration.resolve_global(),
+    }
+}
+
+/// How a settings file would name this game, when it can name it at all.
+///
+/// [`None`] for a process the catalogue did not recognise, and for the one
+/// identifier a settings file cannot hold. Both mean the recording is made with
+/// the global settings, and both mean nothing can be remembered about the game
+/// either, because there would be no key to remember it under.
+fn key_for(game: &GameIdentity) -> Option<GameKey> {
     let GameIdentity::Known { game_id, .. } = game else {
-        return configuration.resolve_global();
+        return None;
     };
 
     match GameKey::parse(game_id) {
-        Ok(key) => configuration.resolve_for(&key),
+        Ok(key) => Some(key),
         Err(error) => {
             tracing::warn!(
                 game = game_id.as_str(),
@@ -1461,7 +1585,7 @@ fn resolve_for(configuration: &Configuration, game: &GameIdentity) -> ResolvedSe
                 "this game cannot be named in a settings file, so its own settings could not be \
                  looked up; recording it with the global settings"
             );
-            configuration.resolve_global()
+            None
         }
     }
 }

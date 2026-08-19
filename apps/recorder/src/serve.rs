@@ -1657,6 +1657,20 @@ impl RecordingState {
         self.settings.configuration()
     }
 
+    /// Records the capture method a recording of `game` ended on, for the
+    /// automatic recorder (`crate::watch`, issue #286).
+    ///
+    /// Here rather than through a store of the driver's own so that every write
+    /// to the settings file in this process goes through one lock, the settings
+    /// screen's included.
+    pub(crate) fn remember_capture_method(
+        &self,
+        game: &clipped_session::config::GameKey,
+        method: clipped_session::CaptureMethod,
+    ) {
+        self.settings.remember_capture_method(game, method);
+    }
+
     /// How many times `apply_settings` has saved, for the automatic recorder to
     /// compare against the generation it took its copy at.
     ///
