@@ -138,8 +138,8 @@ pub use command::{
     StopRecording, TakeScreenshot,
 };
 pub use diagnostics::{
-    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics, EncoderAccount,
-    EncoderSummary,
+    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
+    EffectiveSetting, EncoderAccount, EncoderSummary,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};

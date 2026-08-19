@@ -1875,9 +1875,16 @@ impl Reachable {
         target: String,
         progress: &RecordingProgress,
         stop: &ShutdownSignal,
+        settings: Vec<clipped_session::config::EffectiveSetting>,
     ) -> Result<Adopted, String> {
-        self.recordings
-            .adopt(output, target, progress, stop, &self.asked_to_stop)
+        self.recordings.adopt(
+            output,
+            target,
+            progress,
+            stop,
+            &self.asked_to_stop,
+            settings,
+        )
     }
 }
 
@@ -2081,6 +2088,11 @@ where
                 request.game.display_name().to_owned(),
                 progress,
                 stop,
+                // What this recording is *running with*, which is the command
+                // line with this game's configured settings laid over it,
+                // not the configuration on its own, which says nothing about
+                // the flags no layer overrode (issue #61, criterion 3).
+                clipped_session::config::effective_settings(&settings, &request.settings),
             )
         })
         .transpose()

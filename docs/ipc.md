@@ -1707,10 +1707,14 @@ path.
 
 ### `get_diagnostics`
 
-**How the recording in progress is capturing, and what this machine can encode.**
-Two of the twelve diagnostics SPEC.md section 36 asks a recorder to record; the
-other ten are not measured by anything yet and the screen says which
-([diagnostics.md](diagnostics.md)).
+**How the recording in progress is capturing, what this machine can encode, and
+what that recording is running with.** The first two are two of the twelve
+diagnostics SPEC.md section 36 asks a recorder to record; the other ten are not
+measured by anything yet and the screen says which
+([diagnostics.md](diagnostics.md)). The third is not on that list at all — it is
+[issue #61](https://github.com/wildware-uk/clipped/issues/61)'s third acceptance
+criterion, and it travels here because this is the command a window already asks
+when somebody opens Diagnostics.
 
 ```json
 {"type":"response","id":13,"outcome":{"ok":{"reply":"diagnostics","diagnostics":{
@@ -1731,7 +1735,13 @@ other ten are not measured by anything yet and the screen says which
                            "asked":false,
                            "codecs":[{"codec":"h264","supported":true,
                                       "max_width":4096,"max_height":4096,
-                                      "max_framerate_1080p":522,"inferred":true}]}]}}}}}
+                                      "max_framerate_1080p":522,"inferred":true}]}]},
+  "settings":[{"setting":"resolution","value":"2560x1440","source":"game"},
+              {"setting":"framerate","value":"60","source":"game"},
+              {"setting":"codec","value":"h264","source":"request"},
+              {"setting":"encoder","value":"auto","source":"default"},
+              {"setting":"microphone","value":"none","source":"global"},
+              {"setting":"system_audio","value":"default","source":"default"}]}}}}
 ```
 
 **`capture` is absent when nothing is being recorded**, and that is a fact rather
@@ -1741,6 +1751,38 @@ It is absent as well for the few milliseconds between a recording starting and
 its backend opening — "not chosen yet" and "chose this" are different things,
 which is the same answer a recording that has produced no frame gives when
 [`add_bookmark`](#add_bookmark) asks where it has reached.
+
+**`settings` is absent when nothing is being recorded**, for the reason `capture`
+is, and it is worth being precise about why: a settings *file* exists between
+recordings and would answer. It says what the **next** recording would be made
+with, which is a different fact — the two differ every time somebody saves a
+setting while a game is running, which is exactly when a recording is running
+([configuration.md](configuration.md), "Resolved once, when the recording
+starts"). So there is no reading between recordings and the absence is the
+answer.
+
+**It is what the recording is running with, not what is configured.** Both ways a
+recording starts build it from something of their own first — `watch` from its
+command line, `serve` from the `start_recording` it was sent — and lay the
+configured settings over it, replacing only what a user configured. A setting
+nobody configured therefore keeps the caller's answer, and reporting the
+configuration for it would name a value the encoder is not using. `source` is
+what says which happened:
+
+| `source`  | What supplied this recording's answer                                       |
+| --------- | ---------------------------------------------------------------------------- |
+| `game`    | this game's own layer of `settings.json`                                     |
+| `global`  | the global layer, which this game inherits from                             |
+| `default` | the value Clipped ships with; nothing above it said anything                |
+| `request` | the recording itself — a `watch` command line, or a `start_recording`       |
+
+Six settings, and the two that are missing are missing on purpose:
+`capture_target`, which nothing in this build reads, and
+`replay_window_seconds`, which sizes a buffer rather than being a property of the
+recording. A row for either would be a value invented to fill a table (AGENTS.md
+section 27). The keys and the values are spelled exactly as
+[`get_settings`](#get_settings) and `settings.json` spell them, so a window can
+line one against the other without a table of its own.
 
 **`encoders` is never absent.** A machine with no hardware encoder still has the
 software one and still has adapters, and *"Clipped did not find your NVIDIA

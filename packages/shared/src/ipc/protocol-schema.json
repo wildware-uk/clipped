@@ -343,8 +343,17 @@
         "encoders"
       ],
       "optional": [
-        "capture"
+        "capture",
+        "settings"
       ]
+    },
+    "effective_setting": {
+      "required": [
+        "setting",
+        "source",
+        "value"
+      ],
+      "optional": []
     },
     "encoder_account": {
       "required": [
@@ -3001,7 +3010,19 @@
                   }
                 ],
                 "probed": false
-              }
+              },
+              "settings": [
+                {
+                  "setting": "resolution",
+                  "source": "game",
+                  "value": "2560x1440"
+                },
+                {
+                  "setting": "codec",
+                  "source": "request",
+                  "value": "hevc"
+                }
+              ]
             },
             "reply": "diagnostics"
           }

@@ -39,6 +39,7 @@ import type {
   CaptureMethodChange,
   CodecSummary,
   Diagnostics,
+  EffectiveSetting,
   DiagnosticsReply,
   EncoderAccount,
   EncoderSummary,
@@ -724,7 +725,16 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reason: 'required',
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
-  diagnostics: fields<Diagnostics>({ capture: 'optional', encoders: 'required' }),
+  diagnostics: fields<Diagnostics>({
+    capture: 'optional',
+    encoders: 'required',
+    settings: 'optional',
+  }),
+  effective_setting: fields<EffectiveSetting>({
+    setting: 'required',
+    value: 'required',
+    source: 'required',
+  }),
   capture_account: fields<CaptureAccount>({
     setting: 'required',
     started_with: 'required',

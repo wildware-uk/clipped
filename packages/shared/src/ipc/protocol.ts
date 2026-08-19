@@ -2245,6 +2245,36 @@ export interface EncoderAccount {
   readonly encoders: readonly EncoderSummary[];
 }
 
+/**
+ * One setting the recording in progress is running with.
+ *
+ * Not one setting of the settings file. A recording is built from what its
+ * caller asked for - a `clipped-recorder watch` command line, or a
+ * `start_recording` - with the settings configured for that game laid over it,
+ * so a setting nobody configured keeps the caller's answer.
+ */
+export interface EffectiveSetting {
+  /**
+   * The key, as `settings.json` spells it: `resolution`, `framerate`, `codec`,
+   * `encoder`, `microphone`, `system_audio`.
+   *
+   * Two of the settings a game may override are never here, and their absence
+   * is the honest answer rather than a gap: `capture_target`, which nothing in
+   * this build reads, and `replay_window_seconds`, which sizes a buffer rather
+   * than being a property of the recording.
+   */
+  readonly setting: string;
+  /** The value, spelled the way the settings file spells it. */
+  readonly value: string;
+  /**
+   * Where this recording's answer came from.
+   *
+   * `default`, `global` or `game` for the three layers of the settings file,
+   * and `request` for a setting the recording asked for itself.
+   */
+  readonly source: string;
+}
+
 /** What the recorder can say about capture and encoding, right now. */
 export interface Diagnostics {
   /**
@@ -2257,6 +2287,14 @@ export interface Diagnostics {
   readonly capture?: CaptureAccount;
   /** What this machine can encode. Never absent. */
   readonly encoders: EncoderAccount;
+  /**
+   * What the recording in progress is running with, setting by setting.
+   *
+   * Absent when nothing is being recorded, for the reason {@link capture} is:
+   * these are one recording's answers and not a reading of the settings file,
+   * which says what the *next* recording would be made with.
+   */
+  readonly settings?: readonly EffectiveSetting[];
 }
 
 /** How the recorder is capturing, and what this machine can encode. */

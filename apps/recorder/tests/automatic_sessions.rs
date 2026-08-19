@@ -90,6 +90,40 @@
 //! began and never ended is what M6's indexer would otherwise have to
 //! reconcile against a file that is complete and playable.
 //!
+//! # The per-game settings
+//!
+//! One of these is [issue #61](https://github.com/wildware-uk/clipped/issues/61)'s
+//! first acceptance criterion, which no test in the tree had ever made a file
+//! for: *"one game records at 1440p60 while another records at 1080p60
+//! automatically, verified with ffprobe."* The nearest thing that existed was
+//! `watch::tests::a_games_own_settings_reach_the_recording_that_is_started_for_it`,
+//! which drives the same resolution through the real manager and the real
+//! composition and then hands it to a stand-in engine that records nothing —
+//! so it proves what the engine was *asked* for and can say nothing about what
+//! came out.
+//!
+//! This one makes the files. Two subjects, two catalogue entries, one
+//! `settings.json` with a `games` section naming both, and the two recordings
+//! read back with `ffprobe`. The command line and the global layer are both set
+//! to values **neither game asks for**, which is what makes the reading mean
+//! something: a build where the per-game layer stopped reaching a recording
+//! produces two files at the global layer's frame rate and codec, or at the
+//! command line's, and the assertions below name the setting rather than the
+//! file.
+//!
+//! **What the resolution does and does not prove.** This build has no scaler:
+//! `RecordingSettings::encode_size` records at the size capture is producing and
+//! logs a substitution when a configured size is not that
+//! ([docs/recorder-cli.md](../../../docs/recorder-cli.md), "No scaling"). So a
+//! per-game `resolution` naming the subject's own window size is *honoured*
+//! rather than *causal*, and two files of different sizes on their own would say
+//! only that two windows were different sizes. Two things are done about that.
+//! The command line asks for a size **neither** window is, with the refusal a
+//! command line gets — so a build where the per-game `resolution` did not arrive
+//! records nothing at all rather than recording the same thing twice. And the
+//! frame rate and the codec, which this build genuinely does apply per game,
+//! are asserted alongside it off the same `ffprobe` reading.
+//!
 //! # Why these are `#[ignore]`d
 //!
 //! They need a GPU, an encoder, a desktop session, WMI, and about a minute of
@@ -227,6 +261,177 @@ name = "Clipped Windowless"
 [[game.executables]]
 name = "shutdown_fixture.exe"
 "#;
+
+/// One of the two subjects issue #61's first criterion needs.
+///
+/// A game is a catalogue entry, an executable and a `games` section of
+/// `settings.json`, and the point of the pair is that everything about them is
+/// the same except what their own entries ask for.
+#[derive(Debug, Clone, Copy)]
+struct Subject {
+    /// What the recorder calls it on the console and in the session record.
+    name: &'static str,
+    /// The catalogue's `game_id`, which is also the key its settings are under.
+    key: &'static str,
+    /// The image name the watcher sees, which is a copy of the pattern
+    /// application under a name of its own — two games need two executables, and
+    /// the watcher recognises a game by the name of its image.
+    executable: &'static str,
+    /// The client area its window opens at, and therefore the size capture
+    /// produces and the only size this build can encode (see the module docs).
+    size: (u32, u32),
+    /// The codec its own entry asks for, spelled as `settings.json` spells it
+    /// and as `ffprobe` names it — the two agree for both of these.
+    codec: &'static str,
+}
+
+impl Subject {
+    /// The settings this game's own entry writes, spelled as `settings.json`
+    /// spells them and as the recorder writes them back out.
+    ///
+    /// One list, read by three assertions — the log line the recording starts
+    /// with, the session record beside the files, and the messages naming what
+    /// went wrong — so that adding a setting to the fixture cannot leave one of
+    /// the three behind (AGENTS.md section 55).
+    fn configured(self) -> [(&'static str, String); 3] {
+        [
+            ("resolution", format!("{}x{}", self.size.0, self.size.1)),
+            ("framerate", PER_GAME_FRAMERATE.to_string()),
+            ("codec", self.codec.to_owned()),
+        ]
+    }
+}
+
+/// The 1440p subject.
+const ALPHA: Subject = Subject {
+    name: "Clipped Pattern Alpha",
+    key: "clipped-pattern-alpha",
+    executable: "pattern-alpha.exe",
+    size: (2560, 1440),
+    codec: "h264",
+};
+
+/// The 1080p subject.
+const BETA: Subject = Subject {
+    name: "Clipped Pattern Beta",
+    key: "clipped-pattern-beta",
+    executable: "pattern-beta.exe",
+    size: (1920, 1080),
+    codec: "hevc",
+};
+
+/// The frame rate both games' own entries ask for.
+///
+/// The same for both, because the criterion asks for 1440p60 and 1080p60 — what
+/// differs between the two subjects is the size and the codec. It is still a
+/// per-game assertion: neither the command line nor the global layer says 60,
+/// so a file at 60 can only have come from the game's own entry.
+const PER_GAME_FRAMERATE: u32 = 60;
+
+/// What the global layer says about the frame rate.
+///
+/// A value neither game asks for, so that a build which resolved the global
+/// layer and dropped the per-game one is a distinct, readable failure rather
+/// than an accidental pass (AGENTS.md section 30's worked example, inverted).
+const GLOBAL_FRAMERATE: u32 = 15;
+
+/// What the global layer says about the codec, for the same reason.
+///
+/// `auto` would have been the tempting value and is the one that could not be
+/// read: `auto` on this project's machine resolves to AV1, which is a real
+/// codec name in the file, and a global layer naming it outright is the same
+/// answer said out loud.
+const GLOBAL_CODEC: &str = "av1";
+
+/// The frame rate the recorder's command line asks for.
+///
+/// Third value, third layer. A file at 24 says the settings file did not reach
+/// the recording at all; a file at [`GLOBAL_FRAMERATE`] says the per-game layer
+/// did not.
+///
+/// Below what capture delivers, as [`GLOBAL_FRAMERATE`] is, so that both wrong
+/// answers are *produced* rather than merely asked for. A rate above what the
+/// compositor hands over comes out of the file as whatever capture managed,
+/// which on this project's machine is the 60 a healthy run also produces.
+const COMMAND_LINE_FRAMERATE: &str = "24";
+
+/// The size the recorder's command line asks for.
+///
+/// Neither subject's window, deliberately. A command line's choice is refused
+/// rather than substituted when the machine cannot honour it
+/// ([docs/configuration.md](../../../docs/configuration.md), "What a stale
+/// setting does"), so a build where the per-game `resolution` did not reach the
+/// recording fails both recordings with `ScalingNotSupported` instead of quietly
+/// recording both windows at their own size — which is the only way this build,
+/// which cannot scale, can make a resolution setting causal.
+const COMMAND_LINE_RESOLUTION: &str = "1280x720";
+
+/// How long each subject is recorded for before it is killed.
+const RECORD_PER_SUBJECT: Duration = Duration::from_secs(6);
+
+/// The overlay naming both subjects.
+fn per_game_overlay() -> String {
+    format!(
+        r#"schema_version = 1
+
+[[game]]
+game_id = "{alpha_key}"
+name = "{alpha_name}"
+[[game.executables]]
+name = "{alpha_exe}"
+
+[[game]]
+game_id = "{beta_key}"
+name = "{beta_name}"
+[[game.executables]]
+name = "{beta_exe}"
+"#,
+        alpha_key = ALPHA.key,
+        alpha_name = ALPHA.name,
+        alpha_exe = ALPHA.executable,
+        beta_key = BETA.key,
+        beta_name = BETA.name,
+        beta_exe = BETA.executable,
+    )
+}
+
+/// A user's own `settings.json`: a global layer, and a layer for each game.
+///
+/// Written as text rather than built through `clipped_session::config`, for the
+/// reason [`OVERLAY`] is: this is the file a person edits, and a test that wrote
+/// it through the same API that reads it would not notice the two disagreeing.
+fn per_game_settings() -> String {
+    format!(
+        r#"{{
+  "version": 1,
+  "global": {{
+    "framerate": {GLOBAL_FRAMERATE},
+    "codec": "{GLOBAL_CODEC}"
+  }},
+  "games": {{
+    "{alpha_key}": {{
+      "resolution": "{alpha_width}x{alpha_height}",
+      "framerate": {PER_GAME_FRAMERATE},
+      "codec": "{alpha_codec}"
+    }},
+    "{beta_key}": {{
+      "resolution": "{beta_width}x{beta_height}",
+      "framerate": {PER_GAME_FRAMERATE},
+      "codec": "{beta_codec}"
+    }}
+  }}
+}}
+"#,
+        alpha_key = ALPHA.key,
+        alpha_width = ALPHA.size.0,
+        alpha_height = ALPHA.size.1,
+        alpha_codec = ALPHA.codec,
+        beta_key = BETA.key,
+        beta_width = BETA.size.0,
+        beta_height = BETA.size.1,
+        beta_codec = BETA.codec,
+    )
+}
 
 #[test]
 #[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
@@ -566,6 +771,380 @@ fn a_game_that_never_shows_a_window_is_said_so_and_never_claimed_as_a_recording(
     );
 }
 
+/// How fast each subject is asked to draw.
+///
+/// Faster than any of the three layers asks for, so that what limits a file's
+/// frame rate is the rate resolved for that game rather than the rate the
+/// subject could draw at. What actually arrives is capped by the compositor —
+/// 60 a second on this project's machine, measured on 2026-08-19 — which is why
+/// no layer here asks for more than that.
+const SUBJECT_FPS: u32 = 120;
+
+/// How far from the rate a game's entry asks for its recording may read.
+///
+/// Wide enough that a busy machine losing a picture or two does not trip it, and
+/// far narrower than the gap to either wrong answer: the nearest is
+/// [`COMMAND_LINE_FRAMERATE`], which is 36 below.
+const FRAMERATE_TOLERANCE: f64 = 6.0;
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
+fn each_game_records_at_the_settings_its_own_entry_asks_for() {
+    // Issue #61's first acceptance criterion, with the files to show for it.
+    // Two games, one settings file, and `ffprobe` on what came out. Nothing
+    // here reaches into the configuration: the recorder is the built binary, it
+    // reads the settings file off disk the way it does on a real machine, and
+    // what is asserted is the picture in each file.
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    ensure_console();
+
+    let workspace =
+        Workspace::with_settings("watch-per-game", &per_game_overlay(), &per_game_settings());
+    let alpha = workspace.subject_binary(ALPHA);
+    let beta = workspace.subject_binary(BETA);
+
+    // The command line is the third layer, and it asks for something neither
+    // game does — see the constants above.
+    let mut recorder = workspace.start_recorder_asking_for(&[
+        "--framerate",
+        COMMAND_LINE_FRAMERATE,
+        "--resolution",
+        COMMAND_LINE_RESOLUTION,
+    ]);
+    recorder.wait_for("Watching for games.");
+    thread::sleep(Duration::from_secs(1));
+
+    // One at a time: this process records one thing at a time whoever asked for
+    // it, and two games produce two sittings either way.
+    record_one_subject(&mut recorder, &alpha, ALPHA);
+    record_one_subject(&mut recorder, &beta, BETA);
+
+    let diagnostics = recorder.stop();
+    let sessions = workspace.sessions();
+    assert_eq!(
+        sessions.len(),
+        2,
+        "two games were launched and each should have a sitting of its own:\n{diagnostics}"
+    );
+
+    let alpha_record = playable_recording(session_of(&sessions, ALPHA, &diagnostics), &diagnostics);
+    let beta_record = playable_recording(session_of(&sessions, BETA, &diagnostics), &diagnostics);
+    let alpha_file = probe_recording(alpha_record, ALPHA);
+    let beta_file = probe_recording(beta_record, BETA);
+
+    eprintln!(
+        "\n=== what each game's own settings produced ===\n\
+         command line : --resolution {COMMAND_LINE_RESOLUTION} --framerate \
+         {COMMAND_LINE_FRAMERATE}\n\
+         global layer : framerate {GLOBAL_FRAMERATE}, codec {GLOBAL_CODEC}\n\
+         {}\n{}\n",
+        alpha_file.describe(),
+        beta_file.describe(),
+    );
+
+    assert_the_settings_reached_the_file(&alpha_file, ALPHA, &diagnostics);
+    assert_the_settings_reached_the_file(&beta_file, BETA, &diagnostics);
+
+    // The third acceptance criterion's other half, off the record the recorder
+    // wrote next to the files rather than out of a unit test of the writer:
+    // each recording carries the settings it was made with, and where each one
+    // came from.
+    assert_the_settings_are_in_the_session_record(alpha_record, ALPHA, &diagnostics);
+    assert_the_settings_are_in_the_session_record(beta_record, BETA, &diagnostics);
+
+    // And that the two are not one answer written twice. Every assertion above
+    // is about one game against its own entry; these two are the criterion as
+    // it is written — one game recorded at 1440p60 *while another* recorded at
+    // 1080p60 — and they are what a build resolving every game against one
+    // layer fails.
+    assert_ne!(
+        (alpha_file.width, alpha_file.height),
+        (beta_file.width, beta_file.height),
+        "both games recorded at the same size:\n{}\n{}\n{diagnostics}",
+        alpha_file.describe(),
+        beta_file.describe(),
+    );
+    assert_ne!(
+        alpha_file.codec, beta_file.codec,
+        "both games recorded with the same codec, and `{}`'s entry asks for {} while `{}`'s \
+         asks for {}. One codec for two games is what a build that resolved every game \
+         against the global layer produces, and the global layer here says \
+         {GLOBAL_CODEC}:\n{diagnostics}",
+        ALPHA.key, ALPHA.codec, BETA.key, BETA.codec,
+    );
+}
+
+/// Launches one subject, records it, and kills it.
+///
+/// The sitting is waited out rather than left to overlap the next one: a
+/// recording ends when the window goes and the sitting stays open for its
+/// restart grace after that, and two overlapping sittings would make the two
+/// session records harder to attribute than the thing they are here to show.
+fn record_one_subject(recorder: &mut RecorderProcess, binary: &Path, subject: Subject) {
+    let pattern = LaunchedPattern::as_subject(binary, subject, SUBJECT_FPS, 300);
+    assert_the_settings_resolved_for_the_game(recorder, subject);
+    recorder.wait_for(&format!("Recording {} to", subject.name));
+    thread::sleep(RECORD_PER_SUBJECT);
+
+    terminate(pattern.process_id());
+    recorder.wait_for("recording file finished");
+    // The sitting closing, so the next launch cannot land inside this one.
+    recorder.wait_for(&format!("of {}:", subject.name));
+    drop(pattern);
+}
+
+/// The settings the recorder resolved for this game, before it records it.
+///
+/// This is the tripwire, and it is here because of what the failure looks like
+/// without it. A build where the per-game layer stopped reaching a recording
+/// resolves this game against the global layer, whose `resolution` says nothing,
+/// so the command line's is left standing; it names a size neither window is,
+/// and a command line's choice is refused rather than substituted
+/// (`docs/configuration.md`). The recording therefore fails, no file is written,
+/// and every assertion below this point is waiting for something that will never
+/// come. Left to itself the test then fails as a ninety-second timeout, which is
+/// true and says nothing.
+///
+/// So the settings are read where the recorder announces them: `clipped_session`
+/// writes every setting and the layer that supplied it at the moment a recording
+/// starts, which is the line that answers "why was this session recorded like
+/// that" months later (AGENTS.md section 35). Each one is checked separately, so
+/// a failure names the setting and the layer it came from instead.
+fn assert_the_settings_resolved_for_the_game(recorder: &mut RecorderProcess, subject: Subject) {
+    let resolved = recorder.wait_for_line("with the settings that apply to this game");
+
+    for (setting, value) in subject.configured() {
+        let expected = format!("{setting}={value} (game)");
+        assert!(
+            resolved.contains(&expected),
+            "`{key}`'s own entry asks for {setting} {value}, and the recorder resolved \
+             something else for it. The layer in brackets is where each answer came from: \
+             `global` is the per-game layer not being read, and `default` is the settings \
+             file not being read at all.\n  expected to contain: {expected}\n  resolved: \
+             {resolved}",
+            key = subject.key,
+        );
+    }
+}
+
+/// The session record of one subject.
+fn session_of<'a>(sessions: &'a [Value], subject: Subject, diagnostics: &str) -> &'a Value {
+    sessions
+        .iter()
+        .find(|session| session["game"]["game_id"].as_str() == Some(subject.key))
+        .unwrap_or_else(|| {
+            panic!(
+                "no sitting was filed under `{}`, which is the catalogue identifier this \
+                 game's settings are keyed by. A sitting filed under anything else resolves \
+                 against the global layer instead of the game's own \
+                 layer (docs/configuration.md):\n{sessions:#?}\n{diagnostics}",
+                subject.key
+            )
+        })
+}
+
+/// What `ffprobe` says about one game's recording.
+#[derive(Debug)]
+struct ProbedRecording {
+    subject: Subject,
+    media: Media,
+    path: PathBuf,
+    codec: String,
+    /// The size this game's entry asks for, which is also its window's size.
+    /// What the file says is asserted against it through the validator.
+    width: u32,
+    height: u32,
+    decoded_frames: f64,
+    seconds: f64,
+}
+
+impl ProbedRecording {
+    /// The observed frame rate: pictures a decoder produced, over the span the
+    /// file covers.
+    ///
+    /// **Not `avg_frame_rate` and not `r_frame_rate`.** Both were measured on
+    /// this project's machine on 2026-08-19 and neither reads back what the
+    /// recording was configured for: a 2560x1440 H.264 file encoded at 60 from
+    /// a source drawing 30 reports `r_frame_rate=120/1` and
+    /// `avg_frame_rate=125/2`, while an AV1 file encoded at 20 reports `20/1`
+    /// for both. Those are what the container and the bitstream declare, by a
+    /// different route per codec. What the frame rate setting actually decides
+    /// is which captured frames are encoded (`clipped_session::pacing`), and
+    /// counting the pictures is the reading of that — which is also a reading
+    /// no file whose packets fail to decode can satisfy.
+    fn observed_framerate(&self) -> f64 {
+        self.decoded_frames / self.seconds
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{name:<22}: {width}x{height} {codec}, {frames:.0} decoded pictures over \
+             {seconds:.2}s = {rate:.1} fps  ({file})",
+            name = self.subject.name,
+            width = self.width,
+            height = self.height,
+            codec = self.codec,
+            frames = self.decoded_frames,
+            seconds = self.seconds,
+            rate = self.observed_framerate(),
+            file = self.path.display(),
+        )
+    }
+}
+
+/// Reads one recording with `ffprobe`.
+fn probe_recording(recording: &Value, subject: Subject) -> ProbedRecording {
+    let path = PathBuf::from(
+        recording["output"]
+            .as_str()
+            .expect("a recording names its file"),
+    );
+    let media = Media::open(&path).unwrap_or_else(|error| {
+        panic!("{}'s recording is not usable at all: {error}", subject.name)
+    });
+
+    let (codec, decoded_frames) = {
+        let stream = *media.video_streams().first().unwrap_or_else(|| {
+            panic!(
+                "{}'s recording has no video stream:\n{}",
+                subject.name,
+                media.inventory()
+            )
+        });
+        let codec = stream
+            .field("codec_name")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}'s recording has no codec:\n{}",
+                    subject.name,
+                    media.inventory()
+                )
+            })
+            .to_owned();
+        let frames = stream
+            .field("nb_read_frames")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}'s recording has no decoded picture count:\n{}",
+                    subject.name,
+                    media.inventory()
+                )
+            });
+        (codec, frames)
+    };
+
+    let seconds = media.duration_seconds().unwrap_or_else(|| {
+        panic!(
+            "{}'s recording has no duration:\n{}",
+            subject.name,
+            media.inventory()
+        )
+    });
+
+    ProbedRecording {
+        subject,
+        media,
+        path,
+        codec,
+        width: subject.size.0,
+        height: subject.size.1,
+        decoded_frames,
+        seconds,
+    }
+}
+
+/// The effective settings, as the session record beside the files carries them.
+fn assert_the_settings_are_in_the_session_record(
+    recording: &Value,
+    subject: Subject,
+    diagnostics: &str,
+) {
+    for (setting, value) in subject.configured() {
+        let recorded = &recording["settings"][setting.to_owned()];
+        assert_eq!(
+            (&recorded["value"], &recorded["source"]),
+            (&Value::from(value.clone()), &Value::from("game")),
+            "the session record should say this recording was made at {setting} {value} \
+             because `{key}`'s own entry asked for it. A `source` of `global` or `default` \
+             here is a file recorded at one answer and filed under \
+             another.\n{recording:#}\n{diagnostics}",
+            key = subject.key,
+        );
+    }
+}
+
+/// Every per-game setting this build applies, read back off the file.
+///
+/// Each assertion names the setting and the layer a wrong answer would have come
+/// from, because "the two files differ" is a claim about two windows, and "this
+/// file is at the rate this game's entry asks for, and not at the rate of the
+/// layer beneath it" is a claim about the settings.
+fn assert_the_settings_reached_the_file(
+    probed: &ProbedRecording,
+    subject: Subject,
+    diagnostics: &str,
+) {
+    // The frame rate, which is the load-bearing one: nothing but this game's
+    // own entry says 60.
+    let observed = probed.observed_framerate();
+    assert!(
+        (observed - f64::from(PER_GAME_FRAMERATE)).abs() <= FRAMERATE_TOLERANCE,
+        "`{key}`'s entry asks for framerate {PER_GAME_FRAMERATE} and its recording holds \
+         {observed:.1} pictures a second. The global layer of the same settings file asks \
+         for {GLOBAL_FRAMERATE} and the recorder's command line asks for \
+         {COMMAND_LINE_FRAMERATE}, so a reading near either of those is the per-game \
+         `framerate` not reaching the recording.\n{described}\n{diagnostics}",
+        key = subject.key,
+        described = probed.describe(),
+    );
+
+    // The codec, which is the setting the two games differ on.
+    assert_eq!(
+        probed.codec,
+        subject.codec,
+        "`{key}`'s entry asks for codec {wanted} and its recording holds {found}. The global \
+         layer asks for {GLOBAL_CODEC}, so that is what the per-game `codec` not reaching \
+         the recording reads as.\n{described}\n{diagnostics}",
+        key = subject.key,
+        wanted = subject.codec,
+        found = probed.codec,
+        described = probed.describe(),
+    );
+
+    // And the size, off `ffprobe`'s own fields rather than the recorder's
+    // account of them. This build cannot scale, so a per-game `resolution` can
+    // only ever name the size capture is producing; what makes it causal here is
+    // the command line, which names a size neither window is and which is
+    // refused rather than substituted — so a recording that did not receive this
+    // game's own `resolution` is a recording that does not exist (module docs).
+    if let Err(report) = probed
+        .media
+        .validate()
+        .video_stream_count(1)
+        .video(
+            VideoStream::codec(&probed.codec)
+                .resolution(probed.width, probed.height)
+                // Decoded, not demuxed: a file whose packets all fail to decode
+                // still reports a stream, a duration and monotonic timestamps.
+                .decoded_frames_at_least(1),
+        )
+        .monotonic_timestamps()
+        .check()
+    {
+        panic!(
+            "`{key}`'s entry asks for resolution {width}x{height}, which is the size its \
+             window opens at and the only size this build can encode it \
+             at.\n{report}\n{diagnostics}",
+            key = subject.key,
+            width = probed.width,
+            height = probed.height,
+        );
+    }
+}
+
 /// A temporary directory holding a run's clips, its session records and the
 /// user data the recorder is pointed at.
 #[derive(Debug)]
@@ -591,6 +1170,45 @@ impl Workspace {
         workspace
     }
 
+    /// The same, with a `settings.json` beside the overlay.
+    ///
+    /// The same directory, because that is where the recorder looks for both
+    /// (`ConfigurationStore::default_path`), and the reason the child process
+    /// gets a `LOCALAPPDATA` of its own is the reason this can be written at
+    /// all: nothing here touches the settings of whoever is running the tests.
+    fn with_settings(label: &str, overlay: &str, settings: &str) -> Self {
+        let workspace = Self::with_overlay(label, overlay);
+        fs::write(
+            workspace
+                .local_app_data()
+                .join("Clipped")
+                .join("settings.json"),
+            settings,
+        )
+        .expect("the settings file can be written");
+        workspace
+    }
+
+    /// A copy of the pattern application under a name of the caller's choosing.
+    ///
+    /// Two games need two executables, because the watcher recognises a game by
+    /// the name of its image and one binary can only ever be one game. A copy
+    /// rather than a second test application: what is being recorded is not the
+    /// point of this test, and a second renderer would be a second thing to keep
+    /// working (AGENTS.md section 55).
+    fn subject_binary(&self, subject: Subject) -> PathBuf {
+        let directory = self.path().join("games");
+        fs::create_dir_all(&directory).expect("the subjects' directory can be created");
+        let copy = directory.join(subject.executable);
+        fs::copy(pattern_binary(), &copy).unwrap_or_else(|error| {
+            panic!(
+                "the pattern application could not be copied to {}: {error}",
+                copy.display()
+            )
+        });
+        copy
+    }
+
     fn clips(&self) -> PathBuf {
         self.path().join("clips")
     }
@@ -608,6 +1226,15 @@ impl Workspace {
 
     /// Starts `clipped-recorder watch` against this workspace.
     fn start_recorder(&self) -> RecorderProcess {
+        self.start_recorder_asking_for(&[])
+    }
+
+    /// The same, with more of `watch`'s own command line.
+    ///
+    /// What a command line asks for is one of the three layers a recording is
+    /// resolved from, so a test about the other two has to be able to set it to
+    /// something it can recognise (`docs/configuration.md`).
+    fn start_recorder_asking_for(&self, extra: &[&str]) -> RecorderProcess {
         let mut child = Command::new(recorder_binary())
             .args([
                 "watch",
@@ -624,6 +1251,7 @@ impl Workspace {
                 "--system-audio",
                 "none",
             ])
+            .args(extra)
             // The overlay and the logs both hang off this, so the run touches
             // nothing of the machine's own (see the module documentation).
             .env("LOCALAPPDATA", self.local_app_data())
@@ -641,6 +1269,34 @@ impl Workspace {
             lines,
             collected: String::new(),
         }
+    }
+
+    /// Every session record the run produced, oldest first.
+    fn sessions(&self) -> Vec<Value> {
+        let mut sidecars: Vec<PathBuf> = fs::read_dir(self.clips())
+            .expect("the clips directory can be listed")
+            .map(|entry| entry.expect("the clips directory can be read").path())
+            .filter(|path| {
+                path.to_string_lossy()
+                    .to_lowercase()
+                    .ends_with(".session.json")
+            })
+            .collect();
+        // Named after the moment the sitting started, so this is chronological.
+        sidecars.sort();
+
+        sidecars
+            .iter()
+            .map(|path| {
+                let text = fs::read_to_string(path).expect("the session record can be read");
+                serde_json::from_str(&text).unwrap_or_else(|error| {
+                    panic!(
+                        "the session record is not JSON: {error}
+{text}"
+                    )
+                })
+            })
+            .collect()
     }
 
     /// The one session record the run produced, as JSON.
@@ -708,6 +1364,18 @@ struct RecorderProcess {
 impl RecorderProcess {
     /// Waits for a line containing `needle`, keeping everything read on the way.
     fn wait_for(&mut self, needle: &str) {
+        self.wait_for_line(needle);
+    }
+
+    /// The same, handing back the line that matched.
+    ///
+    /// For the one caller that has to read a line rather than merely reach it:
+    /// the recorder writes the settings it resolved for a game at the moment it
+    /// starts recording it, and that line is the earliest place a per-game
+    /// setting that did not arrive can be named. Without it the first thing to
+    /// go wrong is a wait that times out, and a timeout says nothing about
+    /// which setting was missing.
+    fn wait_for_line(&mut self, needle: &str) -> String {
         let deadline = Instant::now() + PATIENCE;
         loop {
             match self
@@ -719,7 +1387,7 @@ impl RecorderProcess {
                     self.collected.push_str(&line);
                     self.collected.push('\n');
                     if found {
-                        return;
+                        return line;
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => panic!(
@@ -800,6 +1468,33 @@ impl LaunchedPattern {
         let mut child = spawn(command, &binary);
         let process_id = child.id();
         let (window, client) = read_ready_line(&mut child);
+        Self {
+            child,
+            process_id,
+            window,
+            client,
+        }
+    }
+
+    /// Started from a copy of the pattern application, at a size of its own.
+    ///
+    /// The two subjects of the per-game settings test: the same renderer under
+    /// two image names, so that the catalogue has two games to tell apart and
+    /// each opens a window the size its own settings entry names.
+    fn as_subject(binary: &Path, subject: Subject, fps: u32, seconds: u64) -> Self {
+        let mut command = Command::new(binary);
+        command.args(pattern_arguments(fps, seconds)).args([
+            "--size".to_owned(),
+            format!("{}x{}", subject.size.0, subject.size.1),
+        ]);
+        let mut child = spawn(command, binary);
+        let process_id = child.id();
+        let (window, client) = read_ready_line(&mut child);
+        assert_eq!(
+            client, subject.size,
+            "{} did not open the window its settings entry is written for, so nothing below              would be about that entry",
+            subject.name
+        );
         Self {
             child,
             process_id,

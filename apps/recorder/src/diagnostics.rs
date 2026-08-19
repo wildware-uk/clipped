@@ -52,8 +52,8 @@ use clipped_encoder::{
     EncoderKind, EncoderReport, Resolution, Vendor,
 };
 use clipped_ipc::{
-    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics, EncoderAccount,
-    EncoderSummary, ErrorCode, ProtocolError,
+    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
+    EffectiveSetting, EncoderAccount, EncoderSummary, ErrorCode, ProtocolError,
 };
 
 /// The resolution the framerate ceiling is quoted at.
@@ -74,6 +74,7 @@ const FRAMERATE_REFERENCE: Resolution = Resolution::HD_1080P;
 /// draw as the first (AGENTS.md section 27).
 pub(crate) fn diagnostics(
     capture: Option<&clipped_session::CaptureAccount>,
+    settings: Option<&[clipped_session::config::EffectiveSetting]>,
 ) -> Result<Diagnostics, ProtocolError> {
     let detection = crate::capabilities::detection().map_err(|error| {
         ProtocolError::new(
@@ -85,7 +86,26 @@ pub(crate) fn diagnostics(
     Ok(Diagnostics {
         capture: capture.map(capture_account),
         encoders: encoder_account(&detection),
+        settings: settings.map(effective_settings),
     })
+}
+
+/// What the recording in progress is running with.
+///
+/// A rename and nothing else: the value and the layer are `clipped_session`'s
+/// own answer, spelled in the vocabulary the settings file uses, and this crate
+/// does not get to have an opinion about either.
+fn effective_settings(
+    settings: &[clipped_session::config::EffectiveSetting],
+) -> Vec<EffectiveSetting> {
+    settings
+        .iter()
+        .map(|setting| EffectiveSetting {
+            setting: setting.key().name().to_owned(),
+            value: setting.value().to_owned(),
+            source: setting.source().token().to_owned(),
+        })
+        .collect()
 }
 
 /// How the recording in progress is capturing.

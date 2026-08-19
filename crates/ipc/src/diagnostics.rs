@@ -84,6 +84,57 @@ pub struct Diagnostics {
     /// software one and still has adapters, and "no encoder was found" is a
     /// report somebody with a problem needs rather than an empty answer.
     pub encoders: EncoderAccount,
+    /// What the recording in progress is running with, setting by setting.
+    ///
+    /// Absent when nothing is being recorded, for the reason
+    /// [`capture`](Self::capture) is: these are the answers *one recording* was
+    /// started with, not a reading of the settings file. Reporting the file
+    /// between recordings would be a window saying what a recording is doing
+    /// from a reading of what the next one would do — and the two differ every
+    /// time somebody saves a setting while a game is running, which is exactly
+    /// when a recording is running (`docs/configuration.md`, "Resolved once,
+    /// when the recording starts").
+    ///
+    /// [Issue #61](https://github.com/wildware-uk/clipped/issues/61)'s third
+    /// acceptance criterion; the other half of it is the session record beside
+    /// the files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<EffectiveSetting>>,
+}
+
+/// One setting the recording in progress is running with.
+///
+/// Not "one setting in the settings file". A recording is built from what its
+/// caller asked for — a `clipped-recorder watch` command line, or a
+/// `start_recording` — with the settings configured for that game laid over it,
+/// so a setting nobody configured keeps the caller's answer and reporting the
+/// file's would name a value the encoder is not using
+/// (`clipped_session::config::effective`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveSetting {
+    /// The key, as `settings.json` spells it: `resolution`, `framerate`,
+    /// `codec`, `encoder`, `microphone`, `system_audio`.
+    ///
+    /// The same names `get_settings` uses, so a window can line a diagnostics
+    /// reading up against the settings screen's own rows without a table of its
+    /// own.
+    ///
+    /// Two of the settings a game may override are **not** here, and their
+    /// absence is the honest answer rather than a gap: `capture_target`, which
+    /// nothing in this build reads, and `replay_window_seconds`, which sizes a
+    /// buffer rather than being a property of the recording.
+    pub setting: String,
+    /// The value, spelled the way the settings file and the command line spell
+    /// it — `2560x1440`, `60`, `h264`, `nvenc`, `none`, `name:Shure MV7`.
+    pub value: String,
+    /// Where this recording's answer came from.
+    ///
+    /// `default`, `global` or `game` for the three layers of the settings file,
+    /// and `request` for a setting the recording asked for itself and no layer
+    /// above the shipped default overrode. A window drawing "inherited" from a
+    /// value alone would say a recording was following the global settings when
+    /// it was following a command line.
+    pub source: String,
 }
 
 /// How the recording in progress is capturing.
@@ -319,7 +370,7 @@ pub struct CodecSummary {
 mod tests {
     use super::{
         AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
-        EncoderAccount, EncoderSummary,
+        EffectiveSetting, EncoderAccount, EncoderSummary,
     };
 
     fn encoders() -> EncoderAccount {
@@ -360,6 +411,7 @@ mod tests {
         let diagnostics = Diagnostics {
             capture: None,
             encoders: encoders(),
+            settings: None,
         };
 
         let json = serde_json::to_value(&diagnostics).expect("it serialises");
@@ -374,6 +426,47 @@ mod tests {
             json.get("encoders").is_some(),
             "the encoders are never absent"
         );
+        assert_eq!(
+            json.get("settings"),
+            None,
+            "the settings a recording is running with belong to a recording, and an empty list              here would be read as a recording running with no settings at all"
+        );
+    }
+
+    #[test]
+    fn a_recordings_settings_carry_the_layer_that_supplied_each_one() {
+        // The field the whole reading turns on. A value alone cannot tell a
+        // recording following the global settings from one following the
+        // command line it was started with, and those are different bugs.
+        let diagnostics = Diagnostics {
+            capture: None,
+            encoders: encoders(),
+            settings: Some(vec![
+                EffectiveSetting {
+                    setting: "framerate".to_owned(),
+                    value: "60".to_owned(),
+                    source: "game".to_owned(),
+                },
+                EffectiveSetting {
+                    setting: "codec".to_owned(),
+                    value: "h264".to_owned(),
+                    source: "request".to_owned(),
+                },
+            ]),
+        };
+
+        let json = serde_json::to_value(&diagnostics).expect("it serialises");
+
+        assert_eq!(
+            json["settings"],
+            serde_json::json!([
+                {"setting": "framerate", "value": "60", "source": "game"},
+                {"setting": "codec", "value": "h264", "source": "request"},
+            ])
+        );
+
+        let read: Diagnostics = serde_json::from_value(json).expect("it reads back");
+        assert_eq!(read, diagnostics);
     }
 
     #[test]

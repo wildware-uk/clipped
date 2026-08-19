@@ -101,6 +101,7 @@
 
 mod capture_memory;
 mod document;
+mod effective;
 mod error;
 mod game;
 mod hotkeys;
@@ -119,6 +120,7 @@ use clipped_capture::{CaptureMethod, CaptureMethodSetting};
 
 pub use capture_memory::{CaptureMemory, MEMORY_LIFETIME};
 pub use document::{Loaded, FILE_NAME, SCHEMA_VERSION};
+pub use effective::{effective_settings, EffectiveSetting, EffectiveSource};
 pub use error::{ConfigurationError, Section, SettingError};
 pub use game::{GameKey, InvalidGameKey};
 pub use hotkeys::{HotkeyOverride, HotkeyOverrides, ResolvedHotkeys};
