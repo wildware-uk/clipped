@@ -367,6 +367,18 @@ Every `record` option — `--window`, `--process`, `--pid`, `--output`,
 `--system-audio` — means exactly what it means there, because they are the same
 arguments validated by the same code.
 
+`replay_window_seconds` can be set to `0`, which means keep no replay buffer
+([configuration.md](configuration.md)). There is then no configured window for
+`--duration` to default to, and both of the things this subcommand adds would be
+missing — so it refuses rather than recording with a hotkey that could only ever
+answer "there is no buffer":
+
+```text
+error: replay_window_seconds is 0, so no replay buffer would be kept and the
+hotkey would have nothing to save: pass --duration to keep one for this run, or
+use `record` for a recording without one
+```
+
 ### `--no-recording`, which is the Manual/Replay capture mode
 
 By default `replay` writes the ordinary recording as well as the clips, and costs

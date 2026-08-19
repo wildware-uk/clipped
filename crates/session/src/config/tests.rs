@@ -398,6 +398,190 @@ fn a_device_name_the_file_could_not_hold_is_refused_by_the_setter() {
 }
 
 #[test]
+fn a_replay_buffer_can_be_declined_and_the_file_gives_that_answer_back() {
+    // Issue #539's whole point. `replay_window_seconds` accepted 30 to 1800 and
+    // nothing else, so the nearest thing to "no buffer" was a thirty-second one
+    // that still spills at the recording's own bitrate — and every recording
+    // the desktop window starts asks for a buffer. This is the value that says
+    // no, and it goes through the file because a settings screen is not the
+    // only way somebody sets one.
+    let mut preferences = Preferences::none();
+    preferences
+        .set_replay_window(Some(REPLAY_WINDOW_OFF))
+        .expect("declining the replay buffer is a thing a user may do");
+
+    let mut configuration = Configuration::defaults();
+    configuration.set_global(preferences);
+    assert_eq!(round_trip("replay-off", &configuration), configuration);
+
+    // And it is a *number* in the file, not a word: the key holds seconds, so
+    // the off value is spelled the way the rest of its range is. Writing
+    // "none" here would give one key two types.
+    let directory = TestDirectory::new("replay-off-text");
+    ConfigurationStore::at(directory.file())
+        .store(configuration.clone())
+        .expect("the settings file can be written");
+    let written = fs::read_to_string(directory.file()).expect("the settings file can be read");
+    assert!(
+        written.contains(r#""replay_window_seconds": 0"#),
+        "the off value is the number zero in the file: {written}"
+    );
+
+    // Zero is an answer and *absent* is the inherit. They resolve differently
+    // and report different sources, which is what stops "off" being mistaken
+    // for "unset" (AGENTS.md section 30).
+    let resolved = configuration.resolve_global();
+    assert_eq!(*resolved.replay_window().value(), REPLAY_WINDOW_OFF);
+    assert_eq!(
+        resolved.source_of(SettingKey::ReplayWindow),
+        SettingSource::Global
+    );
+    assert_eq!(
+        resolved.replay_buffer_window(),
+        None,
+        "a recording made with these settings keeps no buffer at all"
+    );
+
+    let untouched = Configuration::defaults().resolve_global();
+    assert_eq!(
+        untouched.source_of(SettingKey::ReplayWindow),
+        SettingSource::Default,
+        "a file that says nothing about the window is not a file that turned it off"
+    );
+    assert_eq!(
+        untouched.replay_buffer_window(),
+        Some(DEFAULT_REPLAY_WINDOW),
+        "and it still keeps the five minutes Clipped ships with"
+    );
+}
+
+#[test]
+fn a_settings_file_from_a_build_that_had_no_off_value_still_reads() {
+    // AGENTS.md section 56. Widening a range must not make an existing file
+    // unreadable, and the two shapes a build without the off value could have
+    // left behind are a window inside the old range and no key at all.
+    let directory = TestDirectory::new("replay-older-build");
+    fs::write(
+        directory.file(),
+        r#"{
+  "version": 1,
+  "global": { "replay_window_seconds": 300, "framerate": 144 },
+  "games": { "counter-strike-2": { "resolution": "1920x1080" } }
+}"#,
+    )
+    .expect("a settings file this test wrote");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store
+        .load()
+        .expect("a file written before the off value existed is still one this build reads");
+    let resolved = store.current().resolve_for(&game("counter-strike-2"));
+    assert_eq!(
+        resolved.replay_buffer_window(),
+        Some(Duration::from_secs(300)),
+        "the window an older build wrote is still the window this one keeps"
+    );
+    assert_eq!(*resolved.framerate().value(), 144);
+    assert_eq!(
+        store
+            .current()
+            .resolve_for(&game("minecraft"))
+            .replay_buffer_window(),
+        Some(Duration::from_secs(300)),
+        "and a game the file never mentions still inherits it"
+    );
+}
+
+#[test]
+fn declining_the_replay_buffer_inherits_per_game_in_both_directions() {
+    // AGENTS.md section 30's worked example, for the setting that has just
+    // gained an off value: a game may keep a buffer on a machine that globally
+    // declines one, and may decline one on a machine that globally keeps one.
+    // Neither is special-cased — both fall out of the same fold every other
+    // setting uses, which is the point of not inventing machinery for this key.
+    let mut off = Preferences::none();
+    off.set_replay_window(Some(REPLAY_WINDOW_OFF))
+        .expect("the off value");
+    let mut two_minutes = Preferences::none();
+    two_minutes
+        .set_replay_window(Some(Duration::from_secs(120)))
+        .expect("two minutes is in range");
+
+    let mut globally_off = Configuration::defaults();
+    globally_off.set_global(off.clone());
+    globally_off.set_game(game("counter-strike-2"), two_minutes.clone());
+    assert_eq!(
+        globally_off
+            .resolve_for(&game("counter-strike-2"))
+            .replay_buffer_window(),
+        Some(Duration::from_secs(120)),
+        "a game that asked for a buffer gets one however the global layer reads"
+    );
+    assert_eq!(
+        globally_off
+            .resolve_for(&game("minecraft"))
+            .replay_buffer_window(),
+        None,
+        "and a game with no section of its own inherits the refusal"
+    );
+
+    let mut globally_on = Configuration::defaults();
+    globally_on.set_global(two_minutes);
+    globally_on.set_game(game("counter-strike-2"), off);
+    assert_eq!(
+        globally_on
+            .resolve_for(&game("counter-strike-2"))
+            .replay_buffer_window(),
+        None,
+        "and one game may decline the buffer without the others losing theirs"
+    );
+    assert_eq!(
+        globally_on
+            .resolve_for(&game("minecraft"))
+            .replay_buffer_window(),
+        Some(Duration::from_secs(120)),
+    );
+}
+
+#[test]
+fn the_off_value_travels_as_text_the_settings_screen_can_send_and_read_back() {
+    // The settings screen sets values as the text the file spells them with
+    // (`Preferences::set_written`), so an off value the file understands and
+    // the screen cannot send would be a control that exists in one place only.
+    let mut preferences = Preferences::none();
+    preferences
+        .set_written(SettingKey::ReplayWindow, Some("0"))
+        .expect("the screen can send the off value");
+    assert_eq!(preferences.replay_window(), Some(REPLAY_WINDOW_OFF));
+
+    let mut configuration = Configuration::defaults();
+    configuration.set_global(preferences);
+    assert_eq!(
+        configuration
+            .resolve_global()
+            .written_value(SettingKey::ReplayWindow),
+        "0",
+        "and reads it back as the same text, so the field shows what was set"
+    );
+
+    // What somebody who typed a number in between is told: the refusal names
+    // the off value as well as the range, because "as little as possible" is
+    // usually what they were reaching for.
+    let error = Preferences::none()
+        .set_replay_window(Some(Duration::from_secs(5)))
+        .expect_err("five seconds is neither off nor a window a buffer will take");
+    let message = error.to_string();
+    assert!(
+        message.contains("0 to keep no replay buffer"),
+        "the refusal has to offer the way out: {message}"
+    );
+    assert!(
+        message.contains("30") && message.contains("1800"),
+        "and still name the range a buffer accepts: {message}"
+    );
+}
+
+#[test]
 fn a_replay_window_the_file_could_not_hold_exactly_is_refused() {
     // `replay_window_seconds` is whole seconds. Accepting half of one would
     // mean a setting that came back from the file as something other than what

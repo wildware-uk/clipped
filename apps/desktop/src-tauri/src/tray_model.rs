@@ -342,14 +342,23 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
 /// it now saves a clip — `tray::save_replay` — which it did not until
 /// [issue #427](https://github.com/wildware-uk/clipped/issues/427).
 ///
-/// A recording started **from this window** keeps a buffer since #427:
+/// A recording started **from this window** asks for a buffer since #427:
 /// `crate::recording_request` asks for one without naming a length, and the
 /// recorder answers with `replay_window_seconds` resolved for the game it is
 /// recording — a duration somebody chose, which this process could not have
-/// read for itself. So against a recording either control here started, this
-/// item is live. The middle refusal is now a fact about a recording somebody
-/// else started — `clipped-recorder record`, or a client of its own — rather
-/// than a stale claim about the build, which is the whole difference.
+/// read for itself.
+///
+/// It does not follow that the item is always live against such a recording,
+/// and the difference is the reason this reads the status rather than
+/// remembering what it asked for. `replay_window_seconds` may be `0`, which
+/// means keep no buffer
+/// ([issue #539](https://github.com/wildware-uk/clipped/issues/539)) — a user
+/// who has declined the buffer's continuous write gets a recording that keeps
+/// none, `replay_seconds` absent from its status, and this item refused in
+/// words. So the middle refusal covers two honest cases: a recording somebody
+/// else started without a buffer — `clipped-recorder record`, or a client of
+/// its own — and one that was offered a buffer and declined it. What it is no
+/// longer is a stale claim about the build, which is the whole difference.
 ///
 /// The capability is asked first, and is a different question again: a recorder
 /// that never advertised `replay` has no `save_replay` command, so no recording

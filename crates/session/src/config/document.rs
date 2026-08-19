@@ -68,7 +68,7 @@ use crate::config::game::GameKey;
 use crate::config::hotkeys::{HotkeyOverride, HotkeyOverrides};
 use crate::config::preferences::{
     AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, MAXIMUM_FRAMERATE,
-    MINIMUM_FRAMERATE,
+    MINIMUM_FRAMERATE, REPLAY_WINDOW_OFF,
 };
 use crate::config::value::SettingKey;
 use crate::config::Configuration;
@@ -524,8 +524,13 @@ pub(crate) fn accepted_for(key: SettingKey) -> String {
         SettingKey::Codec => CODECS.to_owned(),
         SettingKey::Encoder => ENCODERS.to_owned(),
         SettingKey::Microphone | SettingKey::SystemAudio => DEVICES.to_owned(),
+        // The off value is named first because it is the answer somebody who
+        // typed a too-small number is most likely to have been reaching for:
+        // "5" is usually "as little as possible", and until issue #539 the
+        // nearest thing this setting could offer was a buffer.
         SettingKey::ReplayWindow => format!(
-            "{}-{} seconds",
+            "{} to keep no replay buffer, or {}-{} seconds",
+            REPLAY_WINDOW_OFF.as_secs(),
             clipped_replay::MINIMUM_WINDOW.as_secs(),
             clipped_replay::MAXIMUM_WINDOW.as_secs()
         ),

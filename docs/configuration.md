@@ -156,7 +156,7 @@ does nothing (AGENTS.md section 27).
 | `encoder`               | text   | `auto`        | `auto`, `nvenc`, `amf`, `quicksync`, `software`                    |
 | `microphone`            | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
 | `system_audio`          | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
-| `replay_window_seconds` | number | `300`         | 30–1800, whole seconds                                             |
+| `replay_window_seconds` | number | `300`         | `0` to keep no buffer, or 30–1800, whole seconds                   |
 
 Where the library lives and what it may occupy are **not** in that table, and
 not per game: they live in a `storage` section of their own, because a library
@@ -286,6 +286,60 @@ global settings, framerate is 0; it accepts 1-480 frames per second
 
 The replay window is checked against `clipped_replay`'s own bounds, so the
 refusal reaches the user when they set it rather than when a game launches.
+
+### Declining the replay buffer, and what it saves
+
+`replay_window_seconds` is the one setting with a value outside its own range:
+**`0` means keep no replay buffer at all**, and it is there because every
+recording the desktop window starts asks for one
+([#539](https://github.com/wildware-uk/clipped/issues/539)). Until it existed the
+nearest thing to "no" was a thirty-second buffer, which still spills.
+
+What a buffer costs is disk rather than memory, and the figures are measured
+([replay-buffer.md](replay-buffer.md)): about **0.94 MB of memory** whatever the
+window is, and **208 MB on disk** for the half-hour maximum at 1080p60 — written
+continuously into `%LOCALAPPDATA%\Clipped\replay\` at the recording's own
+bitrate, for as long as the recording runs. That is a rolling figure rather than
+a growing one, but the writes do not stop, and somebody on a small SSD or one
+they are careful with may reasonably not want them. Anybody who never presses
+Save Replay is paying for a feature they do not use.
+
+`0` rather than `"none"`, which is what `microphone` and `system_audio` use for
+the same idea: those are text keys whose whole value space is text, and a device
+may genuinely be called "none". This key holds a number, and a value that made
+its *type* depend on which answer it was would be worse to hand-edit, not
+better — `0` is the reading of the number rather than a word to learn. It cannot
+be confused with "unset" either, because unset is the key not being there: a
+layer that says nothing writes no `replay_window_seconds` at all, which is how
+inheritance tells "off" from "inherit" for this key exactly as it does for every
+other one.
+
+A number in between gets a refusal that offers both:
+
+```text
+C:\Users\alice\AppData\Local\Clipped\settings.json cannot be used: in the
+global settings, replay_window_seconds is 5 seconds; it accepts 0 to keep no
+replay buffer, or 30-1800 seconds
+```
+
+**What a recording with `0` actually keeps: nothing.** No `ReplayRecording` is
+built, so no buffer is sized, no spill directory is made and no packet is copied
+anywhere. `active_recording.replay_seconds` is `null` over the protocol, which is
+a different answer from `Some(n)` with nothing in it yet, and the tray's Save
+Replay is a refused item reading "this recording is not keeping a replay buffer"
+rather than a live one that would do nothing (AGENTS.md section 27). It inherits
+per game like everything else: a game may keep a buffer on a machine that
+globally declines them, and may decline one on a machine that keeps them.
+
+`clipped-recorder replay` is the one caller that refuses instead. Its whole
+subject is a rolling window and a hotkey that saves from it, so it says so and
+names the two ways on:
+
+```text
+replay_window_seconds is 0, so no replay buffer would be kept and the hotkey
+would have nothing to save: pass --duration to keep one for this run, or use
+`record` for a recording without one
+```
 
 ## Notifications
 
@@ -750,7 +804,10 @@ survives it"](#failure-and-what-survives-it)).
   sent `replay` without a length — which is every recording the desktop starts,
   because that window cannot read a setting and the answer inherits per game
   anyway ([`docs/ipc.md`](ipc.md), issue
-  [#427](https://github.com/wildware-uk/clipped/issues/427)).
+  [#427](https://github.com/wildware-uk/clipped/issues/427)). Both read it
+  through `ResolvedSettings::replay_buffer_window`, which is `None` for `0` —
+  the one place the off value becomes the absence the rest of the workspace
+  spells `Option`, so that no caller decides for itself what off means.
 
 ### The two ways a caller applies them, and which one to use
 

@@ -68,7 +68,42 @@ pub const MAXIMUM_DEVICE_NAME: usize = 256;
 /// arithmetic rather than a guess —
 /// [`clipped_replay::ReplayConfig::expected_bytes`] is the figure, and it is
 /// about 700 MB at the 18.66 Mbit/s a 1440p60 recording uses.
+///
+/// That figure is what the window would occupy if it were all held at once;
+/// a buffer spills, so what it really costs a machine is a continuous write of
+/// about the same size (`docs/replay-buffer.md`). Whoever does not want to pay
+/// it sets [`REPLAY_WINDOW_OFF`].
 pub const DEFAULT_REPLAY_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// The window that means *keep no replay buffer at all*.
+///
+/// Zero, and zero is the reading of the number rather than a sentinel to be
+/// learned: `replay_window_seconds` is how many seconds of history a recording
+/// keeps, and none is a number of seconds. It is spelled as a number because
+/// the key holds a number — admitting `"none"` here, as `microphone` and
+/// `system_audio` do, would make one key's *type* depend on its value, and
+/// those two are text keys whose entire value space is text (a device may
+/// genuinely be called "none", which is why they need a word for it and this
+/// does not).
+///
+/// **It is not "unset".** A layer that says nothing about the replay window is
+/// a layer with no `replay_window_seconds` key at all — [`Preferences`] holds
+/// an `Option<Duration>` and the writer omits what is [`None`] — so there is no
+/// in-band spelling of "unset" for zero to be confused with. Setting zero and
+/// clearing the setting stay as different here as they are for every other key:
+/// the first is an answer and the second is an inherit.
+///
+/// What declining is worth is the other side of the same arithmetic. A buffer
+/// spills to disk (`docs/replay-buffer.md`), so it writes continuously at the
+/// recording's own bitrate for as long as the recording runs — 208 MB for a
+/// thirty-minute window — and a recording that keeps none writes none of it.
+///
+/// It is deliberately *outside* [`MINIMUM_WINDOW`] rather than below it: no
+/// buffer is not a very short buffer. A recording that declines one holds no
+/// `ReplayRecording` at all, which is the absence every caller already spells
+/// `Option` (`crate::replay`), and is what lets a window tell "this recording
+/// keeps no buffer" from "this buffer has nothing in it yet".
+pub const REPLAY_WINDOW_OFF: Duration = Duration::ZERO;
 
 /// Whether the game's own window is captured, or the display it is on.
 ///
@@ -361,6 +396,13 @@ impl Preferences {
 
     /// Sets, or with `None` clears, the replay window.
     ///
+    /// [`REPLAY_WINDOW_OFF`] is accepted alongside the buffer's own range, and
+    /// is the whole of how somebody declines a replay buffer. Without it the
+    /// nearest thing to "no" is [`MINIMUM_WINDOW`], which is a buffer that
+    /// still spills — so every recording the desktop window starts would keep
+    /// one and nobody could say otherwise
+    /// ([issue #539](https://github.com/wildware-uk/clipped/issues/539)).
+    ///
     /// # Errors
     ///
     /// [`SettingError::OutOfRange`] outside
@@ -375,15 +417,15 @@ impl Preferences {
     /// from the file as something other than what was set.
     pub fn set_replay_window(&mut self, value: Option<Duration>) -> Result<(), SettingError> {
         if let Some(window) = value {
-            if !(MINIMUM_WINDOW..=MAXIMUM_WINDOW).contains(&window) {
+            if window != REPLAY_WINDOW_OFF && !(MINIMUM_WINDOW..=MAXIMUM_WINDOW).contains(&window) {
                 return Err(SettingError::OutOfRange {
                     key: SettingKey::ReplayWindow,
                     value: format!("{} seconds", window.as_secs()),
-                    accepted: format!(
-                        "{}-{} seconds",
-                        MINIMUM_WINDOW.as_secs(),
-                        MAXIMUM_WINDOW.as_secs()
-                    ),
+                    // The same sentence the settings screen puts beside the
+                    // field, rather than a second copy of the range that would
+                    // stop naming the off value the moment one was added
+                    // (AGENTS.md section 55).
+                    accepted: crate::config::document::accepted_for(SettingKey::ReplayWindow),
                 });
             }
             if window.subsec_nanos() != 0 {
@@ -624,6 +666,23 @@ impl ResolvedSettings {
     #[must_use]
     pub const fn replay_window(&self) -> &Resolved<Duration> {
         &self.replay_window
+    }
+
+    /// The buffer these settings ask for, or [`None`] when they ask for none.
+    ///
+    /// The one place [`REPLAY_WINDOW_OFF`] becomes the absence the rest of the
+    /// workspace already spells `Option`, so that "has the user declined the
+    /// buffer" is not a comparison each caller writes for itself and gets
+    /// subtly different (AGENTS.md section 55). `clipped-recorder serve` asks
+    /// it for every `start_recording` that sent `replay` without a length, and
+    /// `clipped-recorder replay` asks it before it opens anything.
+    ///
+    /// [`Self::replay_window`] is still the accessor for the *setting* — what a
+    /// settings screen shows, and what [`Self::source_of`] reports a layer for.
+    /// This is the accessor for what to build.
+    #[must_use]
+    pub fn replay_buffer_window(&self) -> Option<Duration> {
+        Some(self.replay_window.get()).filter(|window| *window != REPLAY_WINDOW_OFF)
     }
 
     /// Where `key`'s answer came from, without naming its type.

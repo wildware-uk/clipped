@@ -928,6 +928,17 @@ asks its catalogue once the window is resolved. The desktop window sends
 `replay` for exactly that reason — it may link `clipped-ipc` and nothing else
 of the workspace, so a length it named would be one nobody chose.
 
+`"replay": true` may still produce **no buffer**, and a client has to be ready
+for that: `replay_window_seconds` has an off value, `0`, and a user who has set
+it for this game has declined the buffer
+([`docs/configuration.md`](configuration.md),
+[#539](https://github.com/wildware-uk/clipped/issues/539)). The recording starts
+normally and `active_recording.replay_seconds` is absent, which is the same
+answer as for a recording that asked for nothing — because it is the same thing.
+`replay_seconds` on the request is unchanged and still takes 30 to 1800: a caller
+naming a length has already answered the question, and `"replay": false` is how
+that caller says no.
+
 A `recording_id` is unique for the life of the recorder process. It exists so
 that a stop meant for a recording that has already ended by itself cannot stop
 its successor — a real race when a window closes at the moment the user presses
