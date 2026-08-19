@@ -36,11 +36,13 @@
 //! begins — and nothing here ever acts on a recording without being told to,
 //! by name.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use clipped_export::MediaFacts;
 use serde_json::{Map, Value};
 
 use super::clock;
@@ -177,6 +179,145 @@ pub fn interrupted_recordings(directory: &Path) -> io::Result<Vec<InterruptedRec
     }
 
     Ok(found)
+}
+
+/// A media file in the recording directory that no session record names.
+///
+/// Different from an [`InterruptedRecording`] in the way that matters: that one
+/// has a session record which never says it finished, and this one has no
+/// session record at all. `recover` used to report nothing about these, so a
+/// recording whose sidecar was deleted or never written was invisible to the
+/// whole application ([issue #272](https://github.com/wildware-uk/clipped/issues/272)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrphanedRecording {
+    path: PathBuf,
+    bytes: u64,
+    facts: Option<MediaFacts>,
+}
+
+impl OrphanedRecording {
+    /// The file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// How large it is.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// What the file itself says, or [`None`] when it could not be opened.
+    ///
+    /// [`None`] is reported rather than hidden. A file in the recording folder
+    /// that no session record names *and* that cannot be opened is worth a
+    /// person seeing: it is either not media at all, or a recording damaged
+    /// badly enough that nothing can read it, and neither is something to pass
+    /// over in silence.
+    #[must_use]
+    pub const fn facts(&self) -> Option<&MediaFacts> {
+        self.facts.as_ref()
+    }
+}
+
+/// Media in `directory` that no session record accounts for.
+///
+/// Only the recordings' own directory, and only files named the way the
+/// recorder names them: something a user put in that folder themselves is
+/// theirs, and listing it would be this application taking an interest in files
+/// that are none of its business.
+///
+/// Each file is opened, because the alternative is reporting a size and a name
+/// and calling it a recording without having looked. What cannot be read is
+/// reported as unreadable rather than dropped.
+///
+/// # What this deliberately does not do
+///
+/// Adopt them. A session record carries what the recorder *measured* — the
+/// capture method, the encoder, the codec, how many frames were captured and
+/// how many were dropped — and none of that is knowable from a file. Writing a
+/// record that asserted any of it would be inventing measurements, which is the
+/// one thing this workspace is built not to do, so what an adopted record
+/// should look like is a schema question issue #272 has to answer first.
+///
+/// # Errors
+///
+/// Whatever stopped the directory being read. A directory that is not there is
+/// not an error and yields nothing: it is what a machine that has recorded
+/// nothing looks like.
+pub fn orphaned_recordings(directory: &Path) -> io::Result<Vec<OrphanedRecording>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut media: Vec<PathBuf> = Vec::new();
+    let mut sidecars: Vec<PathBuf> = Vec::new();
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if is_sidecar(&path) {
+            sidecars.push(path);
+        } else if is_recording(&path) {
+            media.push(path);
+        }
+    }
+
+    let mut accounted: BTreeSet<PathBuf> = BTreeSet::new();
+    for sidecar in &sidecars {
+        match read_sidecar(sidecar) {
+            Ok(file) => collect_outputs(&file, &mut accounted),
+            // A record that cannot be read accounts for nothing, so whatever it
+            // named is reported as unaccounted for. That is the honest way
+            // round: the alternative leaves a file the application can neither
+            // index nor mention, which is the state issue #272 is about.
+            Err(error) => tracing::warn!(
+                sidecar = %clipped_logging::RedactedPath::new(sidecar),
+                %error,
+                "a session record could not be read while looking for unaccounted \
+                 recordings, so anything it named is reported as unaccounted for"
+            ),
+        }
+    }
+
+    // Sorted for the reason the sidecars are: the filesystem promises no order,
+    // and a listing somebody reads twice should not change between runs.
+    media.sort();
+
+    let mut found = Vec::new();
+    for path in media {
+        if accounted.contains(&path) {
+            continue;
+        }
+        let bytes = fs::metadata(&path).map(|data| data.len()).unwrap_or(0);
+        let facts = clipped_export::facts_about(&path).ok();
+        found.push(OrphanedRecording { path, bytes, facts });
+    }
+    Ok(found)
+}
+
+/// Whether this is a file the recorder would have written.
+fn is_recording(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with("clipped-") && name.to_ascii_lowercase().ends_with(".mkv")
+        })
+}
+
+/// Every output path a session record names, however the recordings ended.
+///
+/// Reading the same `Value` shape the rest of this module does, rather than a
+/// typed view, for the reason [`read_sidecar`] gives.
+fn collect_outputs(file: &Map<String, Value>, into: &mut BTreeSet<PathBuf>) {
+    let Some(recordings) = file.get("recordings").and_then(Value::as_array) else {
+        return;
+    };
+    for recording in recordings {
+        if let Some(output) = recording.get("output").and_then(Value::as_str) {
+            into.insert(PathBuf::from(output));
+        }
+    }
 }
 
 /// Records `recording` as having been interrupted, keeping the file.
@@ -456,7 +597,7 @@ mod tests {
     /// Exactly the shape `super::sidecar` writes, minus the fields
     /// `end_recording` would have added — which is what a killed recorder
     /// leaves.
-    fn interrupted_session(directory: &Path, session_id: &str, bytes: usize) -> PathBuf {
+    pub(super) fn interrupted_session(directory: &Path, session_id: &str, bytes: usize) -> PathBuf {
         let recording = directory.join(format!("clipped-{session_id}.mkv"));
         fs::write(&recording, vec![0u8; bytes]).expect("the recording can be written");
 
@@ -769,5 +910,115 @@ mod tests {
         assert!(!is_sidecar(Path::new(
             r"D:\clips\clipped-cs2.bookmarks.json"
         )));
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::tests::interrupted_session;
+    use super::*;
+    use std::fs;
+
+    /// A recording with no session record, written as bytes that are not media.
+    ///
+    /// Not media on purpose: discovery and the probe are separate questions, and
+    /// a case that needed FFmpeg to build a fixture would skip on a machine
+    /// without it — which is how a suite quietly stops testing anything
+    /// (AGENTS.md section 54). What the probe reads out of a real file is
+    /// covered where it belongs, in `clipped-export`.
+    fn orphan(directory: &Path, name: &str, bytes: usize) -> PathBuf {
+        let path = directory.join(name);
+        fs::write(&path, vec![0u8; bytes]).expect("the temporary directory is writable");
+        path
+    }
+
+    fn temporary(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("clipped-orphans-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("a temporary directory can be made");
+        path
+    }
+
+    #[test]
+    fn a_recording_no_session_record_names_is_reported() {
+        let directory = temporary("unnamed");
+        let path = orphan(&directory, "clipped-20260812-171203.mkv", 2048);
+
+        let found = orphaned_recordings(&directory).expect("the directory can be read");
+
+        assert_eq!(found.len(), 1, "one file, named by nothing");
+        assert_eq!(found[0].path(), path);
+        assert_eq!(found[0].bytes(), 2048);
+        assert!(
+            found[0].facts().is_none(),
+            "these bytes are not media, and that is reported rather than hidden"
+        );
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_a_session_record_names_is_not_reported() {
+        // The half that stops this listing every recording ever made. Without
+        // it the report would name every file in the folder, which is worse
+        // than naming none.
+        let directory = temporary("named");
+        interrupted_session(&directory, "counter-strike-2-20260811-143205", 1024);
+
+        let found = orphaned_recordings(&directory).expect("the directory can be read");
+
+        assert!(
+            found.is_empty(),
+            "a session record names this recording, so it is accounted for: {found:?}"
+        );
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn one_of_each_reports_only_the_one_nothing_names() {
+        let directory = temporary("mixed");
+        interrupted_session(&directory, "counter-strike-2-20260811-143205", 1024);
+        let unnamed = orphan(&directory, "clipped-20260812-171203.mkv", 4096);
+
+        let found = orphaned_recordings(&directory).expect("the directory can be read");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path(), unnamed);
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_file_the_recorder_would_never_have_written_is_left_alone() {
+        // Somebody else's file in the same folder is theirs. Listing it would be
+        // this application taking an interest in files that are none of its
+        // business, and the folder is one a user chose.
+        let directory = temporary("not-ours");
+        orphan(&directory, "holiday.mkv", 512);
+        orphan(&directory, "clipped-notes.txt", 512);
+
+        let found = orphaned_recordings(&directory).expect("the directory can be read");
+
+        assert!(
+            found.is_empty(),
+            "only files the recorder names are ours: {found:?}"
+        );
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_not_an_error() {
+        let directory = std::env::temp_dir().join("clipped-orphans-never-existed-either");
+        let _ = fs::remove_dir_all(&directory);
+
+        let found = orphaned_recordings(&directory).expect("an absent directory is not a failure");
+
+        assert!(
+            found.is_empty(),
+            "a machine that has recorded nothing looks like this"
+        );
     }
 }

@@ -98,6 +98,7 @@
 //! ```
 
 mod error;
+pub mod facts;
 mod media;
 pub mod plan;
 pub mod progress;
@@ -105,6 +106,7 @@ mod render;
 pub mod source;
 
 pub use crate::error::ExportError;
+pub use crate::facts::{facts_about, MediaFacts};
 pub use crate::plan::{
     CopyBlocker, EstimatedSize, ExportMethod, ExportPlan, MixReason, PlanError, PlannedAudioTrack,
     PlannedSegment, SizeEstimate, SizeUnknown,

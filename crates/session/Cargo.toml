@@ -28,6 +28,12 @@ clipped-audio.workspace = true
 # where the encoder's packets are drained: the buffer is a second consumer of
 # those packets, so a recording and a replay buffer running together encode
 # once.
+# Reading what a media file says about itself, for the recordings no session
+# record accounts for (issue #272). This crate already owns what happens to a
+# recording after it is written; `clipped-export` is the only place that opens
+# a container, and a second opener here would be a second FFmpeg integration to
+# keep in step (AGENTS.md section 55).
+clipped-export.workspace = true
 clipped-replay.workspace = true
 # What a game is, and what started and stopped. The automatic session manager
 # (`src/automatic`) is the policy between those two answers and a recording, and

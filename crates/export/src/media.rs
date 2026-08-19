@@ -218,6 +218,30 @@ impl SourceMedia {
         self.context.as_ptr()
     }
 
+    /// Every stream this container declares, in container order.
+    pub(crate) fn streams(&self) -> &[SourceStream] {
+        &self.streams
+    }
+
+    /// How long the container says the file runs for.
+    ///
+    /// [`None`] when it declares nothing, which a file an interrupted recorder
+    /// left behind may not. Absent rather than zero: a caller writing this down
+    /// should leave the field out rather than assert a length nobody measured.
+    pub(crate) fn declared_duration(&self) -> Option<std::time::Duration> {
+        // SAFETY: the context is live for the lifetime of `self`, and
+        // `duration` is a plain field filled in while the file was opened.
+        let declared = unsafe { (*self.as_ptr()).duration };
+        if declared == AV_NOPTS_VALUE || declared < 0 {
+            return None;
+        }
+        // `AVFormatContext::duration` counts in `AV_TIME_BASE` units, which is
+        // microseconds, rather than in any stream time base.
+        u64::try_from(declared)
+            .ok()
+            .map(std::time::Duration::from_micros)
+    }
+
     /// Which container stream is the picture, when there is one.
     pub(crate) fn video_stream_index(&self) -> Option<usize> {
         self.streams
