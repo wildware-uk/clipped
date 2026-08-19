@@ -770,3 +770,639 @@ not_the_game = ["start_protected_game.exe", "ApexLauncher.exe"]
 
 [game.capture]
 compatibility = "unknown"
+
+# --- A second batch of widely played Steam titles ----------------------------
+#
+# Same rule as the batch above: every executable name was read off an
+# installation rather than looked up, and every entry carries the Steam
+# application identifier, which is matched before the executable is consulted.
+#
+# Demos, playtests, editors, dedicated servers and soundtrack downloads are
+# deliberately absent even where they were installed beside these. Steam lists
+# them as applications exactly like a game, which is why identifying a game by
+# "a launcher installed it" is not sufficient on its own
+# (issue #664) — `Source SDK Base 2006`, `Steamworks Common Redistributables`,
+# `SteamVR`, `s&box editor` and `Satisfactory Dedicated Server` are all
+# applications by that measure and none of them is a game somebody is playing.
+
+[[game]]
+game_id = "the-finals"
+name = "THE FINALS"
+
+[[game.executables]]
+name = "Discovery.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2073850"
+not_the_game = ["AntiCheatInstaller.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "marvel-rivals"
+name = "Marvel Rivals"
+
+[[game.executables]]
+name = "Marvel.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2767030"
+not_the_game = [
+    "MarvelRivals_Launcher.exe",
+    "UniCrashReporter.exe",
+    "UniSDKTools.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "delta-force"
+name = "Delta Force"
+
+[[game.executables]]
+name = "DeltaForceClient.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2507950"
+not_the_game = [
+    "df_launcher.exe",
+    "Assistant.exe",
+    "VersionService.exe",
+    "INTLWebViewHelper.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "chivalry-2"
+name = "Chivalry 2"
+
+[[game.executables]]
+name = "Chivalry2-Win64-Shipping.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1824220"
+not_the_game = ["Chivalry2Launcher.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "arc-raiders"
+name = "ARC Raiders"
+
+[[game.executables]]
+name = "PioneerGame.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1808500"
+not_the_game = ["AntiCheatInstaller.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "lethal-company"
+name = "Lethal Company"
+
+[[game.executables]]
+name = "Lethal Company.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1966720"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "repo"
+name = "R.E.P.O."
+
+[[game.executables]]
+name = "REPO.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "3241660"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "v-rising"
+name = "V Rising"
+
+[[game.executables]]
+name = "VRising.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1604030"
+not_the_game = ["VRisingServer.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "dark-and-darker"
+name = "Dark and Darker"
+
+[[game.executables]]
+name = "Tavern.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2016590"
+not_the_game = [
+    "TavernWorker.exe",
+    "TavernDart.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "escape-the-backrooms"
+name = "Escape the Backrooms"
+
+[[game.executables]]
+name = "Backrooms.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1943950"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "sunkenland"
+name = "Sunkenland"
+
+[[game.executables]]
+name = "Sunkenland.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2080690"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "shapez-2"
+name = "shapez 2"
+
+[[game.executables]]
+name = "shapez 2.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2162800"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "lightyear-frontier"
+name = "Lightyear Frontier"
+
+[[game.executables]]
+name = "LightyearFrontier.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1677110"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "the-farmer-was-replaced"
+name = "The Farmer Was Replaced"
+
+[[game.executables]]
+name = "TheFarmerWasReplaced.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2060160"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "labyrinthine"
+name = "Labyrinthine"
+
+[[game.executables]]
+name = "Labyrinthine.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1302240"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "despots-game"
+name = "Despot's Game: Dystopian Battle Simulator"
+
+[[game.executables]]
+name = "Despot's Game.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1227280"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "rubber-bandits"
+name = "Rubber Bandits"
+
+[[game.executables]]
+name = "RubberBandits.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1206610"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "foundry"
+name = "FOUNDRY"
+
+[[game.executables]]
+name = "Foundry.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "983870"
+not_the_game = [
+    "FoundryRestarter.exe",
+    "FoundryBugReporter.exe",
+    "dowser.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "vellum"
+name = "Vellum"
+
+[[game.executables]]
+name = "Vellum.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "917950"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "songs-of-syx"
+name = "Songs of Syx"
+
+[[game.executables]]
+name = "SongsofSyx.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1162750"
+not_the_game = ["SyxWithout.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "space-engineers-2"
+name = "Space Engineers 2"
+
+[[game.executables]]
+name = "SpaceEngineers2.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1133870"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "the-riftbreaker"
+name = "The Riftbreaker"
+
+[[game.executables]]
+name = "riftbreaker_win_release.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "780310"
+not_the_game = [
+    "Launcher.exe",
+    "DedicatedServer.exe",
+    "CrashReporter.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "iosoccer"
+name = "IOSoccer"
+
+[[game.executables]]
+name = "iosoccer.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "673560"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "pavlov-vr"
+name = "Pavlov VR"
+
+[[game.executables]]
+name = "Pavlov.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "555160"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "surgeon-simulator"
+name = "Surgeon Simulator"
+
+[[game.executables]]
+name = "ss2013.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "233720"
+not_the_game = ["ss2013_DirectToRift.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "plan-b-terraform"
+name = "Plan B: Terraform"
+
+[[game.executables]]
+name = "Plan B Terraform.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1894430"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "the-classrooms"
+name = "The Classrooms"
+
+[[game.executables]]
+name = "The Classrooms.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2099110"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "your-only-move-is-hustle"
+name = "Your Only Move Is HUSTLE"
+
+[[game.executables]]
+name = "YourOnlyMoveIsHUSTLE.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2212330"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "straftat"
+name = "STRAFTAT"
+
+[[game.executables]]
+name = "STRAFTAT.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2386720"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "chained-together"
+name = "Chained Together"
+
+[[game.executables]]
+name = "ChainedTogether.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2567870"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "supermarket-together"
+name = "Supermarket Together"
+
+[[game.executables]]
+name = "Supermarket Together.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2709570"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "megabonk"
+name = "Megabonk"
+
+[[game.executables]]
+name = "Megabonk.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "3405340"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "make-way"
+name = "Make Way"
+
+[[game.executables]]
+name = "Make Way.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1445790"
+not_the_game = ["EOSBootstrapper.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "waltz-of-the-wizard"
+name = "Waltz of the Wizard"
+
+[[game.executables]]
+name = "Waltz of the Wizard Extended Edition.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1094390"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "propagation-vr"
+name = "Propagation VR"
+
+[[game.executables]]
+name = "PropagationVR.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1363430"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "runescape-dragonwilds"
+name = "RuneScape: Dragonwilds"
+
+[[game.executables]]
+name = "RSDragonwilds.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1374490"
+not_the_game = ["EpicOnlineServicesInstaller.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "rollercoaster-tycoon-2"
+name = "RollerCoaster Tycoon 2: Triple Thrill Pack"
+
+[[game.executables]]
+name = "RCT2.EXE"
+
+[game.launcher]
+kind = "steam"
+app_id = "285330"
+not_the_game = ["Autorun.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "stonewards"
+name = "Stonewards"
+
+[[game.executables]]
+name = "Stonewards.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "4502710"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "yapyap"
+name = "YAPYAP"
+
+[[game.executables]]
+name = "yapyap.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "3834090"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "cast-and-spell"
+name = "Cast & Spell"
+
+[[game.executables]]
+name = "CastAndSpell.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "3032020"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "melon-merge"
+name = "Melon Merge"
+
+[[game.executables]]
+name = "FruitGame.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "2750230"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "meccha-chameleon"
+name = "MECCHA CHAMELEON"
+
+[[game.executables]]
+name = "PenguinHotel.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "4704690"
+
+[game.capture]
+compatibility = "unknown"
