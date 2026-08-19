@@ -68,8 +68,11 @@ path = "../../tests/capture/odd_client_area.rs"
 # tests that record known tone generators. It belongs to this package because
 # it starts this binary — `--steady-tone` makes it a process tree that owns a
 # window *and* makes a sound, which is what a stand-in for a game has to be —
-# and because a recording of that window is the only place the game's track and
-# its complement can be measured against what Windows actually handed over.
+# and because a recording of that window is the only place the game's track,
+# its complement and a microphone track can be measured against what Windows
+# actually handed over. The microphone is simulated: src/virtual_audio.rs finds
+# a device with no hardware behind it and the test plays a third tone into it,
+# so no real capture endpoint is ever opened (AGENTS.md section 14).
 [[test]]
 name = "track_isolation"
 path = "../../tests/audio/track_isolation.rs"
@@ -99,24 +102,29 @@ clipped-windows.workspace = true
 # The window, the Direct3D 11 device and the swap chain the pattern is presented
 # through, and — for `--tone` only — the render stream the sound half of the
 # subject is played through. The feature list is the honest inventory of what
-# src/render.rs, src/app.rs and src/tone.rs name:
+# src/render.rs, src/app.rs, src/tone.rs and src/virtual_audio.rs name:
 #
-# - Win32_Foundation               HWND, RECT, BOOL
+# - Win32_Devices_FunctionDiscovery  PKEY_Device_FriendlyName, which names an endpoint
+# - Win32_Foundation               HWND, RECT, BOOL, PROPERTYKEY
 # - Win32_Graphics_Direct3D        the driver type and feature level
 # - Win32_Graphics_Direct3D11      the device, the staging texture, Map/Unmap
 # - Win32_Graphics_Dxgi(_Common)   the swap chain, the format, fullscreen
-# - Win32_Media_Audio              IAudioClient, IAudioRenderClient, IAudioClock
+# - Win32_Media_Audio              IAudioClient, IAudioRenderClient, IAudioClock,
+#                                  and the endpoint enumeration src/virtual_audio.rs reads
 # - Win32_Media_Multimedia         the IEEE-float subformat a mix format names
 # - Win32_System_Com               CoCreateInstance and the multi-threaded apartment
-# - Win32_System_Com_StructuredStorage  the PROPVARIANT IMMDevice::Activate takes
+# - Win32_System_Com_StructuredStorage  the PROPVARIANT IMMDevice::Activate takes, and
+#                                  PropVariantToStringAlloc for an endpoint's properties
 # - Win32_System_Console           the Ctrl-C handler that gives a display back
 # - Win32_System_LibraryLoader     the module handle a window class needs
 # - Win32_System_Performance       the performance counter a tone is placed on
 # - Win32_System_Variant           the activation parameter IMMDevice::Activate takes
+# - Win32_UI_Shell_PropertiesSystem  IPropertyStore, which an endpoint's properties are read from
 # - Win32_UI_WindowsAndMessaging   the window, its class and its messages
 #
 # Dual MIT/Apache-2.0.
 windows = { workspace = true, features = [
+    "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
@@ -130,6 +138,7 @@ windows = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
     "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -137,8 +146,14 @@ windows = { workspace = true, features = [
 # Windows Graphics Capture backend and reads the pattern back out of the
 # captured textures, and tests/capture/av_sync.rs additionally records the
 # system audio endpoint alongside it to measure how far the two clocks drift
-# apart. All of it is test-only: the application itself never captures anything,
-# and nothing in the product depends on this package
+# apart. tests/audio/track_isolation.rs uses `clipped-audio`'s microphone
+# capture for one thing only: a half-second probe that establishes a virtual
+# audio device really is a cable before a recording is made through it. That
+# probe opens the product's own capture client rather than a second one written
+# there (AGENTS.md section 55), and only ever on an endpoint
+# src/virtual_audio.rs has established has no hardware behind it. All of it is
+# test-only: the application itself never captures anything, and nothing in the
+# product depends on this package
 # (tests/integration/tests/workspace_layering.rs).
 [target.'cfg(windows)'.dev-dependencies]
 clipped-capture.workspace = true
@@ -154,7 +169,7 @@ clipped-audio.workspace = true
 clipped-session.workspace = true
 
 # The tone analysis the absolute A/V offset measurement in tests/capture/av_sync.rs
-# is built on. `AudioContent::magnitude_at` is the media harness's own Goertzel
+# and the loopback probe in tests/audio/track_isolation.rs are built on. `AudioContent::magnitude_at` is the media harness's own Goertzel
 # filter over samples already in hand, which is exactly the question the
 # detector asks of every two-millisecond window of a capture: how much of the
 # subject's tone is in this one. Reused rather than written a third time

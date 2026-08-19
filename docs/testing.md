@@ -699,20 +699,81 @@ That is #34's system half, and it is
 [`tests/audio/track_isolation.rs`](../tests/audio/track_isolation.rs). It starts
 `video-pattern --steady-tone 997` — one process tree that owns a window *and*
 makes a sound, which is what a stand-in for a game has to be — plays 1373 Hz from
-the test process itself, records the window through `record_into`, and measures
-every track of the file by frequency. On this project's development machine each
-track's own tone measures 0.0565 and the neighbour's measures 0.00003, which is
-about **1,900 times** apart against a threshold of eight. It needs a GPU, a
+the test process itself, plays 1699 Hz into a simulated microphone, records the
+window through `record_into`, and measures every track of the file by frequency.
+On this project's development machine:
+
+```text
+track                          997 Hz      1373 Hz      1699 Hz   strongest
+a:0 Compatibility Mix         0.05652      0.05677      0.05572   997.0 Hz (0.05652)
+a:1 Game                      0.05653      0.00003      0.00010   997.0 Hz (0.05653)
+a:2 Other System Audio        0.00003      0.05653      0.00157   1373.0 Hz (0.05653)
+a:3 Microphone                0.00008      0.00016      0.03998   1699.0 Hz (0.03998)
+```
+
+Each track's own tone against the loudest tone that does not belong there is
+about **1,900 times** for the game, **1,800 times** for the complement and **250
+times** for the microphone, against a threshold of eight. It needs a GPU, a
 display, an encoder and an output endpoint, so it is `#[ignore]`d like everything
 in `tests/capture/`; [tests/audio/README.md](../tests/audio/README.md) has the
 command and what to set.
 
-**The microphone leg is still manual.** A simulated microphone at a known
-frequency needs a capture endpoint a test can feed — a virtual audio device,
-installed by somebody — which AGENTS.md section 25 rules out assuming, and
-opening the real microphone of whoever ran the tests would record their room
-(section 14). So the microphone is checked by hand, and so is a real game rather
-than a test application:
+#### The microphone is simulated, and no real one is ever opened
+
+A microphone track can only be measured if a test decides what the microphone
+hears, and for a long time that read as impossible: a simulated microphone needs
+a virtual audio device — a render endpoint whose audio reappears on a matching
+capture endpoint — which AGENTS.md section 25 rules out *assuming*, and opening
+the real microphone of whoever ran the tests would record their room (section
+14). But an installed device is a **presence** problem, which is what `#[ignore]`
+and `CLIPPED_REQUIRE_AUDIO` exist for, so the test finds one in two stages:
+
+1. **A gate that opens nothing.** `PKEY_Device_EnumeratorName`, read from an
+   endpoint's own property store, names the PnP enumerator that produced the
+   device it belongs to. Hardware is enumerated by the bus it is plugged into —
+   `USB`, `HDAUDIO`, `BTHENUM` — and a device installed by software is
+   root-enumerated. `test-apps/video-pattern/src/virtual_audio.rs` keeps only
+   `ROOT` endpoints, so a headset, a webcam and a line-in jack are excluded
+   before any audio client is activated. It is not a name test: a headset's
+   speaker and microphone endpoints match each other by name exactly as a
+   virtual cable's two ends do.
+2. **A tone that proves it.** The test renders 1699 Hz into a candidate's render
+   end and listens for it on the candidate's capture end. That is the only
+   honest way to know two endpoints are two ends of one cable, and unlike a list
+   of vendor names it works whatever the device is called. It also
+   **calibrates** — a cable may apply gain, and the one on this project's
+   development machine adds exactly 30 dB — so the run renders at whatever
+   amplitude makes the captured tone arrive at the same level as the other two
+   sources.
+
+There is no fallback to a real capture endpoint. On a machine with no virtual
+device the test prints what it looked at and skips:
+
+```text
+SKIPPED (audio): this machine has no virtual audio device: 0 software render endpoints
+and 0 software capture endpoints, with 8 capture endpoints left alone because Windows
+says there is hardware behind them. Installing VB-Audio Virtual Cable, VoiceMeeter or
+any other loopback device — one whose speaker end reappears on its microphone end —
+makes this test runnable. Its real microphones are never opened.
+```
+
+`CLIPPED_REQUIRE_AUDIO` turns that skip into a failure, which is what a run whose
+numbers are being recorded uses.
+
+**`Other System Audio` carries 1699 Hz too, and that is correct.** The
+microphone's tone is rendered by the test process, and the test process is not
+the game, so the complement of the game genuinely includes it — at the amplitude
+the *stream* was written at rather than the amplified one the capture end
+delivers, because the cable's gain belongs to the device and the loopback tap is
+upstream of it. The test asserts its presence there rather than leaving the
+measurement unsaid: a build whose exclude-mode capture had narrowed to the
+default endpoint would drop it, and would pass every other assertion.
+
+#### What is still manual
+
+A **real** game, a **real** microphone and a person listening. The automated test
+proves routing; whether a headset in a room sounds right is a claim about the
+world:
 
 1. Start a game, something playing audio that is not the game (a browser tab is
    enough), and have a microphone connected.
@@ -725,10 +786,11 @@ than a test application:
    **Microphone** must contain only the microphone.
 5. Mute all three and unmute **Compatibility Mix**: it must contain all of them.
 
-Step 4 is the one that matters. The first two thirds of it are now the automated
-test above; the microphone third is not, and is where a run of this procedure
-earns its place. Record what it found on the milestone issue (AGENTS.md
-section 53).
+Step 4 is the one that matters, and all three thirds of it — the microphone
+included — are now the automated test above. What this procedure adds is a real
+game rather than a window drawing a pattern, a real microphone rather than a
+cable, and ears rather than a Goertzel filter. Record what it found on the
+milestone issue (AGENTS.md section 53).
 
 Nothing is asserted until `assert_valid()`, so one run reports every failed
 expectation rather than the first:
@@ -1017,11 +1079,13 @@ purpose rather than stubbed:
   `tests/audio/track_isolation.rs` does it against real endpoints and real
   processes with `video-pattern --steady-tone` as the source.
 
-The generator that is missing is a **microphone** one, and it is missing for a
-reason no test application can fix: a simulated microphone needs a capture
-endpoint to render into, which is a virtual audio device rather than a program.
-That is why `track_isolation.rs` records no microphone track and why the
-procedure above still has a manual step for it.
+The generator that is missing is a **microphone** one, and no test application
+could ever have been it: a simulated microphone needs a capture endpoint to
+render into, which is a virtual audio device rather than a program. What closed
+that gap was not a generator but a way to find such a device safely —
+`test-apps/video-pattern/src/virtual_audio.rs` and the probe in
+`tests/audio/track_isolation.rs`, described above — so the microphone leg is now
+measured wherever one is installed, and skipped, loudly, where one is not.
 
 Anything else this document describes is built. Where it describes something
 that is not, it says so — a document that quietly describes intentions as facts
