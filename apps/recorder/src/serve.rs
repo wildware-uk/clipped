@@ -213,7 +213,23 @@ fn features_of_this_build() -> Vec<String> {
         // is the worst pair of readings to confuse on the one screen whose
         // whole subject is what is and is not known.
         features::DIAGNOSTICS.to_owned(),
+        // And this before a Storage screen draws a figure. A recorder built
+        // before issue #95 has no `get_storage`, and every reading a window
+        // could invent from the refusal is one somebody would act on: "nothing
+        // would be deleted" is what they would set a limit on the strength of,
+        // and "no free space" is what they would delete recordings on the
+        // strength of (AGENTS.md sections 27 and 56).
+        features::STORAGE.to_owned(),
     ]
+}
+
+/// Why a proposed limit could not even be asked about.
+///
+/// `clipped_session`'s own sentence, which already names the figure and the
+/// bound it fell outside. A window previewing a value it could never save would
+/// be shown consequences that could never happen (AGENTS.md section 45).
+fn refused_limit(error: clipped_library::accounting::LimitError) -> ProtocolError {
+    ProtocolError::new(ErrorCode::InvalidParameters, error.to_string())
 }
 
 /// Why `serve` did not serve.
@@ -601,6 +617,70 @@ impl RecorderService {
         &self.recordings
     }
 
+    /// What the library occupies, and what a limit would do about it.
+    ///
+    /// Measured against the folder this recorder is **writing into**, which for
+    /// the length of a sitting can differ from the one `settings.json` holds:
+    /// where automatic recordings go moves between sittings and never during one
+    /// (issue #609). The figures are about the folder the files are in, so it is
+    /// the folder in use that is walked - and `get_settings` carries the other
+    /// with `not_yet_in_force` beside it, so a window can say both.
+    ///
+    /// A request naming limits of its own is a **dry run**: the measurement is
+    /// judged against what somebody is about to save rather than against what is
+    /// saved, and the reply says which it was. Nothing is written by asking, and
+    /// nothing is deleted; the whole point is to be able to say what saving a
+    /// limit would take, before it takes it (AGENTS.md section 56, issue #529).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::LibraryUnavailable`] when there is nowhere to measure -
+    /// this machine describes no recordings folder - or when the measurement
+    /// itself failed, carrying which of the three reasons it was.
+    fn storage(
+        &self,
+        request: &clipped_ipc::GetStorage,
+    ) -> Result<clipped_ipc::StorageReport, ProtocolError> {
+        let recordings = self
+            .recordings
+            .automatic_recording_directory()
+            .or_else(|| {
+                self.settings
+                    .configuration()
+                    .storage()
+                    .recording_directory()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .or_else(crate::config::default_output_directory)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    "this machine describes no videos folder, so Clipped has nowhere it records                      into to measure",
+                )
+            })?;
+
+        let mut configuration = self.settings.configuration();
+        if let Some(proposed) = request.limits {
+            // The whole set is replaced rather than merged. A limit the proposal
+            // leaves out is one it does not have, which is how "what would
+            // clearing this do" is asked at all - and the settings API is what
+            // refuses a figure it would not accept, so a proposal cannot be
+            // previewed against limits that could never be saved.
+            let mut storage = configuration.storage().clone();
+            storage
+                .set_maximum_usage(proposed.maximum_usage_bytes)
+                .map_err(refused_limit)?;
+            storage.set_minimum_free_space(proposed.minimum_free_space_bytes);
+            storage
+                .set_maximum_age_days(proposed.maximum_age_days)
+                .map_err(refused_limit)?;
+            configuration.set_storage(storage);
+        }
+
+        self.library
+            .measure(&configuration, &recordings, request.limits.is_some())
+    }
+
     /// The settings, with the one that is saved and not yet in use said so.
     ///
     /// Every answer this service gives about the settings goes through here,
@@ -820,6 +900,15 @@ impl CommandHandler for RecorderService {
                     self.recordings.capture_account().as_ref(),
                 )?,
             }),
+            // The one read here that walks the filesystem, and still on the
+            // connection thread: it shares nothing with a recording, and it is
+            // behind a screen somebody opened deliberately (`crate::library`,
+            // AGENTS.md sections 17 and 20). Nothing is deleted by asking - the
+            // limits are saved through `apply_settings` like every other
+            // setting, and the sweep is what acts on them (issue #95).
+            Command::GetStorage(request) => Ok(Reply::Storage {
+                storage: self.storage(&request)?,
+            }),
             // Answered on the connection thread, like a library read: reading
             // or writing one small file shares nothing with a recording, and
             // the only lock it takes is the settings file's own
@@ -831,9 +920,23 @@ impl CommandHandler for RecorderService {
             // what was saved rather than what it hoped had been — and, for the
             // recording directory, whether what was saved is what automatic
             // recordings are using yet (issue #609).
-            Command::ApplySettings(request) => Ok(Reply::Settings {
-                settings: self.settings_in_force(self.settings.apply(&request)?),
-            }),
+            Command::ApplySettings(request) => {
+                let saved = self.settings.apply(&request)?;
+                // Straight to the indexer, because the sweep holds its own copy
+                // of the limits and read it once when this process started. A
+                // maximum usage saved from the window and not carried here is a
+                // control whose effect waits for a restart, with nothing on
+                // screen saying so (AGENTS.md section 27, issue #95).
+                //
+                // After the save rather than before it: a refused change never
+                // reaches the sweep, so the figure the indexer enforces is
+                // always one the settings file agreed to hold.
+                self.indexer
+                    .set_storage(self.settings.configuration().storage().clone());
+                Ok(Reply::Settings {
+                    settings: self.settings_in_force(saved),
+                })
+            }
             // Asked of Windows each time rather than answered from a list read
             // at start-up: a microphone plugged in while the window is open is
             // one somebody is about to choose (issue #308).
@@ -5084,6 +5187,112 @@ mod tests {
                 .resolve_global()
                 .written_value(clipped_session::config::SettingKey::Microphone),
             "name:Shure MV7",
+        );
+    }
+
+    #[test]
+    fn a_storage_limit_saved_through_the_protocol_is_the_one_the_sweep_will_enforce() {
+        // The same shape as the case above, for the setting where getting it
+        // wrong is worst. The sweep holds its own copy of the limits and read it
+        // once when this process started, so a maximum usage saved from the
+        // window would have been honoured only from the next `serve` - a control
+        // that appears to do nothing, with nothing on screen saying why
+        // (AGENTS.md section 27, issue #95).
+        //
+        // Through `CommandHandler::call` rather than through `crate::settings`
+        // beside it, because what is under test is the change reaching the
+        // indexer at all: a settings file that holds the right figure while the
+        // sweep enforces yesterday's is exactly the gap this closes.
+        let directory = scratch("storage-limit-dispatch");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        assert_eq!(
+            service.indexer.storage().maximum_usage(),
+            None,
+            "nothing has been configured yet, so this proves nothing unless it starts unset"
+        );
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(
+            crate::settings::MAXIMUM_USAGE.to_owned(),
+            Some("250000000000".to_owned()),
+        );
+        service
+            .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                values,
+            }))
+            .expect("250 GB is a quota the settings file will hold");
+
+        assert_eq!(
+            service.indexer.storage().maximum_usage(),
+            Some(250_000_000_000),
+            "the quota reached the settings file and not the sweep, so nothing would enforce it \
+             until the recorder was restarted"
+        );
+    }
+
+    #[test]
+    fn a_quota_the_settings_file_refuses_never_reaches_the_sweep() {
+        // The other direction, and the one that deletes recordings if it is
+        // wrong. A limit the file would not hold must not be enforced by
+        // anything: the push to the indexer happens after the save, so a refused
+        // change leaves the sweep on the figure that was agreed to.
+        let directory = scratch("storage-limit-refused");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(
+            crate::settings::MAXIMUM_USAGE.to_owned(),
+            Some("1000".to_owned()),
+        );
+        service
+            .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                values,
+            }))
+            .expect_err("a thousand bytes is not a library");
+
+        assert_eq!(
+            service.indexer.storage().maximum_usage(),
+            None,
+            "a quota the settings file refused was handed to the sweep anyway"
+        );
+    }
+
+    #[test]
+    fn a_storage_report_asked_for_with_no_library_is_refused_rather_than_answered_with_zeroes() {
+        // `LibraryReader::at(None)` is a machine with no per-user directory, so
+        // there is no index to read and no measurement to take. A report of
+        // zeroes would be indistinguishable from a library with nothing in it,
+        // and the two send somebody in opposite directions (AGENTS.md section 27).
+        let directory = scratch("storage-no-library");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(None),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        let refusal = service
+            .call(Command::GetStorage(clipped_ipc::GetStorage::default()))
+            .expect_err("there is no library to measure");
+
+        assert_eq!(refusal.code, ErrorCode::LibraryUnavailable);
+        assert!(
+            !refusal.message.is_empty(),
+            "a refusal with nothing in it is one a window cannot show"
         );
     }
 

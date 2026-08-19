@@ -212,6 +212,7 @@ fn main() {
             recorder_status,
             recorder_hotkeys,
             recorder_diagnostics,
+            recorder_storage,
             recorder_settings,
             apply_recorder_settings,
             audio_devices,
@@ -734,6 +735,37 @@ fn recorder_diagnostics(
 ///
 /// `async` for the reason [`recorder_status`] is: it opens a pipe and waits for
 /// an answer, and the thread drawing the window may not.
+/// What the library occupies, and what a storage limit would delete.
+///
+/// The recorder's, not this window's, and not because of a rule: the measurement
+/// is a walk of the recording and trash folders and a read of the index, and
+/// this window links neither `clipped-library` nor `clipped-storage` and has no
+/// file-system permission at all (`capabilities/default.json`). Before
+/// [issue #95](https://github.com/wildware-uk/clipped/issues/95) the figures
+/// reached one caller - `clipped-recorder storage`, at a terminal - so the
+/// screen SPEC.md section 27 asks for could draw none of them.
+///
+/// `limits` is the dry run. Passing the figures somebody has typed asks what
+/// saving them would delete, and **saves nothing**: the limits are written
+/// through [`apply_recorder_settings`] like every other setting. That is what
+/// lets the Storage screen say what a limit would take before it takes it
+/// (AGENTS.md section 56).
+///
+/// `async` for the reason [`recorder_status`] is, and more so: this one waits on
+/// a directory walk at the other end, and the thread drawing the window may not.
+#[tauri::command(async)]
+fn recorder_storage(
+    link: tauri::State<'_, RecorderLink>,
+    limits: Option<clipped_ipc::StorageLimits>,
+) -> Result<clipped_ipc::StorageReport, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetStorage(clipped_ipc::GetStorage {
+        limits,
+    }))? {
+        clipped_ipc::Reply::Storage { storage } => Ok(storage),
+        _ => Err(wrong_reply("get_storage")),
+    }
+}
+
 #[tauri::command(async)]
 fn recorder_settings(
     link: tauri::State<'_, RecorderLink>,

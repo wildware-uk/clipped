@@ -105,6 +105,20 @@ export interface CommandAnswers {
    */
   readonly recorderSettings?: () => unknown;
   /**
+   * What `recorder_storage` answers, given the limits it was asked about.
+   *
+   * `args['limits']` is absent when the screen is asking about the limits that
+   * are configured, and present when it is asking what saving a limit would
+   * delete — so a test can answer the two differently, which is the whole
+   * distinction issue #95's dry run is about.
+   *
+   * The default is a rejection, as every recorder command's is, and here it
+   * matters more than most: a stub that quietly answered "nothing would be
+   * deleted" would let a screen test pass while the screen saved a quota
+   * nobody had been shown the cost of (AGENTS.md section 56).
+   */
+  readonly recorderStorage?: (args: Record<string, unknown>) => unknown;
+  /**
    * What `apply_recorder_settings` answers, given the values it was sent.
    *
    * The answer is the settings as they now stand, which is what the screen
@@ -339,6 +353,13 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'recorder_settings') {
         return answered(commands.recorderSettings);
+      }
+      if (command === 'recorder_storage') {
+        return answered(
+          commands.recorderStorage === undefined
+            ? undefined
+            : () => commands.recorderStorage?.(args),
+        );
       }
       if (command === 'apply_recorder_settings') {
         return answered(

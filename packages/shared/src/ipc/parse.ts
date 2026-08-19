@@ -99,6 +99,12 @@ import type {
   ServerMessage,
   SessionRecording,
   SessionSummary,
+  CategoryUsage,
+  ProtectedGroup,
+  RecordingList,
+  StorageLimits,
+  StorageRecording,
+  StorageReport,
   Welcome,
 } from './protocol';
 
@@ -435,6 +441,8 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'diagnostics':
       return { reply: 'diagnostics', diagnostics: readDiagnostics(reply['diagnostics']) };
+    case 'storage':
+      return { reply: 'storage', storage: readStorageReport(reply['storage']) };
     case 'settings':
       return { reply: 'settings', settings: readSettingsView(reply['settings']) };
     case 'audio_devices':
@@ -527,6 +535,91 @@ function readSessionRecording(value: JsonValue | undefined): SessionRecording {
     // (issue #625).
     ...(endReason === undefined ? {} : { end_reason: endReason }),
     ...(duration === undefined ? {} : { duration_ms: duration }),
+  };
+}
+
+/**
+ * What a library may occupy.
+ *
+ * Every field is optional and absent means no limit of that kind, which is what
+ * Clipped ships with — so an object with nothing in it is a valid reading and
+ * not a frame with fields missing.
+ */
+function readStorageLimits(value: JsonValue | undefined): StorageLimits {
+  const limits = object(value, 'storage limits');
+  const what = 'storage limits';
+  const maximumUsage = optionalNumberField(limits, 'maximum_usage_bytes', what);
+  const minimumFree = optionalNumberField(limits, 'minimum_free_space_bytes', what);
+  const maximumAge = optionalNumberField(limits, 'maximum_age_days', what);
+  return {
+    ...(maximumUsage === undefined ? {} : { maximum_usage_bytes: maximumUsage }),
+    ...(minimumFree === undefined ? {} : { minimum_free_space_bytes: minimumFree }),
+    ...(maximumAge === undefined ? {} : { maximum_age_days: maximumAge }),
+  };
+}
+
+function readStorageRecording(value: JsonValue | undefined): StorageRecording {
+  const recording = object(value, 'a recording in a storage report');
+  const what = 'a recording in a storage report';
+  const why = optionalStringField(recording, 'protected_because', what);
+  return {
+    recording_id: numberField(recording, 'recording_id', what),
+    path: stringField(recording, 'path', what),
+    size_bytes: numberField(recording, 'size_bytes', what),
+    started_at: stringField(recording, 'started_at', what),
+    // Absent is a recording nothing protects, which is one a sweep may take.
+    ...(why === undefined ? {} : { protected_because: why }),
+  };
+}
+
+function readRecordingList(value: JsonValue | undefined, what: string): RecordingList {
+  const listed = object(value, what);
+  return {
+    total: numberField(listed, 'total', what),
+    total_bytes: numberField(listed, 'total_bytes', what),
+    recordings: arrayField(listed['recordings'], what, readStorageRecording),
+  };
+}
+
+function readProtectedGroup(value: JsonValue | undefined): ProtectedGroup {
+  const group = object(value, 'a protection rule');
+  const what = 'a protection rule';
+  return {
+    label: stringField(group, 'label', what),
+    recordings: numberField(group, 'recordings', what),
+    bytes: numberField(group, 'bytes', what),
+  };
+}
+
+function readCategoryUsage(value: JsonValue | undefined): CategoryUsage {
+  const usage = object(value, 'a usage category');
+  const what = 'a usage category';
+  return {
+    category: stringField(usage, 'category', what),
+    bytes: numberField(usage, 'bytes', what),
+  };
+}
+
+function readStorageReport(value: JsonValue | undefined): StorageReport {
+  const report = object(value, 'a storage report');
+  const what = 'a storage report';
+  return {
+    recordings_directory: stringField(report, 'recordings_directory', what),
+    trash_directory: stringField(report, 'trash_directory', what),
+    usage_bytes: numberField(report, 'usage_bytes', what),
+    by_category: arrayField(report['by_category'], 'a usage breakdown', readCategoryUsage),
+    free_bytes: numberField(report, 'free_bytes', what),
+    capacity_bytes: numberField(report, 'capacity_bytes', what),
+    limits: readStorageLimits(report['limits']),
+    // Read rather than defaulted. A dry run drawn as the state of the machine
+    // would tell somebody recordings are about to go when nothing has been
+    // saved, and a machine's state drawn as a dry run would tell them the
+    // opposite (AGENTS.md section 56).
+    proposed: booleanField(report, 'proposed', what),
+    would_delete: readRecordingList(report['would_delete'], 'what a sweep would delete'),
+    still_over_limit: numberField(report, 'still_over_limit', what),
+    protected: arrayField(report['protected'], 'the protection rules', readProtectedGroup),
+    largest: readRecordingList(report['largest'], 'the largest recordings'),
   };
 }
 

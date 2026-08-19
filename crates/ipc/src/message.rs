@@ -350,6 +350,29 @@ pub mod features {
         /// [`PreviewState::Pending`](crate::PreviewState) for every recording,
         /// which is a different fact and one a screen draws differently.
         PREVIEWS = "previews";
+        /// The recorder can measure the library and say what a storage limit
+        /// would delete: `get_storage`.
+        ///
+        /// A UI asks for this before drawing a storage screen at all, for the
+        /// reason the others give: a recorder built before
+        /// [issue #95](https://github.com/wildware-uk/clipped/issues/95) has no
+        /// `get_storage` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand).
+        ///
+        /// The difference is sharper here than anywhere else on the list.
+        /// Without the check, a window would have to draw the refusal as *some*
+        /// storage state, and every reading available to it is a dangerous one:
+        /// "nothing would be deleted" over a recorder that was never asked is
+        /// the reassurance somebody would set a limit on the strength of, and
+        /// "0 bytes free" is the alarm they would delete recordings on the
+        /// strength of. Neither is a thing to be wrong about (AGENTS.md
+        /// sections 27 and 56).
+        ///
+        /// It says the recorder *can be asked*, not that any limit is
+        /// configured: a machine with none answers with a measurement and
+        /// [`StorageLimits::is_unlimited`](crate::StorageLimits::is_unlimited),
+        /// which is a different fact and one a screen draws differently.
+        STORAGE = "storage";
     }
 }
 

@@ -54,6 +54,7 @@
         "open_preview",
         "get_hotkeys",
         "get_diagnostics",
+        "get_storage",
         "get_settings",
         "apply_settings",
         "get_audio_devices",
@@ -145,7 +146,8 @@
         "diagnostics",
         "startup",
         "automatic",
-        "previews"
+        "previews",
+        "storage"
       ],
       "tolerates_unrecognised": true
     },
@@ -214,7 +216,8 @@
         "favourited",
         "locked",
         "plugins",
-        "diagnostics"
+        "diagnostics",
+        "storage"
       ],
       "tolerates_unrecognised": false
     },
@@ -313,6 +316,13 @@
         "restart",
         "to",
         "trigger"
+      ],
+      "optional": []
+    },
+    "category_usage": {
+      "required": [
+        "bytes",
+        "category"
       ],
       "optional": []
     },
@@ -439,6 +449,12 @@
       ],
       "optional": [
         "losses"
+      ]
+    },
+    "get_storage": {
+      "required": [],
+      "optional": [
+        "limits"
       ]
     },
     "hello": {
@@ -673,6 +689,14 @@
         "peaks"
       ]
     },
+    "protected_group": {
+      "required": [
+        "bytes",
+        "label",
+        "recordings"
+      ],
+      "optional": []
+    },
     "protocol_error": {
       "required": [
         "code",
@@ -708,6 +732,14 @@
       "optional": [
         "session"
       ]
+    },
+    "recording_list": {
+      "required": [
+        "recordings",
+        "total",
+        "total_bytes"
+      ],
+      "optional": []
     },
     "recording_summary": {
       "required": [
@@ -918,6 +950,13 @@
       ],
       "optional": []
     },
+    "reply.storage": {
+      "required": [
+        "reply",
+        "storage"
+      ],
+      "optional": []
+    },
     "reply.trash_emptied": {
       "required": [
         "emptied",
@@ -1064,6 +1103,42 @@
       "optional": [
         "recording_id"
       ]
+    },
+    "storage_limits": {
+      "required": [],
+      "optional": [
+        "maximum_age_days",
+        "maximum_usage_bytes",
+        "minimum_free_space_bytes"
+      ]
+    },
+    "storage_recording": {
+      "required": [
+        "path",
+        "recording_id",
+        "size_bytes",
+        "started_at"
+      ],
+      "optional": [
+        "protected_because"
+      ]
+    },
+    "storage_report": {
+      "required": [
+        "by_category",
+        "capacity_bytes",
+        "free_bytes",
+        "largest",
+        "limits",
+        "proposed",
+        "protected",
+        "recordings_directory",
+        "still_over_limit",
+        "trash_directory",
+        "usage_bytes",
+        "would_delete"
+      ],
+      "optional": []
     },
     "take_screenshot": {
       "required": [],
@@ -1229,6 +1304,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "get_storage",
+      "params": "get_storage",
+      "reply": "reply.storage",
+      "available_in_this_build": true
+    },
+    {
       "name": "get_settings",
       "params": null,
       "reply": "reply.settings",
@@ -1345,6 +1426,35 @@
       },
       "parses": true,
       "discriminant": "request.start_recording"
+    },
+    {
+      "name": "asking what the library occupies, against the limits that are configured",
+      "direction": "client",
+      "frame": {
+        "command": "get_storage",
+        "id": 21,
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.get_storage"
+    },
+    {
+      "name": "asking what a storage limit would delete, before it is saved",
+      "direction": "client",
+      "frame": {
+        "command": "get_storage",
+        "id": 22,
+        "params": {
+          "limits": {
+            "maximum_age_days": 90,
+            "maximum_usage_bytes": 250000000000,
+            "minimum_free_space_bytes": 21474836480
+          }
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.get_storage"
     },
     {
       "name": "asking for a page of the library",
@@ -1484,7 +1594,8 @@
           "diagnostics",
           "startup",
           "automatic",
-          "previews"
+          "previews",
+          "storage"
         ],
         "protocol_version": 2,
         "recorder": {
@@ -2706,6 +2817,132 @@
       },
       "parses": true,
       "discriminant": "response.ok.hotkeys"
+    },
+    {
+      "name": "what the library occupies, against the limits that are configured",
+      "direction": "server",
+      "frame": {
+        "id": 21,
+        "outcome": {
+          "ok": {
+            "reply": "storage",
+            "storage": {
+              "by_category": [
+                {
+                  "bytes": 402204889112,
+                  "category": "recordings"
+                }
+              ],
+              "capacity_bytes": 1000204886016,
+              "free_bytes": 162003120128,
+              "largest": {
+                "recordings": [
+                  {
+                    "path": "D:\\Clips\\clipped-cs2-20260811-201400-1.mkv",
+                    "protected_because": "it is a favourite",
+                    "recording_id": 41,
+                    "size_bytes": 9812009112,
+                    "started_at": "2026-08-11T20:14:00+01:00"
+                  }
+                ],
+                "total": 118,
+                "total_bytes": 411204889112
+              },
+              "limits": {
+                "maximum_age_days": 90,
+                "maximum_usage_bytes": 250000000000,
+                "minimum_free_space_bytes": 21474836480
+              },
+              "proposed": false,
+              "protected": [
+                {
+                  "bytes": 84120091112,
+                  "label": "Favourites",
+                  "recordings": 12
+                }
+              ],
+              "recordings_directory": "D:\\Clips",
+              "still_over_limit": 0,
+              "trash_directory": "D:\\Clips.trash",
+              "usage_bytes": 411204889112,
+              "would_delete": {
+                "recordings": [
+                  {
+                    "path": "D:\\Clips\\clipped-cs2-20260811-201400-1.mkv",
+                    "protected_because": "it is a favourite",
+                    "recording_id": 41,
+                    "size_bytes": 9812009112,
+                    "started_at": "2026-08-11T20:14:00+01:00"
+                  }
+                ],
+                "total": 118,
+                "total_bytes": 411204889112
+              }
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.storage"
+    },
+    {
+      "name": "a dry run of limits a window is about to save, which it cannot meet",
+      "direction": "server",
+      "frame": {
+        "id": 22,
+        "outcome": {
+          "ok": {
+            "reply": "storage",
+            "storage": {
+              "by_category": [
+                {
+                  "bytes": 402204889112,
+                  "category": "recordings"
+                }
+              ],
+              "capacity_bytes": 1000204886016,
+              "free_bytes": 162003120128,
+              "largest": {
+                "recordings": [
+                  {
+                    "path": "D:\\Clips\\clipped-cs2-20260811-201400-1.mkv",
+                    "protected_because": "it is a favourite",
+                    "recording_id": 41,
+                    "size_bytes": 9812009112,
+                    "started_at": "2026-08-11T20:14:00+01:00"
+                  }
+                ],
+                "total": 118,
+                "total_bytes": 411204889112
+              },
+              "limits": {},
+              "proposed": true,
+              "protected": [],
+              "recordings_directory": "D:\\Clips",
+              "still_over_limit": 12000000000,
+              "trash_directory": "D:\\Clips.trash",
+              "usage_bytes": 411204889112,
+              "would_delete": {
+                "recordings": [
+                  {
+                    "path": "D:\\Clips\\clipped-cs2-20260811-201400-1.mkv",
+                    "protected_because": "it is a favourite",
+                    "recording_id": 41,
+                    "size_bytes": 9812009112,
+                    "started_at": "2026-08-11T20:14:00+01:00"
+                  }
+                ],
+                "total": 118,
+                "total_bytes": 411204889112
+              }
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.storage.proposed"
     },
     {
       "name": "the diagnostics of a recorder that is recording, whose preferred capture backend could not be started",

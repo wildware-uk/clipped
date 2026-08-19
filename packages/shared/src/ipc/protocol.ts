@@ -138,6 +138,7 @@ export const FEATURES = [
   'startup',
   'automatic',
   'previews',
+  'storage',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -176,6 +177,7 @@ export const COMMANDS = [
   'open_preview',
   'get_hotkeys',
   'get_diagnostics',
+  'get_storage',
   'get_settings',
   'apply_settings',
   'get_audio_devices',
@@ -277,6 +279,7 @@ export const REPLIES = [
   'start_at_login',
   'shutting_down',
   'diagnostics',
+  'storage',
 ] as const;
 
 /** The name of a reply. Closed: a reply nobody can read is a failed command. */
@@ -1425,6 +1428,229 @@ export interface TrashEmptiedReply {
 }
 
 /**
+ * How many recordings a list in a storage report names before it stops.
+ *
+ * Mirrors `MOST_LISTED` in `crates/ipc/src/storage.rs`. Enough to fill a panel
+ * and to answer "what is filling my drive"; far short of a frame. What is left
+ * out is not hidden — {@link RecordingList.total} and
+ * {@link RecordingList.total_bytes} are of the whole set, and a screen says so.
+ */
+export const MOST_LISTED = 25;
+
+/**
+ * What a library may occupy, as a window reads and proposes it.
+ *
+ * Every field is optional and absent means **no limit of that kind**, which is
+ * what Clipped ships with. That reading is the same in both directions: absent
+ * in a {@link StorageReport} is a limit nobody has configured, and absent in a
+ * {@link GetStorageParams.limits} is a limit the window is asking about the
+ * removal of.
+ *
+ * Bytes rather than gigabytes, and days rather than a duration, because that is
+ * how `settings.json` spells them — and a second unit on the wire is a second
+ * place for a factor of 1024 to be wrong.
+ */
+export interface StorageLimits {
+  /** What the library may occupy, in bytes. */
+  readonly maximum_usage_bytes?: number;
+  /** What must stay free on the volume, in bytes. */
+  readonly minimum_free_space_bytes?: number;
+  /** How old a recording may get, in days. */
+  readonly maximum_age_days?: number;
+}
+
+/**
+ * Ask what the library occupies and what a limit would do about it. A type
+ * alias for the reason {@link StartRecordingParams} is one.
+ *
+ * All optional, and an omitted request measures against the limits that are
+ * configured — which is what a screen asks when it opens.
+ */
+export type GetStorageParams = {
+  /**
+   * Limits to judge the measurement against **instead of** the configured ones.
+   *
+   * This is the dry run: a window about to save a maximum usage sends the value
+   * somebody typed and is told what saving it would delete, before the setting
+   * is written and before the sweep acts on it.
+   *
+   * The whole set is replaced rather than merged, so a field left out is a limit
+   * the proposal does not have. Merging would make "clear this limit"
+   * unexpressible, and a window could not preview a removal.
+   *
+   * Nothing is saved by asking. The limits are written through `apply_settings`
+   * like every other setting.
+   */
+  readonly limits?: StorageLimits;
+};
+
+/** What one recording occupies, and whether a sweep may take it. */
+export interface StorageRecording {
+  /** The index's own identifier, as `library_sessions` reports it. */
+  readonly recording_id: number;
+  /**
+   * The file.
+   *
+   * The same path `library_sessions` sends, so a window can match a row here
+   * against the recording it already drew. A path inside the user's own profile,
+   * so it is redacted before it reaches a log (`redactPath.ts`).
+   */
+  readonly path: string;
+  /** What it occupies, or zero when nothing has measured it. */
+  readonly size_bytes: number;
+  /** When it started, RFC 3339. The order a sweep deletes in. */
+  readonly started_at: string;
+  /**
+   * Why a sweep will not take it, in the recorder's own words.
+   *
+   * Absent for a recording nothing protects, which is one a sweep may take.
+   * Present is drawn beside the row rather than instead of it: a protected
+   * recording is still filling the drive.
+   */
+  readonly protected_because?: string;
+}
+
+/**
+ * Some recordings, and the whole set they were taken from.
+ *
+ * The two totals are of everything, and {@link recordings} is the first
+ * {@link MOST_LISTED} of them. A screen draws the rows and says how many more
+ * there are — a truncated list that did not carry its own total would read as
+ * the whole answer, which for "what a limit would delete" is the worst possible
+ * thing to be wrong about.
+ */
+export interface RecordingList {
+  /** How many recordings there are in all. */
+  readonly total: number;
+  /** What all of them occupy. */
+  readonly total_bytes: number;
+  /** The first {@link MOST_LISTED} of them, in the order the list is about. */
+  readonly recordings: readonly StorageRecording[];
+}
+
+/**
+ * One rule that keeps recordings out of a sweep, and what it is holding.
+ *
+ * SPEC.md section 27's "never automatically delete" list, as measured state
+ * rather than as a sentence on a screen: this is how many recordings that rule
+ * is protecting right now and what they occupy. A screen drawing "favourites are
+ * protected" with no figure beside it is decorative copy, and a user cannot tell
+ * it from a promise nothing keeps (AGENTS.md section 27).
+ */
+export interface ProtectedGroup {
+  /**
+   * The rule, in the words a person reads, such as `Favourites`.
+   *
+   * Sent rather than derived, for the reason {@link HotkeyBinding.label} is: the
+   * vocabulary of protections lives in the recorder, and a window keeping its own
+   * table of them would show nothing at all for a rule a newer recorder had
+   * added.
+   */
+  readonly label: string;
+  /** How many recordings it is protecting. */
+  readonly recordings: number;
+  /** What they occupy. */
+  readonly bytes: number;
+}
+
+/** What one kind of file occupies. */
+export interface CategoryUsage {
+  /** The kind, as accounting names it: `recordings`, `trash`, `thumbnails`. */
+  readonly category: string;
+  /** What the files of that kind occupy. */
+  readonly bytes: number;
+}
+
+/**
+ * What the library occupies, what a limit would take, and what it would keep.
+ *
+ * The reply to `get_storage`. Everything in it is measured: the usage is a walk
+ * of the recording and trash directories, the free space is what the volume
+ * reports, and the plan is the one the sweep would carry out.
+ */
+export interface StorageReport {
+  /**
+   * Where this recorder writes, which is the directory that was measured.
+   *
+   * The directory **in force**, which for the length of a sitting can differ
+   * from the one `settings.json` holds: where automatic recordings go moves
+   * between sittings and never during one (issue #609). This is the folder the
+   * figures are about — `get_settings` carries the other, and says so on the row
+   * with {@link SettingEntry.not_yet_in_force}.
+   */
+  readonly recordings_directory: string;
+  /** Where deleted media waits, and is measured as part of the usage. */
+  readonly trash_directory: string;
+  /** What the library occupies, across every category measured. */
+  readonly usage_bytes: number;
+  /**
+   * What each category occupies, largest first.
+   *
+   * A category with nothing in it is left out rather than sent as zero.
+   */
+  readonly by_category: readonly CategoryUsage[];
+  /**
+   * What is free on the volume the recordings are on.
+   *
+   * Measured, not derived: the disk holds other applications' files too, so this
+   * cannot be worked out from the usage above.
+   */
+  readonly free_bytes: number;
+  /** The whole volume, which is what makes the free figure mean something. */
+  readonly capacity_bytes: number;
+  /** The limits the measurement was judged against. */
+  readonly limits: StorageLimits;
+  /**
+   * Whether those limits came from {@link GetStorageParams.limits} rather than
+   * from the settings file.
+   *
+   * `true` is a dry run: **nothing has been saved**, and a window has to say so
+   * or it is showing somebody the consequences of a setting they will believe is
+   * already in force.
+   */
+  readonly proposed: boolean;
+  /**
+   * What a sweep would send to the trash under those limits, oldest first.
+   *
+   * Empty for a library inside its limits, and for one with no limits at all.
+   * Not empty is the confirmation a window owes somebody before it saves them:
+   * these recordings, this much.
+   */
+  readonly would_delete: RecordingList;
+  /**
+   * What would still be over the limit once all of that had gone.
+   *
+   * Zero when the limits would be met. Non-zero means the sweep would run out of
+   * things it is allowed to delete, which is a disk that stays full and is
+   * something somebody has to be told rather than a cleanup that worked.
+   */
+  readonly still_over_limit: number;
+  /**
+   * What a sweep would keep, one row per rule.
+   *
+   * Empty on a library where nothing is favourited or locked. Never a reason to
+   * draw nothing: a screen says the rules protect nothing yet, which is a
+   * different thing from a screen that did not ask.
+   */
+  readonly protected: readonly ProtectedGroup[];
+  /**
+   * Every recording the index knows, largest first.
+   *
+   * The review path SPEC.md section 27 asks for: somebody who can see what is
+   * filling their drive can act before automatic cleanup does.
+   */
+  readonly largest: RecordingList;
+}
+
+/** What the library occupies, and what a limit would do about it. */
+export interface StorageReply {
+  /** The tag. */
+  readonly reply: 'storage';
+  /** The measurement, the limits it was judged against, and the plan. */
+  readonly storage: StorageReport;
+}
+
+/**
  * Marking one thing a favourite, or clearing the mark.
  *
  * The target takes two fields because the schema does: a sitting is addressed by
@@ -2096,6 +2322,7 @@ export type Reply =
   | PreviewOpenedReply
   | HotkeysReply
   | DiagnosticsReply
+  | StorageReply
   | SettingsReply
   | AudioDevicesReply
   | MicrophoneLevelReply

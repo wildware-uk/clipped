@@ -54,10 +54,11 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use clipped_ipc::{
-    ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
-    LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LockMark,
-    Preview, ProtocolError, RestoreFromTrash, RestoredItem, SetFavourite, SetLock, TrashEmptied,
-    TrashListing, TrashedItem, MAX_FRAME_BYTES,
+    CategoryUsage, ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark,
+    LibraryEvents, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
+    LibrarySessions, LockMark, Preview, ProtectedGroup, ProtocolError, RecordingList,
+    RestoreFromTrash, RestoredItem, SetFavourite, SetLock, StorageLimits, StorageRecording,
+    StorageReport, TrashEmptied, TrashListing, TrashedItem, MAX_FRAME_BYTES, MOST_LISTED,
 };
 use clipped_library::favourites::Favourite;
 use clipped_library::index::{
@@ -208,6 +209,162 @@ fn empty_refused(error: clipped_library::trash::TrashError) -> ProtocolError {
     ProtocolError::new(code, error.to_string())
 }
 
+/// One recording a sweep considered, as the window is told about it.
+fn storage_recording(
+    candidate: &clipped_library::accounting::cleanup::Candidate,
+) -> StorageRecording {
+    StorageRecording {
+        recording_id: candidate.item.id,
+        path: candidate.path.to_string_lossy().into_owned(),
+        size_bytes: candidate.size_bytes,
+        started_at: candidate.started_at.clone(),
+        // The recorder's own sentence, which already reads as a reason: "it is
+        // a favourite", "the sitting it belongs to is locked". A window keeping
+        // its own table of these would say nothing at all for a rule a newer
+        // recorder had added (`clipped_library::accounting::cleanup`).
+        protected_because: candidate.protection.map(|why| why.to_string()),
+    }
+}
+
+/// Some recordings and the whole set they came from, bounded to what a frame
+/// and a screen can hold.
+///
+/// The totals are of everything and the rows are the first [`MOST_LISTED`], so a
+/// window can say how many more there are. A truncated list carrying no total
+/// would read as the whole answer, which for "what a limit would delete" is the
+/// worst thing on this screen to be wrong about.
+fn recording_list(candidates: &[clipped_library::accounting::cleanup::Candidate]) -> RecordingList {
+    RecordingList {
+        total: candidates.len() as u64,
+        total_bytes: candidates
+            .iter()
+            .map(|candidate| candidate.size_bytes)
+            .sum(),
+        recordings: candidates
+            .iter()
+            .take(MOST_LISTED)
+            .map(storage_recording)
+            .collect(),
+    }
+}
+
+/// The name a person reads for one protection rule.
+///
+/// The recorder's vocabulary rather than the window's, for the reason
+/// `HotkeyBinding::label` is the recorder's: the rules live in
+/// `clipped_library::accounting::cleanup`, and a window with its own table of
+/// them would draw nothing for a rule added after it was built.
+///
+/// `Display` is not reused here. It writes the *reason one row is kept* - "it is
+/// a favourite" - which reads correctly beside a single recording and not at all
+/// as the heading of a group of them.
+fn protection_label(protection: clipped_library::accounting::cleanup::Protection) -> &'static str {
+    use clipped_library::accounting::cleanup::Protection;
+
+    match protection {
+        Protection::Locked => "Locked",
+        Protection::LockedSession => "In a locked sitting",
+        Protection::Favourite => "Favourites",
+        Protection::FavouriteSession => "In a favourited sitting",
+        Protection::SourceOfClips { .. } => "Clips were cut from them",
+        Protection::AlreadyDeleted => "Already in the trash",
+        Protection::Missing => "Their file is not on disk",
+    }
+}
+
+/// What each protection rule is holding, in the order the rules were met.
+///
+/// Grouped rather than listed. Nobody wants to scroll ten thousand protected
+/// recordings; what SPEC.md section 27's "never automatically delete" list needs
+/// in order to be believable is a count and a size against each rule, so that
+/// the promise is measured state rather than a sentence on a screen (AGENTS.md
+/// section 27).
+///
+/// A rule holding nothing is left out. "Favourites: 0 recordings" on a machine
+/// where nothing is favourited is a row about a feature rather than about the
+/// disk, and a window says the rules are protecting nothing yet in one sentence
+/// instead.
+fn protected_groups(
+    protected: &[clipped_library::accounting::cleanup::Candidate],
+) -> Vec<ProtectedGroup> {
+    let mut groups: Vec<ProtectedGroup> = Vec::new();
+
+    for candidate in protected {
+        let Some(protection) = candidate.protection else {
+            continue;
+        };
+        let label = protection_label(protection);
+        if let Some(group) = groups.iter_mut().find(|group| group.label == label) {
+            group.recordings += 1;
+            group.bytes += candidate.size_bytes;
+        } else {
+            groups.push(ProtectedGroup {
+                label: label.to_owned(),
+                recordings: 1,
+                bytes: candidate.size_bytes,
+            });
+        }
+    }
+
+    groups
+}
+
+/// How the settings file spells a maximum age, which is whole days.
+const SECONDS_A_DAY: u64 = 86_400;
+
+/// What the library occupies, as the window is told about it.
+///
+/// `proposed` says whether the limits came from the request rather than from the
+/// settings file, and it travels because the two readings must not be drawn the
+/// same way: one is what is happening, the other is what *would* happen if
+/// somebody saved a limit they have not saved yet (AGENTS.md section 56).
+fn report_of(
+    measured: &clipped_session::cleanup::Measurement,
+    recordings: &std::path::Path,
+    proposed: bool,
+) -> StorageReport {
+    let mut by_category: Vec<CategoryUsage> = measured
+        .by_category
+        .iter()
+        // A category with nothing in it is left out rather than sent as a zero:
+        // `screenshots: 0` on a machine that has never taken one is a row about
+        // a feature rather than about the disk.
+        .filter(|(_, bytes)| **bytes > 0)
+        .map(|(category, bytes)| CategoryUsage {
+            category: category.as_str().to_owned(),
+            bytes: *bytes,
+        })
+        .collect();
+    by_category.sort_by_key(|usage| core::cmp::Reverse(usage.bytes));
+
+    StorageReport {
+        recordings_directory: recordings.to_string_lossy().into_owned(),
+        trash_directory: measured.trash.to_string_lossy().into_owned(),
+        usage_bytes: measured.usage_bytes,
+        by_category,
+        free_bytes: measured.free_bytes,
+        // Read from the same volume the free space was, and falling back to the
+        // free figure rather than to zero: a capacity of nought beside 162 GB
+        // free is a drive that is more than full, which is a worse thing to draw
+        // than a bar that reads as entirely free.
+        capacity_bytes: clipped_library::accounting::capacity_of(recordings)
+            .map_or(measured.free_bytes, |volume| volume.total_bytes()),
+        limits: StorageLimits {
+            maximum_usage_bytes: measured.limits.maximum_usage(),
+            minimum_free_space_bytes: measured.limits.minimum_free_space(),
+            maximum_age_days: measured
+                .limits
+                .maximum_age()
+                .map(|age| age.as_secs() / SECONDS_A_DAY),
+        },
+        proposed,
+        would_delete: recording_list(&measured.plan.deletions),
+        still_over_limit: measured.plan.still_over_limit,
+        protected: protected_groups(&measured.plan.protected),
+        largest: recording_list(&measured.largest),
+    }
+}
+
 /// A path as the window is told about it, or nothing where there is none.
 fn text(path: Option<&std::path::Path>) -> Option<String> {
     path.map(|path| path.to_string_lossy().into_owned())
@@ -305,6 +462,64 @@ impl LibraryReader {
                 directory: directory.to_string_lossy().into_owned(),
                 items: entries.into_iter().map(trashed_item).collect(),
             })
+        })
+    }
+
+    /// What the library occupies, and what a storage limit would do about it.
+    ///
+    /// The projection of `clipped_session::cleanup::preview` a window reads
+    /// (`clipped_ipc::storage`,
+    /// [issue #95](https://github.com/wildware-uk/clipped/issues/95)).
+    /// `configuration` carries the limits to judge against — the configured
+    /// ones, or the ones a caller proposed — and `recordings` is the folder this
+    /// recorder writes into, which is the root that is measured and the volume
+    /// whose free space is read.
+    ///
+    /// **Nothing is deleted, trashed or moved.** `preview` is the sweep's own
+    /// measurement without its last step, which is what makes a dry run
+    /// impossible to disagree with what happens (AGENTS.md section 55).
+    ///
+    /// # What this costs, and why it is answered here
+    ///
+    /// It walks the recording and trash directories, reading no file's
+    /// contents, and runs one statement over the index. That is more than the
+    /// other reads on this connection thread, and it is still the right thread:
+    /// it shares nothing with a recording — no capture, encoder or muxer thread
+    /// waits on the filesystem or on this lock — and it is behind a screen
+    /// somebody opened deliberately (AGENTS.md sections 17 and 20).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::LibraryUnavailable`] when the index could not be read, when
+    /// the directories could not be declared, or when the volume could not be
+    /// measured — each carrying `clipped_session`'s own account of which.
+    /// Refused rather than answered with a guess: free space that is unknown is
+    /// not free space of zero, and a screen told the disk was full would send
+    /// somebody deleting recordings to fix a reading nobody took.
+    pub fn measure(
+        &self,
+        configuration: &clipped_session::config::Configuration,
+        recordings: &std::path::Path,
+        proposed: bool,
+    ) -> Result<StorageReport, ProtocolError> {
+        self.with_database(|database| {
+            let measured = clipped_session::cleanup::preview(
+                configuration,
+                recordings,
+                database,
+                SystemTime::now(),
+            )
+            .map_err(|reason| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    format!(
+                        "the library could not be measured: {}",
+                        crate::storage::describe(&reason)
+                    ),
+                )
+            })?;
+
+            Ok(report_of(&measured, recordings, proposed))
         })
     }
 
@@ -923,7 +1138,15 @@ struct Indexer {
     /// Handed in rather than read here, and empty unless a caller says
     /// otherwise, so that a test's answer does not depend on the settings file
     /// of whoever is running it (AGENTS.md section 25).
-    storage: clipped_session::config::StorageSettings,
+    ///
+    /// Behind a lock because it changes while the process runs. It was a plain
+    /// field, read once when `serve` started, which made a limit saved from the
+    /// Settings screen a control whose effect waited for a restart - the
+    /// recorder would keep sweeping to yesterday's figure and nothing on screen
+    /// would say so (AGENTS.md section 27, issue #95).
+    /// [`LibraryIndexer::set_storage`] is what a save calls, and the sweep reads
+    /// it at the top of every run.
+    storage: Mutex<clipped_session::config::StorageSettings>,
     control: IndexControl,
     state: Mutex<IndexerState>,
     woken: Condvar,
@@ -999,7 +1222,7 @@ impl LibraryIndexer {
                 path,
                 settings: IndexSettings::new(roots.clone()),
                 roots,
-                storage: clipped_session::config::StorageSettings::none(),
+                storage: Mutex::new(clipped_session::config::StorageSettings::none()),
                 control: IndexControl::new(),
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
@@ -1017,11 +1240,51 @@ impl LibraryIndexer {
     /// is unlimited and `sweep` stops before it reads a directory
     /// ([issue #111](https://github.com/wildware-uk/clipped/issues/111)).
     #[must_use]
-    pub fn with_storage(mut self, storage: clipped_session::config::StorageSettings) -> Self {
-        if let Some(shared) = Arc::get_mut(&mut self.shared) {
-            shared.storage = storage;
-        }
+    pub fn with_storage(self, storage: clipped_session::config::StorageSettings) -> Self {
+        self.set_storage(storage);
         self
+    }
+
+    /// What the sweep is enforcing, as it now stands.
+    ///
+    /// Here so that "a limit saved from the window reaches the sweep" is a claim
+    /// something can check. It was the assertion that could not be written when
+    /// the settings were a plain field read once at start-up, and a claim
+    /// nothing checks is how that arrangement survived
+    /// (`serve.rs`, issue #95).
+    #[must_use]
+    pub fn storage(&self) -> clipped_session::config::StorageSettings {
+        match self.shared.storage.lock() {
+            Ok(held) => held.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Tells the sweep what the library is allowed to occupy, from now on.
+    ///
+    /// Called when `apply_settings` saves, so that a limit set in the window is
+    /// the limit the next sweep enforces. Before this the settings were read
+    /// once when `serve` started, which made the storage limits the one group of
+    /// settings a save did not reach until the recorder was restarted - and
+    /// nothing on screen said so, which is a control that appears to do nothing
+    /// (AGENTS.md section 27).
+    ///
+    /// It cannot disturb a sweep in progress. The lock is taken to clone the
+    /// settings at the top of a run and released before anything is measured, so
+    /// a save either lands before that clone and is honoured this run, or after
+    /// it and is honoured the next one. Nothing waits on this but the indexer
+    /// thread, and never for longer than a `clone` (AGENTS.md section 20).
+    pub fn set_storage(&self, storage: clipped_session::config::StorageSettings) {
+        match self.shared.storage.lock() {
+            Ok(mut held) => *held = storage,
+            // A poisoned lock means a previous holder panicked while replacing
+            // the settings. Nothing is deleted on the strength of a limit that
+            // could not be read: the sweep keeps whatever it last had, which is
+            // at worst a stale limit and never an invented one.
+            Err(_) => tracing::warn!(
+                "the storage limits could not be updated, so the sweep keeps the ones it has"
+            ),
+        }
     }
 
     /// The same indexer, working at a pace the caller chose.
@@ -1311,8 +1574,15 @@ impl Indexer {
             return;
         };
 
+        // Cloned out from under the lock and the lock released, so that a save
+        // arriving mid-sweep waits on nothing (`LibraryIndexer::set_storage`).
+        let storage = match self.storage.lock() {
+            Ok(held) => held.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
         let mut configuration = clipped_session::config::Configuration::defaults();
-        configuration.set_storage(self.storage.clone());
+        configuration.set_storage(storage);
 
         let report = clipped_session::cleanup::sweep(
             &configuration,

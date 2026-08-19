@@ -346,7 +346,7 @@ user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
 `shutdown`, `library`, `export`, `playback`, `previews`, `hotkeys`, `replay`,
 `export_progress`, `settings`, `microphone_level`, `diagnostics`, `startup`,
-`automatic`.
+`automatic`, `storage`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -458,6 +458,17 @@ answers it on a machine with no hardware encoder replies with a report saying
 so. Drawn without the check, "Clipped found no encoder on this machine" is what a
 window would show for a question it never managed to put — on the one screen
 whose entire subject is what is and is not known.
+
+`storage` is the check in front of a Storage screen, and it gates the pair of
+readings on this list it would be most dangerous to invent. A recorder built
+before [`get_storage`](#get_storage) refuses it by name, and a window that drew
+*some* storage state from the refusal has two obvious ways to be wrong and both
+of them are acted on: "nothing would be deleted" is what somebody sets a quota on
+the strength of, and "no free space" is what they delete recordings on the
+strength of (AGENTS.md sections 27 and 56). The feature says the recorder can be
+*asked*, not that any limit is set: a machine with none answers with a
+measurement and an empty `limits`, which is a different fact and one a screen
+draws differently.
 
 `settings` says the build has all three of [`get_settings`](#the-settings),
 `apply_settings` and [`get_audio_devices`](#get_audio_devices) — one build has
@@ -687,6 +698,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `open_preview` | `source`, `kind`, `buckets` (optional) | `preview_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `get_diagnostics` | none | `diagnostics` | yes |
+| `get_storage` | `limits` (optional) | `storage` | yes |
 | `get_settings` | none | `settings` | yes |
 | `apply_settings` | `values`, below | `settings` | yes |
 | `get_audio_devices` | none | `audio_devices` | yes |
@@ -1774,6 +1786,110 @@ used, and when that answer was taken — which is the part that changes how a bu
 report reads. `apps/recorder/tests/ipc_protocol.rs::a_recorder_carries_no_path_into_its_diagnostics`
 asserts it over the bytes of the frame rather than over a parsed reply, so a path
 in a field this build does not define is caught too.
+
+### `get_storage`
+
+**What the library occupies, what a storage limit would delete, and what it
+would keep.** SPEC.md section 27 makes storage a product feature — a maximum
+size, a minimum amount of free disk space, a maximum recording age, with
+favourites and locked footage never deleted — and until
+[#95](https://github.com/wildware-uk/clipped/issues/95) none of it could be seen
+from the window. The measurement is a walk of the recording and trash folders and
+a read of the index, and the desktop application links neither `clipped-library`
+nor `clipped-storage` and has no file-system permission, so it is a command like
+every other library read.
+
+```json
+{"type":"request","id":21,"command":"get_storage"}
+```
+
+```json
+{"type":"response","id":21,"outcome":{"ok":{"reply":"storage","storage":{
+  "recordings_directory":"D:\\Clips","trash_directory":"D:\\Clips.trash",
+  "usage_bytes":411204889112,
+  "by_category":[{"category":"recordings","bytes":402204889112}],
+  "free_bytes":162003120128,"capacity_bytes":1000204886016,
+  "limits":{"maximum_usage_bytes":250000000000,
+            "minimum_free_space_bytes":21474836480,
+            "maximum_age_days":90},
+  "proposed":false,
+  "would_delete":{"total":118,"total_bytes":411204889112,
+                  "recordings":[{"recording_id":41,
+                                 "path":"D:\\Clips\\clipped-cs2-20260811-201400-1.mkv",
+                                 "size_bytes":9812009112,
+                                 "started_at":"2026-08-11T20:14:00+01:00",
+                                 "protected_because":"it is a favourite"}]},
+  "still_over_limit":0,
+  "protected":[{"label":"Favourites","recordings":12,"bytes":84120091112}],
+  "largest":{"total":118,"total_bytes":411204889112,"recordings":[]}}}}}
+```
+
+**Nothing is deleted, trashed or moved by asking**, and nothing is saved. The
+recorder answers from `clipped_session::cleanup::preview`, which is the same
+measurement its storage sweep takes before it acts — so a dry run is the decision
+without its last step rather than a second implementation of it (AGENTS.md
+section 55).
+
+#### The dry run, which is why the command takes parameters
+
+`limits` asks the question the other way round: *given these limits, what would
+go?*
+
+```json
+{"type":"request","id":22,"command":"get_storage",
+ "params":{"limits":{"maximum_usage_bytes":250000000000}}}
+```
+
+The reply comes back with `proposed` set, and a window has to say so: the same
+frame otherwise describes what *is* happening and what *would* happen if somebody
+saved a setting they have not saved. Setting a maximum usage is the one setting
+in this application that deletes somebody's recordings, and a control that does
+that silently is what AGENTS.md section 56 is about.
+
+The whole set of limits is **replaced** rather than merged, so a field left out
+is a limit the proposal does not have — which is how "what would clearing this
+do" is asked at all. A figure the settings file would refuse is refused here too,
+with `clipped_session`'s own sentence, so nothing is ever previewed against
+limits that could never be saved.
+
+The limits themselves are written through
+[`apply_settings`](#the-settings), like every other setting.
+`maximum_usage_bytes`, `minimum_free_space_bytes` and `maximum_age_days` are
+rows in `get_settings` with `applies: true`, because the sweep in the recorder's
+indexer reads them after every reconciliation.
+
+#### What is bounded, and what stands in for the rest
+
+`would_delete` and `largest` name the first 25 recordings each — `MOST_LISTED` in
+`crates/ipc/src/storage.rs` — and carry `total` and `total_bytes` of the whole
+set, so a window can draw the rows and say how many more there are. A library of
+ten thousand recordings would not fit in a frame, and a truncated list that did
+not carry its own total would read as the whole answer.
+
+`protected` is not a list at all. Nobody wants to scroll ten thousand protected
+recordings; what SPEC.md section 27's "never automatically delete" needs in order
+to be believable is a count and a size against each rule, so it crosses as one
+row per rule with the recorder's own label. A rule holding nothing is left out.
+
+`still_over_limit` is what would remain over the limit once every deletion had
+happened. Non-zero means the sweep would run out of things it is allowed to take,
+which is a disk that stays full — something somebody has to be told rather than a
+cleanup reported as working.
+
+`recordings_directory` is the folder the recorder is **writing into**, which for
+the length of a sitting can differ from the one the settings file holds
+([#609](https://github.com/wildware-uk/clipped/issues/609)). The figures are
+about the folder the files are in, so it is that one that is walked;
+`get_settings` carries the other with `not_yet_in_force` beside it, and a screen
+can say both.
+
+#### What is refused
+
+`library_unavailable`, when the index could not be read, the directories could
+not be declared, or the volume could not be measured — carrying which of the
+three. Refused rather than answered with a guess: free space that is unknown is
+not free space of zero, and a screen told the disk was full would send somebody
+deleting recordings to fix a reading nobody took.
 
 ### `stop_recording`
 

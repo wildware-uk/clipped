@@ -1,11 +1,21 @@
-import type { AudioDevices, SettingEntry, SettingsView } from '@clipped/shared';
+import type { AudioDevices, SettingEntry, SettingsView, StorageReport } from '@clipped/shared';
 import { railPanelId, railTabId, SectionRail, type RailSection } from '@clipped/ui';
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import { HotkeyList } from './HotkeyList';
-import type { LibraryRead } from './library';
+import { StorageAccount } from './StorageAccount';
+import { asProblem, describeProblem, type LibraryProblem, type LibraryRead } from './library';
 import { StartAtLoginSwitch } from './StartAtLoginSwitch';
+import {
+  glossOf,
+  limitsFrom,
+  previewLimits,
+  size,
+  LIMIT_KEYS,
+  MAXIMUM_USAGE,
+  MINIMUM_FREE_SPACE,
+} from './storage';
 import {
   chooseRecordingDirectory,
   describeSettingsProblem,
@@ -16,6 +26,7 @@ import {
   RECORDING_DIRECTORY,
   SETTINGS_SECTIONS,
   STARTUP_SECTION,
+  STORAGE_SECTION,
   useAudioDevices,
   useSettings,
   type SettingRow,
@@ -84,6 +95,11 @@ function Field({
   const value = edited ?? entry.value;
   const options = entry.key === MICROPHONE ? microphoneOptions(entry, devices) : undefined;
   const choices = entry.choices ?? [];
+  // Only the two settings that are a number of bytes. A maximum age is in days
+  // and "90 days is 90 bytes" would be nonsense, so the gloss is asked for by
+  // key rather than of every field that happens to hold a number.
+  const gloss =
+    entry.key === MAXIMUM_USAGE || entry.key === MINIMUM_FREE_SPACE ? glossOf(value) : undefined;
 
   /*
    * A setting whose only two values are `true` and `false` is a switch, and it
@@ -206,6 +222,15 @@ function Field({
       <p className="clipped-muted" id={hintId(entry.key)}>
         {entry.accepted}
         {entry.overridden ? '' : ' Nothing has changed this, so it is what Clipped ships with.'}
+        {/*
+         * The same number, read back in the unit a person reads. The field
+         * carries what the settings file carries, because that is what the
+         * recorder accepts and what its refusal names - a window with a second
+         * vocabulary for a setting is one that can disagree with the file
+         * (`crates/ipc/src/settings.rs`). This never travels: it is a gloss on
+         * what was typed, not a value.
+         */}
+        {gloss === undefined ? '' : ` That is ${gloss}.`}
       </p>
 
       {/*
@@ -293,6 +318,109 @@ function Row({ row }: { readonly row: SettingRow }): ReactNode {
   );
 }
 
+/**
+ * What a Save is waiting on, when it is waiting on something.
+ *
+ * Only the storage limits ever put a Save here. `measuring` is the recorder
+ * being asked what the limit would take; `confirm` is that answer, and it is not
+ * a warning but a list of somebody's recordings; `unmeasured` is the question
+ * having failed, which is a different thing from the answer being "nothing" and
+ * must not be drawn as one (AGENTS.md section 27).
+ */
+type Asking =
+  | { readonly state: 'measuring'; readonly keys: readonly string[] }
+  | {
+      readonly state: 'confirm';
+      readonly keys: readonly string[];
+      readonly report: StorageReport;
+    }
+  | {
+      readonly state: 'unmeasured';
+      readonly keys: readonly string[];
+      readonly problem: LibraryProblem;
+    };
+
+/**
+ * What saving a storage limit would delete, and the two ways out of it.
+ *
+ * Two presses rather than one, and the second says what it is about to do -
+ * the same shape the Library screen empties the trash with, because it is the
+ * same kind of decision. What is different is where the sentence comes from:
+ * the count and the size are the recorder's dry run rather than this window's
+ * arithmetic, so they are what a sweep would actually take (issue #529).
+ *
+ * The recordings go to the trash rather than away, and the message says so and
+ * says where to get them back. That is not a softening: it is the difference
+ * between this and something irreversible, and somebody deciding needs it
+ * (SPEC.md section 28, AGENTS.md section 45).
+ */
+function LimitConfirmation({
+  asking,
+  onConfirm,
+  onCancel,
+}: {
+  readonly asking: Asking | undefined;
+  readonly onConfirm: (keys: readonly string[]) => void;
+  readonly onCancel: () => void;
+}): ReactNode {
+  if (asking === undefined) {
+    return null;
+  }
+
+  if (asking.state === 'measuring') {
+    return (
+      <p className="clipped-panel__body" aria-busy="true">
+        Working out what this would delete…
+      </p>
+    );
+  }
+
+  if (asking.state === 'unmeasured') {
+    return (
+      <p className="clipped-panel__body" role="alert">
+        Clipped could not work out what this limit would delete. {describeProblem(asking.problem)}{' '}
+        Saving it will let automatic cleanup act on it without anybody having seen what it would
+        take.{' '}
+        <button
+          type="button"
+          className="clipped-btn clipped-btn--secondary"
+          onClick={() => {
+            onConfirm(asking.keys);
+          }}
+        >
+          Save it anyway
+        </button>{' '}
+        <button type="button" className="clipped-btn clipped-btn--secondary" onClick={onCancel}>
+          Leave it as it is
+        </button>
+      </p>
+    );
+  }
+
+  return (
+    <p className="clipped-panel__body" role="alert">
+      Saving this would move {String(asking.report.would_delete.total)} recording(s),{' '}
+      {size(asking.report.would_delete.total_bytes)}, to the trash — the oldest first, and nothing
+      that is protected. You can restore them from the Library screen until the trash is emptied.
+      {asking.report.still_over_limit > 0
+        ? ` It would still be ${size(asking.report.still_over_limit)} over afterwards, because everything else is protected.`
+        : ''}{' '}
+      <button
+        type="button"
+        className="clipped-btn clipped-btn--secondary"
+        onClick={() => {
+          onConfirm(asking.keys);
+        }}
+      >
+        Save the limit
+      </button>{' '}
+      <button type="button" className="clipped-btn clipped-btn--secondary" onClick={onCancel}>
+        Keep the recordings
+      </button>
+    </p>
+  );
+}
+
 /** The pane one section of the rail opens. */
 function Pane({
   section,
@@ -305,6 +433,8 @@ function Pane({
   onReset,
   saving,
   refusal,
+  confirmation,
+  saved,
 }: {
   readonly section: SettingsSection;
   readonly settings: LibraryRead<SettingsView>;
@@ -316,6 +446,17 @@ function Pane({
   readonly onReset: (key: string) => void;
   readonly saving: boolean;
   readonly refusal: string | undefined;
+  /**
+   * What has to be agreed to before Save sends anything, where anything does.
+   *
+   * Built by the screen rather than here, because it is about the save rather
+   * than about the section: only one Save in this window can delete somebody's
+   * recordings, and what it would delete is a question only the recorder can
+   * answer (`storage.ts`, issue #95).
+   */
+  readonly confirmation: ReactNode;
+  /** Bumped after each save, so the measured panel follows what was applied. */
+  readonly saved: number;
 }): ReactNode {
   const entries =
     settings.state === 'read'
@@ -397,6 +538,8 @@ function Pane({
             </p>
           )}
 
+          {confirmation}
+
           <div className="clipped-field">
             <button
               type="submit"
@@ -432,6 +575,14 @@ function Pane({
        */}
       {section.id === STARTUP_SECTION ? <StartAtLoginSwitch /> : null}
 
+      {/*
+       * And the third: the measurement the limits above act on. Not a setting
+       * either - it is what the recorder found on the disk, and it is what makes
+       * the three fields above something somebody can set having looked rather
+       * than guessed (SPEC.md section 27, issue #95).
+       */}
+      {section.id === STORAGE_SECTION ? <StorageAccount refreshOn={saved} /> : null}
+
       {section.rows.length > 0 ? (
         <table className="clipped-table">
           <thead>
@@ -458,6 +609,8 @@ export function SettingsScreen(): ReactNode {
   const devices = useAudioDevices();
   const [openId, setOpenId] = useState(SETTINGS_SECTIONS[0]?.id ?? '');
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [asking, setAsking] = useState<Asking | undefined>(undefined);
+  const [saved, setSaved] = useState(0);
   const open = SETTINGS_SECTIONS.find((section) => section.id === openId) ?? SETTINGS_SECTIONS[0];
 
   /**
@@ -481,17 +634,91 @@ export function SettingsScreen(): ReactNode {
       }
     }
 
-    void settings.apply(values).then((saved) => {
+    void settings.apply(values).then((applied) => {
       // Cleared only for what the recorder took, and only what was sent: on a
       // refusal the edits stay so that a bad value can be corrected rather than
       // retyped.
-      if (saved) {
+      if (applied) {
         setEdits((current) =>
           Object.fromEntries(Object.entries(current).filter(([key]) => !keys.includes(key))),
         );
+        // The measured panel is now describing the limits from before this save,
+        // so it is asked again. Only on success: a refused change did not happen
+        // and nothing has moved.
+        setSaved((count) => count + 1);
       }
     });
   };
+
+  /**
+   * Saves, first asking what a storage limit would delete.
+   *
+   * This is the one Save in the window that can destroy somebody's recordings.
+   * A maximum usage is enforced by a sweep that runs after every reconciliation,
+   * so saving one is not a preference taking effect later - it is footage on its
+   * way to the trash, and somebody has to be told which before it goes
+   * (SPEC.md section 27, AGENTS.md section 56).
+   *
+   * The question is the recorder's own dry run, which is the measurement the
+   * sweep itself takes: what the screen shows before the limit is saved cannot
+   * disagree with what happens after it is (issue #529, AGENTS.md section 55).
+   *
+   * A limit that would take nothing is saved without a confirmation. A dialog
+   * that appears whatever the answer teaches people to dismiss it, and then it
+   * is not a confirmation of anything (AGENTS.md section 27).
+   *
+   * A measurement that fails does **not** save quietly. It cannot be told from
+   * one that would delete nothing, and the two are opposite; so it says what
+   * went wrong and offers the save as something to choose (AGENTS.md section 45).
+   */
+  const saveWithCare = (keys: readonly string[]): void => {
+    const editedLimits = keys.filter(
+      (key) => LIMIT_KEYS.includes(key as (typeof LIMIT_KEYS)[number]) && edits[key] !== undefined,
+    );
+    if (editedLimits.length === 0) {
+      save(keys);
+      return;
+    }
+
+    // What the three limits would be after this save: the fields as they now
+    // stand, edited or not, because a sweep is judged against all three at once
+    // and previewing only what changed would ask a different question.
+    const proposed: Record<string, string> = {};
+    if (settings.read.state === 'read') {
+      for (const entry of settings.read.value.settings) {
+        if (LIMIT_KEYS.includes(entry.key as (typeof LIMIT_KEYS)[number])) {
+          proposed[entry.key] = edits[entry.key] ?? entry.value;
+        }
+      }
+    }
+
+    setAsking({ state: 'measuring', keys });
+    previewLimits(limitsFrom(proposed))
+      .then((report) => {
+        if (report.would_delete.total === 0) {
+          setAsking(undefined);
+          save(keys);
+          return;
+        }
+        setAsking({ state: 'confirm', keys, report });
+      })
+      .catch((thrown: unknown) => {
+        setAsking({ state: 'unmeasured', keys, problem: asProblem(thrown) });
+      });
+  };
+
+  const confirmation = (
+    <LimitConfirmation
+      asking={asking}
+      onConfirm={(keys) => {
+        setAsking(undefined);
+        save(keys);
+      }}
+      onCancel={() => {
+        setAsking(undefined);
+      }}
+    />
+  );
 
   return (
     <>
@@ -528,7 +755,9 @@ export function SettingsScreen(): ReactNode {
             onEdit={(key, value) => {
               setEdits((current) => ({ ...current, [key]: value }));
             }}
-            onSave={save}
+            onSave={saveWithCare}
+            confirmation={confirmation}
+            saved={saved}
             onDiscard={() => {
               setEdits({});
             }}

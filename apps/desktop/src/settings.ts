@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useState } from 'react';
 
 import { asProblem, type LibraryProblem, type LibraryRead } from './library';
+import { MAXIMUM_AGE_DAYS, MAXIMUM_USAGE, MINIMUM_FREE_SPACE } from './storage';
 
 /**
  * The Settings screen: what it can change, and what it can only account for
@@ -141,6 +142,16 @@ export const NOTIFICATION_KEYS = [
 
 /** The key the recording directory has in the settings file. */
 export const RECORDING_DIRECTORY = 'recording_directory';
+
+/**
+ * The section holding the storage limits and the measurement they act on.
+ *
+ * Named here for the reason {@link HOTKEYS_SECTION} is, and for a sharper one:
+ * this is the one section whose Save can delete somebody's recordings, so the
+ * screen has to be able to find it in order to confirm against what a limit
+ * would take before it takes it (SPEC.md section 27, issue #95).
+ */
+export const STORAGE_SECTION = 'storage';
 
 /**
  * Whether a setting is a switch rather than a field or a list.
@@ -567,25 +578,30 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
      * row itself while a sitting is holding a change back.
      */
     lead:
-      'Where recordings go, and what happens when the disk fills. A directory chosen here is ' +
-      'where the recorder writes from the next session onwards.',
-    keys: [RECORDING_DIRECTORY],
+      'Where recordings go, what the library occupies, and what happens when the disk fills. A ' +
+      'directory chosen here is where the recorder writes from the next session onwards; the ' +
+      'three limits below are what automatic cleanup enforces.',
+    keys: [RECORDING_DIRECTORY, MAXIMUM_USAGE, MINIMUM_FREE_SPACE, MAXIMUM_AGE_DAYS],
     rows: [
-      {
-        label: 'Maximum usage, minimum free space, maximum age',
-        key: { name: 'maximum_usage_bytes', file: 'settings.json' },
-        today:
-          `Set by hand in the storage section of ${SETTINGS_FILE}. Clipped measures what the ` +
-          'library occupies against them and reports what a sweep would delete.',
-        needs: 'Issue #95 for the screen SPEC.md section 27 draws them on.',
-      },
       {
         label: 'Where deleted recordings wait',
         key: { name: 'trash_directory', file: 'settings.json' },
         today:
           'Beside the recordings — `D:\\Clips` becomes `D:\\Clips.trash` — unless that key says ' +
-          'otherwise. What is in it, and putting something back, is on the Library screen.',
-        needs: 'Issue #95, with the limits above.',
+          'otherwise. The folder in use is shown above, measured; what is in it, and putting ' +
+          'something back, is on the Library screen.',
+        needs:
+          'Issue #646 to choose the folder here. Moving a trash that already holds somebody’s ' +
+          'deleted recordings is the part that needs deciding, not the field.',
+      },
+      {
+        label: 'How long the trash keeps something',
+        today:
+          'Nothing. SPEC.md section 28 offers 3, 7 and 30 days or immediately, and no key ' +
+          'carries the choice — so nothing expires, and no item in the trash has a date on it.',
+        needs:
+          'Issue #646: a retention key, and something that runs `Trash::expire` against it. ' +
+          'The type and the expiry are written and nothing configures or calls them.',
       },
       {
         label: 'Per-game settings',

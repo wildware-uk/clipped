@@ -143,6 +143,14 @@ import type {
   ShuttingDownReply,
   StatusReply,
   StopRecordingParams,
+  CategoryUsage,
+  GetStorageParams,
+  ProtectedGroup,
+  RecordingList,
+  StorageLimits,
+  StorageRecording,
+  StorageReply,
+  StorageReport,
   UnboundHotkey,
   UnsupportedProtocolVersionDetail,
   WatchingStatus,
@@ -478,6 +486,62 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     size_bytes: 'optional',
     dependent_clips: 'required',
   }),
+  get_storage: fields<GetStorageParams>({
+    // Optional, and this is what holds the mirror to it: a request with no
+    // parameters asks about the limits that are configured, and one carrying
+    // them asks what saving those would delete. A mirror that made this
+    // required could not put the first question at all.
+    limits: 'optional',
+  }),
+  storage_limits: fields<StorageLimits>({
+    // All three optional, and absent means no limit of that kind — which is
+    // what Clipped ships with, so an empty object is the ordinary reading
+    // rather than a frame with fields missing.
+    maximum_usage_bytes: 'optional',
+    minimum_free_space_bytes: 'optional',
+    maximum_age_days: 'optional',
+  }),
+  storage_recording: fields<StorageRecording>({
+    recording_id: 'required',
+    path: 'required',
+    size_bytes: 'required',
+    started_at: 'required',
+    // Optional, and absent is the reading that matters: a recording nothing
+    // protects is one a sweep may take.
+    protected_because: 'optional',
+  }),
+  recording_list: fields<RecordingList>({
+    total: 'required',
+    total_bytes: 'required',
+    recordings: 'required',
+  }),
+  protected_group: fields<ProtectedGroup>({
+    label: 'required',
+    recordings: 'required',
+    bytes: 'required',
+  }),
+  category_usage: fields<CategoryUsage>({
+    category: 'required',
+    bytes: 'required',
+  }),
+  storage_report: fields<StorageReport>({
+    recordings_directory: 'required',
+    trash_directory: 'required',
+    usage_bytes: 'required',
+    by_category: 'required',
+    free_bytes: 'required',
+    capacity_bytes: 'required',
+    limits: 'required',
+    // Required, deliberately. It is the difference between what is happening
+    // and what would happen if somebody saved a limit they have not saved, and
+    // a mirror that let it default would draw one as the other (AGENTS.md
+    // section 56).
+    proposed: 'required',
+    would_delete: 'required',
+    still_over_limit: 'required',
+    protected: 'required',
+    largest: 'required',
+  }),
   restored_item: fields<RestoredItem>({
     kind: 'required',
     id: 'required',
@@ -603,6 +667,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.library_trash': fields<LibraryTrashReply>({
     reply: 'required',
     trash: 'required',
+  }),
+  'reply.storage': fields<StorageReply>({
+    reply: 'required',
+    storage: 'required',
   }),
   'reply.restored': fields<RestoredReply>({
     reply: 'required',
@@ -909,6 +977,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_storage',
+    params: 'get_storage',
+    reply: 'reply.storage',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_settings',
     params: null,
     reply: 'reply.settings',
@@ -1027,6 +1101,13 @@ function replyDiscriminant(reply: Reply): string {
       // that has a backend to name and one that has none, and which of those it
       // is decides whether the screen has a capture row to draw at all.
       return reply.diagnostics.capture === undefined ? 'diagnostics' : 'diagnostics.capturing';
+    case 'storage':
+      // Whether the limits were proposed is part of the path: a mirror that
+      // dropped `proposed` would reach the same discriminant for a report of
+      // what is configured and a dry run of what somebody is about to
+      // configure, and the whole difference between them is whether the
+      // deletions listed have been agreed to (AGENTS.md section 56).
+      return reply.storage.proposed ? 'storage.proposed' : 'storage';
     case 'settings':
       // One discriminant: a settings view with nothing in it is the same shape
       // carrying nothing, and `settings` is always present.

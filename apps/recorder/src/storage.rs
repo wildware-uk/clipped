@@ -66,7 +66,13 @@ impl core::fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 /// What a skipped measurement means, in the words a person reads.
-fn describe(reason: &Skipped) -> String {
+///
+/// `pub(crate)` rather than private: the `get_storage` handler refuses with the
+/// same sentence, and a second wording for the same four failures would be two
+/// answers to one question (AGENTS.md section 55). What a person is told about a
+/// drive that could not be measured must not depend on whether they asked from
+/// the terminal or from the window.
+pub(crate) fn describe(reason: &Skipped) -> String {
     match reason {
         Skipped::NoLimit => "no storage limit is configured".to_owned(),
         Skipped::Roots(detail) => format!("the directories could not be declared: {detail}"),

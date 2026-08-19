@@ -299,10 +299,16 @@ impl StorageStatus {
     ///
     /// Carried through from the inventory rather than left behind with it,
     /// because the figure and its completeness are only meaningful together:
-    /// the screen in
-    /// [issue #95](https://github.com/wildware-uk/clipped/issues/95) is handed a
-    /// `StorageStatus` and nothing else, and "212 GB" and "at least 212 GB" are
-    /// different sentences.
+    /// "212 GB" and "at least 212 GB" are different sentences.
+    ///
+    /// **Nothing reads it yet.** The Storage screen
+    /// ([issue #95](https://github.com/wildware-uk/clipped/issues/95)) was built
+    /// on `clipped_session::cleanup::preview` — the measurement its sweep also
+    /// takes, so that a dry run cannot disagree with what happens — and that
+    /// path does not evaluate a [`StorageStatus`] at all. `preview` walks with
+    /// an unbudgeted [`ScanOptions`](crate::accounting::ScanOptions), so its
+    /// inventory is complete or the walk failed; a screen that could be handed a
+    /// partial one is what would need this, and no caller is.
     #[must_use]
     pub const fn measurement(&self) -> &Completeness {
         &self.measurement

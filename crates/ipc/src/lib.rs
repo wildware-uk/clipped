@@ -128,6 +128,7 @@ pub mod server;
 pub mod settings;
 pub mod startup;
 pub mod status;
+pub mod storage;
 pub mod supervisor;
 pub mod transport;
 
@@ -171,6 +172,10 @@ pub use startup::{SetStartAtLogin, StartAtLogin};
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportProgress, ExportSummary, RecorderStatus,
     RecordingSummary, ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,
+};
+pub use storage::{
+    CategoryUsage, GetStorage, ProtectedGroup, RecordingList, StorageLimits, StorageRecording,
+    StorageReport, MOST_LISTED,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,
