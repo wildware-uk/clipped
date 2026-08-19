@@ -332,11 +332,11 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     // Before the ready line as well, so that a window connecting the instant it
     // sees that line already has an answer to `get_hotkeys` rather than a race
     // with registration.
-    let (hotkeys, registered) = crate::hotkeys::start(
+    let hotkeys = crate::hotkeys::start(
         &(Arc::clone(&service) as Arc<dyn CommandHandler>),
         &service.configuration(),
     );
-    service.publish_hotkeys(registered);
+    service.publish_hotkeys(hotkeys.clone());
 
     // After the hotkeys, because this is the process that has them: one
     // process watches for games, serves the protocol and owns the
@@ -464,21 +464,26 @@ pub struct RecorderService {
     /// the first run and shutdown can stop one, neither of which is a recording's
     /// business.
     indexer: Arc<LibraryIndexer>,
-    /// What became of the global hotkeys, once `serve` has registered them
-    /// (`crate::hotkeys`, issue #232).
+    /// The global hotkeys this process registered, once `serve` has registered
+    /// them (`crate::hotkeys`, issue #232).
     ///
     /// Filled in after this service exists rather than built with it, because
     /// the registration's handlers call *into* this service: a press is turned
     /// into the same [`Command`] the window would have sent, so the service has
-    /// to exist before there is anything to register. Set once and never
-    /// changed — rebinding without a restart is
-    /// [issue #233](https://github.com/wildware-uk/clipped/issues/233).
+    /// to exist before there is anything to register. That is what the
+    /// [`OnceLock`] is for, and it is why this is still one: the field is
+    /// filled from `serve` without a `&mut RecorderService` existing anywhere.
     ///
-    /// The [`Err`] is a registration that did not happen at all, kept as a
-    /// sentence rather than collapsed into an empty list: "this recorder
-    /// registered no hotkeys" and "every hotkey registered cleanly" are opposite
-    /// answers (AGENTS.md section 27).
-    hotkeys: OnceLock<Result<Vec<HotkeyBinding>, String>>,
+    /// It used to hold the *report* — `Result<Vec<HotkeyBinding>, String>` —
+    /// and being set once was what guaranteed a window could never read a
+    /// report that no registration backed. Rebinding without a restart
+    /// ([issue #233](https://github.com/wildware-uk/clipped/issues/233)) would
+    /// have made that copy something to keep in step, so the copy is gone
+    /// instead: what is set once now is the *handle*, and
+    /// [`RegisteredHotkeys::report`] reads the answer out of the live
+    /// registration under the lock a rebind holds. The guarantee is the same
+    /// one, made structural — there is no second value left to disagree.
+    hotkeys: OnceLock<crate::hotkeys::RegisteredHotkeys>,
     /// Where an export says how far it has got (`crate::export`, issue #446).
     ///
     /// A second handle on the publisher [`RecordingState`] holds, rather than a
@@ -704,14 +709,17 @@ impl RecorderService {
         settings
     }
 
-    /// Records what became of the global hotkeys, so `get_hotkeys` can answer.
+    /// Hands over the global hotkeys, so `get_hotkeys` can answer out of them
+    /// and `apply_settings` can rebind them.
     ///
     /// Called once, by `serve`, immediately after registering them. A second
-    /// call is ignored rather than overwriting the first: nothing re-registers
-    /// today, and a report that could change under a window reading it would be
-    /// a promise this build cannot keep (issue #233).
-    pub fn publish_hotkeys(&self, registered: Result<Vec<HotkeyBinding>, String>) {
-        if self.hotkeys.set(registered).is_err() {
+    /// call is ignored rather than overwriting the first: there is one
+    /// registration in this process — `Listener::bind` has already made this
+    /// the only recorder in the session (ADR 0009) — and a second handle
+    /// arriving would mean a second one exists, which nothing here could
+    /// reconcile.
+    pub fn publish_hotkeys(&self, hotkeys: crate::hotkeys::RegisteredHotkeys) {
+        if self.hotkeys.set(hotkeys).is_err() {
             tracing::warn!("the hotkey registration was reported twice; the first one stands");
         }
     }
@@ -725,8 +733,9 @@ impl RecorderService {
     /// empty list reads as "nothing conflicted".
     fn hotkeys(&self) -> Result<Vec<HotkeyBinding>, ProtocolError> {
         match self.hotkeys.get() {
-            Some(Ok(hotkeys)) => Ok(hotkeys.clone()),
-            Some(Err(reason)) => Err(ProtocolError::new(ErrorCode::Internal, reason.clone())),
+            Some(registered) => registered
+                .report()
+                .map_err(|reason| ProtocolError::new(ErrorCode::Internal, reason)),
             // Reachable only from a `RecorderService` nothing registered hotkeys
             // for, which today means a test. Saying so beats an empty list that
             // would be drawn as seven working hotkeys.
@@ -734,6 +743,25 @@ impl RecorderService {
                 ErrorCode::Internal,
                 "this recorder has not registered any global hotkeys",
             )),
+        }
+    }
+
+    /// Points the running hotkey service at whatever the settings now say.
+    ///
+    /// Nothing to report and nothing to fail: every outcome is a line in the
+    /// log, including a combination Windows refused, which leaves the action on
+    /// the combination it had. A `get_hotkeys` after this is what shows the
+    /// window where each one ended up, because that answer is read out of the
+    /// registration rather than out of the settings file
+    /// (`crate::hotkeys::RegisteredHotkeys::apply`, issue #233).
+    ///
+    /// A service that never registered anything — the settings file names one
+    /// combination twice, or this is a test — has nothing to rebind, and
+    /// [`crate::hotkeys::RegisteredHotkeys::apply`] does nothing rather than
+    /// complaining once per save.
+    fn rebind_hotkeys(&self) {
+        if let Some(registered) = self.hotkeys.get() {
+            registered.apply(&self.settings.configuration());
         }
     }
 
@@ -882,9 +910,11 @@ impl CommandHandler for RecorderService {
             Command::OpenPreview(request) => Ok(Reply::PreviewOpened {
                 preview: self.indexer.preview(&request)?,
             }),
-            // Answered from what registration produced when this process
-            // started, which is a clone of a small `Vec` and touches nothing a
-            // recording touches (`crate::hotkeys`, issue #232).
+            // Answered out of the live registration, which is a walk of seven
+            // rows and touches nothing a recording touches (`crate::hotkeys`,
+            // issue #232). Read rather than stored so that a binding changed
+            // through `apply_settings` is the one reported here, without a
+            // second copy to keep in step (issue #233).
             Command::GetHotkeys => Ok(Reply::Hotkeys {
                 hotkeys: self.hotkeys()?,
             }),
@@ -933,6 +963,18 @@ impl CommandHandler for RecorderService {
                 // always one the settings file agreed to hold.
                 self.indexer
                     .set_storage(self.settings.configuration().storage().clone());
+                // And straight to the hotkey service, for the same reason and
+                // with the same ordering. A combination is registered with
+                // Windows by the thread that owns the message loop, so this
+                // does not re-register anything itself: it posts to that
+                // thread and waits (`crate::hotkeys::RegisteredHotkeys::apply`,
+                // issue #233).
+                //
+                // Answered *after* the rebind, so that a window redrawing
+                // itself from this reply and then asking `get_hotkeys` cannot
+                // see the old combination — the report is read out of the live
+                // registration, and by here the registration has moved.
+                self.rebind_hotkeys();
                 Ok(Reply::Settings {
                     settings: self.settings_in_force(saved),
                 })

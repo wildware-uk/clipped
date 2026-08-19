@@ -140,6 +140,29 @@ export const NOTIFICATION_KEYS = [
   'hotkey_unavailable',
 ] as const;
 
+/**
+ * The keys the hotkey bindings have on the settings commands.
+ *
+ * `hotkey_` and the action's own name, which is how the recorder sends them
+ * (`apps/recorder/src/settings.rs`): the settings *file* keeps them under a
+ * `hotkeys` object, and these commands are one flat namespace shared with the
+ * per-game settings, so the prefix is what stops `save_replay` the binding
+ * colliding with `save_replay` the protocol command.
+ *
+ * The order is the one `clipped_hotkeys::ACTIONS` lists, which is the order a
+ * screen should draw them in. `settingsConformance.test.ts` reads the actions
+ * out of the Rust and fails if this list drifts from them.
+ */
+export const HOTKEY_KEYS = [
+  'hotkey_save_replay',
+  'hotkey_add_bookmark',
+  'hotkey_take_screenshot',
+  'hotkey_toggle_recording',
+  'hotkey_mute_microphone',
+  'hotkey_toggle_microphone',
+  'hotkey_open_overlay',
+] as const;
+
 /** The key the recording directory has in the settings file. */
 export const RECORDING_DIRECTORY = 'recording_directory';
 
@@ -618,25 +641,25 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     lead:
       'Hotkeys are global and never per game: Windows registers a combination once for a ' +
       'process, so a per-game binding is one that could not be honoured. The recorder is that ' +
-      'process, and the table below is what it registered when it started.',
-    keys: [],
+      'process. Type a combination such as Ctrl+F10, or none to leave an action bound to ' +
+      'nothing; saving registers it straight away, and the table below is what Windows gave ' +
+      'the recorder.',
+    keys: [...HOTKEY_KEYS],
     rows: [
       {
-        label: 'Which combination an action has',
+        label: 'Choosing a combination by pressing it',
         today:
-          `The hotkeys section of ${SETTINGS_FILE}, read once when the recorder starts. Two ` +
-          'actions are bound out of the box — Ctrl+F10 to save a replay and Ctrl+F9 to bookmark ' +
-          '— and editing the file takes effect the next time Clipped starts.',
-        needs:
-          'Issue #54 for the screen that binds a combination, and issue #233 to change one ' +
-          'without restarting the recorder.',
+          'Not offered. A combination is typed — Ctrl+F10, Ctrl+Shift+F8 — and the recorder ' +
+          'refuses anything it could not bind, naming the keys it can.',
+        needs: 'Issue #54 for a control you press the combination into rather than spell out.',
       },
       {
         label: 'A combination another application owns',
         today:
           'Shown below, in the recorder’s own words: Discord, Steam and NVIDIA’s overlay all ' +
           'claim function keys, and a combination Windows would not give Clipped is a key that ' +
-          'does nothing. Choosing another one means editing the file above.',
+          'does nothing. Saving a different one above takes effect at once, and a combination ' +
+          'Windows refuses leaves the action on the one it had.',
         needs: 'Issue #417 to interrupt you with it rather than waiting for you to look here.',
       },
       {

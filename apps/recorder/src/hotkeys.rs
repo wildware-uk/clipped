@@ -12,9 +12,12 @@
 //! exited by the time it could have taken a combination away from the first.
 //!
 //! The desktop application registers nothing. It reads this through
-//! `get_hotkeys` and, once [issue
-//! #54](https://github.com/wildware-uk/clipped/issues/54) lands, writes the
-//! bindings into the settings file this reads at start-up.
+//! `get_hotkeys` and changes a binding through `apply_settings`, which saves
+//! the combination and then rebinds the running service
+//! ([`RegisteredHotkeys::apply`], issue #233) — so a combination changed from
+//! the window takes effect on the next press rather than the next start. What
+//! [issue #54](https://github.com/wildware-uk/clipped/issues/54) still adds is
+//! a control that *captures* a combination instead of one that is typed.
 //!
 //! # What a press is
 //!
@@ -61,7 +64,7 @@
 //! press or any other action. Nothing here runs on a capture thread, and nothing
 //! here is called from one.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clipped_hotkeys::{
     ActionStatus, BindingState, Handlers, Hotkey, HotkeyAction, HotkeyService, Registration,
@@ -97,15 +100,49 @@ pub(crate) fn what_is_in_front() -> Foreground {
 
 /// The hotkey service this process is running, and what it registered.
 ///
-/// Dropping it gives every combination back to Windows and waits for a handler
-/// that is still running, so a recorder that ends — by request, by Ctrl+C or by
-/// a panic unwinding out of `serve` — never leaves a combination registered that
-/// nothing is listening for (AGENTS.md section 58).
-#[derive(Debug)]
+/// Dropping the last handle gives every combination back to Windows and waits
+/// for a handler that is still running, so a recorder that ends — by request,
+/// by Ctrl+C or by a panic unwinding out of `serve` — never leaves a
+/// combination registered that nothing is listening for (AGENTS.md section 58).
+///
+/// # Why this is shared rather than owned by `serve`
+///
+/// Because a binding has to be changeable from a connection thread. `serve`
+/// holds one handle so that it can stop the service in the right order at
+/// shutdown, and `RecorderService` holds another so that `apply_settings` can
+/// call [`Self::apply`] on the thread the window's request arrived on
+/// ([issue #233](https://github.com/wildware-uk/clipped/issues/233)).
+///
+/// # Threads
+///
+/// `RegisterHotKey` and `UnregisterHotKey` are bound to the thread that called
+/// them, which is the message loop `clipped_hotkeys` runs and not any thread
+/// here. Nothing in this module reaches that thread itself:
+/// [`HotkeyService::rebind`] posts the request to it and waits for the answer,
+/// which is why a connection thread may ask for a rebind at all (AGENTS.md
+/// section 20, `crates/hotkeys/src/service/windows.rs`).
+///
+/// The wait is bounded by what the loop thread does with one message, which is
+/// two Win32 calls; it holds this lock while it waits, so a `get_hotkeys`
+/// arriving mid-rebind is answered after it rather than during it. That is the
+/// point rather than a cost — the answer is read *out of* the live
+/// registration, so a reader can never be shown a combination Windows has not
+/// been asked for.
+#[derive(Debug, Clone)]
 pub struct RegisteredHotkeys {
-    /// [`None`] when the service could not be started at all, which is not the
-    /// same as every combination being refused: see [`start`].
-    service: Option<HotkeyService>,
+    state: Arc<Mutex<Registered>>,
+}
+
+/// What this process is holding, or the sentence saying why it is holding
+/// nothing.
+#[derive(Debug)]
+enum Registered {
+    /// Running, and this is what Windows gave it.
+    Running(HotkeyService),
+    /// Nothing is registered. The string is the sentence `get_hotkeys` answers
+    /// with — a refusal rather than an empty list, because an empty list reads
+    /// as "nothing conflicted" (AGENTS.md section 27).
+    Nothing(String),
 }
 
 impl RegisteredHotkeys {
@@ -114,20 +151,163 @@ impl RegisteredHotkeys {
     /// Called before the recorder stops the recording it is making, so that a
     /// press cannot arrive while the process is winding up and ask for a
     /// recording that is halfway through being finished.
-    pub fn stop(mut self) {
-        if let Some(service) = self.service.take() {
+    ///
+    /// Takes `&self` rather than consuming, because `serve` is not the only
+    /// holder any more: the service holds a handle too, and stopping is a thing
+    /// one of them does rather than the last one to let go.
+    pub fn stop(&self) {
+        let stopped = std::mem::replace(
+            &mut *self.locked(),
+            Registered::Nothing("this recorder is shutting down".to_owned()),
+        );
+        if let Registered::Running(service) = stopped {
             service.stop();
+        }
+    }
+
+    /// Where every global hotkey stands, read out of the live registration.
+    ///
+    /// Not a stored copy. Before [issue
+    /// #233](https://github.com/wildware-uk/clipped/issues/233) the report was
+    /// published once and kept, which was safe only because nothing could
+    /// change what was registered; now that something can, a second copy would
+    /// be a second thing to keep in step. Asking the service each time makes
+    /// that impossible rather than merely unlikely.
+    ///
+    /// # Errors
+    ///
+    /// The sentence to show when nothing is registered at all, which is not the
+    /// same as every combination having been refused: a refusal is a
+    /// [`HotkeyState::Conflict`] in an otherwise ordinary report.
+    pub fn report(&self) -> Result<Vec<HotkeyBinding>, String> {
+        match &*self.locked() {
+            Registered::Running(service) => Ok(report_of(service.registration())),
+            Registered::Nothing(reason) => Err(reason.clone()),
+        }
+    }
+
+    /// Points every action at what the settings now say, without a restart.
+    ///
+    /// Called by `apply_settings` after the save, for the reason the storage
+    /// limits are pushed to the indexer there: a combination saved from the
+    /// window and not carried here is a control whose effect waits for a
+    /// restart, with nothing on screen saying so (AGENTS.md section 27).
+    ///
+    /// **Only what changed is touched.** An action already bound to what the
+    /// settings ask for is left alone rather than unregistered and registered
+    /// again, so saving the resolution does not briefly drop `Ctrl`+`F10`.
+    ///
+    /// A combination Windows refuses is reported and *kept as it was*
+    /// ([`HotkeyService::rebind`] registers the new one before releasing the
+    /// old), so a save that names an impossible combination costs the user the
+    /// change and not the binding they had. The refusal reaches them through
+    /// the report: the next `get_hotkeys` shows the action still on its old
+    /// combination.
+    pub fn apply(&self, configuration: &Configuration) {
+        let wanted = match configuration.resolve_hotkeys() {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                // The saved file points one combination at two actions.
+                // `apply_settings` refuses such a change, so this is a file
+                // edited by hand underneath a running recorder; changing part
+                // of the set would leave a keyboard whose behaviour depends on
+                // which action was reached first, exactly as `start` refuses
+                // to.
+                tracing::error!(
+                    %error,
+                    "no hotkey was rebound, because the settings file now points one combination \
+                     at two actions"
+                );
+                return;
+            }
+        };
+
+        let mut state = self.locked();
+        let Registered::Running(service) = &mut *state else {
+            return;
+        };
+
+        let held: Vec<(HotkeyAction, Option<Hotkey>)> = service
+            .registration()
+            .statuses()
+            .iter()
+            .map(|status| (status.action(), status.binding()))
+            .collect();
+        let changed: Vec<(HotkeyAction, Option<Hotkey>)> = held
+            .iter()
+            .filter(|&&(action, bound)| bound != wanted.binding(action).get())
+            .map(|&(action, _)| (action, wanted.binding(action).get()))
+            .collect();
+
+        // Two passes, and the first one exists for one case: swapping two
+        // actions' combinations. `HotkeyService::rebind` refuses a combination
+        // another Clipped action still holds — the same rule `Bindings::bind`
+        // enforces — so the action being moved *off* a combination has to let
+        // go before the action moving onto it can ask for it. Only an action
+        // that is itself changing is released, and only when something else
+        // wants what it holds, so the ordinary case of one changed binding
+        // releases nothing early and keeps the refusal guarantee above.
+        //
+        // The holder is always one of the changing actions: `wanted` resolved
+        // without a conflict, so nothing that keeps its combination can be
+        // holding one another action is moving onto. The check is what makes
+        // that an assumption this code does not act on rather than one it
+        // relies on.
+        for &(action, hotkey) in &changed {
+            let Some(hotkey) = hotkey else { continue };
+            let holder = held.iter().find_map(|&(other, bound)| {
+                (other != action && bound == Some(hotkey)).then_some(other)
+            });
+            if let Some(holder) = holder {
+                if changed.iter().any(|&(moving, _)| moving == holder) {
+                    Self::rebind(service, holder, None);
+                }
+            }
+        }
+
+        for &(action, hotkey) in &changed {
+            Self::rebind(service, action, hotkey);
+        }
+    }
+
+    /// One rebind, with its outcome in the log either way (AGENTS.md section
+    /// 15).
+    fn rebind(service: &mut HotkeyService, action: HotkeyAction, hotkey: Option<Hotkey>) {
+        match service.rebind(action, hotkey) {
+            Ok(()) => tracing::info!(
+                action = action.name(),
+                hotkey = hotkey.map_or_else(|| "none".to_owned(), |hotkey| hotkey.to_string()),
+                "a hotkey was rebound from the settings without restarting the recorder"
+            ),
+            Err(error) => tracing::warn!(
+                action = action.name(),
+                hotkey = hotkey.map_or_else(|| "none".to_owned(), |hotkey| hotkey.to_string()),
+                "a hotkey could not be rebound, so it is still on the combination it had: {error}"
+            ),
+        }
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Registered> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn of(state: Registered) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
         }
     }
 }
 
 /// Registers the user's hotkeys and starts delivering presses to `recorder`.
 ///
-/// Returns the running service and the report `get_hotkeys` answers with. The
-/// report is produced on **every** path, including the ones where nothing was
-/// registered, because "the recorder could not register its hotkeys" and "every
-/// hotkey registered cleanly" are opposite answers and an empty list would be
-/// drawn as the second (AGENTS.md section 27).
+/// Returns the running service, which [`RegisteredHotkeys::report`] answers
+/// `get_hotkeys` out of. An answer is available on **every** path, including
+/// the ones where nothing was registered, because "the recorder could not
+/// register its hotkeys" and "every hotkey registered cleanly" are opposite
+/// answers and an empty list would be drawn as the second (AGENTS.md section
+/// 27).
 ///
 /// # Errors
 ///
@@ -139,7 +319,7 @@ impl RegisteredHotkeys {
 pub fn start(
     recorder: &Arc<dyn CommandHandler>,
     configuration: &Configuration,
-) -> (RegisteredHotkeys, Result<Vec<HotkeyBinding>, String>) {
+) -> RegisteredHotkeys {
     let bindings = match configuration.resolve_hotkeys() {
         Ok(resolved) => resolved.bindings().clone(),
         Err(error) => {
@@ -154,13 +334,10 @@ pub fn start(
                 "no hotkey was registered, because the settings file points one combination at \
                  two actions"
             );
-            return (
-                RegisteredHotkeys { service: None },
-                Err(format!(
-                    "No hotkey is registered: {error} Fix the `hotkeys` section of the settings \
-                     file and restart Clipped."
-                )),
-            );
+            return RegisteredHotkeys::of(Registered::Nothing(format!(
+                "No hotkey is registered: {error} Fix the `hotkeys` section of the settings file \
+                 and restart Clipped."
+            )));
         }
     };
 
@@ -175,26 +352,19 @@ pub fn start(
             // and nothing else, which `HotkeyService::start` documents.
             drop(events);
 
-            let report = report_of(service.registration());
             tracing::info!(
                 registered = service.registration().bound().count(),
                 conflicts = service.registration().conflicts().count(),
                 "the global hotkeys were registered"
             );
 
-            (
-                RegisteredHotkeys {
-                    service: Some(service),
-                },
-                Ok(report),
-            )
+            RegisteredHotkeys::of(Registered::Running(service))
         }
         Err(error) => {
             tracing::error!(%error, "no global hotkey was registered");
-            (
-                RegisteredHotkeys { service: None },
-                Err(format!("No hotkey is registered: {error}.")),
-            )
+            RegisteredHotkeys::of(Registered::Nothing(format!(
+                "No hotkey is registered: {error}."
+            )))
         }
     }
 }
@@ -1106,6 +1276,105 @@ mod tests {
     /// with, so one assertion covers both. It carries the combination that was
     /// *asked for* whether or not Windows granted it, which is what keeps this
     /// test from depending on what else on the machine holds a function key.
+    /// A configuration binding each action in `bindings` and nothing else.
+    fn configured(bindings: &[(HotkeyAction, &str)]) -> Configuration {
+        let mut overrides = HotkeyOverrides::none();
+        for action in ACTIONS {
+            let binding = bindings.iter().find(|(bound, _)| *bound == action).map_or(
+                HotkeyOverride::Unbound,
+                |(_, text)| {
+                    HotkeyOverride::Bound(text.parse().expect("a combination this test writes"))
+                },
+            );
+            overrides
+                .set(action, Some(binding))
+                .expect("this test does not write a combination twice");
+        }
+        let mut configuration = Configuration::defaults();
+        configuration.set_hotkeys(overrides);
+        configuration
+    }
+
+    /// Two combinations nothing else on the machine will have.
+    ///
+    /// `F13` upwards, chosen from this process's identifier, exactly as
+    /// `crates/hotkeys/tests/windows_hotkeys.rs` chooses: no keyboard has these
+    /// keys, nothing binds them, and two checkouts running the suite at once do
+    /// not fight over one registration. In particular they are **not** the
+    /// shipped defaults, which the recorder the person at the keyboard is
+    /// running already holds.
+    fn two_spare_combinations() -> (String, String) {
+        let first = std::process::id() % 12;
+        let second = (first + 1) % 12;
+        (
+            format!("Ctrl+Alt+Shift+F{}", first + 13),
+            format!("Ctrl+Alt+Shift+F{}", second + 13),
+        )
+    }
+
+    /// Two actions trading combinations in one save, which is the one case that
+    /// cannot be done a binding at a time.
+    ///
+    /// `HotkeyService::rebind` refuses a combination another Clipped action
+    /// still holds — the same rule a fresh set of bindings is validated by — so
+    /// pointing Save replay at what Add bookmark has, while Add bookmark still
+    /// has it, is refused and the save reaches the file and stops. The settings
+    /// screen sends both keys in one `apply_settings`, so this is a swap a user
+    /// can ask for in one press of Save.
+    ///
+    /// Asserted over what was *asked of Windows* rather than over what Windows
+    /// granted, for the reason `the_combination_registered_is_the_one_the_settings_file_names`
+    /// is: whether a machine running the suite can register anything is not
+    /// something this test may depend on. A refused rebind leaves the old
+    /// combination in the report, so the assertion still fails when the release
+    /// pass is removed.
+    #[test]
+    fn two_actions_can_trade_combinations_in_one_save() {
+        let (first, second) = two_spare_combinations();
+        let recorder = Arc::new(AskedRecorder::idle());
+        let registered = start(
+            &handler(&recorder),
+            &configured(&[
+                (HotkeyAction::SaveReplay, &first),
+                (HotkeyAction::AddBookmark, &second),
+            ]),
+        );
+
+        registered.apply(&configured(&[
+            (HotkeyAction::SaveReplay, &second),
+            (HotkeyAction::AddBookmark, &first),
+        ]));
+
+        let report = registered.report();
+        // Before the assertions, so that a failure does not leave the
+        // combinations registered for the rest of the suite.
+        registered.stop();
+
+        let report = report.expect("the service started, so there is a report");
+        assert_eq!(
+            row(&report, "save_replay").hotkey.as_deref(),
+            Some(second.as_str()),
+            "Save replay did not take the combination Add bookmark was moving off, which is the \
+             swap being refused rather than performed: {report:?}",
+        );
+        assert_eq!(
+            row(&report, "add_bookmark").hotkey.as_deref(),
+            Some(first.as_str()),
+            "Add bookmark did not take the combination Save replay gave up: {report:?}",
+        );
+    }
+
+    /// One action's row.
+    fn row<'a>(
+        report: &'a [clipped_ipc::HotkeyBinding],
+        action: &str,
+    ) -> &'a clipped_ipc::HotkeyBinding {
+        report
+            .iter()
+            .find(|row| row.action == action)
+            .unwrap_or_else(|| panic!("`{action}` should be in the report: {report:?}"))
+    }
+
     #[test]
     fn the_combination_registered_is_the_one_the_settings_file_names() {
         let recorder = Arc::new(AskedRecorder::idle());
@@ -1121,8 +1390,9 @@ mod tests {
         let mut configuration = Configuration::defaults();
         configuration.set_hotkeys(overrides);
 
-        let (registered, report) = start(&handler(&recorder), &configuration);
-        let row = report
+        let registered = start(&handler(&recorder), &configuration);
+        let row = registered
+            .report()
             .as_ref()
             .expect("the service starts, so the report is the list of rows")
             .iter()
