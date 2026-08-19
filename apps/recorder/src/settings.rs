@@ -139,7 +139,8 @@ fn applies(key: SettingKey) -> Result<(), &'static str> {
         // Laid over what a recording was asked for by
         // `ResolvedSettings::apply_configured_to`, on the path both `watch` and
         // this recorder's `start_recording` take.
-        SettingKey::Resolution
+        SettingKey::QualityPreset
+        | SettingKey::Resolution
         | SettingKey::Framerate
         | SettingKey::Codec
         | SettingKey::Encoder

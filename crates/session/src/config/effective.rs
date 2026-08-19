@@ -139,7 +139,8 @@ pub fn effective_settings(
 
 /// The settings a [`RecordingSettings`] has an answer for, in the order the
 /// settings file and the settings screen list them.
-const REPORTED: [SettingKey; 6] = [
+const REPORTED: [SettingKey; 7] = [
+    SettingKey::QualityPreset,
     SettingKey::Resolution,
     SettingKey::Framerate,
     SettingKey::Codec,

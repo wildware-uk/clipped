@@ -409,6 +409,7 @@ fn configured(settings: RecordingSettings, config: &RecordingConfig) -> Recordin
             Resolution::Fixed { width, height } => ResolutionSetting::Fixed { width, height },
         })
         .with_framerate(config.framerate.frames_per_second())
+        .with_quality(config.quality_preset.preset())
         .with_codec(match config.codec {
             VideoCodec::Auto => CodecPreference::Automatic,
             VideoCodec::H264 => CodecPreference::Fixed(clipped_encoder::Codec::H264),
@@ -570,6 +571,7 @@ mod tests {
 
     fn config() -> RecordingConfig {
         RecordingConfig {
+            quality_preset: crate::options::PresetSelection::default(),
             target: CaptureTarget::WindowTitle("Counter-Strike 2".to_owned()),
             output: PathBuf::from(r"D:\clips\session.mkv"),
             overwrite: false,
@@ -814,6 +816,7 @@ mod tests {
                 height: 1080,
             },
             framerate: "144".parse().expect("a valid framerate"),
+            quality_preset: crate::options::PresetSelection::Ultra,
             codec: VideoCodec::Av1,
             encoder: EncoderSelection::Nvenc,
             ..config()
@@ -829,6 +832,11 @@ mod tests {
             }
         );
         assert_eq!(settings.framerate(), 144);
+        assert_eq!(
+            settings.quality(),
+            clipped_session::QualityPreset::Ultra,
+            "a preset that parsed and was then dropped is a flag that silently does nothing"
+        );
         assert_eq!(
             settings.codec(),
             CodecPreference::Fixed(clipped_encoder::Codec::Av1)

@@ -134,6 +134,10 @@ const ANSWERS: &[(&str, Answer)] = &[
         Answer::ReadAgain(SETTINGS_FILE_PER_RECORDING),
     ),
     (
+        "SettingKey::quality_preset",
+        Answer::ReadAgain(SETTINGS_FILE_PER_RECORDING),
+    ),
+    (
         "SettingKey::codec",
         Answer::ReadAgain(SETTINGS_FILE_PER_RECORDING),
     ),

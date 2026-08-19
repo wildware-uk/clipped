@@ -32,6 +32,7 @@ use clipped_replay::{MAXIMUM_WINDOW, MINIMUM_WINDOW};
 
 use crate::config::error::SettingError;
 use crate::config::value::{Resolved, Scope, SettingKey, SettingSource};
+use crate::quality::QualityPreset;
 use crate::settings::{
     AudioSourceSetting, CodecPreference, EncoderPreference, RecordingSettings, ResolutionSetting,
     UnavailableChoice, DEFAULT_FRAMERATE,
@@ -230,6 +231,7 @@ impl AudioDeviceSetting {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Preferences {
     capture_target: Option<CaptureTargetSetting>,
+    quality_preset: Option<QualityPreset>,
     resolution: Option<ResolutionSetting>,
     framerate: Option<u32>,
     codec: Option<CodecPreference>,
@@ -268,6 +270,23 @@ impl Preferences {
     /// Sets, or with `None` clears, the capture target.
     pub fn set_capture_target(&mut self, value: Option<CaptureTargetSetting>) {
         self.capture_target = value;
+    }
+
+    /// How much of the machine a recording may spend on itself, if this layer
+    /// says.
+    #[must_use]
+    pub const fn quality_preset(&self) -> Option<QualityPreset> {
+        self.quality_preset
+    }
+
+    /// Sets, or with `None` clears, the quality preset.
+    ///
+    /// Fallible-looking siblings notwithstanding, there is nothing to validate:
+    /// every value the type can hold is one the file can carry and read back,
+    /// which is exactly the property `crate::config::document`'s round trip
+    /// checks.
+    pub fn set_quality_preset(&mut self, value: Option<QualityPreset>) {
+        self.quality_preset = value;
     }
 
     /// The size to encode at, if this layer says.
@@ -479,6 +498,7 @@ impl Preferences {
     pub fn is_set(&self, key: SettingKey) -> bool {
         match key {
             SettingKey::CaptureTarget => self.capture_target.is_some(),
+            SettingKey::QualityPreset => self.quality_preset.is_some(),
             SettingKey::Resolution => self.resolution.is_some(),
             SettingKey::Framerate => self.framerate.is_some(),
             SettingKey::Codec => self.codec.is_some(),
@@ -493,6 +513,7 @@ impl Preferences {
     pub fn clear(&mut self, key: SettingKey) {
         match key {
             SettingKey::CaptureTarget => self.capture_target = None,
+            SettingKey::QualityPreset => self.quality_preset = None,
             SettingKey::Resolution => self.resolution = None,
             SettingKey::Framerate => self.framerate = None,
             SettingKey::Codec => self.codec = None,
@@ -568,6 +589,7 @@ fn check_dimension(side: &'static str, value: u32) -> Result<(), SettingError> {
 pub struct ResolvedSettings {
     scope: Scope,
     capture_target: Resolved<CaptureTargetSetting>,
+    quality_preset: Resolved<QualityPreset>,
     resolution: Resolved<ResolutionSetting>,
     framerate: Resolved<u32>,
     codec: Resolved<CodecPreference>,
@@ -599,6 +621,7 @@ impl ResolvedSettings {
         Self {
             capture_target: layers
                 .pick(CaptureTargetSetting::default(), Preferences::capture_target),
+            quality_preset: layers.pick(QualityPreset::default(), Preferences::quality_preset),
             resolution: layers.pick(ResolutionSetting::default(), Preferences::resolution),
             framerate: layers.pick(DEFAULT_FRAMERATE, Preferences::framerate),
             codec: layers.pick(CodecPreference::default(), Preferences::codec),
@@ -624,6 +647,12 @@ impl ResolvedSettings {
     #[must_use]
     pub const fn capture_target(&self) -> &Resolved<CaptureTargetSetting> {
         &self.capture_target
+    }
+
+    /// How much of the machine a recording may spend on itself.
+    #[must_use]
+    pub const fn quality_preset(&self) -> &Resolved<QualityPreset> {
+        &self.quality_preset
     }
 
     /// The size to encode at.
@@ -694,6 +723,7 @@ impl ResolvedSettings {
     pub const fn source_of(&self, key: SettingKey) -> SettingSource {
         match key {
             SettingKey::CaptureTarget => self.capture_target.source(),
+            SettingKey::QualityPreset => self.quality_preset.source(),
             SettingKey::Resolution => self.resolution.source(),
             SettingKey::Framerate => self.framerate.source(),
             SettingKey::Codec => self.codec.source(),
@@ -792,6 +822,9 @@ impl ResolvedSettings {
     #[must_use]
     pub fn apply_configured_to(&self, recording: RecordingSettings) -> RecordingSettings {
         let mut recording = recording;
+        if let Some(preset) = configured(&self.quality_preset) {
+            recording = recording.with_quality(preset);
+        }
         if let Some(resolution) = configured(&self.resolution) {
             recording = recording.with_resolution(resolution);
         }

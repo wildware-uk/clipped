@@ -253,6 +253,7 @@ mod capture_account;
 mod error;
 mod pacing;
 mod progress;
+mod quality;
 mod report;
 mod settings;
 mod stop;
@@ -276,6 +277,7 @@ pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
+pub use quality::{QualityPreset, ResolvedQuality};
 pub use replay::{start_buffer, ReplayRecording, ReplaySaveError};
 // Re-exported rather than redefined, and rather than left to callers to take a
 // dependency on `clipped-capture` for. `RecordingSettings` is told which capture

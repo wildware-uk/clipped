@@ -1015,10 +1015,10 @@ saved, or nothing behind it:
 
 | Section | Still an account rather than a control |
 | --- | --- |
-| Recording | The quality presets and bitrate (#181, #62), and the container (#307) |
+| Recording | A bitrate named in megabits (#181), HDR (#99, #146), and the container (#307). The quality preset is a control now (#62) |
 | Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
 | Storage | Where deleted recordings wait, and how long the trash keeps them — the first is a key the file carries and nothing offers, the second is a key nothing has (#646). The limits are controls now, with the measurement they act on beside them (#95) |
-| Per game | Whether Clipped records a game at all, which is the catalogue's answer and has no key anywhere (#245, #45), and the capture mode, of which this build has one (#77, #78). The eight settings a game may override are controls (#63) |
+| Per game | Whether Clipped records a game at all, which is the catalogue's answer and has no key anywhere (#245, #45), and the capture mode, of which this build has one (#77, #78). The nine settings a game may override are controls (#63) |
 | Hotkeys | Pressing a combination to bind it (#54). Typing one is a control now, and saving registers it without restarting the recorder (#233). The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
 | Notifications | Nothing that has a key. The four switches are controls ([#252](https://github.com/wildware-uk/clipped/issues/252)); what is left is a toast for a replay that was saved, which needs an event from the recorder to be raised from (#110) |
 | Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |

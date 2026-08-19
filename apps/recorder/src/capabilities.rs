@@ -36,10 +36,11 @@ use std::error::Error;
 use std::fmt;
 
 use clipped_encoder::{
-    detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, CodecSupport, Detection,
-    DetectionSource, EncoderKind, EncoderReport, ProbeError, Probing, Recommendation, Resolution,
-    Signal, SystemProbe,
+    detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, Codec, CodecSupport,
+    Detection, DetectionSource, EncoderKind, EncoderReport, ProbeError, Probing, Recommendation,
+    Resolution, Signal, SystemProbe,
 };
+use clipped_session::QualityPreset;
 
 use crate::cli::CapabilitiesArgs;
 
@@ -237,6 +238,7 @@ pub fn render(detection: &Detection, cache: &CapabilityCache) -> String {
     }
 
     out.push_str(&automatic_lines(report));
+    out.push_str(&preset_lines(report));
     out.push_str(&ffmpeg_lines());
     out.push_str(&footer(detection, cache));
     out
@@ -394,6 +396,69 @@ fn automatic_lines(report: &CapabilityReport) -> String {
         out.push('\n');
     }
     out
+}
+
+/// What each quality preset resolves to, per encoder, on this machine.
+///
+/// This section is the answer to issue #62's first acceptance criterion —
+/// *"preset selection produces the documented settings on at least two
+/// different GPU classes (documented)"* — and it is here rather than in a
+/// document because a document cannot be run on somebody else's machine. On a
+/// machine with an NVIDIA card and integrated AMD graphics it prints both
+/// classes side by side, and the codec column differs between them because the
+/// two encoders were measured to produce different codecs
+/// (`clipped_session::quality`).
+///
+/// Only encoders that are *present* are listed. An encoder this machine does
+/// not have has no answer to give, and inventing one would be the fabricated
+/// reading AGENTS.md section 27 rules out.
+///
+/// The three columns are exactly the three axes a preset moves. There is no
+/// resolution column and no frame rate column, because a preset sets neither —
+/// those are settings of their own (`docs/configuration.md`).
+fn preset_lines(report: &CapabilityReport) -> String {
+    let present: Vec<&EncoderReport> = report
+        .encoders()
+        .iter()
+        .filter(|encoder| encoder.availability().is_present())
+        .collect();
+
+    if present.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("Quality presets on this machine\n\n");
+    for encoder in present {
+        let kind = encoder.kind();
+        let automatic = best_measured_codec(encoder);
+        out.push_str(&format!("  {kind}\n\n"));
+        out.push_str("    preset       codec  bits per pixel per frame  encoder preset\n");
+        for preset in QualityPreset::ALL {
+            let resolved = preset.resolve(kind, automatic, report);
+            out.push_str(&format!(
+                "    {preset:<12} {codec:<6} {bits:<24}  {effort}\n",
+                codec = resolved.codec().log_value(),
+                bits = format!("{:.2}", resolved.bits_per_pixel_per_frame()),
+                effort = resolved.effort(),
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The codec `--codec auto` resolves to on one encoder.
+///
+/// The same walk `clipped_session::encoding` makes — the most efficient codec
+/// the encoder was *measured* to support, falling back to H.264 — so what this
+/// section prints is what a recording would be given and not a second opinion
+/// about it (AGENTS.md section 55).
+fn best_measured_codec(encoder: &EncoderReport) -> Codec {
+    let measured = clipped_encoder::measured_codecs(encoder);
+    Codec::EFFICIENCY_ORDER
+        .into_iter()
+        .find(|codec| measured.contains(codec))
+        .unwrap_or(Codec::H264)
 }
 
 /// The legend, the standing caveat, and where the answer came from.
@@ -660,6 +725,144 @@ mod tests {
         assert!(
             !report.contains("--prefix="),
             "the configure arguments are two thousand characters and belong in the notices,              not in a terminal report: {report}"
+        );
+    }
+
+    /// The two GPU classes issue #62's first acceptance criterion asks for,
+    /// as one machine: a discrete NVIDIA card whose driver registers all three
+    /// transforms, and integrated AMD graphics whose driver registers two.
+    ///
+    /// The same shape `clipped-recorder capabilities --refresh` reports on the
+    /// machine this was developed on, and the reason the preset table is worth
+    /// printing at all: the two encoders were measured to produce different
+    /// codecs, so one preset resolves to two different answers on one machine.
+    #[derive(Debug)]
+    struct TwoGpuClasses;
+
+    impl SystemProbe for TwoGpuClasses {
+        fn adapters(&self) -> Result<Vec<Adapter>, ProbeError> {
+            Ok(vec![
+                nvidia_card(),
+                Adapter::new(
+                    clipped_encoder::AdapterId::from_luid(2, 0),
+                    "AMD Radeon(TM) Graphics",
+                    Vendor::Amd,
+                    0x13C0,
+                    2 * 1024 * 1024 * 1024,
+                    false,
+                ),
+            ])
+        }
+
+        fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
+            Ok(EncoderObservations::none()
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Nvenc,
+                    "nvEncodeAPI64.dll",
+                    clipped_encoder::RuntimeOutcome::Loaded,
+                ))
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Amf,
+                    "amfrt64.dll",
+                    clipped_encoder::RuntimeOutcome::Loaded,
+                ))
+                .with_hardware_encoder(clipped_encoder::HardwareEncoder::new(
+                    Vendor::Nvidia,
+                    clipped_encoder::Codec::Av1,
+                    "NVIDIA AV1 Encoder MFT",
+                ))
+                .with_hardware_encoder(clipped_encoder::HardwareEncoder::new(
+                    Vendor::Nvidia,
+                    clipped_encoder::Codec::H264,
+                    "NVIDIA H.264 Encoder MFT",
+                ))
+                .with_hardware_encoder(clipped_encoder::HardwareEncoder::new(
+                    Vendor::Amd,
+                    clipped_encoder::Codec::Hevc,
+                    "AMDh265Encoder",
+                ))
+                .with_hardware_encoder(clipped_encoder::HardwareEncoder::new(
+                    Vendor::Amd,
+                    clipped_encoder::Codec::H264,
+                    "AMDh264Encoder",
+                )))
+        }
+
+        fn encoder_limits(
+            &self,
+            _adapters: &[Adapter],
+        ) -> Result<Vec<clipped_encoder::EncoderLimits>, ProbeError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The report says what each quality preset resolves to, per encoder, and
+    /// the answer differs between two GPU classes on one machine.
+    ///
+    /// Issue #62's first acceptance criterion — *"preset selection produces the
+    /// documented settings on at least two different GPU classes
+    /// (documented)"* — as something a machine answers rather than something a
+    /// document claims.
+    ///
+    /// Driven through the real [`render`] rather than through `preset_lines`,
+    /// for the reason `the_report_names_the_ffmpeg_this_process_loaded` gives
+    /// above: `rendered_report` assembles a report of its own out of the same
+    /// private functions, so a test that used it would still pass on a build
+    /// where the section had been deleted from `render`.
+    #[test]
+    fn the_report_says_what_each_preset_resolves_to_on_each_encoder() {
+        let detection = detect_cached(
+            &TwoGpuClasses,
+            &CapabilityCache::disabled(),
+            Probing::WithoutSessions,
+        )
+        .expect("a machine with two vendors' adapters detects successfully");
+        let report = render(&detection, &CapabilityCache::disabled());
+
+        let presets = report
+            .split_once("Quality presets on this machine")
+            .and_then(|(_, rest)| rest.split_once("\nFFmpeg"))
+            .map(|(section, _)| section)
+            .unwrap_or_else(|| panic!("the report has no quality preset section:\n{report}"));
+        let (nvidia, amd) = presets
+            .split_once("AMD AMF")
+            .unwrap_or_else(|| panic!("the AMD encoder has no preset table:\n{presets}"));
+
+        // The whole point of the section: `ultra` is AV1 where AV1 was measured
+        // and HEVC where it was not. A table of fixed numbers would say one of
+        // those on both, and asking the AMD encoder for AV1 is a recording that
+        // fails at the driver.
+        assert!(
+            nvidia.contains("ultra        av1"),
+            "NVENC was measured to produce AV1, so `ultra` must ask for it:\n{nvidia}"
+        );
+        assert!(
+            amd.contains("ultra        hevc"),
+            "this driver registers no AV1 transform for AMF, so `ultra` must take the most \
+             efficient codec that was measured, which is HEVC:\n{amd}"
+        );
+
+        // And the axis every encoder answers the same way, because it is not
+        // about the hardware: Performance asks for H.264 everywhere.
+        for (name, table) in [("NVENC", nvidia), ("AMF", amd)] {
+            assert!(
+                table.contains("performance  h264"),
+                "`performance` asks every encoder for H.264, and {name}'s table says \
+                 otherwise:\n{table}"
+            );
+            assert!(
+                table.contains("0.10") && table.contains("0.30"),
+                "{name}'s table should carry each preset's own bits per pixel per frame; a table \
+                 where they were all the number would be four rows of one preset:\n{table}"
+            );
+        }
+
+        // Quick Sync is not on this machine, and a row of answers for an
+        // encoder that is not here would be the invented reading AGENTS.md
+        // section 27 rules out.
+        assert!(
+            !presets.contains("Intel Quick Sync"),
+            "an encoder this machine does not have has no preset to resolve:\n{presets}"
         );
     }
 

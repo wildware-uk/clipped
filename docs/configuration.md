@@ -150,6 +150,7 @@ does nothing (AGENTS.md section 27).
 | Key                     | Type   | Default       | Accepts                                                            |
 | ----------------------- | ------ | ------------- | ------------------------------------------------------------------ |
 | `capture_target`        | text   | `game-window` | `game-window`, `display`                                           |
+| `quality_preset`        | text   | `balanced`    | `performance`, `balanced`, `high`, `ultra`                         |
 | `resolution`            | text   | `source`      | `source`, or a size such as `1920x1080`; both sides even, 128–7680 |
 | `framerate`             | number | `60`          | 1–480                                                              |
 | `codec`                 | text   | `auto`        | `auto`, `h264`, `hevc`, `av1`                                      |
@@ -157,6 +158,73 @@ does nothing (AGENTS.md section 27).
 | `microphone`            | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
 | `system_audio`          | text   | `default`     | `default`, `none`, or a device name of 1–256 characters            |
 | `replay_window_seconds` | number | `300`         | `0` to keep no buffer, or 30–1800, whole seconds                   |
+
+### The quality preset, and why `Custom` is not one of its values
+
+`quality_preset` is SPEC.md section 10's Performance / Balanced / High / Ultra.
+It resolves against what capability detection measured rather than to fixed
+numbers, and it moves exactly three things:
+
+| Preset | Bits per pixel per frame | Encoder effort | Codec, when `codec` is `auto` |
+| --- | --- | --- | --- |
+| `performance` | 0.10 | speed | H.264 |
+| `balanced` | 0.15 | balanced | the most efficient measured |
+| `high` | 0.22 | quality | the most efficient measured |
+| `ultra` | 0.30 | quality | the most efficient measured |
+
+Three, because three is what nothing else can express. The bitrate has no key at
+all — naming a number is [#181] — and `clipped_encoder::EncodePreset` is driven
+by all four encoder backends and was chosen by nothing until this setting
+existed. The codec is the one it shares, and it shares it in the direction that
+composes: the preset decides what `auto` means, and a `codec` naming one wins on
+every preset. `clipped-recorder capabilities` prints the resolved table per
+encoder, which is how a machine answers this rather than a document claiming to.
+
+**`Custom` is not a fifth value, and storing it would be worse than not having
+it.** SPEC.md section 10 lists `Custom` beside the four and then lists *under*
+it the settings somebody would set by hand — resolution, framerate, codec,
+encoder — every one of which is its own row in the table above and is always
+available. So `Custom` names a state rather than a choice: it is what is already
+true of a page where one of those has been set. Making it storable would break
+two things. `Resolved::is_overridden` is what enables the settings screen's
+Reset ([#286]), so a stored `Custom` is a value the screen reports the user chose
+and offers to reset — to nothing, because there is no "no preset" to return to,
+which is a control that silently does nothing (AGENTS.md section 27). And if
+setting a codec by hand silently rewrote the preset to `Custom`, one edit would
+throw away the preset *and* stop the settings nobody edited from following the
+machine, which is the failure the preset exists to prevent. So the preset stays
+what the user chose, a setting they set by hand wins over it, and the screen
+already says which is which.
+
+### What a quality preset does not set, and what each is waiting on
+
+SPEC.md section 10's list is ten things long. Four of them are settings of their
+own and a preset deliberately leaves them alone; the rest are not built, and a
+preset that claimed them would be a control that silently does nothing.
+
+| From SPEC.md section 10 | Where it stands |
+| --- | --- |
+| Resolution, framerate | Settings of their own, above. A preset that also set them would be a second answer to a question that already has one (AGENTS.md section 55) |
+| Codec, encoder | Settings of their own. The preset decides what `codec: auto` resolves to and never overrules a codec that was named |
+| Bitrate as a number | [#181]. The preset chooses how generous to be; naming the megabits is a different act |
+| HDR | [#99] for the capture — `clipped_session::encoding` refuses a 10-bit surface by name — and [#146] for the colour signalling that makes a 10-bit stream an HDR one. Nothing reads a key, so there is no key |
+| Colour format | Not a choice: the encoder is told the layout the capture is producing, and there is one |
+| Colour space | `clipped_encoder::ColourSpace` exists and every recording is BT.709 limited range. Writing anything else into the file is [#146] |
+| Audio bitrate | No key, and no caller passes one |
+| Container | Matroska. A container setting is [#307], and which container an editor can open is [#602] |
+
+Two things capability detection *measures* and nothing acts on are worth naming
+here rather than being quietly added to a preset: **B-frames**, which both
+vendors answer for and which every backend explicitly asks for none of, and the
+**framerate ceiling**, which is measured on AMF and deliberately not on NVENC
+(`docs/encoder-capabilities.md` explains why publishing NVENC's figure would be
+a lie). Neither is something a preset may move until something reads it.
+
+[#99]: https://github.com/wildware-uk/clipped/issues/99
+[#146]: https://github.com/wildware-uk/clipped/issues/146
+[#181]: https://github.com/wildware-uk/clipped/issues/181
+[#286]: https://github.com/wildware-uk/clipped/issues/286
+[#602]: https://github.com/wildware-uk/clipped/issues/602
 
 Where the library lives and what it may occupy are **not** in that table, and
 not per game: they live in a `storage` section of their own, because a library
@@ -730,7 +798,7 @@ a second time
 
 | Setting | What re-reads it after a save |
 | --- | --- |
-| every per-game setting: `resolution`, `framerate`, `codec`, `encoder`, `microphone`, `system_audio`, `replay_window_seconds` | the **next recording**. A recording started from the window resolves it as it starts; the automatic recorder compares `SettingsFile::generation` on every watcher pass and refreshes its copy when it moves ([#51](https://github.com/wildware-uk/clipped/issues/51)) |
+| every per-game setting: `quality_preset`, `resolution`, `framerate`, `codec`, `encoder`, `microphone`, `system_audio`, `replay_window_seconds` | the **next recording**. A recording started from the window resolves it as it starts; the automatic recorder compares `SettingsFile::generation` on every watcher pass and refreshes its copy when it moves ([#51](https://github.com/wildware-uk/clipped/issues/51)) |
 | `capture_target` | **nothing** — every recording captures the game's own window whatever this says, and the settings screen draws that sentence instead of a control ([#650](https://github.com/wildware-uk/clipped/issues/650), split out of [#61](https://github.com/wildware-uk/clipped/issues/61) because reading it changes how a window is resolved rather than how a setting is read) |
 | `storage.maximum_usage_bytes`, `storage.minimum_free_space_bytes`, `storage.maximum_age_days` | the **storage sweep**, after every reconciliation. `apply_settings` pushes the saved limits to the library indexer ([#95](https://github.com/wildware-uk/clipped/issues/95)) |
 | `storage.recording_directory` | the **next sitting**. Held while one is open and taken up when it ends, which the row's `not_yet_in_force` says on screen ([#609](https://github.com/wildware-uk/clipped/issues/609)) |
@@ -975,7 +1043,7 @@ against the layer that resolved it, and every other setting is reported as
 `request`. That is exactly the inverse of what `apply_configured_to` did, so the
 two cannot drift apart without the reading changing.
 
-Six settings, and the two that are absent are absent on purpose: `capture_target`,
+Seven settings, and the two that are absent are absent on purpose: `capture_target`,
 which nothing in this build reads, and `replay_window_seconds`, which sizes a
 buffer rather than being a property of the recording. A row for either would be a
 value invented to fill a table (AGENTS.md section 27).

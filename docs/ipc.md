@@ -1736,7 +1736,8 @@ when somebody opens Diagnostics.
                            "codecs":[{"codec":"h264","supported":true,
                                       "max_width":4096,"max_height":4096,
                                       "max_framerate_1080p":522,"inferred":true}]}]},
-  "settings":[{"setting":"resolution","value":"2560x1440","source":"game"},
+  "settings":[{"setting":"quality_preset","value":"high","source":"game"},
+              {"setting":"resolution","value":"2560x1440","source":"game"},
               {"setting":"framerate","value":"60","source":"game"},
               {"setting":"codec","value":"h264","source":"request"},
               {"setting":"encoder","value":"auto","source":"default"},
@@ -1776,7 +1777,7 @@ what says which happened:
 | `default` | the value Clipped ships with; nothing above it said anything                |
 | `request` | the recording itself — a `watch` command line, or a `start_recording`       |
 
-Six settings, and the two that are missing are missing on purpose:
+Seven settings, and the two that are missing are missing on purpose:
 `capture_target`, which nothing in this build reads, and
 `replay_window_seconds`, which sizes a buffer rather than being a property of the
 recording. A row for either would be a value invented to fill a table (AGENTS.md
@@ -2110,9 +2111,9 @@ Two fields come back with every answer:
   a page" rather than "games with an override".
 
 A game's page is a **shorter list**, not the global one with rows disabled. Only
-the settings a game may override are on it — `capture_target`, `resolution`,
-`framerate`, `codec`, `encoder`, `microphone`, `system_audio` and
-`replay_window_seconds`. The recording directory, the three storage limits, the
+the settings a game may override are on it — `capture_target`,
+`quality_preset`, `resolution`, `framerate`, `codec`, `encoder`, `microphone`,
+`system_audio` and `replay_window_seconds`. The recording directory, the three storage limits, the
 seven hotkeys and the four notification switches are global by construction, and
 `apply_settings` refuses one against a game by name rather than writing it to the
 global layer: a window saving a quota against a game and being answered "saved"

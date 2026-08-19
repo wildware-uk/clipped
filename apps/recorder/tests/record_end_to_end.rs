@@ -65,7 +65,7 @@
 mod support;
 
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -625,4 +625,289 @@ fn declared_frame_rate(media: &Media) -> Option<f64> {
     let numerator: f64 = numerator.parse().ok()?;
     let denominator: f64 = denominator.parse().ok()?;
     (denominator != 0.0).then_some(numerator / denominator)
+}
+
+/// How long each preset records for.
+///
+/// Short, because the point of this test is which encoder session was opened
+/// rather than how much footage came out of it, and it opens four.
+const RECORD_PER_PRESET: Duration = Duration::from_secs(4);
+
+/// The size the pattern renders at for the preset comparison.
+///
+/// 1280x720, the pattern application's own default and what every other test in
+/// this file records, so the arithmetic in [`PRESETS`] is over the same picture
+/// the rest of the harness produces.
+const PRESET_SIZE: (u32, u32) = (1280, 720);
+
+/// One quality preset, and everything the recorder should do differently for it.
+#[derive(Debug, Clone, Copy)]
+struct Preset {
+    /// What `--quality-preset` is given.
+    name: &'static str,
+    /// The vendor point [`clipped_encoder::EncodePreset`] should ask for, as
+    /// the encoder backends log it.
+    effort: &'static str,
+    /// Megabits a second at [`PRESET_SIZE`] and [`PRESET_FRAMERATE`], to one
+    /// decimal place, as the rate control prints itself.
+    ///
+    /// The arithmetic `clipped_session::quality` publishes — width x height x
+    /// rate x bits per pixel per frame — written out rather than computed, so
+    /// that a change to either constant fails here with a number a person can
+    /// read rather than agreeing with itself.
+    megabits: &'static str,
+    /// Whether this preset should overrule what `--codec auto` would choose.
+    ///
+    /// `true` for Performance, which asks every encoder for H.264. The other
+    /// three take the most efficient codec the encoder was *measured* to
+    /// support, which is a different codec on two machines and is therefore not
+    /// something this test may name.
+    asks_for_h264: bool,
+}
+
+/// The frame rate the bitrate is budgeted from.
+///
+/// [`SOURCE_FPS`] is what the pattern *presents* at; this is what the recording
+/// is *configured* for, and it is the recorder's own default because these
+/// invocations pass no `--framerate`. The bitrate is budgeted from the
+/// configured ceiling rather than from the rate the source turns out to
+/// sustain, which is a known thing and
+/// [issue #191](https://github.com/wildware-uk/clipped/issues/191) rather than
+/// anything a preset introduces — a preset scales whatever that budget is.
+const PRESET_FRAMERATE: u32 = 60;
+
+/// The four presets, cheapest first.
+const PRESETS: [Preset; 4] = [
+    Preset {
+        name: "performance",
+        effort: "speed",
+        // 1280 x 720 x 60 x 0.10 = 5.5 Mbit/s
+        megabits: "5.5",
+        asks_for_h264: true,
+    },
+    Preset {
+        name: "balanced",
+        effort: "balanced",
+        // x 0.15 = 8.3 Mbit/s
+        megabits: "8.3",
+        asks_for_h264: false,
+    },
+    Preset {
+        name: "high",
+        effort: "quality",
+        // x 0.22 = 12.2 Mbit/s
+        megabits: "12.2",
+        asks_for_h264: false,
+    },
+    Preset {
+        name: "ultra",
+        effort: "quality",
+        // x 0.30 = 16.6 Mbit/s
+        megabits: "16.6",
+        asks_for_h264: false,
+    },
+];
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
+fn each_quality_preset_opens_the_encoder_session_it_asks_for_and_only_one_changes_the_codec() {
+    // [Issue #62](https://github.com/wildware-uk/clipped/issues/62), against
+    // four real recordings of one window.
+    //
+    // **What makes this causal, and why it is the codec.** The trap in a test
+    // like this is asserting something that was already true: a 1280x720 file
+    // proves only that the window was 1280x720, whatever the preset did
+    // (`tests/automatic_sessions.rs` says the same about a per-game
+    // `resolution`, and this build has no scaler either way). So the reading
+    // that carries this test is the *codec*, and it is causal because all four
+    // invocations pass the same `--codec auto` against the same window at the
+    // same rate: on a build where the preset reached nothing, all four produce
+    // one codec and Performance's row fails naming the preset.
+    //
+    // **What the file cannot show, and why it is read elsewhere.** The bitrate
+    // a preset chooses does not read back out of a recording of this
+    // application. The pattern is a near-static picture with a counter on it,
+    // so the rate control never binds: measured on this project's machine on
+    // 2026-08-19, four 2560x1440 recordings configured at 22.1, 33.2, 48.7 and
+    // 66.4 Mbit/s came out at 0.085, 0.075, 0.086 and 0.087 Mbit/s — the
+    // content's own size four times over, with the configured rate nowhere in
+    // it. Asserting on file size here would pass or fail on how compressible
+    // the test pattern is rather than on the setting, which is worse than not
+    // asserting it. So the bitrate and the vendor's quality-for-speed point are
+    // read off the line the encoder backend logs when it opens the session —
+    // the values it handed the driver — and the codec is read off the file.
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    ensure_console();
+
+    let directory = TemporaryDirectory::new("recorder-quality-presets");
+    let mut produced: Vec<(Preset, Summary, PathBuf)> = Vec::new();
+
+    for preset in PRESETS {
+        let pattern = PatternApp::start(SOURCE_FPS, 60);
+        assert_eq!(
+            pattern.client_size(),
+            PRESET_SIZE,
+            "the arithmetic in `PRESETS` is for {PRESET_SIZE:?}",
+        );
+
+        let output = directory.file(&format!("{}.mkv", preset.name));
+        let mut recorder = Command::new(recorder_binary())
+            .args(record_arguments(pattern.process_id(), &output))
+            .args(["--quality-preset", preset.name])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .expect("the recorder binary can be started");
+        let diagnostics = read_stderr(&mut recorder);
+
+        thread::sleep(RECORD_PER_PRESET);
+        send_ctrl_c(&recorder);
+        wait_for_exit(&mut recorder, "the recorder");
+        let diagnostics = collected_stderr(&diagnostics);
+        drop(pattern);
+
+        assert_the_session_was_opened_for(preset, &diagnostics);
+        produced.push((preset, Summary::parse(&diagnostics), output));
+    }
+
+    // Printed pass or fail: this is the measurement issue #62 asks to be
+    // documented, and a green test whose evidence nobody can read is not it
+    // (AGENTS.md section 53).
+    let mut report = String::from("\n=== what each quality preset produced ===\n");
+    for (preset, summary, path) in &produced {
+        report.push_str(&format!(
+            "{name:<12} {codec:<5} {width}x{height}, {frames} frames over {seconds:.2}s  ({path})\n",
+            name = preset.name,
+            codec = summary.codec,
+            width = summary.width,
+            height = summary.height,
+            frames = summary.frames,
+            seconds = summary.seconds,
+            path = path.display(),
+        ));
+    }
+    println!("{report}");
+
+    for (preset, summary, path) in &produced {
+        assert_the_preset_reached_the_file(*preset, summary, path, &report);
+    }
+
+    // The causal claim in one assertion: `--codec auto` on one window on one
+    // machine gave two different codecs, and the preset is the only thing that
+    // differed between the two invocations.
+    let performance = &produced[0];
+    let dearest = &produced[PRESETS.len() - 1];
+    assert_ne!(
+        performance.1.codec, dearest.1.codec,
+        "`performance` and `ultra` recorded the same window with the same `--codec auto` and \
+         produced the same codec, so the preset reached nothing that decides one. Performance asks \
+         for H.264 and the others take the most efficient codec this encoder was measured to \
+         support.\n{report}"
+    );
+}
+
+/// Asserts that the encoder session the recorder opened is the one this preset
+/// asks for.
+///
+/// Read off the backend's own line rather than off the file, for the reason the
+/// test's own comment gives: the bitrate and the vendor preset are what the
+/// driver was handed, and neither survives into a recording of a picture this
+/// compressible. The line is
+/// `encoder session opened ... 4.1 Mbit/s constant ...`, and the session it
+/// describes is logged by `clipped_session::encoding`.
+fn assert_the_session_was_opened_for(preset: Preset, diagnostics: &str) {
+    let line = diagnostics
+        .lines()
+        .find(|line| line.contains("encoder session opened"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the recorder opened no encoder session for `{}`:\n{diagnostics}",
+                preset.name
+            )
+        });
+
+    let expected_rate = format!("{} Mbit/s constant", preset.megabits);
+    assert!(
+        line.contains(&expected_rate),
+        "`--quality-preset {name}` should configure the encoder for {expected_rate} at \
+         {PRESET_SIZE:?} and {PRESET_FRAMERATE} fps. A build where the preset never reached \
+         `bitrate_for` opens all four sessions at the Balanced rate of 8.3.\n{line}",
+        name = preset.name,
+    );
+    assert!(
+        line.contains(&format!("{} preset", preset.effort)),
+        "`--quality-preset {name}` should sit at the `{effort}` point of the encoder's \
+         quality-for-speed curve. Every backend drives `EncodePreset` and nothing chose it before \
+         this setting existed, so a build that dropped it opens all four `balanced`.\n{line}",
+        name = preset.name,
+        effort = preset.effort,
+    );
+}
+
+/// Asserts that the file holds Performance's codec, and that every preset left
+/// the picture alone.
+fn assert_the_preset_reached_the_file(
+    preset: Preset,
+    summary: &Summary,
+    output: &Path,
+    report: &str,
+) {
+    let media = Media::open(output)
+        .unwrap_or_else(|error| panic!("`{}`'s recording is not usable: {error}", preset.name));
+    let stream = *media
+        .video_streams()
+        .first()
+        .unwrap_or_else(|| panic!("`{}`'s recording has no video stream", preset.name));
+    let codec = stream
+        .field("codec_name")
+        .unwrap_or_else(|| panic!("`{}`'s recording names no codec", preset.name))
+        .to_owned();
+
+    if preset.asks_for_h264 {
+        assert_eq!(
+            codec,
+            "h264",
+            "`--quality-preset {name}` asks every encoder for H.264 — the one codec every encoder \
+             in the workspace produces — and this file holds `{codec}`. `--codec auto` was passed, \
+             so nothing else in the invocation could have chosen one.\n{report}",
+            name = preset.name,
+        );
+    }
+
+    // The reading that says the preset moved only what it owns. A preset sets
+    // no resolution and no frame rate — each of those is a setting in its own
+    // right — so a preset that had quietly changed either would show up here as
+    // a file unlike the other three.
+    if let Err(problems) = media
+        .validate()
+        .video_stream_count(1)
+        .video(
+            VideoStream::codec(&codec)
+                .resolution(PRESET_SIZE.0, PRESET_SIZE.1)
+                // Decoded rather than demuxed: a file whose packets all fail to
+                // decode still reports a stream and a duration.
+                .decoded_frames_at_least(1),
+        )
+        .monotonic_timestamps()
+        .check()
+    {
+        panic!(
+            "`{name}`'s recording is not the picture the other presets produced. A quality preset \
+             sets the bitrate, the encoder's effort and what `auto` means for the codec, and \
+             nothing else — a size that moved with the preset would be one overruling a setting of \
+             its own.\n{problems}\n{report}",
+            name = preset.name,
+        );
+    }
+
+    assert!(
+        sustained_framerate(summary) >= MINIMUM_SUSTAINED_FRAMERATE,
+        "`{name}` sustained {rate:.1} frames a second from a {SOURCE_FPS} fps source, which is not \
+         a recording of it.\n{report}",
+        name = preset.name,
+        rate = sustained_framerate(summary),
+    );
 }

@@ -14,6 +14,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use clap::ValueEnum;
+use clipped_session::QualityPreset;
 
 /// The smallest capture width or height accepted.
 ///
@@ -489,6 +490,46 @@ impl FromStr for Framerate {
     }
 }
 
+/// How much of the machine a recording may spend on itself.
+///
+/// `clap`'s copy of [`clipped_session::QualityPreset`], for the reason
+/// [`VideoCodec`] is `clipped_encoder::Codec`'s: this crate names the values a
+/// command line accepts, and the library it calls must not have to depend on
+/// `clap` to be asked for one (AGENTS.md section 5). The two are held together
+/// by `preset_selection_and_the_session_agree_on_every_name` below rather than
+/// by anybody remembering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum PresetSelection {
+    /// The fewest bits, the encoder's fastest point, and H.264.
+    Performance,
+    /// The default, and what every recording made before presets existed used.
+    #[default]
+    Balanced,
+    /// More bits, and the encoder's quality point.
+    High,
+    /// The most bits this build spends without being told a number.
+    Ultra,
+}
+
+impl PresetSelection {
+    /// The session's name for this preset.
+    #[must_use]
+    pub const fn preset(self) -> QualityPreset {
+        match self {
+            Self::Performance => QualityPreset::Performance,
+            Self::Balanced => QualityPreset::Balanced,
+            Self::High => QualityPreset::High,
+            Self::Ultra => QualityPreset::Ultra,
+        }
+    }
+}
+
+impl fmt::Display for PresetSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.preset().token())
+    }
+}
+
 /// Which video codec to encode with.
 ///
 /// Which of these a machine can actually produce is a property of its GPU and
@@ -830,6 +871,46 @@ mod tests {
                 "`{name}` is displayed but not accepted"
             );
         }
+    }
+
+    #[test]
+    fn preset_selection_and_the_session_agree_on_every_name() {
+        // Two enumerations for one vocabulary, because the library must not
+        // depend on `clap` and the command line must not depend on the
+        // library's derive. This is what stops them drifting: every value
+        // `--quality-preset` offers maps to a session preset, every session
+        // preset is reachable from the command line, and the two spell each
+        // one the same way — which is also the spelling `settings.json` uses
+        // (`clipped_session::config::document`).
+        let selections: Vec<QualityPreset> = PresetSelection::value_variants()
+            .iter()
+            .map(|selection| selection.preset())
+            .collect();
+        assert_eq!(
+            selections,
+            QualityPreset::ALL.to_vec(),
+            "the command line offers a different set of presets from the session's"
+        );
+
+        for selection in PresetSelection::value_variants() {
+            let name = selection.to_string();
+            assert_eq!(
+                PresetSelection::from_str(&name, false),
+                Ok(*selection),
+                "`{name}` is displayed but not accepted"
+            );
+            assert_eq!(
+                QualityPreset::from_token(&name),
+                Some(selection.preset()),
+                "`{name}` is what the command line prints and not what the settings file reads"
+            );
+        }
+
+        assert_eq!(
+            PresetSelection::default().preset(),
+            QualityPreset::default(),
+            "an invocation that says nothing must get the same preset a settings file that says              nothing gets"
+        );
     }
 
     #[test]

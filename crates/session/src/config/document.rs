@@ -72,6 +72,7 @@ use crate::config::preferences::{
 };
 use crate::config::value::SettingKey;
 use crate::config::Configuration;
+use crate::quality::QualityPreset;
 use crate::settings::{CodecPreference, EncoderPreference, ResolutionSetting};
 
 /// The settings format this build writes.
@@ -453,6 +454,16 @@ fn read_setting(
             })?;
             preferences.set_capture_target(Some(target));
         }
+        SettingKey::QualityPreset => {
+            let token = expect_string(key, value, PRESETS)?;
+            let preset =
+                QualityPreset::from_token(token).ok_or_else(|| SettingError::Unrecognised {
+                    key,
+                    value: format!("{token:?}"),
+                    accepted: PRESETS,
+                })?;
+            preferences.set_quality_preset(Some(preset));
+        }
         SettingKey::Resolution => {
             let token = expect_string(key, value, "\"source\" or \"1920x1080\"")?;
             preferences.set_resolution(Some(parse_resolution(token)?))?;
@@ -488,6 +499,7 @@ fn read_setting(
 }
 
 const CODECS: &str = "\"auto\", \"h264\", \"hevc\" or \"av1\"";
+const PRESETS: &str = "\"performance\", \"balanced\", \"high\" or \"ultra\"";
 const ENCODERS: &str = "\"auto\", \"nvenc\", \"amf\", \"quicksync\" or \"software\"";
 const DEVICES: &str = "\"default\", \"none\" or a device name";
 
@@ -507,6 +519,10 @@ pub(crate) fn choices_for(key: SettingKey) -> Vec<String> {
         SettingKey::CaptureTarget => CaptureTargetSetting::ALL
             .iter()
             .map(|target| target.token().to_owned())
+            .collect(),
+        SettingKey::QualityPreset => QualityPreset::ALL
+            .iter()
+            .map(|preset| preset.token().to_owned())
             .collect(),
         SettingKey::Codec => core::iter::once("auto".to_owned())
             .chain(
@@ -541,6 +557,7 @@ pub(crate) fn accepted_for(key: SettingKey) -> String {
         SettingKey::Framerate => {
             format!("{MINIMUM_FRAMERATE}-{MAXIMUM_FRAMERATE} frames per second")
         }
+        SettingKey::QualityPreset => PRESETS.to_owned(),
         SettingKey::Codec => CODECS.to_owned(),
         SettingKey::Encoder => ENCODERS.to_owned(),
         SettingKey::Microphone | SettingKey::SystemAudio => DEVICES.to_owned(),
@@ -610,6 +627,7 @@ pub(crate) fn set_written_setting(
 pub(crate) fn written_setting(settings: &ResolvedSettings, key: SettingKey) -> String {
     match key {
         SettingKey::CaptureTarget => settings.capture_target().get().token().to_owned(),
+        SettingKey::QualityPreset => settings.quality_preset().get().token().to_owned(),
         SettingKey::Resolution => write_resolution(settings.resolution().get()),
         SettingKey::Framerate => settings.framerate().get().to_string(),
         SettingKey::Codec => write_codec(settings.codec().get()),
@@ -641,6 +659,7 @@ pub(crate) fn written_recording_setting(
     key: SettingKey,
 ) -> String {
     match key {
+        SettingKey::QualityPreset => recording.quality().token().to_owned(),
         SettingKey::Resolution => write_resolution(recording.resolution()),
         SettingKey::Framerate => recording.framerate().to_string(),
         SettingKey::Codec => write_codec(recording.codec()),
@@ -676,6 +695,12 @@ fn write_preferences(preferences: &Preferences) -> Map<String, Value> {
         object.insert(
             SettingKey::CaptureTarget.name().to_owned(),
             Value::from(target.token()),
+        );
+    }
+    if let Some(preset) = preferences.quality_preset() {
+        object.insert(
+            SettingKey::QualityPreset.name().to_owned(),
+            Value::from(preset.token()),
         );
     }
     if let Some(resolution) = preferences.resolution() {
