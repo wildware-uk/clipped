@@ -1090,9 +1090,11 @@ What they cannot say is whether a real broken capture on real hardware looks the
 way this fixture does. A Windows Graphics Capture session that has stopped
 working is *observed* to hand over frames of zeroes rather than to report
 anything, which is what the detector is built around, but nothing in this
-repository can make one do it on request. That belongs to the capture
-compatibility matrix in
-[issue #96](https://github.com/wildware-uk/clipped/issues/96).
+repository can make one do it on request. That is recorded as an open unknown in
+[compatibility.md](compatibility.md), which is
+[issue #96](https://github.com/wildware-uk/clipped/issues/96)'s matrix — the
+page that says which of the commands in this file anybody has ever run, on what
+hardware, and what came out of them.
 
 ## What is not built yet
 
