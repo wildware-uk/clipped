@@ -64,6 +64,32 @@ saying what it already implied.
   product reason, and now says it is accepting a known exposure rather than
   leaving that to be found in the Alternatives.
 
+**2026-08-19 — the parts the amendment above shifted the weight of
+([#257](https://github.com/wildware-uk/clipped/issues/257)).** Saying plainly
+that most recordings are HEVC on vendor silicon changed which parts of this
+record are load-bearing, and three of them were still written for the older
+framing. Again, no change of position.
+
+- **The four questions are not four equal items.** Their section now says so,
+  and names question 2 as the one to ask first. It is the question that tests
+  decision point 5's reading, which is the entire patent cover for the modal
+  case. A list of four equal-looking items invites spending the first hour of
+  somebody's chargeable time on question 1 — the software H.264 path, reached
+  only by a machine that fell back. The questions are **not** reordered: their
+  numbering is load-bearing elsewhere, in the headings of [The
+  answers](#the-answers) and in the release gate that reads them.
+- **Decision point 5 says it is load-bearing.** It read as a footnote — a
+  caveat on one path among several — when it is the claim nearly every recording
+  Clipped makes rests on. Same argument, same status as a reading rather than a
+  fact; it now says what depends on it, for a reader skimming the six numbered
+  points.
+- **AVC patent expiry is demoted in "What has to be watched".** It led that
+  list, saying the AVC exposure "shrinks towards nothing". That was a reasonable
+  headline when AVC looked like the main problem. It now sits below the items
+  that matter more and says what it does not do: AVC is the third codec on the
+  efficiency order, and its patents expiring changes nothing about HEVC, which
+  dates from 2013 and has decades to run.
+
 **On the inline citations.** The file-and-line references in this record are
 indicative: three of them had drifted within six days of it being written, which
 is what line numbers do. Every claim they support was re-verified against the
@@ -251,14 +277,22 @@ That resolves into six things a contributor can check against a pull request.
    third party's standard-essential patents, and a user who reads a repository
    full of licence files should not be left to infer otherwise.
 
-5. **Hardware encoding is the preferred path for AVC and HEVC, and the reason is
-   recorded as a reading, not a fact.** The argument is that the encoding is
-   performed by silicon whose vendor holds the licences, and that Clipped is an
-   application invoking a licensed component rather than an implementation of
-   the standard. That is the ordinary industry practice and it is what every
-   comparable recorder relies on. It is **not** established here: Access
-   Advance's own FAQ declines to state a general rule for software and asks
-   implementers to contact them, which is the opposite of a safe harbour.
+5. **Hardware encoding is the preferred path for AVC and HEVC, the reason is
+   recorded as a reading rather than a fact, and that reading is the
+   load-bearing claim in this record.** Take the point in that order, because
+   the last part is the one a skim loses. Nearly every recording Clipped makes
+   is encoded on vendor silicon — HEVC on most machines, AV1 on recent ones,
+   H.264 on old ones — so this is not a caveat on one path among several. It is
+   the entire patent cover for the modal case.
+
+   The argument is that the encoding is performed by silicon whose vendor holds
+   the licences, and that Clipped is an application invoking a licensed
+   component rather than an implementation of the standard. That is the
+   ordinary industry practice and it is what every comparable recorder relies
+   on. It is **not** established here: Access Advance's own FAQ declines to
+   state a general rule for software and asks implementers to contact them,
+   which is the opposite of a safe harbour. Question 2 below is what would
+   settle it, and it is the one to ask first.
 
 6. **The first signed public release is blocked on the questions below being
    asked.** Not on a particular answer — on somebody qualified having answered.
@@ -270,6 +304,18 @@ That resolves into six things a contributor can check against a pull request.
 ### The four questions for a lawyer
 
 Written to be answerable, rather than as "are we allowed to ship this".
+
+**They are not four equal items, and question 2 is the one to ask first.**
+Every HEVC recording Clipped makes — which is most of them, on most machines —
+rests on decision point 5's reading and on nothing else, and question 2 is what
+tests it. Legal time is bought in units somebody is counting, and a list that
+reads as four equal items invites spending the first unit somewhere else. If
+only one of these can be put to a solicitor, put that one: an authoritative
+answer to question 2 and nothing else would be a good outcome. An authoritative
+answer to question 1 and nothing else would settle the *software* H.264 path,
+which is reached only by a machine whose hardware encoder was absent or
+refused, and would leave the modal case exactly where it is. The numbering
+below is the order they were written in, not their weight.
 
 1. **Does the installer make Clipped an "AVC encoder/decoder product"?** It
    distributes `avcodec-62.dll` containing a statically linked `libopenh264`
@@ -474,10 +520,6 @@ the wrong moment to still be guessing.
   the UI above AV1, or adding software HEVC — each of those now has to argue
   with this record first. That is the intended cost.
 - **What has to be watched:**
-  - **AVC patent expiry.** The AVC pool's patents are old and the standard dates
-    from 2003; as they expire the AVC half of this record shrinks towards
-    nothing. Nobody here has checked the expiry dates, and that is exactly the
-    sort of question a lawyer answers in a paragraph.
   - **Pool terms move, sometimes quietly.** Via LA restructured its AVC
     *streaming* fees for new licensees from 2026, and Access Advance has been
     deferring an HEVC rate increase through 2026. Neither is Clipped's category —
@@ -485,6 +527,16 @@ the wrong moment to still be guessing.
   - **Sisvel's AV1 pool.** It has licensed hardware implementations so far. If it
     starts licensing software implementations, AV1 stops being the clean answer
     and this record needs revisiting rather than repeating.
+  - **AVC patent expiry, which does not shrink the part that matters.** The AVC
+    pool's patents are old and the standard dates from 2003, so the AVC half of
+    this record does thin out as they expire. Nobody here has checked the dates,
+    and that is the sort of question a lawyer answers in a paragraph. It is
+    listed low deliberately: an earlier version of this list led with it, which
+    was reasonable when AVC looked like the main problem and is misleading now.
+    AVC is the *third* codec on the efficiency order and is reached only by a
+    machine with neither an AV1 nor an HEVC encoder, and what this record is
+    mostly about is HEVC — a 2013 standard with decades left to run, no free
+    tier, and more than one pool. AVC expiring changes none of that.
   - **A player in the window ([#304](https://github.com/wildware-uk/clipped/issues/304)).**
     Playback in WebView2 decodes through the platform, not through Clipped, and
     the platform's licensing is Microsoft's — but it is a new place where
