@@ -465,6 +465,7 @@ dependencies = [
  "clipped-edit",
  "clipped-encoder",
  "clipped-events",
+ "clipped-export",
  "clipped-game-detection",
  "clipped-hotkeys",
  "clipped-library",

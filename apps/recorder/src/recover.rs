@@ -33,7 +33,8 @@ use clipped_library::index::{reconcile, IndexControl, IndexError, IndexPace, Ind
 use clipped_library::trash::{Trash, TrashError, TrashItem};
 use clipped_logging::RedactedPath;
 use clipped_session::automatic::recovery::{
-    adopt, interrupted_recordings, record_discarded, InterruptedRecording,
+    adopt, interrupted_recordings, orphaned_recordings, record_discarded, InterruptedRecording,
+    OrphanedRecording,
 };
 use clipped_session::cleanup;
 use clipped_session::config::ConfigurationStore;
@@ -237,11 +238,31 @@ pub fn run(args: &RecoverArgs) -> Result<(), RecoverError> {
         "looked for recordings an interrupted recorder left behind"
     );
 
-    if found.is_empty() {
-        eprintln!(
-            "No interrupted recordings in {}. Nothing to recover.",
-            directory.display()
+    // Media no session record accounts for. Listed alongside the interrupted
+    // recordings because they are the same question from a user's side — "there
+    // is a file and the application does not know about it" — and because
+    // reporting the first while staying silent about the second is how a
+    // recording whose sidecar was deleted stayed invisible (issue #272).
+    let orphaned = orphaned_recordings(&directory).unwrap_or_else(|error| {
+        tracing::warn!(
+            directory = %RedactedPath::new(&directory),
+            %error,
+            "the recording directory could not be searched for unaccounted media; the \
+             interrupted recordings were still found"
         );
+        Vec::new()
+    });
+
+    if found.is_empty() {
+        if orphaned.is_empty() {
+            eprintln!(
+                "No interrupted recordings in {}. Nothing to recover.",
+                directory.display()
+            );
+        } else {
+            eprintln!("No interrupted recordings in {}.", directory.display());
+            report_orphaned(&orphaned);
+        }
         return Ok(());
     }
 
@@ -250,6 +271,7 @@ pub fn run(args: &RecoverArgs) -> Result<(), RecoverError> {
     match args.action() {
         RecoverAction::List => {
             report(&chosen, &directory);
+            report_orphaned(&orphaned);
             Ok(())
         }
         RecoverAction::Adopt => adopt_all(&chosen),
@@ -304,6 +326,70 @@ fn select<'a>(
 }
 
 /// Prints what there is, and what can be done about it.
+/// Says what media in the folder no session record accounts for.
+///
+/// Silent when there is none, because a line saying "nothing else" on every run
+/// is noise on the machines where this is the ordinary answer.
+///
+/// Each file is described from what it says about itself rather than from its
+/// name: a length, a picture size and a track count are what tell somebody
+/// whether the file is footage they want back, and a name and a size are not.
+/// A file that could not be opened says so — it is either not media, or damaged
+/// beyond reading, and both are worth seeing.
+///
+/// It offers nothing to do about them. Adopting one means writing a session
+/// record, and a session record carries what the recorder measured — the
+/// encoder, the codec, how many frames were dropped — none of which is knowable
+/// from a file. Inventing those is the one thing this workspace is built not to
+/// do, so what an adopted record looks like is a schema question issue #272 has
+/// to answer before there is an action to offer (AGENTS.md section 27: a
+/// control that did nothing would be worse than none).
+fn report_orphaned(orphaned: &[OrphanedRecording]) {
+    if orphaned.is_empty() {
+        return;
+    }
+
+    eprintln!();
+    eprintln!(
+        "{} recording{} no session record accounts for:",
+        orphaned.len(),
+        if orphaned.len() == 1 { "" } else { "s" }
+    );
+
+    for recording in orphaned {
+        match recording.facts() {
+            Some(facts) => {
+                let length = facts.duration().map_or_else(
+                    || "length unknown".to_owned(),
+                    |duration| format!("{:.1} s", duration.as_secs_f64()),
+                );
+                let picture = facts.picture_size().map_or_else(
+                    || "no picture".to_owned(),
+                    |(width, height)| format!("{width}x{height}"),
+                );
+                let tracks = facts.audio_tracks();
+                eprintln!(
+                    "  {}, {length}, {picture}, {tracks} sound track{}, {}",
+                    describe_bytes(recording.bytes()),
+                    if tracks == 1 { "" } else { "s" },
+                    recording.path().display()
+                );
+            }
+            None => eprintln!(
+                "  {}, could not be opened, {}",
+                describe_bytes(recording.bytes()),
+                recording.path().display()
+            ),
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "These are not offered for adoption yet: a session record carries what the recorder \
+         measured, and none of it can be read back out of a file. See issue #272."
+    );
+}
+
 fn report(chosen: &[&InterruptedRecording], directory: &Path) {
     eprintln!(
         "{} interrupted recording{} in {}:",
