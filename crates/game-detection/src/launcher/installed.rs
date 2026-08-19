@@ -40,7 +40,7 @@
 //! named so that a diagnostics screen can say detection is working with less
 //! than everything, rather than the user finding out one game at a time.
 
-use crate::catalogue::ProcessCandidate;
+use crate::catalogue::{LauncherKind, ProcessCandidate};
 
 use super::battlenet::BattleNet;
 use super::epic::Epic;
@@ -148,6 +148,35 @@ impl Launchers {
     #[must_use]
     pub fn problems(&self) -> &[String] {
         &self.problems
+    }
+
+    /// What the launcher of `kind` calls the application it knows as `app_id`.
+    ///
+    /// The pair is exactly what [`ProcessCandidate::launcher`] carries, so a
+    /// caller handed a claim can turn it into something to show a person. That
+    /// is the whole of what this is for: a game a launcher installed but the
+    /// catalogue does not name has an identifier and no name, and
+    /// `steam-1145360` is not a thing to put in a library
+    /// ([issue #664](https://github.com/wildware-uk/clipped/issues/664)).
+    ///
+    /// [`None`] when that launcher is not installed, or when nothing it
+    /// installed carries that identifier.
+    #[must_use]
+    pub fn name_of(&self, kind: LauncherKind, app_id: &str) -> Option<&str> {
+        match kind {
+            LauncherKind::Steam => self.steam.as_ref()?.name_of(app_id),
+            LauncherKind::Epic => self.epic.as_ref()?.name_of(app_id),
+            LauncherKind::Xbox => self.xbox.as_ref()?.name_of(app_id),
+            LauncherKind::BattleNet => self.battlenet.as_ref()?.name_of(app_id),
+            LauncherKind::Riot => self.riot.as_ref()?.name_of(app_id),
+            LauncherKind::Ubisoft => self.ubisoft.as_ref()?.name_of(app_id),
+            // `LauncherKind` is `#[non_exhaustive]` and names kinds no provider
+            // is written for yet — `Ea`, and whatever is added next. A claim can
+            // only come from a provider, so this arm is unreachable in practice;
+            // answering `None` rather than panicking keeps a future kind from
+            // turning a naming question into a crash.
+            _ => None,
+        }
     }
 
     /// A running process as the catalogue wants to be asked about it, carrying

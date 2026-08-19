@@ -294,6 +294,27 @@ impl Riot {
         }
     }
 
+    /// What this launcher calls the application it knows as `app_id`.
+    ///
+    /// The identifier is the one [`Self::candidate_for`] puts into a claim, so a
+    /// caller holding a claim can name the application without knowing which
+    /// field of which provider that identifier came from
+    /// ([issue #664](https://github.com/wildware-uk/clipped/issues/664)).
+    /// Riot records no display name of its own, so its identifier is the
+    /// best name available and is returned as one. It is readable —
+    /// `league_of_legends` — which is why this is acceptable rather than a
+    /// placeholder.
+    ///
+    ///
+    /// [`None`] when nothing installed here carries that identifier.
+    #[must_use]
+    pub fn name_of(&self, app_id: &str) -> Option<&str> {
+        self.apps()
+            .iter()
+            .find(|app| app.id() == app_id)
+            .map(|app| app.id())
+    }
+
     /// The products Riot says are installed.
     #[must_use]
     pub fn apps(&self) -> &[RiotApp] {

@@ -2190,27 +2190,17 @@ fn saving_back_the_directory_in_use_cancels_a_change_a_sitting_was_holding() {
     assert!(moved.sidecars().is_empty(), "{:?}", moved.sidecars());
 }
 
-/// The `LaunchGroup` inside a `WatchEvent::Launched`, for the cases that ask the
-/// manager a question about a launch rather than feeding it one.
-fn group_of(event: &WatchEvent) -> &LaunchGroup {
-    match event {
-        WatchEvent::Launched(group) => group,
-        other => panic!("this helper is only used with a launch, not {other:?}"),
-    }
-}
-
 #[test]
-fn a_launcher_installed_game_with_no_entry_is_reported_as_one() {
-    // Issue #664. The shipped catalogue names a few dozen games and a Steam
-    // library holds hundreds, so "the catalogue does not claim this" is the
-    // ordinary outcome on a real machine, not the exceptional one. It was
-    // reported at `debug!`, and a shipped build runs at `info`, so the ordinary
-    // outcome produced no record anywhere and "Clipped is not recording my
-    // games" could not be answered from a log.
+fn a_game_a_launcher_installed_is_recorded_though_the_catalogue_does_not_name_it() {
+    // Issue #664. The catalogue names a few dozen games and a Steam library
+    // holds hundreds, so "no entry claims this" is the ordinary outcome on a
+    // real machine. Measured on one: 2 of 89 installed Steam applications were
+    // placed before #665, and 68 after two batches of entries -- which still
+    // leaves the general case unsolved, because a catalogue cannot be appended
+    // to until it covers Steam.
     //
-    // What makes the line worth emitting is the distinction asserted here: a
-    // launcher claiming the path is the machine saying this *is* a game, which
-    // is a gap in our data rather than a verdict about the process.
+    // A launcher claiming the path is the machine reporting that the thing is a
+    // game. This asserts that the claim is now enough on its own.
     const CATALOGUE: &str = r#"
 schema_version = 1
 
@@ -2221,7 +2211,7 @@ name = "Some Other Game"
 name = "some-other-game.exe"
 "#;
 
-    let directory = TestDirectory::new("unrecognised-but-claimed");
+    let directory = TestDirectory::new("claimed-but-unnamed");
     let catalogue =
         Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
     let launchers = Launchers::none().with_riot(
@@ -2238,34 +2228,78 @@ name = "some-other-game.exe"
     )
     .with_launchers(launchers);
 
-    let event = launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe");
-
-    assert_eq!(
-        manager.unrecognised(group_of(&event)),
-        Unrecognised::ClaimedBy {
-            kind: LauncherKind::Riot,
-            app_id: "shop_game".to_owned(),
-        },
-        "the launcher installed this and the catalogue has no entry for it, which is the case          that has to be reported"
+    let actions = manager.observe(
+        &launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe"),
+        t(0),
     );
 
-    // And it is still not recorded. This change reports the gap; whether to
-    // record a launcher-installed game with no entry is issue #664 and is not
-    // decided here.
     assert!(
-        manager.observe(&event, t(0)).is_empty(),
-        "reporting an unrecognised launch must not start recording it"
+        !actions.is_empty(),
+        "a launcher installed this, so it is a game and should be recorded even though no          catalogue entry names it"
     );
-    assert!(manager.active_session().is_none());
+
+    // `league_of_legends` is Riot's own identifier and Riot publishes no display
+    // name, so the identifier is the name. The identifier is spelled from it:
+    // `shop_game` contains an underscore, which `GameKey` forbids, so it is
+    // normalised and carries a hash of the raw value to keep the mapping
+    // injective.
+    let game = manager
+        .active_session()
+        .expect("a session was opened")
+        .game()
+        .clone();
+    let GameIdentity::Known { game_id, name } = game else {
+        panic!("a claimed launch is a known game, not {game:?}");
+    };
+    assert_eq!(name, "shop_game", "the launcher's own name for it");
+    assert!(
+        game_id.starts_with("riot-shop-game-"),
+        "the identifier says which launcher and which application: {game_id}"
+    );
+    assert!(
+        crate::config::GameKey::parse(&game_id).is_ok(),
+        "a synthesised identifier has to be spellable as a settings key: {game_id}"
+    );
 }
 
 #[test]
-fn a_launch_no_launcher_installed_is_reported_as_the_other_thing() {
-    // The other half. Same catalogue, same executable, same path — and no
-    // launcher to ask. There is then no evidence the process is a game at all,
-    // which is a different sentence and stays at `debug!`: a machine with no
-    // launcher installed would otherwise log every background process it ever
-    // sees at `info`.
+fn two_identifiers_that_normalise_alike_do_not_become_one_game() {
+    // The failure this guards against is silent and permanent. `games.game_id`
+    // is a PRIMARY KEY, so two games reduced to one identifier do not collide
+    // loudly -- the second adopts the first one's row, its per-game settings and
+    // its exclusions, and nothing anywhere reports it.
+    //
+    // `Microsoft.Limitless` and `Microsoft_Limitless` differ by one character
+    // that `GameKey` forbids, so a normalisation that simply replaced it would
+    // map them onto one key.
+    let catalogue = Catalogue::parse(
+        "schema_version = 1
+",
+        EntrySource::Seed,
+    )
+    .expect("an empty catalogue is valid");
+
+    let first = synthesised_game_id(LauncherKind::Xbox, "Microsoft.Limitless", &catalogue);
+    let second = synthesised_game_id(LauncherKind::Xbox, "Microsoft_Limitless", &catalogue);
+
+    assert_ne!(
+        first, second,
+        "two applications must not share one identifier, however alike they normalise"
+    );
+    for identifier in [&first, &second] {
+        assert!(
+            crate::config::GameKey::parse(identifier).is_ok(),
+            "not spellable as a settings key: {identifier}"
+        );
+    }
+}
+
+#[test]
+fn a_launch_no_launcher_installed_is_not_a_game() {
+    // The other half, and what keeps the change above from meaning "record
+    // everything": the same executable at the same path, with no launcher to
+    // ask, is not a game. Nothing installed it, so there is no evidence it is
+    // one, and a desktop is mostly this.
     const CATALOGUE: &str = r#"
 schema_version = 1
 
@@ -2276,20 +2310,23 @@ name = "Some Other Game"
 name = "some-other-game.exe"
 "#;
 
-    let directory = TestDirectory::new("unrecognised-unclaimed");
+    let directory = TestDirectory::new("unclaimed-is-not-a-game");
     let catalogue =
         Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
 
-    let manager = SessionManager::new(
+    let mut manager = SessionManager::new(
         catalogue,
         AutomaticSettings::new(directory.path().to_path_buf()),
     );
 
-    let event = launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe");
+    let actions = manager.observe(
+        &launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe"),
+        t(0),
+    );
 
-    assert_eq!(
-        manager.unrecognised(group_of(&event)),
-        Unrecognised::Unclaimed,
+    assert!(
+        actions.is_empty(),
         "nothing installed this, so there is no evidence it is a game"
     );
+    assert!(manager.active_session().is_none());
 }

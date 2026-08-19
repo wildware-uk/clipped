@@ -459,6 +459,47 @@ that is not installed is absent; one whose metadata could not be read is a
 problem recorded against it, because a corrupt Epic manifest directory must not
 cost the user the Steam games on the same machine.
 
+### A game the catalogue does not name
+
+A launcher claiming a process is the machine reporting that the thing is a game,
+and that is enough on its own. When no catalogue entry matches, but a launcher
+says it installed the executable, the recording happens anyway under an identity
+derived from what the launcher said ([#664]).
+
+This is not a nicety. Measured on a real machine, the shipped catalogue placed
+**2 of 89 installed Steam applications** before entries were added for them, and
+68 afterwards — and a catalogue cannot be appended to until it covers Steam. A
+build that recorded only catalogued games recorded almost nothing, and said
+nothing about it either.
+
+**The identity is derived, and it is derived carefully.** `games.game_id` is a
+`PRIMARY KEY` and becomes a key in the user's settings file, so two rules apply
+at once:
+
+- It has to be spellable as a `GameKey` — `[a-z0-9-]`. Only three of the six
+  launchers hand out identifiers that already are: Xbox's
+  `Microsoft.Limitless_8wekyb3d8bbwe`, Riot's `league_of_legends` and Epic's
+  `FabPlugin_5.8` are not.
+- The mapping has to be **injective**. Two games reduced to one identifier do
+  not collide loudly; the second silently adopts the first one's row, its
+  per-game settings and its exclusions. So an identifier whose normalisation
+  lost anything carries a hash of the raw value: `Microsoft.Limitless` and
+  `Microsoft_Limitless` stay two games.
+
+**The name is the launcher's own.** Steam, Epic, Battle.net and Ubisoft publish
+one; Riot does not, so its identifier is used, which is readable
+(`league_of_legends`). Xbox publishes the package name, which is often not the
+game's — `Limitless` is Microsoft Flight Simulator 2024. A catalogue entry beats
+all of this, which is the reason to write one.
+
+**A catalogue entry still wins, and still earns its place.** It brings a real
+name, per-game defaults, a child-process list and a `not_the_game` list, none of
+which can be derived from a claim. The claim is the floor, not the ceiling.
+
+**What is still not a game.** A process no launcher claims. Nothing installed
+it, so there is no evidence it is one, and that is most of what runs on a
+desktop.
+
 ### What a launcher may not claim
 
 A launcher claims a **directory**, so every process under it carries the game's
@@ -1590,3 +1631,4 @@ Both halves are addressed, because either alone would leave it:
   process on the machine twenty times a second — the thing this design exists to
   avoid.
 [#459]: https://github.com/wildware-uk/clipped/issues/459
+[#664]: https://github.com/wildware-uk/clipped/issues/664
