@@ -384,3 +384,389 @@ app_id = "BethesdaSoftworks.ProjectAltar_3275kfvn8vcwc"
 
 [game.capture]
 compatibility = "unknown"
+
+# --- Widely played Steam titles ---------------------------------------------
+#
+# Every executable name below was read off a real installation rather than
+# looked up, and every entry carries its Steam application identifier, which is
+# the rung that identifies a game whose process is called something generic
+# (`catalogue::matching`). The identifier is what makes these robust: it is
+# matched before the executable is consulted at all, so a game that renames its
+# binary in a patch keeps being recognised.
+#
+# `not_the_game` is used where the install directory contains a launcher or an
+# anti-cheat bootstrapper that runs first and is not the thing to record.
+# `start_protected_game.exe` is Easy Anti-Cheat's and appears in three of these
+# directories, which is precisely why it is named per game rather than globally.
+
+[[game]]
+game_id = "left-4-dead-2"
+name = "Left 4 Dead 2"
+
+[[game.executables]]
+name = "left4dead2.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "550"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "counter-strike-source"
+name = "Counter-Strike: Source"
+
+# Not `hl2.exe`. Counter-Strike: Source was moved onto its own executable, so
+# unlike Team Fortress 2 above it needs no path qualifier to tell it from
+# Half-Life 2.
+[[game.executables]]
+name = "cstrike_win64.exe"
+
+[[game.executables]]
+name = "cstrike.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "240"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "garrys-mod"
+name = "Garry's Mod"
+
+[[game.executables]]
+name = "gmod.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "4000"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "arma-3"
+name = "Arma 3"
+
+[[game.executables]]
+name = "arma3_x64.exe"
+
+[[game.executables]]
+name = "arma3.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "107410"
+# Arma 3 opens a launcher window of its own before the game, and the dedicated
+# server binaries sit in the same directory.
+not_the_game = [
+    "arma3launcher.exe",
+    "arma3server.exe",
+    "arma3server_x64.exe",
+    "arma3battleye.exe",
+]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "payday-2"
+name = "PAYDAY 2"
+
+[[game.executables]]
+name = "PAYDAY2.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "218620"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "killing-floor-2"
+name = "Killing Floor 2"
+
+[[game.executables]]
+name = "KFGame.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "232090"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "space-engineers"
+name = "Space Engineers"
+
+[[game.executables]]
+name = "SpaceEngineers.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "244850"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "seven-days-to-die"
+name = "7 Days to Die"
+
+[[game.executables]]
+name = "7DaysToDie.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "251570"
+# The Easy Anti-Cheat build and the launcher both start first and neither is
+# the game.
+not_the_game = ["7DaysToDie_EAC.exe", "7dLauncher.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "rust"
+name = "Rust"
+
+# `Rust.exe` is the launcher that starts this one.
+[[game.executables]]
+name = "RustClient.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "252490"
+not_the_game = ["Rust.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "rimworld"
+name = "RimWorld"
+
+[[game.executables]]
+name = "RimWorldWin64.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "294100"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "besiege"
+name = "Besiege"
+
+[[game.executables]]
+name = "Besiege.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "346010"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "kingdom-come-deliverance"
+name = "Kingdom Come: Deliverance"
+
+[[game.executables]]
+name = "KingdomCome.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "379430"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "stardew-valley"
+name = "Stardew Valley"
+
+[[game.executables]]
+name = "Stardew Valley.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "413150"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "factorio"
+name = "Factorio"
+
+[[game.executables]]
+name = "factorio.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "427520"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "vrchat"
+name = "VRChat"
+
+[[game.executables]]
+name = "VRChat.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "438100"
+not_the_game = ["start_protected_game.exe", "launch.exe", "install.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "satisfactory"
+name = "Satisfactory"
+
+# Unreal ships the shipping binary under `Engine\Binaries\Win64` and a small
+# starter beside it; both were present on the installation this was read from.
+[[game.executables]]
+name = "FactoryGameSteam-Win64-Shipping.exe"
+
+[[game.executables]]
+name = "FactoryGameSteam.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "526870"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "blade-and-sorcery"
+name = "Blade & Sorcery"
+
+[[game.executables]]
+name = "BladeAndSorcery.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "629730"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "risk-of-rain-2"
+name = "Risk of Rain 2"
+
+[[game.executables]]
+name = "Risk of Rain 2.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "632360"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "noita"
+name = "Noita"
+
+# `noita_dev.exe` is the development build shipped beside it.
+[[game.executables]]
+name = "noita.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "881100"
+not_the_game = ["noita_dev.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "valheim"
+name = "Valheim"
+
+[[game.executables]]
+name = "valheim.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "892970"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "back-4-blood"
+name = "Back 4 Blood"
+
+[[game.executables]]
+name = "Back4Blood.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "924970"
+not_the_game = ["start_protected_game.exe"]
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "among-us"
+name = "Among Us"
+
+[[game.executables]]
+name = "Among Us.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "945360"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "timberborn"
+name = "Timberborn"
+
+[[game.executables]]
+name = "Timberborn.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1062090"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "apex-legends"
+name = "Apex Legends"
+
+# Only the DirectX 12 binary was present on the installation this was read
+# from; `r5apex.exe` is the DirectX 11 one the same game ships and has not been
+# seen here, so it is deliberately not listed. The Steam identifier below
+# matches either of them without the executable being consulted.
+[[game.executables]]
+name = "r5apex_dx12.exe"
+
+[game.launcher]
+kind = "steam"
+app_id = "1172470"
+not_the_game = ["start_protected_game.exe", "ApexLauncher.exe"]
+
+[game.capture]
+compatibility = "unknown"

@@ -386,6 +386,83 @@ name = "a-game.exe"
     }
 
     #[test]
+    fn every_shipped_entry_with_a_launcher_identifier_is_reached_by_it() {
+        // The launcher rung is the one that identifies a game whose executable
+        // is called something generic, and it is the rung most of the shipped
+        // entries lean on. Nothing else here checks that an entry can actually
+        // be reached by the identifier it records: a typo in an `app_id`, or the
+        // same identifier written twice, parses and validates perfectly and then
+        // matches nothing or matches ambiguously, for ever, in silence.
+        //
+        // So each entry is looked up the way the launcher would look it up,
+        // deliberately under an executable name that appears nowhere in the
+        // file, which is what forces the answer to come from the identifier
+        // rather than from the name.
+        //
+        // What it catches: the same identifier recorded twice, and an entry
+        // shadowed so that its own identifier reaches something else. Breaking
+        // it by giving two entries one `app_id` fails with
+        // "launcher identifier `550` is recorded by more than one entry".
+        //
+        // What it cannot catch, and no test here could: an `app_id` that is
+        // simply the wrong number. The lookup uses the identifier the entry
+        // itself records, so a wrong one still finds itself. Only the launcher
+        // on a machine with that game installed can say whether the number is
+        // right, which is what `launcher::steam`'s probe is for.
+        let catalogue = Catalogue::seed().expect("the seed data is valid");
+        let mut checked = 0_usize;
+
+        for entry in catalogue.entries() {
+            let Some(launcher) = entry.launcher() else {
+                continue;
+            };
+            let Some(app_id) = launcher.app_id() else {
+                continue;
+            };
+
+            let candidate = ProcessCandidate::new("no-entry-names-this-executable.exe")
+                .from_launcher(launcher.kind(), app_id);
+
+            match catalogue.match_process(&candidate) {
+                Match::One { entry: found, strength } => {
+                    assert_eq!(
+                        found.game_id().as_str(),
+                        entry.game_id().as_str(),
+                        "`{}` records launcher identifier `{app_id}`, but looking that                          identifier up answers `{}`",
+                        entry.game_id(),
+                        found.game_id()
+                    );
+                    assert_eq!(
+                        strength,
+                        MatchStrength::LauncherIdentity,
+                        "`{}` was reached at {strength:?} rather than by its launcher                          identifier",
+                        entry.game_id()
+                    );
+                }
+                Match::Ambiguous { entries, .. } => panic!(
+                    "launcher identifier `{app_id}` is recorded by more than one entry: {}",
+                    entries
+                        .iter()
+                        .map(|entry| entry.game_id().as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Match::None => panic!(
+                    "`{}` records launcher identifier `{app_id}`, and looking that identifier                      up finds nothing at all",
+                    entry.game_id()
+                ),
+            }
+
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 15,
+            "only {checked} shipped entries carry a launcher identifier; this test has              stopped covering the file"
+        );
+    }
+
+    #[test]
     fn every_shipped_entry_reports_its_capture_compatibility_as_unverified() {
         // Nobody has run a capture against these games and written down what
         // happened, so the only honest value is `unknown` (AGENTS.md section
