@@ -5,8 +5,10 @@
 //! space and a maximum recording age, and expects the figures they are shown to
 //! be the truth about their own disk. This module measures that truth, reports
 //! it, and — in [`cleanup`] alone — acts on it. Everything else here is
-//! measurement and **deletes nothing**. The screen that shows all of it is
-//! [issue #95](https://github.com/wildware-uk/clipped/issues/95).
+//! measurement and **deletes nothing**. The Storage section of the Settings
+//! screen shows it, through `clipped_session::cleanup::preview` and the
+//! `get_storage` command that carries it to the window
+//! ([issue #95](https://github.com/wildware-uk/clipped/issues/95)).
 //!
 //! # Responsibilities
 //!

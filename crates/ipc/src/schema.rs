@@ -89,6 +89,10 @@ use crate::status::{
     ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
     SessionSummary, Watching,
 };
+use crate::storage::{
+    CategoryUsage, GetStorage, ProtectedGroup, RecordingList, StorageLimits, StorageRecording,
+    StorageReport,
+};
 
 /// The shape of the schema document itself.
 ///
@@ -542,6 +546,34 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_restored_item(), &[]),
         ),
         (
+            "get_storage".to_owned(),
+            structure_of(&exemplar_get_storage(), &[]),
+        ),
+        (
+            "storage_limits".to_owned(),
+            structure_of(&exemplar_storage_limits(), &[]),
+        ),
+        (
+            "storage_recording".to_owned(),
+            structure_of(&exemplar_storage_recording(), &[]),
+        ),
+        (
+            "recording_list".to_owned(),
+            structure_of(&exemplar_recording_list(), &[]),
+        ),
+        (
+            "protected_group".to_owned(),
+            structure_of(&exemplar_protected_group(), &[]),
+        ),
+        (
+            "category_usage".to_owned(),
+            structure_of(&exemplar_category_usage(), &[]),
+        ),
+        (
+            "storage_report".to_owned(),
+            structure_of(&exemplar_storage_report(), &[]),
+        ),
+        (
             "export_recording".to_owned(),
             structure_of(&exemplar_export_recording(), &[]),
         ),
@@ -712,6 +744,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
                 Command::LibraryEvents(_) => Some("library_events".to_owned()),
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
+                Command::GetStorage(_) => Some("get_storage".to_owned()),
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::SetFavourite(_) => Some("set_favourite".to_owned()),
@@ -755,6 +788,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::OpenPreview(_) => Some("reply.preview_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 Command::GetDiagnostics => Some("reply.diagnostics".to_owned()),
+                Command::GetStorage(_) => Some("reply.storage".to_owned()),
                 // Both settings commands answer with the same reply: what a
                 // change produced is the settings as they now stand
                 // (`crate::settings`).
@@ -816,6 +850,23 @@ fn samples() -> Vec<Sample> {
                 command: "start_recording".to_owned(),
                 params: serde_json::to_value(exemplar_start_recording())
                     .expect("the start options serialise"),
+            }),
+        ),
+        (
+            "asking what the library occupies, against the limits that are configured",
+            ClientMessage::Request(Request {
+                id: 21,
+                command: "get_storage".to_owned(),
+                params: Value::Null,
+            }),
+        ),
+        (
+            "asking what a storage limit would delete, before it is saved",
+            ClientMessage::Request(Request {
+                id: 22,
+                command: "get_storage".to_owned(),
+                params: serde_json::to_value(exemplar_get_storage())
+                    .expect("the storage request serialises"),
             }),
         ),
         (
@@ -1534,6 +1585,44 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "what the library occupies, against the limits that are configured",
+            ServerMessage::Response(Response {
+                id: 21,
+                outcome: Outcome::Ok(Reply::Storage {
+                    storage: exemplar_storage_report(),
+                }),
+            }),
+        ),
+        (
+            // The dry run, and the reading a window must not confuse with the
+            // one above: nothing here has been saved, and the recordings named
+            // would go only if somebody agreed to the limits that produced them
+            // (AGENTS.md section 56). What proves a mirror read it rather than
+            // defaulted it is `proposed`, and that `still_over_limit` is not
+            // zero — a sweep that would run out of things it is allowed to take
+            // is a disk that stays full.
+            "a dry run of limits a window is about to save, which it cannot meet",
+            ServerMessage::Response(Response {
+                id: 22,
+                outcome: Outcome::Ok(Reply::Storage {
+                    storage: StorageReport {
+                        proposed: true,
+                        still_over_limit: 12_000_000_000,
+                        // No limit at all in a *proposal* is a window asking
+                        // what removing every limit would do, which is the
+                        // reading that makes each field's absence mean
+                        // something.
+                        limits: StorageLimits::default(),
+                        // A machine that has never favourited or locked
+                        // anything, which is what a fresh library looks like,
+                        // and an empty list is not a reason to draw nothing.
+                        protected: Vec::new(),
+                        ..exemplar_storage_report()
+                    },
+                }),
+            }),
+        ),
+        (
             "the diagnostics of a recorder that is recording, whose preferred capture backend \
              could not be started",
             ServerMessage::Response(Response {
@@ -1960,6 +2049,18 @@ fn reply_discriminant(reply: &Reply) -> String {
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
+        // Whether the limits were proposed is part of the path. A mirror that
+        // dropped `proposed` would reach the same discriminant for a report of
+        // what *is* configured and a dry run of what somebody is about to
+        // configure — and the whole difference between them is whether the
+        // deletions listed have been agreed to (AGENTS.md section 56).
+        Reply::Storage { storage } => {
+            if storage.proposed {
+                "storage.proposed".to_owned()
+            } else {
+                "storage".to_owned()
+            }
+        }
         Reply::Favourited { .. } => "favourited".to_owned(),
         Reply::Locked { .. } => "locked".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
@@ -2677,6 +2778,98 @@ fn exemplar_restored_item() -> crate::library::RestoredItem {
     }
 }
 
+/// A `get_storage` request with every optional field present.
+///
+/// Which for this command means a *proposal*: limits the caller is asking about
+/// rather than the ones that are configured. The other reading — no parameters
+/// at all — is the second sample below, because a request whose only field is
+/// optional has two shapes and a mirror has to read both.
+fn exemplar_get_storage() -> GetStorage {
+    GetStorage {
+        limits: Some(exemplar_storage_limits()),
+    }
+}
+
+/// Limits with every one of the three set.
+///
+/// All three at once, deliberately. Each is optional and absent means "no limit
+/// of that kind", so a mirror that made any of them required would refuse the
+/// frame an unconfigured machine answers with — which is every machine before
+/// somebody sets one.
+fn exemplar_storage_limits() -> StorageLimits {
+    StorageLimits {
+        maximum_usage_bytes: Some(250_000_000_000),
+        minimum_free_space_bytes: Some(21_474_836_480),
+        maximum_age_days: Some(90),
+    }
+}
+
+/// One recording a sweep considered, with every optional field present.
+///
+/// `protected_because` among them: a recording nothing protects sends none, and
+/// that is the reading which says a sweep may take it.
+fn exemplar_storage_recording() -> StorageRecording {
+    StorageRecording {
+        recording_id: 41,
+        path: r"D:\Clips\clipped-cs2-20260811-201400-1.mkv".to_owned(),
+        size_bytes: 9_812_009_112,
+        started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+        protected_because: Some("it is a favourite".to_owned()),
+    }
+}
+
+/// A list that names fewer recordings than it counted.
+///
+/// Deliberately not a complete one: the totals and the rows disagreeing is the
+/// case a window has to draw, and an exemplar where they matched would be a
+/// shape nobody had checked.
+fn exemplar_recording_list() -> RecordingList {
+    RecordingList {
+        total: 118,
+        total_bytes: 411_204_889_112,
+        recordings: vec![exemplar_storage_recording()],
+    }
+}
+
+/// One rule keeping recordings out of a sweep, and what it holds.
+fn exemplar_protected_group() -> ProtectedGroup {
+    ProtectedGroup {
+        label: "Favourites".to_owned(),
+        recordings: 12,
+        bytes: 84_120_091_112,
+    }
+}
+
+/// What one kind of file occupies.
+fn exemplar_category_usage() -> CategoryUsage {
+    CategoryUsage {
+        category: "recordings".to_owned(),
+        bytes: 402_204_889_112,
+    }
+}
+
+/// A whole storage report, with every list carrying something.
+///
+/// Every list is populated, because an exemplar whose lists were empty would
+/// describe none of their contents to the mirror — and the contents are where
+/// the optional fields are.
+fn exemplar_storage_report() -> StorageReport {
+    StorageReport {
+        recordings_directory: r"D:\Clips".to_owned(),
+        trash_directory: r"D:\Clips.trash".to_owned(),
+        usage_bytes: 411_204_889_112,
+        by_category: vec![exemplar_category_usage()],
+        free_bytes: 162_003_120_128,
+        capacity_bytes: 1_000_204_886_016,
+        limits: exemplar_storage_limits(),
+        proposed: false,
+        would_delete: exemplar_recording_list(),
+        still_over_limit: 0,
+        protected: vec![exemplar_protected_group()],
+        largest: exemplar_recording_list(),
+    }
+}
+
 /// What the library holds for one game, with every optional field present.
 fn exemplar_library_game() -> LibraryGame {
     LibraryGame {
@@ -2974,6 +3167,7 @@ fn every_built_command() -> Vec<Command> {
         Command::OpenPreview(exemplar_open_preview()),
         Command::GetHotkeys,
         Command::GetDiagnostics,
+        Command::GetStorage(exemplar_get_storage()),
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
         Command::GetAudioDevices,
@@ -3005,6 +3199,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::OpenPreview(_)
             | Command::GetHotkeys
             | Command::GetDiagnostics
+            | Command::GetStorage(_)
             | Command::GetSettings
             | Command::ApplySettings(_)
             | Command::GetAudioDevices
@@ -3308,6 +3503,13 @@ fn every_reply() -> Vec<Reply> {
         Reply::Diagnostics {
             diagnostics: exemplar_diagnostics(),
         },
+        // One entry, like every other reply. The two readings a storage screen
+        // draws differently — the configured limits, and a dry run of proposed
+        // ones — are two *samples* below, which is where a discriminant with
+        // more than one reading is exercised.
+        Reply::Storage {
+            storage: exemplar_storage_report(),
+        },
     ];
     for reply in &replies {
         match reply {
@@ -3329,6 +3531,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::Diagnostics { .. }
+            | Reply::Storage { .. }
             | Reply::Settings { .. }
             | Reply::AudioDevices { .. }
             | Reply::MicrophoneLevel { .. }
@@ -3601,6 +3804,14 @@ mod tests {
             "library_game",
             "trashed_item",
             "restored_item",
+            "get_storage",
+            "storage_limits",
+            "storage_recording",
+            "recording_list",
+            "protected_group",
+            "category_usage",
+            "storage_report",
+            "reply.storage",
             "reply.library_sessions",
             "reply.library_games",
             "reply.settings",

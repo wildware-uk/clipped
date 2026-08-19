@@ -876,12 +876,82 @@ configured and not in the list is kept on offer as "not connected", because
 dropping it would silently change what is recorded; a list that could not be
 asked for is *said*, rather than drawn as a machine with no microphone.
 
+### The Storage section, and the one Save that can delete something
+
+SPEC.md section 27, [issue #95](https://github.com/wildware-uk/clipped/issues/95).
+The section holds four controls — the recording folder and the three limits,
+`maximum_usage_bytes`, `minimum_free_space_bytes` and `maximum_age_days` — and,
+below them, the measurement those limits act on.
+
+**Every figure in it comes from one command.** `get_storage` ([ipc.md](ipc.md)),
+answered from `clipped_session::cleanup::preview`, which is the same measurement
+the recorder's storage sweep takes before it deletes anything. So the usage and
+its breakdown are a walk of the recording and trash folders, the free space is
+what the volume reported, "what automatic cleanup would do" is the plan a sweep
+would carry out, "never deleted automatically" is the rules that would stop it
+with a count and a size against each, and the largest recordings are the review
+path #111 asks for. Nothing on it is derived from anything else and nothing is a
+placeholder: a measurement that failed is *said*, because a panel of zeroes over
+an unanswered question is indistinguishable from a machine with nothing on it,
+and the two send somebody in opposite directions.
+
+Two things are deliberately not drawn there. There is no per-game breakdown,
+because `library_games` carries that and the Home screen draws it, and a second
+answer from a second measurement is two opinions about one question (AGENTS.md
+section 55). There is no expiry date against anything in the trash, because
+nothing configures a retention period (#646).
+
+#### Changing the folder, and what happens to what is already recorded
+
+Nothing happens to it, and the screen says so rather than leaving it to be
+guessed at. Recordings are ordinary files and the library indexes where each one
+is (AGENTS.md section 32), so moving the setting moves nothing: what is already
+recorded stays where it is, still plays, and stays in the library. What changes
+is where the next *sitting* is written — and the recorder says when that starts,
+on the row itself, with `not_yet_in_force` (#609). The panel adds the other half:
+the figures above it are of the folder in use, so a library spread over two
+folders reads as smaller there than it is (#272).
+
+#### The confirmation, and why it is not a second one
+
+A maximum usage is the one setting in this application whose effect is to delete
+somebody's footage, and the sweep runs after every reconciliation — so saving one
+is not a preference taking effect later, it is footage on its way to the trash.
+Save therefore asks first: the screen sends what was typed as a *proposal*,
+`get_storage` answers what saving it would take, and the recordings and the size
+are named with what would still be over the limit afterwards. Nothing is sent
+until it is agreed to.
+
+The question is the recorder's own dry run rather than this window's arithmetic
+(#529), so what is shown before the limit is saved cannot disagree with what
+happens after it is. A limit that would take nothing is saved with no
+confirmation at all — a dialog that appears whatever the answer is one people
+learn to dismiss, and then it confirms nothing. A dry run that *failed* is not
+read as one that would take nothing: they are opposite answers, so it says what
+went wrong and offers the save as something to choose (AGENTS.md sections 27, 45
+and 56).
+
+Emptying the trash is confirmed too, and on the Library screen where the trash is
+listed — two presses, the second naming what it will destroy, and the counts the
+user was shown sent back so a trash that has gained something is refused rather
+than emptied (#450). This screen does not build a second one.
+
+#### The unit a limit is typed in
+
+Bytes, as the settings file spells it, with the same figure glossed underneath —
+"That is 250 GB." The value that travels is the file's own, because that is what
+the recorder accepts and what its refusal names, and a window with a second
+vocabulary for a setting is one that can disagree with the file. The gloss is a
+reading, not a value.
+
 ### The two things on this screen that are not settings
 
 The **hotkey list**, which is where every global hotkey stands and the only
 place a conflict is visible (#232); and the **start-at-login switch**, which is
 one `Run` value under this account that Windows reads at sign-in rather than a
-key in `settings.json` (#308). Neither goes through `apply_settings`.
+key in `settings.json` (#308). Neither goes through `apply_settings`. The
+Storage section's measurement is a third: it is what the recorder found on the
+disk rather than anything anybody set.
 
 The switch is the recorder's, not this window's, and it has to be: the value is
 a command line naming the executable Windows runs, and that executable is the
@@ -908,7 +978,7 @@ saved, or nothing behind it:
 | --- | --- |
 | Recording | The quality presets and bitrate (#181, #62), and the container (#307) |
 | Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
-| Storage | The limits and the trash directory, which the file carries and the screen SPEC.md section 27 draws is #95; and per-game overrides, which the file carries and #63 draws |
+| Storage | Where deleted recordings wait, and how long the trash keeps them — the first is a key the file carries and nothing offers, the second is a key nothing has (#646). The limits are controls now, with the measurement they act on beside them (#95); per-game overrides are what the file still carries and #63 draws |
 | Hotkeys | Binding a combination (#54). The section **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
 | Notifications | Nothing that has a key. The four switches are controls ([#252](https://github.com/wildware-uk/clipped/issues/252)); what is left is a toast for a replay that was saved, which needs an event from the recorder to be raised from (#110) |
 | Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |

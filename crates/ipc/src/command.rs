@@ -58,6 +58,7 @@ use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
     ScreenshotSummary,
 };
+use crate::storage::{GetStorage, StorageReport};
 
 /// A command, parsed and known to be one this build understands.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +143,14 @@ pub enum Command {
     /// first moments of one — so an event would be published to nobody
     /// (`crate::diagnostics`, issue #302).
     GetDiagnostics,
+    /// What the library occupies, and what a storage limit would delete.
+    ///
+    /// A measurement, and — where the request names limits of its own — a dry
+    /// run of what saving them would take. **Nothing is deleted by asking**, and
+    /// nothing is saved either: the limits are written through
+    /// [`Self::ApplySettings`] like every other setting, and the sweep is what
+    /// acts on them ([issue #95](https://github.com/wildware-uk/clipped/issues/95)).
+    GetStorage(GetStorage),
     /// Every setting, what it resolves to, and whether anything reads it.
     ///
     /// Asked of the recorder rather than read from the file, because the
@@ -219,6 +228,7 @@ impl Command {
             Self::OpenPreview(_) => "open_preview",
             Self::GetHotkeys => "get_hotkeys",
             Self::GetDiagnostics => "get_diagnostics",
+            Self::GetStorage(_) => "get_storage",
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
             Self::GetAudioDevices => "get_audio_devices",
@@ -260,6 +270,7 @@ impl Command {
             "open_preview" => Ok(Self::OpenPreview(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "get_diagnostics" => Ok(Self::GetDiagnostics),
+            "get_storage" => Ok(Self::GetStorage(parse_params(request)?)),
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
             "get_audio_devices" => Ok(Self::GetAudioDevices),
@@ -296,6 +307,7 @@ impl Command {
             | Self::GetStartAtLogin => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
+            Self::GetStorage(request) => serde_json::to_value(request),
             Self::LibraryTrash(request) => serde_json::to_value(request),
             Self::RestoreFromTrash(request) => serde_json::to_value(request),
             Self::EmptyTrash(request) => serde_json::to_value(request),
@@ -726,6 +738,15 @@ pub enum Reply {
         /// whether the reply arrived rather than by guessing at an empty field.
         lane: LibraryEventLane,
     },
+    /// What the library occupies, and what a limit would do about it.
+    Storage {
+        /// The measurement, the limits it was judged against, and the plan.
+        ///
+        /// Always sent, so that a library inside its limits and a question
+        /// nobody answered are told apart by whether the reply arrived rather
+        /// than by an empty deletion list.
+        storage: StorageReport,
+    },
     /// What is waiting in the trash.
     LibraryTrash {
         /// Everything in it, what it occupies, and where it is.
@@ -956,6 +977,7 @@ mod tests {
             "open_playback",
             "open_preview",
             "get_hotkeys",
+            "get_storage",
             "get_settings",
             "apply_settings",
             "get_audio_devices",

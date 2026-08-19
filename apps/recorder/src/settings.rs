@@ -60,6 +60,33 @@ use clipped_session::{CaptureMethod, CaptureMethodSetting};
 /// others, so it is listed with them here.
 pub const RECORDING_DIRECTORY: &str = "recording_directory";
 
+/// The key holding how much the library may occupy, in bytes.
+///
+/// Not a [`SettingKey`] either, and for the same reason the recording directory
+/// is not: a quota is over the library, which is one thing however many games
+/// are in it. The three limits below are read by the storage sweep after every
+/// reconciliation (`crate::library::LibraryIndexer`), which is what makes them
+/// controls rather than an account (AGENTS.md section 27, issue #95).
+pub const MAXIMUM_USAGE: &str = "maximum_usage_bytes";
+
+/// The key holding how much of the drive to leave free, in bytes.
+pub const MINIMUM_FREE_SPACE: &str = "minimum_free_space_bytes";
+
+/// The key holding how old a recording may get, in whole days.
+pub const MAXIMUM_AGE_DAYS: &str = "maximum_age_days";
+
+/// What a limit is spelled as when there is not one.
+///
+/// The settings file leaves the key out; a [`SettingEntry::value`] may never be
+/// blank, because a window has to be able to draw the answer rather than an
+/// empty field. So "no limit" crosses as a word, and the same word is accepted
+/// back - which is the spelling `system_audio` already uses for the same idea.
+///
+/// Clearing it with `null` does the same thing. That is not two ways to say one
+/// thing: `null` is Reset, which follows a later change to what Clipped ships
+/// with, and today what Clipped ships with is no limit at all.
+pub const NO_LIMIT: &str = "none";
+
 /// Whether a per-game setting is one this build reads when a recording starts,
 /// and what to say when it is not.
 ///
@@ -269,6 +296,9 @@ impl SettingsFile {
         for (key, value) in &request.values {
             match key.as_str() {
                 RECORDING_DIRECTORY => set_recording_directory(&mut storage, value.as_deref())?,
+                MAXIMUM_USAGE | MINIMUM_FREE_SPACE | MAXIMUM_AGE_DAYS => {
+                    set_limit(&mut storage, key, value.as_deref())?;
+                }
                 name => {
                     if let Some(category) = NotificationCategory::from_key(name) {
                         set_notification(&mut notifications, category, value.as_deref())?;
@@ -440,6 +470,60 @@ fn set_notification(
         .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
 }
 
+/// Reads a limit's value as the settings file spells it.
+///
+/// [`NO_LIMIT`] and an absent value both mean no limit. Anything else has to be
+/// a whole number, and a refusal names what was typed and what would have been
+/// taken (AGENTS.md section 45).
+fn limit_value(key: &str, value: Option<&str>, unit: &str) -> Result<Option<u64>, ProtocolError> {
+    let Some(text) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    if text.is_empty() || text.eq_ignore_ascii_case(NO_LIMIT) {
+        return Ok(None);
+    }
+    text.parse::<u64>().map(Some).map_err(|_| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!("`{key}` cannot be `{text}`: it takes {unit}, or `{NO_LIMIT}` for no limit"),
+        )
+    })
+}
+
+/// Sets one storage limit, or clears it.
+///
+/// The bounds are `clipped_session`'s, and its refusal is the one shown: a quota
+/// below a gigabyte and a maximum age below a day both delete footage somebody
+/// recorded this afternoon, and the sentence that says so lives with the code
+/// that enforces it rather than being written a second time here (AGENTS.md
+/// sections 45 and 55).
+fn set_limit(
+    storage: &mut StorageSettings,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), ProtocolError> {
+    let refuse = |error: clipped_library::accounting::LimitError| {
+        ProtocolError::new(ErrorCode::InvalidParameters, error.to_string())
+    };
+
+    match key {
+        MAXIMUM_USAGE => storage
+            .set_maximum_usage(limit_value(key, value, "a number of bytes")?)
+            .map_err(refuse),
+        MINIMUM_FREE_SPACE => {
+            storage.set_minimum_free_space(limit_value(key, value, "a number of bytes")?);
+            Ok(())
+        }
+        MAXIMUM_AGE_DAYS => storage
+            .set_maximum_age_days(limit_value(key, value, "a whole number of days")?)
+            .map_err(refuse),
+        other => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!("this recorder has no `{other}` setting"),
+        )),
+    }
+}
+
 /// Sets the recording directory, or clears it.
 fn set_recording_directory(
     storage: &mut StorageSettings,
@@ -477,12 +561,82 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
         .collect();
 
     settings.push(recording_directory_entry(configuration.storage()));
+    settings.extend(storage_limit_entries(configuration.storage()));
     settings.extend(notification_entries(configuration.notifications()));
 
     SettingsView {
         file: path.to_string_lossy().into_owned(),
         settings,
     }
+}
+
+/// The three storage limits' rows.
+///
+/// `applies` is `true` for all three, and what reads them is neither a recording
+/// nor the window: it is the storage sweep, which runs on the indexer thread
+/// after every reconciliation and moves recordings to the trash to stay inside
+/// them (`crate::library::LibraryIndexer::enforce_storage_limits`,
+/// `clipped_session::cleanup::sweep`).
+///
+/// They are the only settings in this build whose effect is to **delete
+/// somebody's footage**, which is why the window does not save one on the
+/// strength of the field alone: `get_storage` answers what a limit would take
+/// before it is saved, and the screen confirms against that (AGENTS.md section
+/// 56, issue #95).
+///
+/// A limit that is not set crosses as [`NO_LIMIT`] rather than as blank or as
+/// zero. Zero is a real value for the free-space limit - fill the disk - and a
+/// quota of zero is refused outright, so the three readings must not share a
+/// spelling.
+fn storage_limit_entries(storage: &StorageSettings) -> Vec<SettingEntry> {
+    let written =
+        |set: Option<u64>| set.map_or_else(|| NO_LIMIT.to_owned(), |value| value.to_string());
+
+    vec![
+        SettingEntry {
+            key: MAXIMUM_USAGE.to_owned(),
+            label: "Maximum usage".to_owned(),
+            value: written(storage.maximum_usage()),
+            overridden: storage.maximum_usage().is_some(),
+            choices: Vec::new(),
+            accepted: format!(
+                "a number of bytes, at least {} (1 GB) - 250000000000 is 250 GB - or `{NO_LIMIT}` \
+                 to keep everything",
+                clipped_library::accounting::MINIMUM_QUOTA
+            ),
+            applies: true,
+            unavailable: None,
+            not_yet_in_force: None,
+        },
+        SettingEntry {
+            key: MINIMUM_FREE_SPACE.to_owned(),
+            label: "Minimum free space".to_owned(),
+            value: written(storage.minimum_free_space()),
+            overridden: storage.minimum_free_space().is_some(),
+            choices: Vec::new(),
+            accepted: format!(
+                "a number of bytes to leave free on the drive - 21474836480 is 20 GB - `0` to \
+                 fill it, or `{NO_LIMIT}` for no such limit"
+            ),
+            applies: true,
+            unavailable: None,
+            not_yet_in_force: None,
+        },
+        SettingEntry {
+            key: MAXIMUM_AGE_DAYS.to_owned(),
+            label: "Maximum recording age".to_owned(),
+            value: written(storage.maximum_age_days()),
+            overridden: storage.maximum_age_days().is_some(),
+            choices: Vec::new(),
+            accepted: format!(
+                "a whole number of days, at least 1, or `{NO_LIMIT}` to keep recordings however \
+                 old they get"
+            ),
+            applies: true,
+            unavailable: None,
+            not_yet_in_force: None,
+        },
+    ]
 }
 
 /// The notification switches' rows.
@@ -777,6 +931,121 @@ mod tests {
             .find(|entry| entry.key == key)
             .unwrap_or_else(|| panic!("the view carries {key}"))
             .clone()
+    }
+
+    #[test]
+    fn the_three_storage_limits_are_controls_and_travel_as_the_file_spells_them() {
+        // Issue #95's first criterion, from the settings side: a screen can only
+        // draw a control for a setting the recorder sends, and before this the
+        // recorder sent none of the three - the whole storage section of the
+        // file was reachable only by editing it by hand.
+        let directory = TestDirectory::new("storage-limits");
+        let file = SettingsFile::at(directory.file());
+
+        let unset = file.view().expect("the view reads");
+        for key in [MAXIMUM_USAGE, MINIMUM_FREE_SPACE, MAXIMUM_AGE_DAYS] {
+            let row = entry(&unset, key);
+            assert_eq!(
+                row.value, NO_LIMIT,
+                "{key} with nothing configured must not be blank: a window has to draw the \
+                 answer, and `` is a field with nothing in it"
+            );
+            assert!(!row.overridden, "{key} was not configured by anybody");
+            assert!(
+                row.applies,
+                "{key} is read by the storage sweep, so it is a control rather than an account"
+            );
+        }
+
+        file.apply(&change(MAXIMUM_USAGE, Some("250000000000")))
+            .expect("250 GB is above the floor");
+
+        let saved = file.view().expect("the view reads");
+        assert_eq!(entry(&saved, MAXIMUM_USAGE).value, "250000000000");
+        assert!(entry(&saved, MAXIMUM_USAGE).overridden);
+
+        // And it is in the file, in the words the file spells it in, so that
+        // the sweep and `clipped-recorder storage` read the same figure.
+        let mut reopened = ConfigurationStore::at(directory.file());
+        reopened.load().expect("the file this just wrote reads");
+        assert_eq!(
+            reopened.current().storage().maximum_usage(),
+            Some(250_000_000_000),
+            "the quota did not reach the settings file, so nothing would enforce it"
+        );
+    }
+
+    #[test]
+    fn a_quota_small_enough_to_empty_the_library_is_refused_in_the_words_that_explain_it() {
+        // The bound is `clipped_library`'s and the sentence is its own, so a
+        // window shows what the code that enforces it would say (AGENTS.md
+        // sections 45 and 55). A quota under a gigabyte is breached from the
+        // first sitting and can only be satisfied by a library with nothing in
+        // it, which is a setting whose effect is indistinguishable from a bug.
+        let directory = TestDirectory::new("storage-quota-floor");
+        let file = SettingsFile::at(directory.file());
+
+        let refusal = file
+            .apply(&change(MAXIMUM_USAGE, Some("1000")))
+            .expect_err("a thousand bytes is not a library");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("1000"),
+            "the refusal should name what was asked for: {}",
+            refusal.message
+        );
+
+        assert_eq!(
+            file.view()
+                .expect("the view reads")
+                .settings
+                .iter()
+                .find(|row| row.key == MAXIMUM_USAGE)
+                .map(|row| row.value.clone()),
+            Some(NO_LIMIT.to_owned()),
+            "a refused quota was written anyway, so the sweep now has a limit nobody agreed to"
+        );
+    }
+
+    #[test]
+    fn a_limit_is_cleared_by_the_word_for_it_and_by_a_reset_alike() {
+        // Two spellings of one thing, and they are not two ways to say it:
+        // `none` is a value somebody types, and `null` is Reset, which follows a
+        // later change to what Clipped ships with. Today those land in the same
+        // place, and both have to, or one of them silently keeps a quota.
+        let directory = TestDirectory::new("storage-clearing");
+        let file = SettingsFile::at(directory.file());
+
+        for cleared in [Some(NO_LIMIT), None] {
+            file.apply(&change(MAXIMUM_USAGE, Some("250000000000")))
+                .expect("250 GB is above the floor");
+            file.apply(&change(MAXIMUM_USAGE, cleared))
+                .expect("a limit can be taken off");
+
+            assert_eq!(
+                file.configuration().storage().maximum_usage(),
+                None,
+                "`{cleared:?}` left a quota in force, so recordings would still be deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_free_space_is_a_setting_and_zero_days_is_not() {
+        // The two zeros mean opposite things and must not share a fate. Keeping
+        // no free space is a defensible thing to want on a drive kept for
+        // nothing else; keeping recordings for no days deletes footage as it is
+        // written (AGENTS.md section 56).
+        let directory = TestDirectory::new("storage-zeros");
+        let file = SettingsFile::at(directory.file());
+
+        file.apply(&change(MINIMUM_FREE_SPACE, Some("0")))
+            .expect("filling the disk is a choice");
+        assert_eq!(file.configuration().storage().minimum_free_space(), Some(0));
+
+        file.apply(&change(MAXIMUM_AGE_DAYS, Some("0")))
+            .expect_err("no days is not an age");
     }
 
     #[test]

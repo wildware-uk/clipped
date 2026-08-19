@@ -43,6 +43,7 @@ const RECORDER_SETTINGS_RS = source('apps/recorder/src/settings.rs');
 const MESSAGE_RS = source('crates/ipc/src/message.rs');
 const SERVE_RS = source('apps/recorder/src/serve.rs');
 const NOTIFICATIONS_RS = source('crates/session/src/config/notifications.rs');
+const STORAGE_RS = source('crates/session/src/config/storage.rs');
 
 /**
  * The braced block that follows `marker`, or a failure naming what has moved.
@@ -131,6 +132,21 @@ describe('the settings the screen names', () => {
       'RECORDING_DIRECTORY',
     );
 
+    // Nor are the three storage limits, and for the reason the directory is
+    // not: a quota is over the library, which is one thing however many games
+    // are in it. They are declared twice — by the settings file's own module,
+    // which writes them, and by the recorder, which sends them — so both are
+    // read and both have to agree. A rename on either side would draw a control
+    // over a key nothing reads, save it, and redraw it as saved.
+    const limits = ['MAXIMUM_USAGE', 'MINIMUM_FREE_SPACE', 'MAXIMUM_AGE_DAYS'].map((name) => {
+      const sent = constant('apps/recorder/src/settings.rs', RECORDER_SETTINGS_RS, name);
+      const stored = constant('crates/session/src/config/storage.rs', STORAGE_RS, name);
+      expect(sent, `${name} is spelled differently by the recorder and by the settings file`).toBe(
+        stored,
+      );
+      return sent;
+    });
+
     // The notification switches are not `SettingKey`s either — they are
     // global-only, in a `notifications` section — and the recorder puts them in
     // the same list for the same reason (issue #252).
@@ -151,7 +167,7 @@ describe('the settings the screen names', () => {
     // failure this whole issue was about; one the screen lists and the recorder
     // never sends is a control that would never be drawn.
     expect([...KEYS_DRAWN_AS_CONTROLS].sort()).toEqual(
-      [...modelled, directory, ...notifications].sort(),
+      [...modelled, directory, ...limits, ...notifications].sort(),
     );
   });
 
@@ -166,9 +182,7 @@ describe('the settings the screen names', () => {
 
     for (const key of named) {
       expect(
-        [VALUE_RS, RECORDER_SETTINGS_RS, source('crates/session/src/config/storage.rs')].some(
-          (text) => text.includes(`"${key}"`),
-        ),
+        [VALUE_RS, RECORDER_SETTINGS_RS, STORAGE_RS].some((text) => text.includes(`"${key}"`)),
         `${key} is not a key any Rust source declares`,
       ).toBe(true);
     }

@@ -198,6 +198,15 @@ Whether the directory exists, is writable, or has room is
 drive can be unplugged after it, so the answer that matters is the one at the
 moment a recording starts, and that is where it is reported.
 
+Nothing configures **how long** the trash keeps something. SPEC.md section 28
+asks for 3, 7 and 30 days or immediately; `clipped_library::trash::Retention` is
+written and `Trash::expire` is written, and no key carries the choice and nothing
+calls either — so nothing in the trash expires, and no item the recorder sends
+carries a date. That is [#646], and it is why the Storage section says so rather
+than offering a control.
+
+[#646]: https://github.com/wildware-uk/clipped/issues/646
+
 `trash_directory` defaults to the recordings folder's path with `.trash`
 appended — `D:\Clips` becomes `D:\Clips.trash`. Beside rather than inside,
 because deletion is a rename and so must stay on the volume, and because a trash
@@ -231,6 +240,30 @@ no limit" is the most useful thing it can say to somebody deciding whether to
 set one, and the list of the largest recordings is the review path [#111] asks
 for: a chance to act before automatic deletion does.
 
+### The same measurement, in the window
+
+The three limits are settings the Settings screen holds, in its Storage section,
+and everything printed above reaches that screen as well — the usage and its
+breakdown, the free space, what a sweep would take, what it would keep and why,
+and the largest recordings ([#95]). It is one command, `get_storage`
+([ipc.md](ipc.md)), answered from the same `preview` this subcommand prints, so
+the terminal and the window cannot report different figures about one drive.
+
+**Saving a limit from that screen asks first.** Before the setting is written the
+screen sends the figures somebody typed as a *proposal* and is told what saving
+them would delete; the recordings are named, with what would still be over the
+limit afterwards, and nothing is sent until it is agreed to. It is the one
+setting in this application whose effect is to delete somebody's footage, and a
+control that does that on a single press is what AGENTS.md section 56 is about. A
+limit that would take nothing is saved without asking — a confirmation that
+appears whatever the answer is one people learn to dismiss.
+
+A limit saved there reaches the sweep without a restart. The indexer holds the
+storage settings and `apply_settings` hands it the new ones after the save, so
+the figure the file holds and the figure the sweep enforces are the same figure
+([#95]).
+
+[#95]: https://github.com/wildware-uk/clipped/issues/95
 [#111]: https://github.com/wildware-uk/clipped/issues/111
 [#307]: https://github.com/wildware-uk/clipped/issues/307
 
