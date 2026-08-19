@@ -136,6 +136,48 @@ impl XboxApp {
     pub fn installation_directory(&self) -> &Path {
         &self.installation
     }
+
+    /// Every directory a running process of this package may report itself
+    /// under.
+    ///
+    /// Two, for a package the Xbox app put on a drive other than the system one
+    /// ([issue #616](https://github.com/wildware-uk/clipped/issues/616)).
+    /// `Root` in the repository records where the files went — `B:\WindowsApps\…`
+    /// — and Windows leaves a reparse point where the package would have been
+    /// on the system drive. **Every packaged process reports the system-drive
+    /// spelling**, measured 14 of 14 on the machine that found this, and
+    /// `Get-AppxPackage` agrees.
+    ///
+    /// Paths are compared as text throughout this crate, so the two spellings
+    /// are two directories and the registered one alone claims nothing a
+    /// process ever says. Both are offered rather than choosing between them:
+    /// the registered one is right for a package on the system drive, and
+    /// resolving the reparse point at match time would be a filesystem call per
+    /// process per poll.
+    pub(super) fn claim_directories(&self) -> impl Iterator<Item = String> + '_ {
+        let registered = self.installation.to_string_lossy().into_owned();
+        let mirrored = system_drive_spelling(&self.package)
+            .filter(|spelling| !spelling.eq_ignore_ascii_case(&registered));
+        std::iter::once(registered).chain(mirrored)
+    }
+}
+
+/// Where Windows leaves a package's reparse point on the system drive.
+///
+/// `%ProgramFiles%\WindowsApps\<package full name>`, which is what a running
+/// process reports whichever drive the files are actually on. [`None`] when the
+/// environment does not say where `Program Files` is, which leaves the
+/// registered spelling as the only claim — the behaviour before issue #616,
+/// rather than a panic.
+fn system_drive_spelling(package_full_name: &str) -> Option<String> {
+    let program_files = std::env::var("ProgramFiles").ok()?;
+    if program_files.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}\\WindowsApps\\{package_full_name}",
+        program_files.trim_end_matches('\\')
+    ))
 }
 
 /// The family name of a package full name, or [`None`] if it is not one.
@@ -276,13 +318,35 @@ impl Xbox {
     /// ([issue #459](https://github.com/wildware-uk/clipped/issues/459)).
     #[must_use]
     pub fn app_for(&self, executable_path: &str) -> Option<&XboxApp> {
-        let claimants = deepest_claimants(executable_path, &self.apps, |app| {
-            app.installation.to_string_lossy().into_owned()
+        // One entry per (package, spelling), because a package installed off the
+        // system drive is reachable under two names and a process only ever
+        // reports one of them (issue #616).
+        let spellings: Vec<(&XboxApp, String)> = self
+            .apps
+            .iter()
+            .flat_map(|app| {
+                app.claim_directories()
+                    .map(move |directory| (app, directory))
+            })
+            .collect();
+
+        let claimants = deepest_claimants(executable_path, &spellings, |(_, directory)| {
+            directory.clone()
         });
-        match claimants.as_slice() {
-            [only] => Some(only),
-            _ => None,
+
+        // Two spellings of one package are one claimant, not a tie. Compared on
+        // the package full name, which the repository guarantees is unique;
+        // anything left after that really is two packages nesting, which is the
+        // ambiguity this refuses to guess at (issue #459).
+        let mut found: Option<&XboxApp> = None;
+        for (app, _) in claimants {
+            match found {
+                None => found = Some(app),
+                Some(already) if already.package == app.package => {}
+                Some(_) => return None,
+            }
         }
+        found
     }
 
     /// A running process as the catalogue wants to be asked about it.

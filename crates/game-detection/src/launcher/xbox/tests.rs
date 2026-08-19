@@ -250,3 +250,99 @@ fn a_machine_without_any_xbox_games_is_not_a_failure() {
         }
     }
 }
+
+/// A package the Xbox app put on a drive other than the system one, spelled as
+/// the repository spells it.
+///
+/// The full name is one a real machine had — including the single underscore
+/// before the publisher that breaks the obvious family-name parse.
+fn on_a_second_drive() -> Xbox {
+    Xbox::from_packages([(
+        "38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g",
+        r"\\?\B:\WindowsApps\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\",
+    )])
+}
+
+#[test]
+fn a_package_on_another_drive_is_claimed_at_the_path_a_process_reports() {
+    // Issue #616. `Root` records where the files went; Windows leaves a reparse
+    // point where the package would have been on the system drive, and **every
+    // packaged process reports the system-drive spelling** — 14 of 14 on the
+    // machine that found this. Comparing paths as text, the registered spelling
+    // alone claims nothing a process ever says, so the launcher rung never
+    // fired for a game on a second drive.
+    //
+    // That rung matters more for Xbox than anywhere else: every packaged game
+    // declares `gamelaunchhelper.exe` as the program the Store starts, so on
+    // the executable name alone several games are one process.
+    let xbox = on_a_second_drive();
+    let reported = concat!(
+        r"C:\Program Files\WindowsApps",
+        r"\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\gamelaunchhelper.exe"
+    );
+
+    let candidate = xbox.candidate_for("gamelaunchhelper.exe", reported);
+
+    assert_eq!(
+        candidate.launcher(),
+        Some((LauncherKind::Xbox, "38985CA0.COREBase_5bkah9njm3e9g")),
+        "a process reports the system-drive spelling, whichever drive the files are on"
+    );
+}
+
+#[test]
+fn the_registered_spelling_still_claims_it() {
+    // The other half. A package on the system drive is registered and reported
+    // at the same path, and a fix that only added the mirrored spelling would
+    // break that without this.
+    let xbox = on_a_second_drive();
+    let registered = concat!(
+        r"B:\WindowsApps",
+        r"\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\gamelaunchhelper.exe"
+    );
+
+    let candidate = xbox.candidate_for("gamelaunchhelper.exe", registered);
+
+    assert_eq!(
+        candidate.launcher(),
+        Some((LauncherKind::Xbox, "38985CA0.COREBase_5bkah9njm3e9g")),
+        "the path the repository records still claims the package"
+    );
+}
+
+#[test]
+fn two_spellings_of_one_package_are_one_claimant_and_not_a_tie() {
+    // The failure mode of offering two directories per package: `app_for`
+    // refuses when more than one *package* claims a path, and two spellings of
+    // the same package must not look like two packages — that would turn a game
+    // that used to be identified into one that is refused as ambiguous.
+    let xbox = on_a_second_drive();
+    let reported = concat!(
+        r"C:\Program Files\WindowsApps",
+        r"\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\gamelaunchhelper.exe"
+    );
+
+    assert!(
+        xbox.app_for(reported).is_some(),
+        "one package under two names is one claimant"
+    );
+}
+
+#[test]
+fn a_package_that_is_not_installed_claims_nothing_under_either_spelling() {
+    let xbox = on_a_second_drive();
+
+    for path in [
+        concat!(
+            r"C:\Program Files\WindowsApps",
+            r"\Nothing.AtAll_1.0.0.0_x64__aaaaaaaaaaaaa\x.exe"
+        ),
+        r"B:\WindowsApps\Nothing.AtAll_1.0.0.0_x64__aaaaaaaaaaaaa\x.exe",
+    ] {
+        assert_eq!(
+            xbox.candidate_for("x.exe", path).launcher(),
+            None,
+            "nothing installed this, under either spelling: {path}"
+        );
+    }
+}
