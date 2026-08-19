@@ -38,9 +38,9 @@
 //! encoder reports a `no` for it.
 //!
 //! **It never overrides a setting somebody chose.** A user who sets `codec` by
-//! hand keeps that codec on every preset. See `docs/configuration.md`,
-//! "Custom is the absence of a preset", for why that is not a lie the screen
-//! tells.
+//! hand keeps that codec on every preset. See `docs/configuration.md`, "The
+//! quality preset, and why `Custom` is not one of its values", for why keeping
+//! the preset the user chose is not a lie the screen tells.
 
 use core::fmt;
 
