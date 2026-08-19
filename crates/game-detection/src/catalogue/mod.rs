@@ -386,6 +386,48 @@ name = "a-game.exe"
     }
 
     #[test]
+    fn no_two_shipped_entries_claim_the_same_bare_executable_name() {
+        // Two entries claiming one *unqualified* executable name is permanent
+        // ambiguity: `Match::Ambiguous` is the honest answer and the manager
+        // files the session under `UNATTRIBUTED` rather than guessing, so both
+        // games lose their identity for as long as both entries exist.
+        //
+        // Sharing a name is legitimate when both say *where* — `hl2.exe` is
+        // Team Fortress 2 and Half-Life 2, told apart by `path_contains`, which
+        // is rung 2 and decides outright. So the rule is not "no shared names",
+        // it is "no shared names without a qualifier", which is what a
+        // contributor appending an entry can get wrong without noticing.
+        use std::collections::BTreeMap;
+
+        let catalogue = Catalogue::seed().expect("the seed data is valid");
+
+        let mut bare: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for entry in catalogue.entries() {
+            for rule in entry.executables() {
+                if rule.path_contains().is_none() {
+                    bare.entry(rule.name().to_lowercase())
+                        .or_default()
+                        .push(entry.game_id().as_str());
+                }
+            }
+        }
+
+        let clashes: Vec<String> = bare
+            .iter()
+            .filter(|(_, entries)| entries.len() > 1)
+            .map(|(name, entries)| format!("{name} is claimed by {}", entries.join(" and ")))
+            .collect();
+
+        assert!(
+            clashes.is_empty(),
+            "these executable names are claimed by more than one entry with no `path_contains`              to tell them apart, so a process with that name is ambiguous and is recorded under              no game at all:
+  {}",
+            clashes.join("
+  ")
+        );
+    }
+
+    #[test]
     fn every_shipped_entry_with_a_launcher_identifier_is_reached_by_it() {
         // The launcher rung is the one that identifies a game whose executable
         // is called something generic, and it is the rung most of the shipped
