@@ -311,8 +311,24 @@ software Clipped ships, and sets out what it constrains — AV1 stays the first
 choice, no second software encoder for a pool codec, Opus rather than AAC for
 [#392](https://github.com/wildware-uk/clipped/issues/392), and a release that
 states its codec position rather than leaving a reader to infer one from a
-directory of licence texts. It is `Proposed` rather than `Accepted`, because part
+directory of licence texts. It is `Accepted`: the position is decided and
+constrains pull requests now.
+
+**AV1 is the preference, not the outcome.** The default resolves to the most
+efficient codec the machine was *measured* to support, so AV1 is chosen only on
+NVIDIA Ada and later, AMD RDNA 3 and later and Intel Arc. On everything older
+it resolves to **HEVC** — the one standard in that inventory with no free tier
+and more than one pool — and on older hardware again to H.264. Most recordings
+Clipped makes today are therefore HEVC, encoded on vendor silicon. ADR 0008
+says so in its Decision; it is repeated here because this page is the other
+place somebody arrives at the question.
+
+What it does *not* settle is whether an obligation exists, and it says so — part
 of it is four questions for a lawyer that nobody in this repository can answer.
+Those questions block the first signed public release, and that block is a
+release gate rather than a sentence: `scripts/check-release-gates.ps1` refuses
+every tag until the answers are written into the record
+([docs/releasing.md](releasing.md#the-codec-patent-gate)).
 
 Two things it decides that belong on this page:
 

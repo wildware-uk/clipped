@@ -168,6 +168,115 @@ function New-CorrespondingSource {
     }
 }
 
+function New-CodecPatentRecord {
+    <#
+    .SYNOPSIS
+        ADR 0008 in a fixture, with its answers section in a chosen state.
+    .DESCRIPTION
+        The same headings the real record has, because those headings are what
+        the gate parses. A fixture that invented its own shape would test the
+        parser against itself and prove nothing about the document the gate
+        actually reads - which is why one case below copies the real record in
+        rather than building one here.
+
+        -Unanswered produces the pristine state: every field still holding the
+        placeholder, which is what is committed and what a release has to be
+        refused for today. -Answers overrides individual answers by number, so
+        that a case can leave exactly one behind, or blank one out, or write a
+        character into it.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $AnsweredBy = 'A. Solicitor, Example LLP, instructed 2026-10-02',
+        [string] $Date = '2026-11-04',
+        [hashtable] $Answers = @{},
+        [switch] $Unanswered,
+        [switch] $WithoutSection
+    )
+
+    $placeholder = '_UNANSWERED_'
+
+    $headings = @{
+        1 = 'Answer 1 — does the installer make Clipped an "AVC encoder/decoder product"?'
+        2 = 'Answer 2 — does an application driving NVENC, AMF or Quick Sync need its own AVC or HEVC licence?'
+        3 = 'Answer 3 — does shipping software encoders Clipped never calls create an obligation?'
+        4 = 'Answer 4 — does the distribution channel change the answer?'
+    }
+    $written = @{
+        1 = 'Yes, the installer is an AVC product, and the first tier does reach a free download. The licensee has to be a legal entity, so Wildware Ltd signs it rather than a maintainer personally.'
+        2 = 'No separate licence is needed for encoding performed by the vendor silicon, on either standard. Advice given on the pools as they stand in 2026 and no further.'
+        3 = 'Capability distributed is what counts, not capability offered, so the uncalled software encoders should come out of the build when that is cheap to do.'
+        4 = 'A GitHub release and a signed installer are the same arrangement for this purpose. The Microsoft Store is not, and would need asking again before publishing there.'
+    }
+
+    if ($WithoutSection) {
+        Write-Fixture -Path $Path -Content ((@(
+                    '# 0008. AV1 is the codec Clipped commits to',
+                    '',
+                    '- Status: Accepted',
+                    '- Date: 2026-08-13',
+                    '',
+                    '## Decision',
+                    '',
+                    'AV1 first; the questions for a lawyer are below.',
+                    '',
+                    '### The four questions for a lawyer',
+                    '',
+                    '1. Does the installer make Clipped an "AVC encoder/decoder product"?',
+                    '',
+                    '## Alternatives',
+                    '',
+                    'Say nothing and ship. Rejected.'
+                )) -join "`n")
+        return $Path
+    }
+
+    $body = @(
+        '# 0008. AV1 is the codec Clipped commits to',
+        '',
+        '- Status: Accepted',
+        '- Date: 2026-08-13',
+        '',
+        '## Decision',
+        '',
+        'AV1 first; the questions for a lawyer are below.',
+        '',
+        '### The four questions for a lawyer',
+        '',
+        '1. Does the installer make Clipped an "AVC encoder/decoder product"?',
+        '',
+        '### The answers',
+        '',
+        'Prose the gate has to read past without mistaking it for a field.',
+        ''
+    )
+
+    $by = if ($Unanswered) { $placeholder } else { $AnsweredBy }
+    $on = if ($Unanswered) { $placeholder } else { $Date }
+    if ($Answers.ContainsKey('Answered by')) { $by = $Answers['Answered by'] }
+    if ($Answers.ContainsKey('Date')) { $on = $Answers['Date'] }
+
+    $body += "- Answered by: $by"
+    $body += "- Date: $on"
+
+    foreach ($number in 1..4) {
+        $text = if ($Unanswered) { $placeholder } else { $written[$number] }
+        if ($Answers.ContainsKey($number)) { $text = $Answers[$number] }
+        $body += ''
+        $body += "#### $($headings[$number])"
+        $body += ''
+        $body += $text
+    }
+
+    $body += ''
+    $body += '## Alternatives'
+    $body += ''
+    $body += 'Say nothing and ship. Rejected.'
+
+    Write-Fixture -Path $Path -Content ($body -join "`n")
+    return $Path
+}
+
 function New-Fixture {
     <#
     .SYNOPSIS
@@ -198,7 +307,11 @@ function New-Fixture {
         [hashtable] $Disagreeing = @{},
         [switch] $WithLicences,
         [switch] $WithoutCorrespondingSource,
-        [switch] $WithoutFetchScript
+        [switch] $WithoutFetchScript,
+        [hashtable] $CodecAnswers = @{},
+        [switch] $CodecUnanswered,
+        [switch] $WithoutCodecAnswers,
+        [switch] $WithoutCodecRecord
     )
 
     $root = Join-Path $fixtureRoot $Name
@@ -317,6 +430,19 @@ exit 1
         New-CorrespondingSource -Directory $correspondingSource
     }
 
+    # ADR 0008, which the codec patent gate reads. Answered unless a case says
+    # otherwise, for the same reason the source is assembled unless a case says
+    # otherwise: the interesting states are the missing ones, and they should be
+    # asked for rather than arrived at.
+    $codecRecord = Join-Path $root 'docs\adr\0008-codec-patent-position.md'
+    if (-not $WithoutCodecRecord) {
+        New-CodecPatentRecord `
+            -Path $codecRecord `
+            -Answers $CodecAnswers `
+            -Unanswered:$CodecUnanswered `
+            -WithoutSection:$WithoutCodecAnswers | Out-Null
+    }
+
     Push-Location $root
     try {
         $previous = $ErrorActionPreference
@@ -349,6 +475,7 @@ exit 1
         Payload       = $payload
         Source        = $correspondingSource
         FetchScript   = $fetchScript
+        CodecRecord   = $codecRecord
         MilestonesAll = (New-Milestones -Path (Join-Path $root '.milestones-finished.json') -Finished)
         MilestonesOpen = (New-Milestones -Path (Join-Path $root '.milestones-open.json'))
         ReleasesNone  = (New-Json -Path (Join-Path $root '.releases-none.json') -Value '[]')
@@ -505,7 +632,7 @@ try {
         -Name 'every gate passes, and the release is allowed' `
         -Result (Invoke-Gates -Fixture $good -Tag 'v1.0.0') `
         -ExpectedExitCode 0 `
-        -Contains @('All 6 gates pass', 'v1.0.0 may be built and drafted') `
+        -Contains @('All 7 gates pass', 'v1.0.0 may be built and drafted') `
         -DoesNotContain @('REFUSED')
 
     Write-Host ''
@@ -591,7 +718,7 @@ try {
         -Name 'a pre-release tag is a version like any other, and passes when the tree agrees' `
         -Result (Invoke-Gates -Fixture $prerelease -Tag 'v1.0.0-rc.1') `
         -ExpectedExitCode 0 `
-        -Contains @('All 6 gates pass')
+        -Contains @('All 7 gates pass')
 
     Write-Host ''
     Write-Host 'A tag on a branch is not a release'
@@ -744,7 +871,7 @@ try {
         -Name 'licences collected through a second declared resource satisfy the gate' `
         -Result (Invoke-Gates -Fixture $secondResource -Tag 'v1.0.0') `
         -ExpectedExitCode 0 `
-        -Contains @('All 6 gates pass')
+        -Contains @('All 7 gates pass')
 
     Write-Host ''
     Write-Host 'The source of the FFmpeg being shipped is published with it, or nothing is'
@@ -837,6 +964,134 @@ try {
         -Contains @('passed ] Corresponding source', 'ffmpeg-gfixture001-source.zip', 'entries')
 
     Write-Host ''
+    Write-Host 'The codec patent questions are asked before anything is signed and published'
+
+    # The state this repository is actually in, and the one the gate exists for:
+    # ADR 0008 decides the position, its sixth decision blocks the first release
+    # on four questions, and nobody has asked them. Every field has to be named,
+    # because "the answers are missing" without saying which is a refusal
+    # somebody has to go and investigate.
+    $unasked = New-Fixture -Name 'questions-unasked' -WithLicences -CodecUnanswered
+    Assert-Case `
+        -Name 'a release with the codec patent questions unasked is refused, and every field named' `
+        -Result (Invoke-Gates -Fixture $unasked -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @(
+        'REFUSED',
+        'Codec patents',
+        'docs/adr/0008-codec-patent-position.md',
+        'Answered by',
+        'Answer 1',
+        'Answer 2',
+        'Answer 3',
+        'Answer 4',
+        'unanswered',
+        'somebody having answered',
+        'write what they',
+        'not anybody saying the release is'
+    )
+
+    # The refusal has to say what it is refusing *for*. A gate whose message is
+    # "unanswered" teaches whoever hits it nothing about why a release is
+    # blocked, and the next person deletes it.
+    Assert-Case `
+        -Name 'the refusal explains what is at stake rather than only reporting a missing field' `
+        -Result (Invoke-Gates -Fixture $unasked -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('libopenh264', 'resolves to HEVC', 'cannot be undone', 'four questions')
+
+    # Three fields answered and one not is not "nearly answered". The one left
+    # behind is the one nobody wanted to ask, and it is the one that decides
+    # whether the software encoder can ship at all.
+    $almost = New-Fixture -Name 'one-question-left' -WithLicences -CodecAnswers @{ 3 = '_UNANSWERED_' }
+    Assert-Case `
+        -Name 'one question left unanswered among four still refuses, and only that one is named' `
+        -Result (Invoke-Gates -Fixture $almost -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answer 3', 'unanswered', '5 of the 6 fields do hold something') `
+        -DoesNotContain @('AVC encoder/decoder product')
+
+    # Deleting the placeholder and writing nothing is the way this gate gets
+    # defeated by accident: the token it looks for is gone and no answer is
+    # there. Whitespace is the same thing with a space bar involved.
+    $blank = New-Fixture -Name 'answer-blanked' -WithLicences -CodecAnswers @{ 2 = '' }
+    Assert-Case `
+        -Name 'an emptied answer is refused rather than passing because the placeholder is gone' `
+        -Result (Invoke-Gates -Fixture $blank -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answer 2', 'blank')
+
+    $whitespace = New-Fixture -Name 'answer-whitespace' -WithLicences -CodecAnswers @{ 4 = "   `t  " }
+    Assert-Case `
+        -Name 'a whitespace-only answer is refused' `
+        -Result (Invoke-Gates -Fixture $whitespace -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answer 4', 'blank')
+
+    # A character typed into the field to get past the gate. ADR 0008 asks for
+    # the sentence, and the floor is what makes that ask real.
+    $token = New-Fixture -Name 'answer-token' -WithLicences -CodecAnswers @{ 1 = 'no.' }
+    Assert-Case `
+        -Name 'an answer too short to be one is refused' `
+        -Result (Invoke-Gates -Fixture $token -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answer 1', 'too short to be an answer')
+
+    # Who answered and when are part of the answer. "Somebody said it was fine"
+    # is not something a maintainer in two years can weigh, follow up, or date
+    # against a pool's terms having moved.
+    $anonymous = New-Fixture -Name 'answered-by-nobody' -WithLicences -CodecAnswers @{ 'Answered by' = '' }
+    Assert-Case `
+        -Name 'answers with nobody attributed to them are refused' `
+        -Result (Invoke-Gates -Fixture $anonymous -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answered by', 'blank')
+
+    # Removing the section is not how the block is lifted, and the refusal has
+    # to tell the two apart: a renamed heading is somebody's edit to fix, a
+    # deleted section is somebody routing around the gate.
+    $noSection = New-Fixture -Name 'answers-section-removed' -WithLicences -WithoutCodecAnswers
+    Assert-Case `
+        -Name 'the answers section deleted from the record is refused, and distinguished from unanswered' `
+        -Result (Invoke-Gates -Fixture $noSection -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('has no "### The answers" section', 'put it back rather')
+
+    $noRecord = New-Fixture -Name 'adr-0008-deleted' -WithLicences -WithoutCodecRecord
+    Assert-Case `
+        -Name 'the record missing altogether is a refusal, not an absence of anything to object to' `
+        -Result (Invoke-Gates -Fixture $noRecord -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('is not in this checkout', 'deleting the record is not how')
+
+    # The one case that ties the gate to the document rather than to a fixture
+    # of its own shape. The real ADR 0008 is copied in as it is committed, and
+    # the gate has to find its six fields and report them unanswered - not
+    # report that the section is missing, which is what a heading this parser no
+    # longer recognises would produce. Without this, somebody reformatting the
+    # record turns the gate into one that refuses for the wrong reason and says
+    # so in a message nobody can act on.
+    $real = New-Fixture -Name 'the-real-record' -WithLicences
+    Copy-Item `
+        -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\adr\0008-codec-patent-position.md') `
+        -Destination $real.CodecRecord -Force
+    Assert-Case `
+        -Name 'the record as committed is parsed by the gate, and reports six unanswered fields' `
+        -Result (Invoke-Gates -Fixture $real -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('Codec patents', 'Answered by', 'Answer 4', 'unanswered') `
+        -DoesNotContain @('has no "### The answers" section', 'the record has no such field')
+
+    # And the case that matters as much as any refusal: with the questions
+    # asked and the answers written down, the gate passes and says who answered.
+    # A gate only ever seen refusing is not known to be a gate.
+    Assert-Case `
+        -Name 'answers written into the record pass, and the gate names who gave them' `
+        -Result (Invoke-Gates -Fixture $good -Tag 'v1.0.0') `
+        -ExpectedExitCode 0 `
+        -Contains @('passed ] Codec patents', 'A. Solicitor, Example LLP', '2026-11-04', 'read the answers')
+
+    Write-Host ''
     Write-Host 'Evidence that is missing is a refusal, not a pass'
 
     $absent = Join-Path $good.Root '.no-such-file.json'
@@ -861,12 +1116,12 @@ try {
 
     # Four things wrong at once should be four things said once, not one thing
     # said four times over four attempts.
-    $everything = New-Fixture -Name 'everything-wrong' -Disagreeing @{ 'package.json' = '0.2.0' } -WithoutCorrespondingSource
+    $everything = New-Fixture -Name 'everything-wrong' -Disagreeing @{ 'package.json' = '0.2.0' } -WithoutCorrespondingSource -CodecUnanswered
     Assert-Case `
         -Name 'every gate is evaluated, so one refusal does not hide the next three' `
         -Result (Invoke-Gates -Fixture $everything -Tag 'v1.0.0' -CommitSha $everything.BranchCommit -MilestonesJson $everything.MilestonesOpen -CiRunsJson $everything.CiFailed) `
         -ExpectedExitCode 1 `
-        -Contains @('6 of 6 gates refuse', 'Version, Branch, Continuous integration, Milestones, Licences, Corresponding source')
+        -Contains @('7 of 7 gates refuse', 'Version, Branch, Continuous integration, Milestones, Licences, Corresponding source, Codec patents')
 
     # Rehearsal exists so the gates can be read on a day when they refuse. It
     # reports the same verdicts and changes none of them.

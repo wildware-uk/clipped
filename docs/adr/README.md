@@ -70,7 +70,7 @@ Correcting a typo or clarifying wording in place is fine.
 | [0005](0005-named-pipe-control-protocol.md) | A named pipe carries the control protocol between the UI and the recorder | Accepted |
 | [0006](0006-recorder-lifetime-and-supervision.md) | The desktop application starts a detached recorder and supervises it, and neither stops the other | Accepted |
 | [0007](0007-visual-c-runtime-linkage.md) | The recorder links the Visual C++ runtime statically and the universal CRT dynamically | Accepted |
-| [0008](0008-codec-patent-position.md) | AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away | Proposed |
+| [0008](0008-codec-patent-position.md) | AV1 is the codec Clipped commits to where the hardware offers it, and on most machines today that means HEVC | Accepted |
 | [0009](0009-the-recorder-registers-global-hotkeys.md) | The recorder registers the global hotkeys, and a press becomes a protocol command | Accepted |
 | [0010](0010-user-labelled-event-kinds.md) | A user-labelled event kind carries its own text, and a host subsystem gets its own source | Accepted |
 | [0011](0011-what-the-webview-plays.md) | The window plays the archival recording itself, and the recorder chooses which sound track it carries | Accepted |

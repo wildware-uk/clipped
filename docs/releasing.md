@@ -10,7 +10,7 @@ Three questions this answers, in order of how easy they are to get wrong:
 
 1. [What a version is, and what a milestone is not](#a-milestone-is-not-a-version)
 2. [Who decides a milestone is finished](#who-decides-a-milestone-is-finished)
-3. [What a tag is allowed to do](#the-six-gates)
+3. [What a tag is allowed to do](#the-seven-gates)
 
 ## A milestone is not a version
 
@@ -114,7 +114,7 @@ An agent may:
 - run the rehearsal (below) and report which gates refuse;
 - open a pull request bumping the version declarations, when the gates say
   everything else is ready;
-- push a tag once the rehearsal reports all six gates passing.
+- push a tag once the rehearsal reports all seven gates passing.
 
 An agent may **not** publish a release. The workflow always produces a
 **draft**, and a draft is not a distribution: nothing is downloadable and
@@ -128,7 +128,7 @@ means changing this page in a pull request, on purpose, with somebody else
 reading it — which is the correct amount of friction for a decision that cannot
 be reverted once somebody has downloaded the result.
 
-## The six gates
+## The seven gates
 
 Pushing a tag matching `v*` runs
 [`.github/workflows/release.yml`](../.github/workflows/release.yml). Its first
@@ -145,6 +145,7 @@ after one has refused, so a tag that is wrong in four ways is told so once.
 | **Milestones** | anything has yet to be released and any milestone is open or has open issues | the rule at the top of this page |
 | **Licences** | the installer would not bundle the licence texts and third-party notices | see below |
 | **Corresponding source** | the source of the FFmpeg build the installer would ship is not assembled, is incomplete, or is the source of a different build | see below |
+| **Codec patents** | the four questions in [ADR 0008](adr/0008-codec-patent-position.md) have not been asked and their answers written into that record | see below |
 
 The milestone gate **retires itself** once anything has been published. After
 the first release, which version comes next is semantic versioning, and a newly
@@ -253,6 +254,42 @@ remote when the archives were made; a gate that tried to recognise FFmpeg by its
 file names would refuse a correct release the first time upstream renamed
 something.
 
+### The codec patent gate
+
+The two gates above are entirely about **copyright**, and a copyright licence is
+not a patent licence. The installer ships an FFmpeg whose libraries encode H.264
+through a statically linked `libopenh264`, and the default codec resolves to
+HEVC on every machine whose GPU has no AV1 encoder. Both are patent-pool
+standards, and nothing in the licence payload grants anything over them.
+
+[ADR 0008](adr/0008-codec-patent-position.md) is the position, and it is
+`Accepted`: AV1 first, AVC and HEVC only on silicon a vendor already licensed,
+no second software encoder for a pool codec. Its sixth decision blocks the first
+signed public release on four questions being put to somebody qualified — **not
+on a particular answer, on somebody having answered.** Until this gate existed,
+that block was a sentence in a document. This gate is what makes it a block.
+
+It reads the "The answers" section of that record and refuses while any of its
+six fields — who answered, when, and one per question — is still the
+`_UNANSWERED_` placeholder, blank, whitespace, or too short to be an answer.
+Filling it in is what discharges the gate: put the questions to a lawyer, write
+what they said into the record, commit it.
+
+Three things it deliberately does not do:
+
+- **It does not check that anybody was consulted**, because no script can. It
+  checks that the answers were written down where a contributor and a user can
+  read them, which is the most it can honestly claim.
+- **It does not ask for a particular answer.** Passing it is not this project
+  saying a release is safe; ADR 0008 is explicit that nothing available here can
+  establish that.
+- **It does not retire after the first release**, the way the milestone gate
+  does. Answers once written stay written, so it costs a later release nothing;
+  what it goes on catching is that section being deleted or emptied.
+
+It reads one Markdown file out of the checkout, so it costs the gate job
+nothing.
+
 ## Making a release
 
 1. **Finish the milestones.** Every issue closed, every milestone closed by a
@@ -263,21 +300,27 @@ something.
    substituting the FFmpeg DLLs in an installed copy and confirming it still
    records is a person at a keyboard. docs/licensing.md, "Replacing the FFmpeg
    libraries", is the procedure.
-3. **Bump the version** in one reviewed pull request — every declaration in the
+3. **Ask the four codec patent questions and write the answers down.** Also a
+   person, and the longest lead time on this list — it needs somebody outside
+   the project. [ADR 0008](adr/0008-codec-patent-position.md) has the questions
+   written to be answerable and the section the answers go in;
+   [the codec patent gate](#the-codec-patent-gate) refuses until they are there.
+   Start this before step 1, not after step 7.
+4. **Bump the version** in one reviewed pull request — every declaration in the
    table above, plus both lockfiles — and merge it.
-4. **Wait for CI to pass on `main`** at that commit. The gate requires it, and
+5. **Wait for CI to pass on `main`** at that commit. The gate requires it, and
    a tag pushed before CI finishes is refused for a reason that would have gone
    away on its own.
-5. **Rehearse.** Run the workflow from the Actions tab with the tag you are
+6. **Rehearse.** Run the workflow from the Actions tab with the tag you are
    about to push. It reports every gate without creating anything.
-6. **Tag the merge commit and push it**:
+7. **Tag the merge commit and push it**:
 
    ```text
    git tag -a v1.0.0 -m "Clipped 1.0.0"
    git push origin v1.0.0
    ```
 
-7. **Read the draft.** The workflow attaches the installer, a `.sha256`
+8. **Read the draft.** The workflow attaches the installer, a `.sha256`
    sidecar, the corresponding FFmpeg source — two archives and
    `CORRESPONDING-SOURCE.md` — and notes that state the build is unsigned, that
    SmartScreen will warn, the installer's SHA-256 and what the source assets
@@ -286,11 +329,11 @@ something.
    something upstream replaced it. Check the source assets are on the draft too:
    the gates refuse without them, but the assets are what a recipient actually
    gets.
-8. **Publish it.** That is the last gate, and it is a person.
+9. **Publish it.** That is the last gate, and it is a person.
 
 ### Rehearsing
 
-`workflow_dispatch` on the Release workflow takes a tag and reports on all six
+`workflow_dispatch` on the Release workflow takes a tag and reports on all seven
 gates without publishing anything. It exists because the gates all refuse today,
 and a refusal nobody can watch working is a refusal nobody trusts. The rehearsal
 assembles the corresponding source and gates it exactly as a tag push does,
@@ -356,8 +399,19 @@ Verified by running, on 2026-08-17, against the tree at `edb36d8`:
 - **The gate script refuses this repository, for the right reasons.** Run with
   the three `gh api` answers above and `-Tag v1.0.0`: Version, Continuous
   integration and Milestones refuse and Branch passes, each naming what is
-  wrong. Its own suite (`scripts/test-check-release-gates.ps1`, 37 cases) and
+  wrong. Its own suite (`scripts/test-check-release-gates.ps1`) and
   `scripts/test-write-release-notes.ps1` both pass.
+- **The codec patent gate refuses this repository, and passes when answered.**
+  Re-run on 2026-08-19 against `94aa069` with the licence payload collected and
+  the corresponding source assembled: two of seven gates refuse, Milestones and
+  Codec patents, and the other five pass. With plausible answers written into
+  ADR 0008 by hand, the codec gate passed and named who gave them, leaving
+  Milestones as the only refusal; the answers were then reverted, so what is
+  committed is the unanswered state. Each of that gate's checks was removed in
+  turn and its cases went red each time, and renaming the record's `### The
+  answers` heading turned the case that copies the real record in red as well —
+  which is what ties the gate to the document rather than to a fixture of its
+  own shape. Suite: 48 cases.
 - **The corresponding source is assembled, and the gate reads it.** Run against
   the real pin on 2026-08-17, `scripts/fetch-ffmpeg-source.ps1` fetched
   `9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b` from FFmpeg and
