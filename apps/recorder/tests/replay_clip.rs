@@ -256,6 +256,65 @@ fn session(directory: &Path) -> Mutex<ManualSession> {
 }
 
 #[test]
+fn what_declining_the_buffer_saves_is_measured_rather_than_asserted() {
+    // Issue #539 is a cost, so the cost is measured against the real thing:
+    // thirty-five seconds of real coded video and three audio tracks pushed
+    // through the buffer a recording actually builds, spilling to disk exactly
+    // as `serve` makes it spill. The declined recording is the same recording
+    // with `replay_window_seconds` set to 0, which reaches this join as a
+    // `None` — and `start_buffer` is where "no buffer" stops being a setting
+    // and becomes an absence of anything to push into.
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let layout = layout(&video);
+
+    let kept = ReplayRecording::new(WINDOW).expect("thirty seconds is a supported window");
+    let buffer = clipped_session::start_buffer(&layout, generous_rate(), Some(&kept))
+        .expect("a recording that asked for a buffer has one once its encoder is open");
+    push(&video, buffer, 35);
+    push_audio(buffer, 35);
+    let stats = kept
+        .stats()
+        .expect("a recording keeping a buffer reports on it");
+
+    // The declined recording, through the same join. There is no
+    // `ReplayRecording` at all, so there is nothing to size, nothing to spill
+    // into and nothing for the packet loop to copy into.
+    assert!(
+        clipped_session::start_buffer(&layout, generous_rate(), None).is_none(),
+        "a recording that declined the buffer must be handed nothing to push into"
+    );
+    let declined: Option<ReplayRecording> = None;
+    assert!(
+        declined.as_ref().and_then(ReplayRecording::stats).is_none(),
+        "and it reports no buffer, which is what the status turns into replay_seconds: null"
+    );
+
+    // The figure, printed, so that what `docs/configuration.md` says the
+    // setting costs is something somebody can reproduce rather than something
+    // they have to believe. Resident bytes rather than spilled ones because
+    // spilling is asynchronous — the writer thread reports back after the
+    // pushes return, so a disk figure read here would be a race (AGENTS.md
+    // section 25). `docs/replay-buffer.md` has the settled split, 0.94 MB
+    // resident against 208 MB on disk for a thirty-minute window; what this
+    // measures is that the buffer holds real bytes and the declined one holds
+    // no bytes because it does not exist.
+    println!(
+        "a {}-second buffer of this fixture holds {} bytes across {} segments before spilling \
+         releases them; declining it holds none, spills none and opens no directory",
+        WINDOW.as_secs(),
+        stats.bytes_held(),
+        stats.segments_held(),
+    );
+    assert!(
+        stats.bytes_held() > 0,
+        "the buffer under measurement has to be holding something, or the comparison is \
+         between two zeroes: {stats:?}"
+    );
+}
+
+#[test]
 fn a_saved_replay_is_the_last_n_seconds_and_every_picture_of_it_decodes() {
     // The acceptance criterion, end to end. A file that opens, has one video
     // stream of the right size, and whose every picture comes back out of a

@@ -177,6 +177,18 @@ pub enum ConfigError {
         /// The buffer's own duration, in seconds.
         window: u32,
     },
+    /// `replay` was asked to run with `replay_window_seconds` set to
+    /// `clipped_session::config::REPLAY_WINDOW_OFF`, and named no duration of
+    /// its own.
+    ///
+    /// The whole of this subcommand is a rolling window and a hotkey that saves
+    /// out of it, so a window of nothing is a run with nothing to do. Refusing
+    /// it is AGENTS.md section 27 at the command line: recording anyway, with a
+    /// hotkey that can only ever answer "there is no buffer", is a control that
+    /// does nothing. `record` is the subcommand for a recording without one,
+    /// and `--duration` is how somebody who has turned the setting off asks for
+    /// a buffer this once.
+    ReplayWindowOff,
 }
 
 impl fmt::Display for ConfigError {
@@ -254,6 +266,11 @@ impl fmt::Display for ConfigError {
                 "a save of {save} seconds cannot be taken from a replay buffer that keeps \
                  {window}: ask for at most {window} seconds, or give the buffer a longer \
                  duration"
+            ),
+            Self::ReplayWindowOff => formatter.write_str(
+                "replay_window_seconds is 0, so no replay buffer would be kept and the hotkey \
+                 would have nothing to save: pass --duration to keep one for this run, \
+                 or use `record` for a recording without one",
             ),
         }
     }
@@ -343,23 +360,35 @@ impl ReplayConfig {
     /// is about — and unlike a buffer that has not filled yet, this one is
     /// knowable before anything is recorded.
     ///
-    /// `configured` is the window the settings file resolved to, which is what
+    /// `configured` is the buffer the settings file resolved to, which is what
     /// `--duration` overrides for one run. It is read from the same fold every
     /// other setting comes through, so "how much does Clipped keep" has one
     /// answer whether it is asked here or in the settings screen (AGENTS.md
     /// section 30, `docs/configuration.md`).
     ///
+    /// [`None`] is a user who has declined the buffer — `replay_window_seconds`
+    /// set to `clipped_session::config::REPLAY_WINDOW_OFF`. It is an
+    /// `Option<Duration>` rather than a zero this function recognises for
+    /// itself, so that what "off" means is decided in the settings layer and
+    /// nowhere else (`ResolvedSettings::replay_buffer_window`, AGENTS.md
+    /// section 55).
+    ///
     /// # Errors
     ///
-    /// [`RecordingConfig::resolve`]'s, and
-    /// [`ConfigError::SaveLongerThanBuffer`].
+    /// [`RecordingConfig::resolve`]'s, [`ConfigError::SaveLongerThanBuffer`],
+    /// and [`ConfigError::ReplayWindowOff`] when the setting is off and no
+    /// `--duration` overrode it.
     pub fn resolve(
         args: &crate::cli::ReplayArgs,
-        configured: std::time::Duration,
+        configured: Option<std::time::Duration>,
         configured_directory: Option<&Path>,
     ) -> Result<Self, ConfigError> {
         let recording = RecordingConfig::resolve(&args.record, configured_directory)?;
-        let window = args.duration.map_or(configured, ReplayWindow::duration);
+        let window = args
+            .duration
+            .map(ReplayWindow::duration)
+            .or(configured)
+            .ok_or(ConfigError::ReplayWindowOff)?;
         // Nothing said means the whole window: SPEC.md section 42's example is
         // `replay --duration 60` and a hotkey that saves the previous sixty
         // seconds, so the two are one number until somebody says otherwise.
@@ -775,6 +804,11 @@ mod tests {
         clipped_session::config::DEFAULT_REPLAY_WINDOW
     }
 
+    /// The same, as `ReplayConfig::resolve` takes it: a buffer that is on.
+    fn configured() -> Option<std::time::Duration> {
+        Some(configured_window())
+    }
+
     #[test]
     fn a_replay_keeps_the_configured_window_and_saves_the_whole_of_it() {
         // Nothing typed means the setting decides, and a save with no duration
@@ -783,7 +817,7 @@ mod tests {
         let directory = TestDirectory::new("replay-defaults");
         let config = ReplayConfig::resolve(
             &replay_args_in(directory.path(), "Counter-Strike 2"),
-            configured_window(),
+            configured(),
             None,
         )
         .expect("a window and an output are enough");
@@ -793,13 +827,44 @@ mod tests {
     }
 
     #[test]
+    fn replay_with_the_buffer_declined_is_refused_rather_than_run_with_nothing_to_save() {
+        // `replay` is a rolling window and a hotkey that saves out of it, so a
+        // user who has set `replay_window_seconds` to 0 and typed no duration
+        // has asked for a run whose hotkey could only ever answer "there is no
+        // buffer". Recording anyway would be a control that does nothing
+        // (AGENTS.md section 27); `record` is the subcommand for that.
+        let directory = TestDirectory::new("replay-declined");
+        let args = replay_args_in(directory.path(), "Counter-Strike 2");
+
+        let error = ReplayConfig::resolve(&args, None, None)
+            .expect_err("a run with no buffer is not a replay");
+        assert!(
+            matches!(error, ConfigError::ReplayWindowOff),
+            "the refusal has to be about the setting rather than about the arguments: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("--duration") && message.contains("record"),
+            "and has to name both ways out, because the user asked for something reasonable: \
+             {message}"
+        );
+
+        // And `--duration` is the way out it names, so somebody who has turned
+        // the buffer off can still keep one for this run.
+        let mut asked = args;
+        asked.duration = Some("90".parse().expect("ninety seconds is in range"));
+        let config = ReplayConfig::resolve(&asked, None, None)
+            .expect("a duration typed on the command line is a buffer for this run");
+        assert_eq!(config.window, std::time::Duration::from_secs(90));
+    }
+
+    #[test]
     fn a_duration_on_the_command_line_overrides_the_configured_one() {
         let directory = TestDirectory::new("replay-duration");
         let mut args = replay_args_in(directory.path(), "Counter-Strike 2");
         args.duration = Some("90".parse().expect("ninety seconds is in range"));
 
-        let config =
-            ReplayConfig::resolve(&args, configured_window(), None).expect("a valid replay");
+        let config = ReplayConfig::resolve(&args, configured(), None).expect("a valid replay");
 
         assert_eq!(config.window, std::time::Duration::from_secs(90));
         assert_eq!(
@@ -821,7 +886,7 @@ mod tests {
         let args = replay_args_in(directory.path(), "Counter-Strike 2");
 
         assert!(
-            ReplayConfig::resolve(&args, configured_window(), None)
+            ReplayConfig::resolve(&args, configured(), None)
                 .expect("a window and an output are enough")
                 .writes_a_recording,
             "saying nothing must still write the recording, because that is what \
@@ -832,7 +897,7 @@ mod tests {
         asked.no_recording = true;
 
         assert!(
-            !ReplayConfig::resolve(&asked, configured_window(), None)
+            !ReplayConfig::resolve(&asked, configured(), None)
                 .expect("a window and an output are enough")
                 .writes_a_recording,
         );
@@ -850,7 +915,7 @@ mod tests {
         args.duration = Some("60".parse().expect("in range"));
         args.save_duration = Some("120".parse().expect("in range"));
 
-        let error = ReplayConfig::resolve(&args, configured_window(), None)
+        let error = ReplayConfig::resolve(&args, configured(), None)
             .expect_err("a minute of buffer cannot yield two minutes of clip");
 
         let message = error.to_string();
@@ -862,7 +927,7 @@ mod tests {
         // And the same save against a buffer long enough for it is accepted,
         // so the refusal is a rule rather than a refusal of everything.
         args.duration = Some("300".parse().expect("in range"));
-        assert!(ReplayConfig::resolve(&args, configured_window(), None).is_ok());
+        assert!(ReplayConfig::resolve(&args, configured(), None).is_ok());
     }
 
     #[test]
@@ -873,7 +938,7 @@ mod tests {
         let directory = TestDirectory::new("replay-recording");
         let args = replay_args_in(directory.path(), "Counter-Strike 2");
 
-        let config = ReplayConfig::resolve(&args, configured_window(), None)
+        let config = ReplayConfig::resolve(&args, configured(), None)
             .expect("a valid replay")
             .recording;
         assert_eq!(
@@ -884,7 +949,7 @@ mod tests {
 
         let mut broken = replay_args_in(directory.path(), "Counter-Strike 2");
         broken.record.output = Some(directory.path().join("replay.mp4"));
-        let error = ReplayConfig::resolve(&broken, configured_window(), None)
+        let error = ReplayConfig::resolve(&broken, configured(), None)
             .expect_err("the recorder writes Matroska");
         assert!(matches!(error, ConfigError::OutputIsNotMatroska { .. }));
     }

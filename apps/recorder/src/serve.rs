@@ -1137,6 +1137,17 @@ impl Running {
     /// to this recording rather than the one that applies to nothing in
     /// particular (AGENTS.md section 30, `docs/configuration.md`).
     ///
+    /// **A configured window of
+    /// [`REPLAY_WINDOW_OFF`](clipped_session::config::REPLAY_WINDOW_OFF) is a
+    /// recording that keeps no buffer**, rather than a very short one: no
+    /// `ReplayRecording` is built, so nothing is pushed into anything, no spill
+    /// directory is made, and [`status_of`] reports `replay_seconds: None` —
+    /// which is what the tray reads to refuse Save Replay in words instead of
+    /// silently doing nothing (AGENTS.md section 27,
+    /// [issue #539](https://github.com/wildware-uk/clipped/issues/539)).
+    /// Declining has to happen here, because the desktop window asks for a
+    /// buffer on every recording it starts and deliberately names no length.
+    ///
     /// # Errors
     ///
     /// Only for a configured window `clipped-replay` will not take, which a
@@ -1149,15 +1160,27 @@ impl Running {
         let replay = match asked {
             ReplayAsked::Nothing => None,
             ReplayAsked::Named(replay) => Some(replay),
-            ReplayAsked::Configured => {
-                let window = *self.resolved_settings().replay_window().value();
-                tracing::info!(
-                    window_seconds = window.as_secs_f64(),
-                    "this recording keeps the replay window the settings ask for, because the \
-                     request asked for a buffer without naming a length"
-                );
-                Some(replay_of(window)?)
-            }
+            // Through `replay_buffer_window` rather than a comparison of this
+            // module's own, so that "the user declined the buffer" has one
+            // definition and it is the settings layer's (AGENTS.md section 55).
+            ReplayAsked::Configured => match self.resolved_settings().replay_buffer_window() {
+                Some(window) => {
+                    tracing::info!(
+                        window_seconds = window.as_secs_f64(),
+                        "this recording keeps the replay window the settings ask for, because \
+                         the request asked for a buffer without naming a length"
+                    );
+                    Some(replay_of(window)?)
+                }
+                None => {
+                    tracing::info!(
+                        "this recording keeps no replay buffer, because replay_window_seconds \
+                         is 0 for the game it is of; a buffer was asked for and the \
+                         settings decline it"
+                    );
+                    None
+                }
+            },
         };
 
         Ok(self.with_replay(replay))
@@ -3851,6 +3874,168 @@ mod tests {
             Duration::from_secs(45),
             "the game's own replay window has to beat the global one, or per-game settings stop \
              at the buffer"
+        );
+    }
+
+    /// The settings a recording is started with, with `replay_window_seconds`
+    /// set globally to `seconds`.
+    fn configured_replay_window(seconds: Option<u64>) -> Configuration {
+        let mut configuration = Configuration::defaults();
+        let mut global = clipped_session::config::Preferences::default();
+        global
+            .set_replay_window(seconds.map(Duration::from_secs))
+            .expect("the caller names a window this build accepts");
+        configuration.set_global(global);
+        configuration
+    }
+
+    #[test]
+    fn a_recording_whose_settings_decline_the_buffer_keeps_none_and_says_so() {
+        // Issue #539's second half, through the path the desktop actually
+        // takes. Every recording the window starts sends `replay` with no
+        // length, so before there was an off value there was no way to decline
+        // the buffer's continuous write at the recording's own bitrate. This is
+        // the decline, and it has to be a recording that keeps *nothing*
+        // rather than a very short buffer: no `ReplayRecording`, so nothing is
+        // pushed anywhere and no spill directory is made.
+        let directory = scratch("window-declined");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        let configuration = configured_replay_window(Some(0));
+
+        let state = state_configured(&directory, Catalogue::default(), configuration.clone());
+        let running = match state
+            .begin(
+                "r-1".to_owned(),
+                output,
+                "process cs2.exe".to_owned(),
+                &window_of(4_242, "cs2.exe"),
+                &configuration,
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Configured)
+        {
+            Ok(running) => running,
+            Err(error) => panic!(
+                "replay_window_seconds 0 is a recording that keeps no buffer, not a start that \
+                 fails: {}",
+                error.message
+            ),
+        };
+        assert!(
+            running.replay.is_none(),
+            "a recording whose settings decline the buffer must hold no ReplayRecording at all, \
+             so that nothing is ever pushed into one"
+        );
+
+        *state.current.lock().expect("a fresh lock") = Some(running);
+
+        // What a window reads to decide whether to offer Save Replay. `None`
+        // is "this recording keeps no buffer", which is a different answer
+        // from `Some(n)` with nothing in it yet — and it is the answer
+        // `tray_model` turns into a refused menu item rather than a live one
+        // that would do nothing (AGENTS.md section 27).
+        let RecorderStatus::Recording(active) = state.status() else {
+            panic!("the recorder is recording");
+        };
+        assert_eq!(
+            active.replay_seconds, None,
+            "a recording that declined the buffer must not advertise one, or the tray offers a \
+             control that cannot work"
+        );
+
+        // And pressing it anyway is refused in words rather than silently
+        // doing nothing.
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("this recording keeps no buffer");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(
+            error.message.contains("not keeping a replay buffer"),
+            "the refusal has to say what is missing: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn declining_the_buffer_inherits_per_game_the_way_every_other_setting_does() {
+        // AGENTS.md section 30, for the value that says no. The recorder is the
+        // only thing that can apply it: the request names no length, and which
+        // game a process is, is what the catalogue answers here.
+        let directory = scratch("window-declined-per-game");
+        let output = directory.join("clipped-20260813-120000.mkv");
+
+        // A machine that keeps five minutes for everything, and one game the
+        // user has declined the buffer for.
+        let mut configuration = configured_replay_window(Some(300));
+        let mut for_the_game = clipped_session::config::Preferences::default();
+        for_the_game
+            .set_replay_window(Some(clipped_session::config::REPLAY_WINDOW_OFF))
+            .expect("declining is a value a game may carry");
+        configuration.set_game(
+            clipped_session::config::GameKey::parse("a-test-game")
+                .expect("the catalogue's identifier is a settings key"),
+            for_the_game,
+        );
+
+        let state = state_configured(
+            &directory,
+            catalogue_claiming_this_process(),
+            configuration.clone(),
+        );
+        let running = state
+            .begin(
+                "r-1".to_owned(),
+                output.clone(),
+                format!("process {}", this_executable_name()),
+                &window_of(std::process::id(), &this_executable_name()),
+                &configuration,
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Configured)
+            .expect("a game that declined the buffer is not a start that fails");
+        assert!(
+            running.replay.is_none(),
+            "the game's own refusal has to beat the global window, or per-game settings stop at \
+             the buffer"
+        );
+
+        // And the reverse, over the same catalogue: a machine that globally
+        // declines the buffer, and one game that wants one.
+        let mut configuration = configured_replay_window(Some(0));
+        let mut for_the_game = clipped_session::config::Preferences::default();
+        for_the_game
+            .set_replay_window(Some(Duration::from_secs(45)))
+            .expect("forty-five seconds is a window a buffer will take");
+        configuration.set_game(
+            clipped_session::config::GameKey::parse("a-test-game")
+                .expect("the catalogue's identifier is a settings key"),
+            for_the_game,
+        );
+
+        let state = state_configured(
+            &directory,
+            catalogue_claiming_this_process(),
+            configuration.clone(),
+        );
+        let running = state
+            .begin(
+                "r-2".to_owned(),
+                output,
+                format!("process {}", this_executable_name()),
+                &window_of(std::process::id(), &this_executable_name()),
+                &configuration,
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Configured)
+            .expect("a game that asked for a buffer is one this build can give");
+        assert_eq!(
+            running
+                .replay
+                .as_ref()
+                .expect("this game asked for a buffer")
+                .window(),
+            Duration::from_secs(45),
+            "one game may keep a buffer on a machine that globally declines them"
         );
     }
 

@@ -883,13 +883,21 @@ struct StartedRecording {
 /// and the button being pressed. Sending the identifier that was on screen means
 /// a press cannot record an application the user was never offered.
 ///
-/// **`replay` rather than `replay_seconds`.** A recording started here keeps a
-/// replay buffer, so Save Replay is a control rather than a label, and how long
-/// it keeps is `replay_window_seconds` — a setting, resolved by the recorder for
-/// the game it turns out to be recording. This process cannot read it and should
-/// not: it may link `clipped-ipc` and nothing else of the workspace
+/// **`replay` rather than `replay_seconds`.** A recording started here asks for
+/// a replay buffer, and how long it keeps is `replay_window_seconds` — a
+/// setting, resolved by the recorder for the game it turns out to be recording.
+/// This process cannot read it and should not: it may link `clipped-ipc` and
+/// nothing else of the workspace
 /// (`tests/integration/tests/workspace_layering.rs`), and a length invented here
 /// would be a duration nobody chose (AGENTS.md sections 30 and 55).
+///
+/// Asking is not the same as getting: `replay_window_seconds` has an off value,
+/// `0`, and a user who has set it for this game has declined the buffer
+/// ([issue #539](https://github.com/wildware-uk/clipped/issues/539)). The
+/// recording still starts; it just keeps nothing, and says so through
+/// `ActiveRecording::replay_seconds`. Which is exactly why this request names no
+/// length and why `crate::tray_model` reads the status rather than assuming
+/// what this request produced.
 ///
 /// **Nothing else is sent.** Resolution, frame rate, codec, encoder and the
 /// audio devices are the recorder's own settings for the same reason; the output

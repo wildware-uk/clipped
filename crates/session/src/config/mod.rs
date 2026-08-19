@@ -122,7 +122,7 @@ pub use plugins::{NotStarted, PluginConsent, PluginConsents};
 pub use preferences::{
     AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, DEFAULT_REPLAY_WINDOW,
     MAXIMUM_DEVICE_NAME, MAXIMUM_DIMENSION, MAXIMUM_FRAMERATE, MINIMUM_DIMENSION,
-    MINIMUM_FRAMERATE,
+    MINIMUM_FRAMERATE, REPLAY_WINDOW_OFF,
 };
 pub use storage::{trash_beside, DirectoryPathError, StorageProblem, StorageSettings};
 pub use store::ConfigurationStore;

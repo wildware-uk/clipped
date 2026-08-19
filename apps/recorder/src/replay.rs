@@ -225,7 +225,7 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
 
     let config = ReplayConfig::resolve(
         args,
-        *settings.replay_window().value(),
+        settings.replay_buffer_window(),
         configuration.storage().recording_directory(),
     )?;
     // Before the capture session, the encoder and the file, so that an
