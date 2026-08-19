@@ -2189,3 +2189,107 @@ fn saving_back_the_directory_in_use_cancels_a_change_a_sitting_was_holding() {
     );
     assert!(moved.sidecars().is_empty(), "{:?}", moved.sidecars());
 }
+
+/// The `LaunchGroup` inside a `WatchEvent::Launched`, for the cases that ask the
+/// manager a question about a launch rather than feeding it one.
+fn group_of(event: &WatchEvent) -> &LaunchGroup {
+    match event {
+        WatchEvent::Launched(group) => group,
+        other => panic!("this helper is only used with a launch, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_launcher_installed_game_with_no_entry_is_reported_as_one() {
+    // Issue #664. The shipped catalogue names a few dozen games and a Steam
+    // library holds hundreds, so "the catalogue does not claim this" is the
+    // ordinary outcome on a real machine, not the exceptional one. It was
+    // reported at `debug!`, and a shipped build runs at `info`, so the ordinary
+    // outcome produced no record anywhere and "Clipped is not recording my
+    // games" could not be answered from a log.
+    //
+    // What makes the line worth emitting is the distinction asserted here: a
+    // launcher claiming the path is the machine saying this *is* a game, which
+    // is a gap in our data rather than a verdict about the process.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "some-other-game"
+name = "Some Other Game"
+[[game.executables]]
+name = "some-other-game.exe"
+"#;
+
+    let directory = TestDirectory::new("unrecognised-but-claimed");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+    let launchers = Launchers::none().with_riot(
+        clipped_game_detection::launcher::riot::Riot::from_products([(
+            "shop_game".to_owned(),
+            "live".to_owned(),
+            std::path::PathBuf::from("C:/Shop/Shop Game"),
+        )]),
+    );
+
+    let mut manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    )
+    .with_launchers(launchers);
+
+    let event = launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe");
+
+    assert_eq!(
+        manager.unrecognised(group_of(&event)),
+        Unrecognised::ClaimedBy {
+            kind: LauncherKind::Riot,
+            app_id: "shop_game".to_owned(),
+        },
+        "the launcher installed this and the catalogue has no entry for it, which is the case          that has to be reported"
+    );
+
+    // And it is still not recorded. This change reports the gap; whether to
+    // record a launcher-installed game with no entry is issue #664 and is not
+    // decided here.
+    assert!(
+        manager.observe(&event, t(0)).is_empty(),
+        "reporting an unrecognised launch must not start recording it"
+    );
+    assert!(manager.active_session().is_none());
+}
+
+#[test]
+fn a_launch_no_launcher_installed_is_reported_as_the_other_thing() {
+    // The other half. Same catalogue, same executable, same path — and no
+    // launcher to ask. There is then no evidence the process is a game at all,
+    // which is a different sentence and stays at `debug!`: a machine with no
+    // launcher installed would otherwise log every background process it ever
+    // sees at `info`.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "some-other-game"
+name = "Some Other Game"
+[[game.executables]]
+name = "some-other-game.exe"
+"#;
+
+    let directory = TestDirectory::new("unrecognised-unclaimed");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+
+    let manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    );
+
+    let event = launch_at(4_242, "shop-game.exe", r"C:\Shop\Shop Game\shop-game.exe");
+
+    assert_eq!(
+        manager.unrecognised(group_of(&event)),
+        Unrecognised::Unclaimed,
+        "nothing installed this, so there is no evidence it is a game"
+    );
+}
