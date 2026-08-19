@@ -46,6 +46,69 @@ export function canActOn(recording: LibraryRecording): boolean {
 }
 
 /**
+ * Why there is no file, for a recording nothing can be done with.
+ *
+ * Three states and not one, because "there is no file" has three causes and a
+ * user can act on only one of them
+ * ([issue #673](https://github.com/wildware-uk/clipped/issues/673)):
+ *
+ * - `file-gone` — it recorded, and the file has since been moved or deleted.
+ *   Something was lost.
+ * - `never-recorded` — the recording failed before anything was written.
+ *   Nothing was lost, and the sitting's own file says what went wrong.
+ * - `no-window` — Clipped never found a window to record.
+ *
+ * Saying `file-gone` for the other two tells somebody they lost footage they
+ * never had, which is the mistake `LibraryScreen`'s `putBack` already refuses
+ * to make about a clip nothing has exported (issue #593).
+ */
+export type AbsentBecause = 'file-gone' | 'never-recorded' | 'no-window';
+
+/**
+ * Which of the three it is, or [`undefined`] when the file is there.
+ *
+ * Keyed on `missing_since` first, so this cannot disagree with
+ * {@link canActOn}: a recording whose file is present is available whatever its
+ * outcome says, and `outcome` only chooses the wording for one that is not.
+ */
+export function absentBecause(recording: LibraryRecording): AbsentBecause | undefined {
+  if (canActOn(recording)) {
+    return undefined;
+  }
+  if (recording.outcome === 'failed') {
+    return 'never-recorded';
+  }
+  if (recording.outcome === 'no-window') {
+    return 'no-window';
+  }
+  return 'file-gone';
+}
+
+/** The few words a row shows beside the file name. */
+export function absenceLabel(because: AbsentBecause): string {
+  switch (because) {
+    case 'never-recorded':
+      return 'did not record';
+    case 'no-window':
+      return 'no window found';
+    case 'file-gone':
+      return 'file missing';
+  }
+}
+
+/** The sentence a disabled control gives as its reason. */
+export function absenceReason(because: AbsentBecause): string {
+  switch (because) {
+    case 'never-recorded':
+      return 'This recording never started, so there is no file. The sitting\u2019s own file, beside where the recording would have been, says what went wrong.';
+    case 'no-window':
+      return 'Clipped never found a window to record, so there is no file.';
+    case 'file-gone':
+      return 'This file could not be found the last time Clipped looked for it.';
+  }
+}
+
+/**
  * What a window says about an export a recorder built before #399 cannot do.
  *
  * One sentence, said in two places: here, *before* the Export control is drawn

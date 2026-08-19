@@ -221,3 +221,81 @@ describe('SessionList, scrolled against a measured shell', () => {
     MOUNTING_TEN_THOUSAND,
   );
 });
+
+/**
+ * Issue #673. "There is no file" has more than one cause, and a user can act on
+ * only one of them.
+ *
+ * The case that produced this: a real library held five recordings that failed
+ * before an encoder opened — nothing was ever written — and every row read
+ * "file missing", which says footage was lost. It had not been. The recorder had
+ * written down the actual reason, an encoder that would not take an odd
+ * dimension, and the window offered no route to it.
+ *
+ * Both directions are asserted, because a fix that said "did not record" for
+ * everything would pass a test that only checked the first.
+ */
+describe('a recording with no file says which kind of no file it is', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  const GONE_AT = '2026-08-14T09:51:12.3730555+01:00';
+
+  it('says a failed recording never started, rather than that its file is missing', () => {
+    const { container } = render(
+      <SessionList
+        sessions={[session(1, { outcome: 'failed', missing_since: GONE_AT })]}
+        label="Sessions"
+        actions={ACTIONS}
+      />,
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('did not record');
+    expect(text).not.toContain('file missing');
+  });
+
+  it('still says a file has gone when a recording made one and it is not there', () => {
+    const { container } = render(
+      <SessionList
+        sessions={[session(2, { outcome: 'recorded', missing_since: GONE_AT })]}
+        label="Sessions"
+        actions={ACTIONS}
+      />,
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('file missing');
+    expect(text).not.toContain('did not record');
+  });
+
+  it('counts the two separately in the sitting summary', () => {
+    // The shape the real library was in: several that never recorded, one that
+    // did and whose file is gone. One number covering both would be the same
+    // untruth in a different place.
+    const recording = (id: number, outcome: string): LibraryRecording => ({
+      recording_id: id,
+      session_index: 0,
+      path: `D:\\clips\\mixed-${String(id)}.mkv`,
+      started_at: '2026-08-11T20:14:00+01:00',
+      duration_seconds: 600,
+      size_bytes: 100_000,
+      favourite: false,
+      tags: [],
+      outcome,
+      missing_since: GONE_AT,
+    });
+    const mixed: LibrarySession = {
+      ...session(3),
+      recordings: [recording(31, 'failed'), recording(32, 'failed'), recording(33, 'recorded')],
+    };
+
+    const { container } = render(
+      <SessionList sessions={[mixed]} label="Sessions" actions={ACTIONS} />,
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('3 recordings, 2 did not record, 1 file missing');
+  });
+});
