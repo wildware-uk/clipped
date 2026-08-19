@@ -82,16 +82,12 @@ enum Answer {
     /// left with a control that silently needs a restart (AGENTS.md section
     /// 27).
     ///
-    /// **Nothing uses this today, and that is the finding rather than an
-    /// oversight**: every setting below either reaches the running recorder or
-    /// is declared as one nothing acts on. It stays because the answer has to
-    /// exist before it is needed — a guard offering only the answers somebody
-    /// could already give would push the next start-up-only setting towards a
-    /// wrong one (issue #648).
-    #[expect(
-        dead_code,
-        reason = "the answer a start-up-only setting has to be able to give; see above"
-    )]
+    /// **Nothing used this until the catalogue overlay was added to the list**,
+    /// which is what it was kept for: the answer had to exist before it was
+    /// needed, because a guard offering only the answers somebody could already
+    /// give would push the next start-up-only thing towards a wrong one
+    /// (issue #648). The overlay is the first, and its entries say what would
+    /// have to change about them before a command may write it (issue #245).
     AtStartUp(&'static str),
     /// Nothing in this build acts on it at all, and this says where that is
     /// declared to the user. A setting nothing reads is a different defect from
@@ -111,6 +107,102 @@ enum Answer {
 /// file, so that two settings cannot share an entry and a failure names
 /// something a reader can find.
 const ANSWERS: &[(&str, Answer)] = &[
+    // ---- The game catalogue ----------------------------------------------
+    //
+    // A user edits `%LOCALAPPDATA%\Clipped\games.toml` by hand today
+    // (`docs/game-detection.md`); nothing in the window writes it, because no
+    // command reaches these methods yet (issue #245). So the honest answer is
+    // start-up only, and it is acceptable for the one reason `AtStartUp`
+    // requires: there is no control that appears to work and silently needs a
+    // restart, because there is no control.
+    //
+    // **That answer stops being true the moment a command is wired to any of
+    // these**, and this list is what makes changing it compulsory rather than
+    // remembered. `SessionManager` takes a `Catalogue` in `new` and has no
+    // setter, so a write command without a refresh would leave the window
+    // reporting an exclusion the watcher never sees — the fifth instance of
+    // the defect this file exists to stop, and the first one it would not
+    // otherwise catch.
+    (
+        "Overlay::at",
+        Answer::NotAUserSetting(
+            "where the overlay file is, not what is in it. A constructor in \
+             `crates/game-detection/src/catalogue/overlay/edits.rs`; the path is chosen by the \
+             application rather than by the user (issue #245).",
+        ),
+    ),
+    (
+        "Overlay::default_location",
+        Answer::NotAUserSetting(
+            "the same, for the location the application picks when nobody names one: the Clipped \
+             folder of the local application data directory (`docs/game-detection.md`). Not a \
+             thing a user changes, and not a thing the recorder acts on (issue #245).",
+        ),
+    ),
+    (
+        "Overlay::path",
+        Answer::NotAUserSetting(
+            "an accessor for that path in \
+             `crates/game-detection/src/catalogue/overlay/edits.rs`, which reads state rather \
+             than changing any. Nothing a user sets.",
+        ),
+    ),
+    (
+        "Overlay::load",
+        Answer::NotAUserSetting(
+            "the read itself rather than something read: it is what \
+             `apps/recorder/src/watch.rs::load_catalogue` calls at start-up. When this list says \
+             a catalogue edit is start-up only, this is the call it means (issue #245).",
+        ),
+    ),
+    (
+        "Overlay::register",
+        Answer::AtStartUp(
+            "the recorder reads the overlay once, in `apps/recorder/src/watch.rs::load_catalogue`, \
+             and `SessionManager::new` holds it for the life of the driver. Nothing in the window \
+             writes it: no command reaches `Overlay` (issue #245), so a registration is a file the \
+             user edits and the next recorder start reads. A command that writes it needs a \
+             refresh first, and this entry has to say so instead.",
+        ),
+    ),
+    (
+        "Overlay::rename",
+        Answer::AtStartUp(
+            "as `Overlay::register` above: read once at start-up, written only by the user's own \
+             editor, and no command reaches it (issue #245). A rename changes what a sitting is \
+             filed under from the next recorder start.",
+        ),
+    ),
+    (
+        "Overlay::clear_rename",
+        Answer::AtStartUp(
+            "as `Overlay::register` above (issue #245). Undoing a rename takes effect from the \
+             next recorder start, and nothing in the window offers it.",
+        ),
+    ),
+    (
+        "Overlay::exclude",
+        Answer::AtStartUp(
+            "as `Overlay::register` above (issue #245), and the one whose propagation matters \
+             most: an exclusion the watcher has not re-read is a game the user believes is no \
+             longer recorded and which is still being recorded.",
+        ),
+    ),
+    (
+        "Overlay::include",
+        Answer::AtStartUp(
+            "as `Overlay::exclude` above (issue #245). Undoing an exclusion takes effect from the \
+             next recorder start.",
+        ),
+    ),
+    (
+        "Overlay::forget",
+        Answer::AtStartUp(
+            "as `Overlay::register` above (issue #245). Forgetting an entry is a deletion from \
+             the user's own file rather than a decision recorded over one, which is why it must \
+             not share a control with `Overlay::exclude`.",
+        ),
+    ),
     // ---- The per-game settings -------------------------------------------
     //
     // All of these are resolved when a recording starts and never re-read while
@@ -411,6 +503,32 @@ fn fields_of(path: &str, text: &str, marker: &str) -> Vec<String> {
     found
 }
 
+/// The `pub fn` names in the block after `marker`.
+///
+/// `fields_of` reads struct fields and `quoted` reads string literals; this is
+/// the third shape a list of user-changeable things comes in, and the catalogue
+/// overlay is written as one.
+fn methods_of(path: &str, text: &str, marker: &str) -> Vec<String> {
+    let found: Vec<String> = block_after(path, text, marker)
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("pub fn "))
+        .filter_map(|line| line.split_once('('))
+        .map(|(name, _)| name.trim().to_owned())
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character == '_')
+        })
+        .collect();
+    assert!(
+        !found.is_empty(),
+        "`{marker}` in {path} was read as having no methods, which is not what it says",
+    );
+    found
+}
+
 /// Every setting a user can change, qualified by where it is declared.
 fn every_setting(root: &Path) -> Vec<String> {
     let mut settings = Vec::new();
@@ -465,6 +583,25 @@ fn every_setting(root: &Path) -> Vec<String> {
         block_after("crates/hotkeys/src/action.rs", &actions, marker),
     ) {
         settings.push(format!("HotkeyAction::{key}"));
+    }
+
+    // The catalogue overlay. Not a `SettingKey` and not a field of anything,
+    // which is exactly why it is here: what a user can change is no longer only
+    // "a setting". It is also which games exist, what they are called and
+    // whether each is excluded, and the recorder acts on all three from a
+    // catalogue it holds in memory (issue #245).
+    //
+    // Read as the operations rather than as one line for "the catalogue",
+    // because that is the shape that fails when somebody wires a command to one
+    // of them: a new `pub fn` on `Overlay` has to be answered before it can
+    // land, the same way a new `SettingKey` does.
+    let overlay = source(root, "crates/game-detection/src/catalogue/overlay/edits.rs");
+    for method in methods_of(
+        "crates/game-detection/src/catalogue/overlay/edits.rs",
+        &overlay,
+        "impl Overlay {",
+    ) {
+        settings.push(format!("Overlay::{method}"));
     }
 
     settings
