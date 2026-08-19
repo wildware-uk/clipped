@@ -105,8 +105,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
-use clipped_game_detection::catalogue::Catalogue;
+use clipped_game_detection::catalogue::{Catalogue, EntrySource as CatalogueEntrySource};
 use clipped_game_detection::launcher::Launchers;
+use clipped_ipc::catalogue::{CatalogueExecutable, CatalogueGame, EntrySource};
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
@@ -423,6 +424,48 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
 /// recordings under games they told Clipped to leave alone. Every sitting made
 /// while their file is unreadable is `unattributed`, which is honest, and the
 /// error names the file so they can fix it.
+/// The catalogue, as the window is told it.
+///
+/// A translation and nothing more: no entry is filtered out, and the order is
+/// the catalogue's own. An excluded game is *reported as excluded* rather than
+/// omitted, because an exclusion is a decision about an entry rather than the
+/// deletion of one — a list that hid them would leave somebody unable to find
+/// the thing they excluded in order to stop excluding it
+/// (`docs/game-detection.md`, issue #245).
+fn catalogue_games(catalogue: &Catalogue) -> Vec<CatalogueGame> {
+    catalogue
+        .entries()
+        .iter()
+        .map(|entry| CatalogueGame {
+            game_id: entry.game_id().as_str().to_owned(),
+            name: entry.name().to_owned(),
+            source: match entry.source() {
+                CatalogueEntrySource::Seed => EntrySource::Shipped,
+                // The path is deliberately not carried: it is a path inside the
+                // user's own profile, and the window needs to know the entry is
+                // theirs rather than where their file lives (AGENTS.md section
+                // 13).
+                CatalogueEntrySource::Overlay { .. } => EntrySource::User,
+            },
+            executables: entry
+                .executables()
+                .iter()
+                .map(|rule| CatalogueExecutable {
+                    name: rule.name().to_owned(),
+                    path_contains: rule.path_contains().map(str::to_owned),
+                })
+                .collect(),
+            launcher: entry
+                .launcher()
+                .map(|launcher| launcher.kind().as_str().to_owned()),
+            launcher_app_id: entry
+                .launcher()
+                .and_then(|launcher| launcher.app_id().map(str::to_owned)),
+            excluded: entry.is_excluded(),
+        })
+        .collect()
+}
+
 pub(crate) fn catalogue_for_recordings() -> Catalogue {
     match crate::watch::load_catalogue() {
         Ok(catalogue) => catalogue,
@@ -848,6 +891,13 @@ impl CommandHandler for RecorderService {
             }),
             Command::LibraryGames => Ok(Reply::LibraryGames {
                 games: self.library.games()?,
+            }),
+            // The catalogue this service already holds, rather than a second
+            // read of the files: what the window is shown has to be what this
+            // recorder is actually matching against, and a read of its own could
+            // differ from it the moment the user edits their overlay.
+            Command::CatalogueGames => Ok(Reply::CatalogueGames {
+                games: catalogue_games(&self.recordings.catalogue),
             }),
             Command::LibraryClipDocument(request) => Ok(Reply::LibraryClipDocument {
                 clip: self.library.clip_document(&request)?,
@@ -4518,6 +4568,165 @@ mod tests {
         };
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].missing, 1);
+    }
+
+    #[test]
+    fn the_catalogue_reaches_the_window_saying_which_entries_are_the_users_own() {
+        // Issue #245. The window has no file-system permission and may not link
+        // `clipped-game-detection`, so without this command the Games screen can
+        // list nothing at all -- and drew nothing, correctly.
+        //
+        // Through `CommandHandler::call` rather than the translation beside it,
+        // for the reason the library case above gives: a translation that works
+        // while nothing routes a command to it is the gap this closes.
+        const SHIPPED: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "counter-strike-2"
+name = "Counter-Strike 2"
+
+[[game.executables]]
+name = "cs2.exe"
+path_contains = "steamapps/common/Counter-Strike Global Offensive"
+
+[game.launcher]
+kind = "steam"
+app_id = "730"
+"#;
+        const MINE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "a-game-of-my-own"
+name = "A game of my own"
+
+[[game.executables]]
+name = "mygame.exe"
+"#;
+
+        let catalogue = Catalogue::parse(SHIPPED, CatalogueEntrySource::Seed)
+            .expect("the shipped fixture is a valid catalogue")
+            .overlaid_with(
+                Catalogue::parse(
+                    MINE,
+                    CatalogueEntrySource::Overlay {
+                        path: std::path::PathBuf::from("games.toml"),
+                    },
+                )
+                .expect("the overlay fixture is a valid catalogue"),
+            );
+
+        let directory = scratch("catalogue-games");
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            catalogue,
+        );
+
+        let Reply::CatalogueGames { games } = service
+            .call(Command::CatalogueGames)
+            .expect("the catalogue reads")
+        else {
+            panic!("`catalogue_games` was answered with something else");
+        };
+
+        assert_eq!(games.len(), 2, "both halves of the catalogue, not one");
+
+        let shipped = games
+            .iter()
+            .find(|game| game.game_id == "counter-strike-2")
+            .expect("the shipped entry");
+        assert_eq!(shipped.name, "Counter-Strike 2");
+        assert_eq!(shipped.source, clipped_ipc::catalogue::EntrySource::Shipped);
+        assert_eq!(shipped.launcher.as_deref(), Some("steam"));
+        assert_eq!(
+            shipped.launcher_app_id.as_deref(),
+            Some("730"),
+            "the identifier is the rung matched before the executable is looked at, so a window \
+             that could not show it could not explain why a game is recognised"
+        );
+        assert_eq!(
+            shipped.executables[0].path_contains.as_deref(),
+            Some("steamapps/common/Counter-Strike Global Offensive"),
+            "the qualifier is how two games that ship one executable name are told apart"
+        );
+        assert!(!shipped.excluded);
+
+        let mine = games
+            .iter()
+            .find(|game| game.game_id == "a-game-of-my-own")
+            .expect("the user's own entry");
+        assert_eq!(
+            mine.source,
+            clipped_ipc::catalogue::EntrySource::User,
+            "which half an entry came from is what says whether the user can change it and \
+             whether an update will replace it"
+        );
+        assert_eq!(
+            mine.launcher, None,
+            "an entry that names no launcher says so, rather than naming one with no identifier"
+        );
+        assert_eq!(mine.executables[0].path_contains, None);
+    }
+
+    #[test]
+    fn a_game_the_user_excluded_is_listed_as_excluded_rather_than_hidden() {
+        // An exclusion is a decision *about* an entry rather than the deletion
+        // of one (`docs/game-detection.md`). A list that hid them would leave
+        // somebody unable to find the thing they excluded in order to stop
+        // excluding it.
+        const SHIPPED: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "counter-strike-2"
+name = "Counter-Strike 2"
+
+[[game.executables]]
+name = "cs2.exe"
+"#;
+        const MINE: &str = r#"
+schema_version = 1
+
+[[decision]]
+game_id = "counter-strike-2"
+excluded = true
+"#;
+
+        let catalogue = Catalogue::parse(SHIPPED, CatalogueEntrySource::Seed)
+            .expect("the shipped fixture is a valid catalogue")
+            .overlaid_with(
+                Catalogue::parse(
+                    MINE,
+                    CatalogueEntrySource::Overlay {
+                        path: std::path::PathBuf::from("games.toml"),
+                    },
+                )
+                .expect("the overlay fixture is a valid catalogue"),
+            );
+
+        let directory = scratch("catalogue-excluded");
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            catalogue,
+        );
+
+        let Reply::CatalogueGames { games } = service
+            .call(Command::CatalogueGames)
+            .expect("the catalogue reads")
+        else {
+            panic!("`catalogue_games` was answered with something else");
+        };
+
+        assert_eq!(games.len(), 1, "the entry stays in the catalogue");
+        assert!(
+            games[0].excluded,
+            "and is reported as excluded rather than omitted"
+        );
     }
 
     #[test]

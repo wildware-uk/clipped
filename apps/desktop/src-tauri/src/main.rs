@@ -205,6 +205,7 @@ fn main() {
             library_clip_document,
             save_clip_document,
             library_games,
+            catalogue_games,
             library_trash,
             restore_from_trash,
             empty_trash,
@@ -583,6 +584,27 @@ fn library_games(
     match link.call(&clipped_ipc::Command::LibraryGames)? {
         clipped_ipc::Reply::LibraryGames { games } => Ok(games),
         _ => Err(wrong_reply("library_games")),
+    }
+}
+
+/// Every game the recorder's catalogue knows, shipped and the user's own.
+///
+/// Deliberately not [`library_games`], which answers a different question: that
+/// is what has been *recorded*, and this is what the recorder *knows*. A game
+/// can be in the catalogue and never played, which is most of them
+/// ([issue #245](https://github.com/wildware-uk/clipped/issues/245)).
+///
+/// Forwarded rather than read here for the reason every library command is: the
+/// catalogue is half compiled into the recorder and half a file this process has
+/// no permission to open, and a second reader here would be a second answer to
+/// keep in step.
+#[tauri::command(async)]
+fn catalogue_games(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<Vec<clipped_ipc::catalogue::CatalogueGame>, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::CatalogueGames)? {
+        clipped_ipc::Reply::CatalogueGames { games } => Ok(games),
+        _ => Err(wrong_reply("catalogue_games")),
     }
 }
 

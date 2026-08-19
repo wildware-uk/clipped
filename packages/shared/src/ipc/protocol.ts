@@ -123,6 +123,7 @@ export type EventStream = Extensible<KnownEventStream>;
 export const FEATURES = [
   'recording',
   'status_events',
+  'catalogue',
   'bookmarks',
   'screenshots',
   'shutdown',
@@ -166,6 +167,7 @@ export const COMMANDS = [
   'save_replay',
   'library_sessions',
   'library_games',
+  'catalogue_games',
   'library_events',
   'library_clip_document',
   'save_clip_document',
@@ -266,6 +268,7 @@ export const REPLIES = [
   'replay_saved',
   'library_sessions',
   'library_games',
+  'catalogue_games',
   'library_events',
   'library_clip_document',
   'clip_document_saved',
@@ -1177,6 +1180,71 @@ export interface LibrarySessionPage {
  * `game_id` and `name` are both absent on the row for sittings the catalogue
  * would not attribute. There is at most one such row and it is last.
  */
+/**
+ * Where a catalogue entry came from.
+ *
+ * Not a boolean, mirroring `crates/ipc/src/catalogue.rs`: an entry the user
+ * *changed* is a shipped one with a decision applied over it, so this is a
+ * vocabulary a later value can join.
+ */
+export type CatalogueEntrySource = 'shipped' | 'user';
+
+/**
+ * How a game is recognised.
+ *
+ * `path_contains` is what tells two games apart that ship the same executable
+ * name — `hl2.exe` is both Half-Life 2 and Team Fortress 2 — and is absent for
+ * an entry that asked for nothing else.
+ */
+export interface CatalogueExecutable {
+  /** The file name, never a path. */
+  readonly name: string;
+  /** The directories the image path must contain, where the entry demands any. */
+  readonly path_contains?: string;
+}
+
+/**
+ * One game the recorder's catalogue knows about.
+ *
+ * Deliberately not {@link LibraryGame}, which is easy to confuse with it. That
+ * is what has been **recorded** — sittings, recordings, clips, bytes. This is
+ * what the recorder **knows**. A game can be in the catalogue and never played,
+ * which is most of them, and a sitting can be recorded under no catalogue entry
+ * at all. Neither is a subset of the other.
+ */
+export interface CatalogueGame {
+  /** The identifier, which is also the key a per-game setting is written under. */
+  readonly game_id: string;
+  /** What a person calls it. */
+  readonly name: string;
+  /** Which half of the catalogue it came from. */
+  readonly source: CatalogueEntrySource;
+  /** How it is recognised, in the order the entry lists. */
+  readonly executables: readonly CatalogueExecutable[];
+  /**
+   * Which shop installed it, where the entry says.
+   *
+   * Absent for an entry that names no launcher, which is not the same as one
+   * that names a launcher and no identifier for it.
+   */
+  readonly launcher?: string;
+  /**
+   * That launcher's own identifier for the game.
+   *
+   * The rung matched before the executable is consulted at all, so an entry
+   * with one is recognised even when the game renames its binary.
+   */
+  readonly launcher_app_id?: string;
+  /**
+   * Whether the user excluded it, so nothing of it is recorded.
+   *
+   * An exclusion is a decision *about* an entry rather than the deletion of
+   * one: the entry stays and is still listed, which is what stops an update
+   * resurrecting a game somebody excluded.
+   */
+  readonly excluded: boolean;
+}
+
 export interface LibraryGame {
   /** The catalogue's identifier. */
   readonly game_id?: string;
@@ -1309,6 +1377,14 @@ export interface LibraryGamesReply {
   readonly reply: 'library_games';
   /** One row per game, and one for the sittings nothing was attributed to. */
   readonly games: readonly LibraryGame[];
+}
+
+/** The games the catalogue knows. */
+export interface CatalogueGamesReply {
+  /** The tag. */
+  readonly reply: 'catalogue_games';
+  /** One row per entry, shipped and the user's own, in the order the catalogue holds them. */
+  readonly games: readonly CatalogueGame[];
 }
 
 /** One mark on a recording's timeline. */
@@ -2497,6 +2573,7 @@ export type Reply =
   | ReplaySavedReply
   | LibrarySessionsReply
   | LibraryGamesReply
+  | CatalogueGamesReply
   | LibraryEventsReply
   | LibraryClipDocumentReply
   | ClipDocumentSavedReply

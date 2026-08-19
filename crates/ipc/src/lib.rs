@@ -112,6 +112,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod catalogue;
 pub mod client;
 pub mod command;
 pub mod diagnostics;

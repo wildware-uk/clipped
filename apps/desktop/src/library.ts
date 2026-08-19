@@ -1,5 +1,6 @@
 import type {
   LibraryEventLane,
+  CatalogueGame,
   LibraryGame,
   LibrarySession,
   LibrarySessionPage,
@@ -407,6 +408,52 @@ export function useSessions(query: string, pageSize: number): SessionsView {
   }, [asked, cursor, loadingMore, pageSize, query]);
 
   return { read, hasMore: cursor !== undefined, loadingMore, loadMore };
+}
+
+/**
+ * Every game the recorder's catalogue knows.
+ *
+ * Deliberately not {@link readGames}, which answers a different question: that
+ * is what has been *recorded*, and this is what the recorder *knows*. A game can
+ * be in the catalogue and never played, which is most of them, and a sitting can
+ * be recorded under no catalogue entry at all
+ * ([issue #245](https://github.com/wildware-uk/clipped/issues/245)).
+ */
+export async function readCatalogue(): Promise<readonly CatalogueGame[]> {
+  return invoke<CatalogueGame[]>('catalogue_games');
+}
+
+/**
+ * What the recorder's catalogue knows.
+ *
+ * Read once when the screen mounts rather than on every sitting, unlike
+ * {@link useGames}: a catalogue changes when the user edits their overlay or
+ * installs a new build, and neither happens while somebody is looking at this
+ * screen. There is no paging — a catalogue is tens to hundreds of entries and
+ * the screen draws all of them.
+ */
+export function useCatalogue(): LibraryRead<readonly CatalogueGame[]> {
+  const [read, setRead] = useState<LibraryRead<readonly CatalogueGame[]>>({ state: 'reading' });
+
+  useEffect(() => {
+    let current = true;
+    readCatalogue()
+      .then((games) => {
+        if (current) {
+          setRead({ state: 'read', value: games });
+        }
+      })
+      .catch((thrown: unknown) => {
+        if (current) {
+          setRead({ state: 'unread', problem: asProblem(thrown) });
+        }
+      });
+    return (): void => {
+      current = false;
+    };
+  }, []);
+
+  return read;
 }
 
 /**

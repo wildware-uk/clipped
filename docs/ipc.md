@@ -696,6 +696,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `save_replay` | all optional, below | `replay_saved` | yes |
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
+| `catalogue_games` | none | `catalogue_games` | yes |
 | `library_events` | `recording` | `library_events` | yes |
 | `library_clip_document` | `clip` | `library_clip_document` | yes |
 | `save_clip_document` | `clip`, `document` | `clip_document_saved` | yes |
@@ -1291,6 +1292,61 @@ boolean.
 reason: a file another program had open is a real outcome, the next sweep tries
 it again, and a reply carrying only a count would say the trash is empty when it
 is not.
+
+### `catalogue_games`
+
+Every game the recorder's catalogue knows: the shipped entries compiled into the
+build, and the user's own overlay. No parameters, and not a page — a catalogue is
+tens to hundreds of entries and a screen draws all of them.
+
+**Not `library_games`,** which is easy to confuse with it and answers a different
+question. That one is what has been *recorded*: sittings, recordings, clips,
+bytes, for games that have actually been played. This is what the recorder
+*knows*. A game can be in the catalogue and never played, which is most of them,
+and a sitting can be recorded under no catalogue entry at all. Neither is a
+subset of the other.
+
+```json
+{"type":"response","id":12,"outcome":{"ok":{
+  "reply":"catalogue_games",
+  "games":[{"game_id":"counter-strike-2","name":"Counter-Strike 2",
+            "source":"shipped",
+            "executables":[{"name":"cs2.exe",
+              "path_contains":"steamapps/common/Counter-Strike Global Offensive"}],
+            "launcher":"steam","launcher_app_id":"730","excluded":false},
+           {"game_id":"a-game-of-my-own","name":"A game of my own",
+            "source":"user",
+            "executables":[{"name":"mygame.exe"}],
+            "excluded":true}]}}}
+```
+
+`source` says which half of the catalogue an entry came from, and it is part of
+the answer rather than a detail: the shipped data is replaced wholesale by every
+update and the user's overlay is never touched
+([game-detection.md](game-detection.md)), so a list that did not distinguish them
+would be describing two different things in one column. It is a vocabulary
+rather than a boolean, because an entry the user *changed* is a shipped one with
+a decision applied over it.
+
+The overlay's **path is deliberately absent**. A window needs to know an entry is
+the user's own, not where their file lives, and the path is inside their profile.
+
+`path_contains` is what tells apart two games that ship the same executable name
+— `hl2.exe` is both Half-Life 2 and Team Fortress 2 — and is absent for a rule
+that asked for nothing else. `launcher_app_id` is the rung matched **before** the
+executable is consulted at all, so an entry that has one is recognised even when
+the game renames its binary.
+
+`excluded` is a game the user excluded, and it is **listed rather than omitted**.
+An exclusion is a decision *about* an entry rather than the deletion of one: a
+list that hid them would leave somebody unable to find the thing they excluded in
+order to stop excluding it.
+
+A client asks for the `catalogue` feature before drawing a list of games. A
+recorder built before [issue #245](https://github.com/wildware-uk/clipped/issues/245)
+has no such command and refuses with `unknown_command` — and an empty table is
+indistinguishable from a machine that knows no games, which is what the feature
+exists to prevent.
 
 ### `library_events`
 

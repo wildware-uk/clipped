@@ -2,7 +2,8 @@ import type { ReactNode } from 'react';
 
 import { describeGameDetection, whatWorksToday } from './gameDetection';
 import { GamesTable } from './GamesTable';
-import { describeProblem, useGames } from './library';
+import { describeProblem, useCatalogue, useGames } from './library';
+import { recorderCanDo } from './useRecorderLink';
 import type { RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -66,11 +67,6 @@ import { WaitingOn, type Waiting } from './WaitingOn';
  */
 const MISSING: readonly Waiting[] = [
   {
-    shows: 'Every game Clipped knows, with the executable and launcher it is recognised by',
-    needs:
-      'A protocol command that reads the catalogue, including the user’s own entries. Issue #245',
-  },
-  {
     shows:
       'Adding an unknown executable, renaming a game, excluding an application, and disabling capture per game',
     needs:
@@ -94,6 +90,12 @@ export interface GamesScreenProps {
 export function GamesScreen({ link }: GamesScreenProps): ReactNode {
   const detection = describeGameDetection(link);
   const games = useGames();
+  const catalogue = useCatalogue();
+  // Asked before the table is drawn rather than after the read fails: a
+  // recorder built before issue #245 has no `catalogue_games` command and
+  // refuses it, and "this recorder is older than this window" is a different
+  // sentence from "your catalogue could not be read" (AGENTS.md section 27).
+  const canList = recorderCanDo(link, 'catalogue');
 
   return (
     <>
@@ -115,6 +117,70 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
         <h2 className="clipped-panel__heading">{detection.state}</h2>
         <p className="clipped-panel__body">{detection.detail}</p>
         <p className="clipped-panel__body clipped-muted">{whatWorksToday(link)}</p>
+      </section>
+
+      <h2 className="clipped-screen__heading">Every game Clipped knows</h2>
+
+      <section className="clipped-panel" aria-label="Games Clipped knows">
+        {!canList && (
+          <p className="clipped-panel__body">
+            This recorder cannot list its catalogue. It was built before Clipped could be asked, and
+            a newer one answers.
+          </p>
+        )}
+        {canList && catalogue.state === 'reading' && (
+          <p className="clipped-panel__body clipped-muted" aria-busy="true">
+            Reading the catalogue…
+          </p>
+        )}
+        {canList && catalogue.state === 'unread' && (
+          <p className="clipped-panel__body">{describeProblem(catalogue.problem)}</p>
+        )}
+        {canList && catalogue.state === 'read' && catalogue.value.length === 0 && (
+          <p className="clipped-panel__body">
+            The catalogue was read and names no games at all, which is not a state a shipped build
+            is expected to be in.
+          </p>
+        )}
+        {canList && catalogue.state === 'read' && catalogue.value.length > 0 && (
+          <table className="clipped-table" aria-label="Games Clipped knows">
+            <thead>
+              <tr>
+                <th scope="col">Game</th>
+                <th scope="col">Recognised by</th>
+                <th scope="col">Launcher</th>
+                <th scope="col">Entry</th>
+              </tr>
+            </thead>
+            <tbody>
+              {catalogue.value.map((game) => (
+                <tr key={game.game_id}>
+                  <td>
+                    {game.name}
+                    {/*
+                     * In words rather than by colour or by leaving the row out.
+                     * An exclusion is a decision about an entry rather than the
+                     * deletion of one, and somebody who excluded a game has to
+                     * be able to find it again (AGENTS.md section 46).
+                     */}
+                    {game.excluded && <span className="clipped-muted"> · excluded</span>}
+                  </td>
+                  <td>{game.executables.map((rule) => rule.name).join(', ')}</td>
+                  <td>
+                    {game.launcher === undefined ? (
+                      <span className="clipped-muted">by name only</span>
+                    ) : (
+                      game.launcher
+                    )}
+                  </td>
+                  <td className="clipped-muted">
+                    {game.source === 'user' ? 'yours' : 'shipped with Clipped'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <h2 className="clipped-screen__heading">What has been recorded</h2>
