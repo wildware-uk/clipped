@@ -1845,6 +1845,7 @@ fn report_plugin_outcome(recording: &RecordingId, outcome: PluginOutcome) {
 #[derive(Debug, Clone)]
 struct RecordingPlan {
     resolution: crate::options::Resolution,
+    quality_preset: crate::options::PresetSelection,
     framerate: crate::options::Framerate,
     codec: crate::options::VideoCodec,
     encoder: crate::options::EncoderSelection,
@@ -1901,6 +1902,7 @@ impl Default for RecordingPlan {
     fn default() -> Self {
         Self {
             resolution: crate::options::Resolution::default(),
+            quality_preset: crate::options::PresetSelection::default(),
             framerate: crate::options::Framerate::DEFAULT,
             codec: crate::options::VideoCodec::default(),
             encoder: crate::options::EncoderSelection::default(),
@@ -1915,6 +1917,7 @@ impl RecordingPlan {
     fn from(args: &WatchArgs) -> Self {
         Self {
             resolution: args.resolution,
+            quality_preset: args.quality_preset,
             framerate: args.framerate,
             codec: args.codec,
             encoder: args.encoder,
@@ -1943,6 +1946,7 @@ impl RecordingPlan {
             // recording cannot be made again (AGENTS.md section 56).
             overwrite: false,
             resolution: self.resolution,
+            quality_preset: self.quality_preset,
             framerate: self.framerate,
             codec: self.codec,
             encoder: self.encoder,
@@ -2401,6 +2405,7 @@ name = "test-game.exe"
     /// a settings file that quietly replaced it is visible in an assertion.
     fn args() -> WatchArgs {
         WatchArgs {
+            quality_preset: crate::options::PresetSelection::default(),
             output_directory: None,
             window_timeout: 30,
             resolution: crate::options::Resolution::Fixed {
@@ -3120,6 +3125,7 @@ name = "test-game.exe"
         // does nothing (AGENTS.md section 27), and this mapping is the only
         // place one could be lost between `watch` and the session.
         let args = WatchArgs {
+            quality_preset: crate::options::PresetSelection::default(),
             output_directory: None,
             window_timeout: 30,
             resolution: crate::options::Resolution::Fixed {

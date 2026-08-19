@@ -621,7 +621,8 @@ describe('the Settings screen', () => {
    * the suite stay green.
    */
   it.each([
-    ['Recording', 'Quality preset and bitrate', /bitrate/, /#181/],
+    ['Recording', 'A bitrate in megabits', /preset rather than as a number/, /#181/],
+    ['Recording', 'HDR', /no path for a setting/, /#99/],
     ['Recording', 'Recording format', /Matroska/, /#307/],
     ['Audio', 'Audio tracks, enable and level', /nothing mixes/, /#81/],
     ['Audio', 'A named playback device', /Windows is playing through/, /#316/],

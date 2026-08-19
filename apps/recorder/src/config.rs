@@ -23,8 +23,8 @@ use time::OffsetDateTime;
 
 use crate::cli::RecordArgs;
 use crate::options::{
-    AudioDeviceSelection, EncoderSelection, Framerate, ReplayLength, ReplayWindow, Resolution,
-    VideoCodec,
+    AudioDeviceSelection, EncoderSelection, Framerate, PresetSelection, ReplayLength, ReplayWindow,
+    Resolution, VideoCodec,
 };
 
 /// The container extension the recorder writes.
@@ -81,6 +81,8 @@ pub struct RecordingConfig {
     pub resolution: Resolution,
     /// The framerate to encode at.
     pub framerate: Framerate,
+    /// How much of the machine the recording may spend on itself.
+    pub quality_preset: PresetSelection,
     /// The codec to encode with.
     pub codec: VideoCodec,
     /// The encoder to encode with.
@@ -317,6 +319,7 @@ impl RecordingConfig {
             overwrite: args.overwrite,
             resolution: args.resolution,
             framerate: args.framerate,
+            quality_preset: args.quality_preset,
             codec: args.codec,
             encoder: args.encoder,
             microphone: args.microphone.clone(),
@@ -1232,6 +1235,7 @@ mod tests {
         assert_eq!(
             config,
             RecordingConfig {
+                quality_preset: PresetSelection::default(),
                 target: CaptureTarget::WindowTitle("Counter-Strike 2".to_owned()),
                 output,
                 overwrite: false,

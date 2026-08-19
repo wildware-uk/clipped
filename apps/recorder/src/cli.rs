@@ -38,8 +38,8 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use clipped_windows::{TargetSelector, WindowHandle};
 
 use crate::options::{
-    AudioDeviceSelection, EncoderSelection, Framerate, ReplayLength, ReplayWindow, Resolution,
-    VideoCodec,
+    AudioDeviceSelection, EncoderSelection, Framerate, PresetSelection, ReplayLength, ReplayWindow,
+    Resolution, VideoCodec,
 };
 
 /// Text appended to the top-level `--help`.
@@ -288,6 +288,10 @@ pub struct WatchArgs {
     /// Frames per second to encode at.
     #[arg(short, long, value_name = "FPS", default_value_t = Framerate::DEFAULT)]
     pub framerate: Framerate,
+
+    /// How much of the machine a recording may spend on itself.
+    #[arg(long, value_name = "PRESET", default_value_t = PresetSelection::Balanced)]
+    pub quality_preset: PresetSelection,
 
     /// Video codec to encode with.
     #[arg(long, value_name = "CODEC", default_value_t = VideoCodec::Auto)]
@@ -600,6 +604,13 @@ pub struct RecordArgs {
     /// Frames per second to encode at.
     #[arg(short, long, value_name = "FPS", default_value_t = Framerate::DEFAULT)]
     pub framerate: Framerate,
+
+    /// How much of the machine a recording may spend on itself.
+    ///
+    /// Sets the bitrate, the encoder's quality-for-speed point, and which codec
+    /// `--codec auto` resolves to. A codec named outright survives it.
+    #[arg(long, value_name = "PRESET", default_value_t = PresetSelection::Balanced)]
+    pub quality_preset: PresetSelection,
 
     /// Video codec to encode with.
     ///

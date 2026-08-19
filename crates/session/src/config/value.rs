@@ -166,6 +166,8 @@ impl<T: Copy> Resolved<T> {
 pub enum SettingKey {
     /// Whether the game's window or the display it is on is captured.
     CaptureTarget,
+    /// How much of the machine a recording may spend on itself.
+    QualityPreset,
     /// The size video is encoded at.
     Resolution,
     /// The frame rate ceiling.
@@ -184,8 +186,9 @@ pub enum SettingKey {
 
 impl SettingKey {
     /// Every setting, in the order a settings screen should list them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::CaptureTarget,
+        Self::QualityPreset,
         Self::Resolution,
         Self::Framerate,
         Self::Codec,
@@ -203,6 +206,11 @@ impl SettingKey {
     pub const fn name(self) -> &'static str {
         match self {
             Self::CaptureTarget => "capture_target",
+            // Not `quality`: [issue
+            // #181](https://github.com/wildware-uk/clipped/issues/181) is the
+            // numeric quality level a rate control can be given, and a file
+            // holding both under one name would be two settings with one key.
+            Self::QualityPreset => "quality_preset",
             Self::Resolution => "resolution",
             Self::Framerate => "framerate",
             Self::Codec => "codec",
@@ -218,6 +226,7 @@ impl SettingKey {
     pub const fn label(self) -> &'static str {
         match self {
             Self::CaptureTarget => "Capture target",
+            Self::QualityPreset => "Quality preset",
             Self::Resolution => "Resolution",
             Self::Framerate => "Frame rate",
             Self::Codec => "Codec",

@@ -15,6 +15,7 @@ use clipped_encoder::{Codec, EncoderKind};
 use clipped_hotkeys::HotkeyAction;
 
 use super::*;
+use crate::quality::QualityPreset;
 use crate::settings::{
     AudioSourceSetting, CaptureTargetSettings, RecordingSettings, UnavailableChoice,
 };
@@ -637,6 +638,7 @@ fn an_audio_device_name_that_cannot_be_shown_is_refused() {
 fn fully_populated() -> Configuration {
     let mut global = Preferences::none();
     global.set_capture_target(Some(CaptureTargetSetting::Display));
+    global.set_quality_preset(Some(QualityPreset::Ultra));
     global
         .set_resolution(Some(ResolutionSetting::Fixed {
             width: 1920,
@@ -707,6 +709,7 @@ fn remembered_at() -> SystemTime {
 fn a_written_value_for(key: SettingKey) -> String {
     match key {
         SettingKey::CaptureTarget => "display".to_owned(),
+        SettingKey::QualityPreset => "ultra".to_owned(),
         SettingKey::Resolution => "1280x720".to_owned(),
         SettingKey::Framerate => "120".to_owned(),
         SettingKey::Codec => "hevc".to_owned(),
@@ -1639,6 +1642,11 @@ fn only_a_setting_somebody_configured_replaces_what_a_caller_already_asked_for()
         .apply_configured_to(base.clone());
 
     assert_eq!(applied.framerate(), 60);
+    assert_eq!(
+        applied.quality(),
+        base.quality(),
+        "nothing configured the preset, so the recording keeps what it asked for"
+    );
     assert_eq!(applied.resolution(), base.resolution());
     assert_eq!(applied.codec(), base.codec());
     assert_eq!(applied.encoder(), base.encoder());
@@ -1649,6 +1657,48 @@ fn only_a_setting_somebody_configured_replaces_what_a_caller_already_asked_for()
         UnavailableChoice::Refuse,
         "a configured frame rate is not one of the two settings the choice governs, so what the          caller named still refuses rather than substituting"
     );
+}
+
+#[test]
+fn a_games_quality_preset_reaches_the_recording_it_governs() {
+    // Issue #62 through the layer that actually delivers it: nothing about a
+    // preset is read from the settings file at the moment a recording starts —
+    // `apply_configured_to` lays it over what the caller asked for, exactly as
+    // it does for the frame rate. A preset that was stored, shown on the
+    // settings screen and never applied is the control that silently does
+    // nothing (AGENTS.md section 27), and this is the only place it could be
+    // lost.
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1920, 1080),
+        std::path::PathBuf::from("recording.mkv"),
+    );
+    assert_eq!(
+        base.quality(),
+        QualityPreset::Balanced,
+        "a recording nobody configured is the preset every recording had before presets existed"
+    );
+
+    let mut configuration = Configuration::defaults();
+    let mut global = Preferences::none();
+    global.set_quality_preset(Some(QualityPreset::High));
+    configuration.set_global(global);
+    let mut for_one_game = Preferences::none();
+    for_one_game.set_quality_preset(Some(QualityPreset::Performance));
+    configuration.set_game(game("counter-strike-2"), for_one_game);
+
+    // The game's own answer, over the global one it would otherwise inherit
+    // (AGENTS.md section 30).
+    let applied = configuration
+        .resolve_for(&game("counter-strike-2"))
+        .apply_configured_to(base.clone());
+    assert_eq!(applied.quality(), QualityPreset::Performance);
+
+    // And a game with no answer of its own follows the global layer, rather
+    // than falling back to the shipped default.
+    let inherited = configuration
+        .resolve_for(&game("minecraft"))
+        .apply_configured_to(base);
+    assert_eq!(inherited.quality(), QualityPreset::High);
 }
 
 #[test]

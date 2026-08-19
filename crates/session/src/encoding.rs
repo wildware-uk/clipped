@@ -40,18 +40,6 @@ use clipped_encoder::{
 use crate::error::SessionError;
 use crate::settings::{CodecPreference, EncoderPreference, RecordingSettings, UnavailableChoice};
 
-/// Bits spent per pixel per frame, before any clamping.
-///
-/// The command line has no bitrate option yet — SPEC.md section 10 asks for one
-/// and it is
-/// [issue #181](https://github.com/wildware-uk/clipped/issues/181) — so the
-/// session has to choose, and choosing a fixed number would be wrong at every
-/// resolution but one. Scaling with pixels
-/// and rate gives 4.1 Mbit/s for 720p30 and 33 Mbit/s for 1440p60, which is in
-/// the region recorders recommend for H.264 game footage and is generous for
-/// HEVC and AV1.
-const BITS_PER_PIXEL_PER_FRAME: f64 = 0.15;
-
 /// The least a recording may be given, whatever the arithmetic says.
 const MINIMUM_BITRATE: u32 = 2_000_000;
 
@@ -108,10 +96,25 @@ pub(crate) fn open(
         Probing::WithoutSessions,
     )?;
 
-    let bitrate = bitrate_for(size, frame_rate);
-
     let mut attempts = Vec::new();
     for (kind, codec, across) in candidates(settings, detection.report()) {
+        // Resolved per candidate rather than once above the loop: the codec a
+        // preset asks for is a question about the encoder that is about to be
+        // opened, and the first candidate is not always the one that opens.
+        let quality = match settings.codec() {
+            CodecPreference::Automatic => {
+                settings.quality().resolve(kind, codec, detection.report())
+            }
+            // A codec somebody named survives every preset (`crate::quality`).
+            // `candidates` has already put it in `codec`, so this only stops
+            // Performance's preference for H.264 from overruling a choice.
+            CodecPreference::Fixed(named) => settings
+                .quality()
+                .resolve(kind, codec, detection.report())
+                .with_codec(named),
+        };
+        let bitrate = bitrate_for(size, frame_rate, quality.bits_per_pixel_per_frame());
+        let codec = quality.codec();
         let config = EncoderConfig::new(
             codec,
             resolution,
@@ -122,13 +125,15 @@ pub(crate) fn open(
             KeyframeInterval::DEFAULT,
             frame_rate,
         ))
-        .with_source_format(source_format);
+        .with_source_format(source_format)
+        .with_preset(quality.effort());
 
         match open_one(kind, device, config, across) {
             Ok(encoder) => {
                 tracing::info!(
                     encoder = %kind.log_encoder_family(),
                     codec = codec.log_value(),
+                    quality = %quality,
                     configuration = %config,
                     "encoder session opened"
                 );
@@ -302,9 +307,15 @@ fn open_one(
 /// buffer running alongside the recording sizes its memory ceiling from it
 /// (`crate::replay`). Deriving it twice would be two answers to one question
 /// (AGENTS.md section 55).
-fn bitrate_for(size: (u32, u32), frame_rate: FrameRate) -> BitRate {
+///
+/// `bits_per_pixel_per_frame` comes from the recording's quality preset
+/// (`crate::quality`). It is a rate per pixel rather than a number of megabits
+/// because a fixed number is wrong at every resolution but one; naming a number
+/// outright is [issue
+/// #181](https://github.com/wildware-uk/clipped/issues/181) and is not built.
+fn bitrate_for(size: (u32, u32), frame_rate: FrameRate, bits_per_pixel_per_frame: f64) -> BitRate {
     let bits =
-        f64::from(size.0) * f64::from(size.1) * frame_rate.as_f64() * BITS_PER_PIXEL_PER_FRAME;
+        f64::from(size.0) * f64::from(size.1) * frame_rate.as_f64() * bits_per_pixel_per_frame;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let clamped = bits.clamp(f64::from(MINIMUM_BITRATE), f64::from(MAXIMUM_BITRATE)) as u32;
@@ -335,6 +346,8 @@ fn surface_format(format: PixelFormat) -> Result<SurfaceFormat, SessionError> {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::quality::QualityPreset;
+
     use clipped_encoder::{detect, EncoderObservations, SystemFacts};
 
     use super::*;
@@ -354,12 +367,17 @@ mod tests {
     }
 
     fn rate_of(width: u32, height: u32, fps: u32) -> u32 {
+        rate_at(width, height, fps, QualityPreset::default())
+    }
+
+    fn rate_at(width: u32, height: u32, fps: u32, preset: QualityPreset) -> u32 {
         // Through `RateControl` rather than reading the bitrate directly, so
         // that what these figures describe is still what the encoder is
         // configured with.
         match RateControl::constant(bitrate_for(
             (width, height),
             FrameRate::new(fps, 1).expect("a real rate"),
+            preset.bits_per_pixel_per_frame(),
         )) {
             RateControl::Bitrate { average, .. } => average.as_bits_per_second(),
             other => panic!("expected a bitrate, got {other}"),
@@ -371,6 +389,40 @@ mod tests {
         // 1280x720 at 30 is 4.1 Mbit/s; 2560x1440 at 60 is 33 Mbit/s.
         assert_eq!(rate_of(1280, 720, 30), 4_147_200);
         assert_eq!(rate_of(2560, 1440, 60), 33_177_600);
+    }
+
+    #[test]
+    fn each_preset_gives_the_same_recording_a_different_number_of_bits() {
+        // The axis the preset moves that nothing else can: no setting names a
+        // bitrate ([issue #181](https://github.com/wildware-uk/clipped/issues/181)),
+        // so this is the whole of how a user says how generous to be. 1440p60,
+        // which is the size the end-to-end test records at.
+        let at = |preset| rate_at(2560, 1440, 60, preset);
+
+        assert_eq!(at(QualityPreset::Performance), 22_118_400);
+        assert_eq!(at(QualityPreset::Balanced), 33_177_600);
+        assert_eq!(at(QualityPreset::High), 48_660_480);
+        assert_eq!(at(QualityPreset::Ultra), 66_355_200);
+
+        // Ultra is three times Performance, which is a difference a user can
+        // see in the file and in the disk it fills. Two presets that produced
+        // the same rate would be one preset drawn twice.
+        assert!(at(QualityPreset::Ultra) > at(QualityPreset::Performance) * 2);
+    }
+
+    #[test]
+    fn the_default_preset_leaves_every_existing_recording_exactly_as_it_was() {
+        // This setting arrives with a default, and a default that changed the
+        // bitrate would silently re-encode everybody's recordings differently
+        // on upgrade. `rate_of` is the pre-existing helper and its two figures
+        // below are the ones this crate has asserted since before presets
+        // existed.
+        assert_eq!(rate_of(1280, 720, 30), 4_147_200);
+        assert_eq!(rate_of(2560, 1440, 60), 33_177_600);
+        assert_eq!(
+            rate_of(2560, 1440, 60),
+            rate_at(2560, 1440, 60, QualityPreset::Balanced)
+        );
     }
 
     #[test]

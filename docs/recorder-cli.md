@@ -128,6 +128,7 @@ clipped-recorder record --window "Counter-Strike 2"
 | `--overwrite` | off | Required to replace an existing file |
 | `-r, --resolution <WIDTHxHEIGHT>` | `source` | Or `1920x1080`; both sides even, 128–7680 |
 | `-f, --framerate <FPS>` | `60` | 1–480 |
+| `--quality-preset <PRESET>` | `balanced` | `performance`, `balanced`, `high`, `ultra` |
 | `--codec <CODEC>` | `auto` | `auto`, `h264`, `hevc`, `av1` |
 | `--encoder <ENCODER>` | `auto` | `auto`, `nvenc`, `amf`, `quicksync`, `software` |
 | `--microphone <DEVICE>` | `default` | `default`, `none`, or part of a device name |
@@ -184,6 +185,47 @@ wants.
 the next candidate when one refuses to open a session on the device the frames
 are captured on. An encoder named explicitly is never fallen back from: somebody
 who typed `--encoder nvenc` wants to know it was not used.
+
+### The quality preset
+
+`--quality-preset` says how much of the machine a recording may spend on
+itself. It moves **three** things and nothing else:
+
+| | What it sets | Why nothing else sets it |
+| --- | --- | --- |
+| The bitrate | Bits per pixel per frame, which the encoder's rate control is derived from | No option names a bitrate; that is [#181](https://github.com/wildware-uk/clipped/issues/181) |
+| The encoder's effort | Where to sit on the vendor's quality-for-speed curve (`clipped_encoder::EncodePreset`) | Every backend drives it and nothing chose it before this option existed |
+| What `--codec auto` means | `performance` asks for H.264; the rest take the most efficient codec the encoder was *measured* to support | `--codec` names one outright, and a name always wins |
+
+| Preset | Bits per pixel per frame | Encoder effort | Codec, with `--codec auto` |
+| --- | --- | --- | --- |
+| `performance` | 0.10 | speed | H.264 |
+| `balanced` | 0.15 | balanced | the most efficient measured |
+| `high` | 0.22 | quality | the most efficient measured |
+| `ultra` | 0.30 | quality | the most efficient measured |
+
+`balanced` is the default and its 0.15 is the number every recording made
+before this option existed was given, so an invocation that says nothing is
+unchanged by it.
+
+The codec column is the only one whose answer depends on the machine, and it is
+the whole of what "resolves to concrete settings based on detected hardware"
+means here: `ultra` is AV1 on an encoder measured to produce AV1 and HEVC on one
+that was not, and **no preset can name a codec the machine reported it does not
+produce**. `clipped-recorder capabilities` prints the resolved table for every
+encoder it found, which is how a machine answers this for itself rather than
+from a document.
+
+Three points on the encoder's curve rather than four: `high` and `ultra` both
+sit at `quality` because there is no point above the best one
+(`crates/encoder/src/config.rs` says why there are three at all), so those two
+differ in what they spend rather than in what the encoder is asked to try.
+
+**It sets no resolution and no frame rate.** Both are settings in their own
+right, above; a preset that also set them would be a second answer to a question
+that already has one. What it does *not* set at all — HDR, the container, the
+colour format and the audio bitrate — is in
+[configuration.md](configuration.md), with the issue each is waiting on.
 
 ### The audio tracks
 

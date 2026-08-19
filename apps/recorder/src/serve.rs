@@ -2757,6 +2757,14 @@ fn record_args(request: &StartRecording) -> Result<RecordArgs, ProtocolError> {
         output: request.output.as_ref().map(PathBuf::from),
         overwrite: request.overwrite,
         resolution: parsed(&request.resolution, "resolution")?.unwrap_or_default(),
+        // Not a parameter of `start_recording`, deliberately. The preset is a
+        // per-game setting the window edits on the settings screen, and
+        // `ResolvedSettings::apply_configured_to` lays it over every recording
+        // this subcommand starts (`crate::watch`, `docs/configuration.md`). A
+        // second way to ask for it, over a protocol no screen would send it
+        // on, would be a second answer to the same question (AGENTS.md
+        // section 55).
+        quality_preset: crate::options::PresetSelection::default(),
         framerate: parsed(&request.framerate.map(|rate| rate.to_string()), "framerate")?
             .unwrap_or(crate::options::Framerate::DEFAULT),
         codec: chosen(&request.codec, "codec")?.unwrap_or_default(),

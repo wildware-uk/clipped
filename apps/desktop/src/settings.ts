@@ -696,6 +696,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       'these while one is running.',
     keys: [
       'capture_target',
+      'quality_preset',
       'resolution',
       'framerate',
       'codec',
@@ -704,13 +705,26 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
     rows: [
       {
-        label: 'Quality preset and bitrate',
+        label: 'A bitrate in megabits',
         today:
-          'Nothing. A recording’s bitrate is derived rather than chosen, and no key carries a ' +
-          'preset or a bitrate.',
+          'Chosen as a preset rather than as a number. Performance, Balanced, High and Ultra ' +
+          'each set a rate per pixel per frame, so one choice is right at every resolution; ' +
+          'the preset also picks the encoder’s quality-for-speed point and what ' +
+          '“auto” means for the codec. What is not here is naming the megabits ' +
+          'outright.',
         needs:
-          'Issue #181 to make the bitrate a choice, and issue #62 for the Performance, ' +
-          'Balanced, High and Ultra presets SPEC.md section 10 draws.',
+          'Issue #181: a bitrate and a quality level a recording can be given as numbers, ' +
+          'which SPEC.md section 10 asks for beside the presets.',
+      },
+      {
+        label: 'HDR',
+        today:
+          'Nothing. Capture refuses a 10-bit surface by name and the muxer writes no HDR ' +
+          'signalling, so there is no path for a setting to turn on — the quality preset ' +
+          'does not offer one for the same reason.',
+        needs:
+          'Issue #99 for HDR capture, and issue #146 for the colour signalling that makes a ' +
+          '10-bit stream an HDR one.',
       },
       {
         label: 'Recording format',

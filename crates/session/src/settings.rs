@@ -23,6 +23,7 @@ use clipped_encoder::{Codec, EncoderKind};
 use clipped_windows::WindowHandle;
 
 use crate::error::SessionError;
+use crate::quality::QualityPreset;
 
 /// The default frame rate, when a caller does not care.
 ///
@@ -367,6 +368,7 @@ pub struct RecordingSettings {
     overwrite: bool,
     minimum_free_space: u64,
     unavailable: UnavailableChoice,
+    quality: QualityPreset,
 }
 
 impl RecordingSettings {
@@ -424,6 +426,7 @@ impl RecordingSettings {
             overwrite: false,
             minimum_free_space: crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
             unavailable: UnavailableChoice::Refuse,
+            quality: QualityPreset::default(),
         }
     }
 
@@ -475,6 +478,17 @@ impl RecordingSettings {
     #[must_use]
     pub const fn with_encoder(mut self, encoder: EncoderPreference) -> Self {
         self.encoder = encoder;
+        self
+    }
+
+    /// Sets how much of the machine the recording may spend on itself.
+    ///
+    /// [`QualityPreset::Balanced`] unless said otherwise, which is the bitrate
+    /// and the encoder effort every recording made before this setting existed
+    /// was given (`crate::quality`).
+    #[must_use]
+    pub const fn with_quality(mut self, quality: QualityPreset) -> Self {
+        self.quality = quality;
         self
     }
 
@@ -640,6 +654,12 @@ impl RecordingSettings {
     #[must_use]
     pub const fn encoder(&self) -> EncoderPreference {
         self.encoder
+    }
+
+    /// How much of the machine the recording may spend on itself.
+    #[must_use]
+    pub const fn quality(&self) -> QualityPreset {
+        self.quality
     }
 
     /// Whether the cursor should appear in the recording.
