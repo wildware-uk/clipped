@@ -12,7 +12,7 @@
     a release on its own - it asks this script for permission first, and every
     check below is a way of saying no.
 
-    Six gates, each of which is a thing that has gone wrong for somebody else:
+    Seven gates, each of which is a thing that has gone wrong for somebody else:
 
     1. Version.      The tag is the source of truth for the version, and every
                      version this repository declares has to agree with it. A
@@ -45,6 +45,17 @@
                      every installed copy says the source is published with the
                      release, so a release that publishes none makes an
                      installed file lie.
+    7. Codec         Copyright licences are not patent licences, and the two
+       patents.      gates above are entirely about copyright. ADR 0008 is the
+                     patent position, and its sixth decision blocks the first
+                     signed public release on four questions being put to
+                     somebody qualified - not on a particular answer. This gate
+                     is what makes that a block rather than a sentence: it
+                     reads the answers section of that record and refuses while
+                     it is unanswered. It cannot check that a lawyer was
+                     consulted, only that the answers were written down where
+                     everybody can read them, which is the most a script can
+                     honestly claim here.
 
     Every gate is evaluated, always, even after one has refused. A release
     blocked by four things should say so once, rather than four times over four
@@ -145,6 +156,11 @@ if (-not $FetchScript) { $FetchScript = Join-Path $RepositoryRoot 'scripts\fetch
 # Anchored, so `v1.2` and `v1.0.0.1` are refused by name rather than quietly
 # accepted and turned into an installer version Windows rounds off.
 $semanticVersion = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+# What ADR 0008's answers section carries until somebody has put the four
+# questions to a lawyer. The record says this token is what the gate looks for,
+# so a maintainer filling the section in is not guessing at a format.
+$unansweredPlaceholder = '_UNANSWERED_'
 
 function New-GateResult {
     <#
@@ -944,6 +960,243 @@ function Test-CorrespondingSourceGate {
         ))
 }
 
+function Get-CodecPatentAnswer {
+    <#
+    .SYNOPSIS
+        The six fields of ADR 0008's "The answers", and what is written in each.
+    .DESCRIPTION
+        Parsed out of the record rather than out of a file of its own, because
+        the answers belong with the questions: a maintainer writing them down is
+        editing the document they were reading, and a contributor reading the
+        record finds them without knowing this gate exists. A separate
+        machine-readable file would be a second place to forget.
+
+        Read line by line and ended at the next heading of the same level or
+        above, so that prose can be added around the answers without the parse
+        drifting onto it. Windows PowerShell 5.1 ships no Markdown parser and
+        this needs none: the headings are the contract, and the section says so
+        in its own text rather than leaving a reader to infer it from here.
+
+        Returns $null when the section is not there at all, which is a different
+        failure from an unanswered one and gets a different refusal.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+
+    # UTF-8 named, because Windows PowerShell 5.1 otherwise reads a file with no
+    # byte-order mark in the system ANSI codepage. The parse survives that - the
+    # headings and the placeholder are ASCII - but the refusal prints the record
+    # back, and a message that renders an em dash or a name with an accent as
+    # mojibake is one somebody stops reading.
+    $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8)
+
+    $start = -1
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^###\s+The answers\s*$') {
+            $start = $index
+            break
+        }
+    }
+    if ($start -lt 0) { return $null }
+
+    $fields = @()
+    $current = $null
+    for ($index = $start + 1; $index -lt $lines.Count; $index++) {
+        $line = $lines[$index]
+
+        # A heading at this level or above is the end of the section.
+        if ($line -match '^#{1,3}\s') { break }
+
+        if ($line -match '^####\s+(?<heading>Answer\s+(?<number>\d+)\b.*)$') {
+            $current = [pscustomobject]@{
+                Field   = "Answer $($Matches['number'])"
+                Heading = $Matches['heading'].Trim()
+                Body    = @()
+            }
+            $fields += $current
+            continue
+        }
+
+        # The two attribution fields sit above the first answer heading, so they
+        # are only read while no answer is open. Inside one they are prose.
+        if ($null -eq $current -and $line -match '^-\s+(?<name>Answered by|Date)\s*:(?<value>.*)$') {
+            $describes = 'who answered the four questions'
+            if ($Matches['name'] -eq 'Date') { $describes = 'when they answered them' }
+            $fields += [pscustomobject]@{
+                Field   = $Matches['name']
+                Heading = $describes
+                Body    = @($Matches['value'])
+            }
+            continue
+        }
+
+        if ($null -ne $current) { $current.Body += $line }
+    }
+
+    return @($fields)
+}
+
+function Get-AnswerState {
+    <#
+    .SYNOPSIS
+        Whether one field of that section holds an answer.
+    .DESCRIPTION
+        Three ways of not holding one, and they are worth telling apart in the
+        refusal because they are three different things somebody did:
+
+        - the placeholder is still there, meaning nobody has been asked;
+        - it is blank or whitespace, which is what deleting the placeholder and
+          writing nothing leaves, and which must not read as answered - an empty
+          answer is the exact shape of this gate being defeated by accident;
+        - it is too short to be an answer. ADR 0008 asks for the sentence rather
+          than the word, and the floor is low enough that no real answer is
+          under it and high enough that a character typed to get past this is.
+          If somebody wants past it badly enough to write two dozen characters
+          of nonsense, they have deleted the gate, which no gate can prevent.
+    #>
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Value,
+        [Parameter(Mandatory)] [int] $Minimum
+    )
+
+    $text = ($Value -replace '\s+', ' ').Trim()
+    if (-not $text) { return 'blank' }
+    if ($text.Contains($unansweredPlaceholder)) { return 'unanswered' }
+    if ($text.Length -lt $Minimum) { return 'too short to be an answer' }
+    return 'answered'
+}
+
+function Test-CodecPatentGate {
+    <#
+    .SYNOPSIS
+        The four codec patent questions have been asked and the answers written
+        into ADR 0008.
+    .DESCRIPTION
+        ADR 0008's sixth decision blocks the first signed public release on
+        those questions being put to somebody qualified - not on a particular
+        answer, on somebody having answered. Until this gate existed that block
+        was a sentence in a document, which is the defect this repository keeps
+        finding: something decided, believed, and wired to nothing.
+
+        What can and cannot be checked here is worth being plain about. No
+        script can establish that a lawyer was consulted, or judge what they
+        said. What it can establish is that the answers have been *recorded*,
+        in the record that asked the questions, where a contributor and anybody
+        reading the repository can see them. That is the whole of it, and it is
+        deliberately not a check that shipping is safe - ADR 0008 says nothing
+        available to this project can establish that.
+
+        Cheap on purpose: one Markdown file read from the checkout. The gate job
+        compiles nothing and this adds nothing to it.
+
+        It does not retire after the first release, the way the milestone gate
+        does. Answers once written stay written, so it costs a passing release
+        nothing; what it goes on catching is the section being deleted or
+        emptied later.
+    #>
+
+    # Small enough that no answer a person would write is under it, large enough
+    # that a full stop typed into the field is not one. Named here rather than
+    # inlined because ADR 0008's section states the same rule in words, and the
+    # two have to agree.
+    $minimumAnswer = 24
+
+    $relative = 'docs/adr/0008-codec-patent-position.md'
+    $record = Join-Path $RepositoryRoot 'docs\adr\0008-codec-patent-position.md'
+
+    $why = @(
+        '',
+        'ADR 0008 is this project''s codec patent position, and its sixth decision blocks',
+        'the first signed public release on four questions being put to somebody',
+        'qualified. Not on a particular answer - on somebody having answered. The',
+        'installer ships an FFmpeg whose libraries encode H.264 through a statically',
+        'linked libopenh264, and the default codec resolves to HEVC on every machine',
+        'whose GPU has no AV1 encoder. Both are patent-pool standards, and no copyright',
+        'licence in the payload grants anything over them; a release is the moment a',
+        'pool''s claim would attach, and it is the one act here that cannot be undone.',
+        '',
+        'This gate is deliberate, and what discharges it is deliberate too: put the four',
+        'questions under "The four questions for a lawyer" to a lawyer, write what they',
+        'said into "The answers" in that record, and commit it. Nothing here asks for a',
+        'particular answer, and passing this gate is not anybody saying the release is',
+        'safe - that record is explicit that nothing available to this project can',
+        'establish that. It is somebody qualified having looked, before the binaries are',
+        'on other people''s machines rather than after.',
+        '',
+        "The record is $relative; docs/releasing.md is what a release is allowed to do."
+    )
+
+    if (-not (Test-Path -LiteralPath $record -PathType Leaf)) {
+        return New-GateResult -Name 'Codec patents' -Passed $false -Lines (@(
+                "$relative is not in this checkout, so whether the codec patent questions",
+                'have been answered cannot be established. A gate that cannot see its evidence',
+                'refuses; deleting the record is not how the block it carries is lifted.'
+            ) + $why)
+    }
+
+    $fields = Get-CodecPatentAnswer -Path $record
+    if ($null -eq $fields) {
+        return New-GateResult -Name 'Codec patents' -Passed $false -Lines (@(
+                "$relative has no `"### The answers`" section.",
+                '',
+                'That section is what this gate reads, and it was in the record when the gate',
+                'was written. Either it has been removed - in which case put it back rather',
+                'than releasing without it - or its heading has been renamed, in which case',
+                'this gate and the record have to be changed together.'
+            ) + $why)
+    }
+
+    $expected = @('Answered by', 'Date', 'Answer 1', 'Answer 2', 'Answer 3', 'Answer 4')
+    $problems = @()
+    $answered = @()
+
+    foreach ($name in $expected) {
+        $field = @($fields | Where-Object { $_.Field -eq $name })
+        if ($field.Count -eq 0) {
+            $problems += ("    {0,-14} the record has no such field" -f $name)
+            continue
+        }
+
+        $minimum = $minimumAnswer
+        if ($name -eq 'Answered by' -or $name -eq 'Date') { $minimum = 1 }
+
+        $value = ($field[0].Body -join ' ')
+        $state = Get-AnswerState -Value $value -Minimum $minimum
+        if ($state -eq 'answered') {
+            $answered += $field[0]
+            continue
+        }
+        $problems += ("    {0,-14} {1,-26} {2}" -f $name, $state, $field[0].Heading)
+    }
+
+    if ($problems.Count -gt 0) {
+        $lines = @(
+            "The four codec patent questions in $relative have not been answered:",
+            ''
+        ) + $problems
+        if ($answered.Count -gt 0) {
+            $lines += ''
+            $lines += "$($answered.Count) of the $($expected.Count) fields do hold something. Partly answered is not answered:"
+            $lines += 'the release is blocked on all four questions, because the one left blank is'
+            $lines += 'the one nobody wanted to ask.'
+        }
+        return New-GateResult -Name 'Codec patents' -Passed $false -Lines ($lines + $why)
+    }
+
+    $by = @($fields | Where-Object { $_.Field -eq 'Answered by' })[0].Body -join ' '
+    $on = @($fields | Where-Object { $_.Field -eq 'Date' })[0].Body -join ' '
+
+    return New-GateResult -Name 'Codec patents' -Passed $true -Lines @(
+        "All four questions in $relative are answered.",
+        '',
+        "    answered by   $($by.Trim())",
+        "    dated         $($on.Trim())",
+        '',
+        'This says the questions were asked and the answers recorded, which is what ADR',
+        '0008 decision 6 blocks a release on. It is not this gate saying the release is',
+        'safe, and it never was: read the answers.'
+    )
+}
+
 $gates = @()
 $failure = $null
 
@@ -954,6 +1207,7 @@ try {
     $gates += Test-MilestoneGate
     $gates += Test-LicenceGate
     $gates += Test-CorrespondingSourceGate
+    $gates += Test-CodecPatentGate
 } catch {
     $failure = $_
 }

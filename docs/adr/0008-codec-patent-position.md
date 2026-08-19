@@ -1,6 +1,6 @@
 # 0008. AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Issue: [#257](https://github.com/wildware-uk/clipped/issues/257)
 
@@ -11,6 +11,34 @@
 > **reading**, meaning it is an inference someone qualified may disagree with.
 > No statement here says that distributing Clipped is safe, because nothing
 > available to this project can establish that.
+
+## Amendments
+
+**2026-08-19 — accepted, and Decision point 6 wired to something
+([#257](https://github.com/wildware-uk/clipped/issues/257)).** This record was
+written as `Proposed` on 2026-08-13 and its Consequences said that putting the
+four questions to a lawyer "is what would move it from Proposed to Accepted".
+That was wrong about what the status means. What is proposed or accepted here is
+the *position* — AV1 first, hardware silicon for AVC and HEVC, no second
+software encoder for a pool codec, Opus rather than AAC, and a release that
+states its codec position. All of that is decided, constrains pull requests
+today, and does not become more or less true depending on what a solicitor says
+about question 2. Leaving the record `Proposed` until an unscheduled external
+event made it `Accepted` would have left the only written codec policy this
+project has looking optional for months.
+
+The four questions are not a condition of accepting the position. They are a
+condition of the **first signed public release**, which is what Decision point 6
+already said and what nothing enforced. They now block a release directly: [The
+answers](#the-answers) below is a section
+[`scripts/check-release-gates.ps1`](../../scripts/check-release-gates.ps1) reads,
+and the codec-patent gate refuses every tag while it is unanswered. A block that
+exists only as a sentence in a document is not a block.
+
+Nothing in the Context, the inventory, the Decision or the Alternatives is
+changed by this amendment; the Consequences bullet that stated the wrong
+acceptance condition is corrected in place, per [the ADR
+README](README.md#status-and-supersession).
 
 ## Context
 
@@ -162,6 +190,10 @@ That resolves into six things a contributor can check against a pull request.
 
 6. **The first signed public release is blocked on the questions below being
    asked.** Not on a particular answer — on somebody qualified having answered.
+   Enforced, not asserted: [The answers](#the-answers) is where they are
+   recorded, and the codec-patent gate in `scripts/check-release-gates.ps1`
+   refuses every tag until it holds something. See
+   [docs/releasing.md](../releasing.md#the-codec-patent-gate).
 
 ### The four questions for a lawyer
 
@@ -192,6 +224,46 @@ Written to be answerable, rather than as "are we allowed to ship this".
    signed installer from a UK company, and the Microsoft Store are three
    different arrangements, and the Store is the one where a platform's own
    licensing may already cover some of this.
+
+### The answers
+
+**Nobody has asked them yet.** This section is where the answers go, and it is
+not only prose for a reader:
+[`scripts/check-release-gates.ps1`](../../scripts/check-release-gates.ps1) reads
+it, and the codec-patent gate refuses every release tag while any of the six
+fields below still reads `_UNANSWERED_`. That is Decision point 6 made
+enforceable rather than merely written down.
+
+Replace each `_UNANSWERED_` with what the person actually said, in as many
+paragraphs as it takes; keep the headings, because the gate finds the answers by
+them. A blank answer, a whitespace-only answer, or a character typed to get past
+the gate is read as unanswered, because it is. If the real answer to one of them
+is "no", the sentence saying why is what somebody reopening this in two years
+needs — a bare "no" records the outcome and loses the reasoning, which is the
+whole point of writing it here rather than in an email.
+
+The gate does not retire after the first release. Once these are answered they
+stay answered, so it costs nothing; what it goes on catching is this section
+being deleted or emptied later.
+
+- Answered by: _UNANSWERED_
+- Date: _UNANSWERED_
+
+#### Answer 1 — does the installer make Clipped an "AVC encoder/decoder product"?
+
+_UNANSWERED_
+
+#### Answer 2 — does an application driving NVENC, AMF or Quick Sync need its own AVC or HEVC licence?
+
+_UNANSWERED_
+
+#### Answer 3 — does shipping software encoders Clipped never calls create an obligation?
+
+_UNANSWERED_
+
+#### Answer 4 — does the distribution channel change the answer?
+
+_UNANSWERED_
 
 ## Alternatives
 
@@ -320,7 +392,10 @@ the wrong moment to still be guessing.
     (Decision point 4) — a change to `scripts/collect-notices.ps1` and its test,
     belonging with [#123](https://github.com/wildware-uk/clipped/issues/123);
   - the four questions have to be put to a lawyer and the answers written into
-    this record, which is what would move it from Proposed to Accepted;
+    [The answers](#the-answers) above. That is not what accepts this record —
+    the position is accepted on its own terms (see [Amendments](#amendments)) —
+    it is what unblocks the first signed public release, and the codec-patent
+    gate in `scripts/check-release-gates.ps1` refuses one until it is done;
   - if question 3 comes back badly, building our own FFmpeg becomes real work
     against ADR 0004.
 - **What becomes hard:** offering HEVC as a *headline* feature, promoting it in

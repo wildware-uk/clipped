@@ -311,8 +311,15 @@ software Clipped ships, and sets out what it constrains — AV1 stays the first
 choice, no second software encoder for a pool codec, Opus rather than AAC for
 [#392](https://github.com/wildware-uk/clipped/issues/392), and a release that
 states its codec position rather than leaving a reader to infer one from a
-directory of licence texts. It is `Proposed` rather than `Accepted`, because part
+directory of licence texts. It is `Accepted`: the position is decided and
+constrains pull requests now.
+
+What it does *not* settle is whether an obligation exists, and it says so — part
 of it is four questions for a lawyer that nobody in this repository can answer.
+Those questions block the first signed public release, and that block is a
+release gate rather than a sentence: `scripts/check-release-gates.ps1` refuses
+every tag until the answers are written into the record
+([docs/releasing.md](releasing.md#the-codec-patent-gate)).
 
 Two things it decides that belong on this page:
 
