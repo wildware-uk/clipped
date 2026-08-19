@@ -245,6 +245,22 @@ impl Xbox {
         Self { apps, problems }
     }
 
+    /// What this launcher calls the application it knows as `app_id`.
+    ///
+    /// The identifier is the one [`Self::candidate_for`] puts into a claim, so a
+    /// caller holding a claim can name the application without knowing which
+    /// field of which provider that identifier came from
+    /// ([issue #664](https://github.com/wildware-uk/clipped/issues/664)).
+    ///
+    /// [`None`] when nothing installed here carries that identifier.
+    #[must_use]
+    pub fn name_of(&self, app_id: &str) -> Option<&str> {
+        self.apps()
+            .iter()
+            .find(|app| app.family_name() == app_id)
+            .map(|app| app.name())
+    }
+
     /// Every package the Xbox app says is installed.
     #[must_use]
     pub fn apps(&self) -> &[XboxApp] {

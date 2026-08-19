@@ -1073,77 +1073,23 @@ impl SessionManager {
 
     /// Says that a launch was seen and will not be recorded.
     ///
-    /// A launch the catalogue does not claim is not a game and never becomes a
-    /// session, which is the decision `identify_process` documents. On a real
-    /// machine that is the *usual* outcome rather than the exceptional one —
-    /// the shipped catalogue names a few dozen games and a Steam library holds
-    /// hundreds — so the one thing this must not be is quiet.
+    /// Only one kind of launch reaches this now. A launch a *launcher* claims is
+    /// a game and becomes a session, whether or not the catalogue names it
+    /// (issue #664, `identify_process`). What is left is a process nothing
+    /// installed — no shop claims the path — which is no evidence of a game at
+    /// all, and is most of what runs on a desktop.
     ///
-    /// It was quiet. This was a `debug!`, and a shipped build runs at `info`,
-    /// so the only record of the common case was compiled in and never emitted.
-    /// "Clipped is not recording my games" was then unanswerable from a log
-    /// ([issue #664](https://github.com/wildware-uk/clipped/issues/664)).
-    ///
-    /// The distinction that makes the line worth reading is whether a launcher
-    /// claimed the process. A launcher saying "this path is application 427520"
-    /// is the machine telling us the thing is a game, and the catalogue having
-    /// no entry for it is then a gap in our data rather than a judgement about
-    /// the process — a different sentence, and a different remedy, from a stray
-    /// executable nothing installed.
-    ///
-    /// Neither branch names a path. The image *name* is what a catalogue entry
-    /// is written against, and the path is the user's disk (AGENTS.md section
-    /// 13).
+    /// So it stays at `debug!`: at `info!` a machine with no launcher installed
+    /// would log every background process it ever sees. The image *name* and not
+    /// the path, because a catalogue entry is written against the name and the
+    /// path is the user's disk (AGENTS.md section 13).
     fn report_unrecognised(&self, group: &LaunchGroup) {
-        let newest = group.newest();
-
-        match self.unrecognised(group) {
-            Unrecognised::ClaimedBy { kind, app_id } => tracing::info!(
-                launch = group.id.get(),
-                processes = group.processes.len(),
-                image = newest.image_name.as_str(),
-                launcher = kind.as_str(),
-                app_id = app_id.as_str(),
-                "a game this launcher installed has no entry in the catalogue, so it was not                  recorded"
-            ),
-            Unrecognised::Unclaimed => tracing::debug!(
-                launch = group.id.get(),
-                processes = group.processes.len(),
-                image = newest.image_name.as_str(),
-                "a launch matched no game in the catalogue, and no launcher claims it"
-            ),
-        }
-    }
-
-    /// Whether a launcher claims a launch the catalogue could not place.
-    ///
-    /// Split from the reporting above so that the part which can be wrong — did
-    /// the launcher claim actually reach us — is a value a test can assert on.
-    /// The alternative is asserting on log output, which needs a global
-    /// subscriber and would make this decision testable only in a binary that
-    /// installs one.
-    fn unrecognised(&self, group: &LaunchGroup) -> Unrecognised {
-        let newest = group.newest();
-        let Some(path) = newest
-            .image_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-        else {
-            // No readable path is no claim: `candidate_for` matches on the
-            // directory a launcher installed into, and there is nothing here to
-            // compare against one.
-            return Unrecognised::Unclaimed;
-        };
-
-        self.launchers
-            .candidate_for(&newest.image_name, &path)
-            .launcher()
-            .map_or(Unrecognised::Unclaimed, |(kind, app_id)| {
-                Unrecognised::ClaimedBy {
-                    kind,
-                    app_id: app_id.to_owned(),
-                }
-            })
+        tracing::debug!(
+            launch = group.id.get(),
+            processes = group.processes.len(),
+            image = group.newest().image_name.as_str(),
+            "a launch matched no game in the catalogue, and no launcher claims it"
+        );
     }
 
     /// The same game, back inside its session's restart grace.
@@ -1582,7 +1528,28 @@ fn identify_process(
     };
 
     match catalogue.match_process(&candidate) {
-        Match::None => (GameIdentity::Unidentified, BTreeSet::new()),
+        // A launcher claims it and the catalogue does not name it. That is a
+        // game — a shop saying "this path is application 108600" is the machine
+        // itself reporting one — so it is recorded, under an identity derived
+        // from what the launcher said (issue #664).
+        //
+        // The catalogue is still consulted first and still wins: a shipped entry
+        // brings a real name, per-game defaults and a child-process list, none
+        // of which can be derived here.
+        Match::None => match candidate.launcher() {
+            Some((kind, app_id)) => (
+                GameIdentity::Known {
+                    game_id: synthesised_game_id(kind, app_id, catalogue),
+                    // Falling back to the identifier is deliberate: a library row
+                    // reading `league_of_legends` is worse than a real name and
+                    // far better than an empty one, and it is what the user can
+                    // correct with a `[[decision]]` rename in their overlay.
+                    name: launchers.name_of(kind, app_id).unwrap_or(app_id).to_owned(),
+                },
+                BTreeSet::new(),
+            ),
+            None => (GameIdentity::Unidentified, BTreeSet::new()),
+        },
         Match::One { entry, .. } => (
             GameIdentity::Known {
                 game_id: entry.game_id().as_str().to_owned(),
@@ -1608,26 +1575,72 @@ fn identify_process(
     }
 }
 
-/// What a launch the catalogue could not place turned out to be.
+/// A game identifier for something a launcher installed that the catalogue does
+/// not name.
 ///
-/// Only ever reported, never acted on: whether a launcher-installed game with
-/// no catalogue entry should be recorded is
-/// [issue #664](https://github.com/wildware-uk/clipped/issues/664) and is not
-/// decided here. This type exists so that the reporting can tell the two cases
-/// apart, and so that a test can check it does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Unrecognised {
-    /// A launcher says it installed this, so the machine considers it a game
-    /// and the catalogue simply has no entry for it.
-    ClaimedBy {
-        /// Which launcher.
-        kind: LauncherKind,
-        /// That launcher's own identifier for the application.
-        app_id: String,
-    },
-    /// Nothing installed by a launcher, so there is no evidence it is a game at
-    /// all.
-    Unclaimed,
+/// The identifier is persisted — it becomes a row in `games`, a key in the
+/// user's settings file, and the subject of any `[[decision]]` they write about
+/// the game — so two properties matter more than how it reads.
+///
+/// **It has to be spellable.** [`GameKey`](crate::config::GameKey) accepts
+/// `[a-z0-9-]` and nothing else, because an identifier differing from another
+/// only by case is one two files will disagree about. Only three of the six
+/// launchers hand out identifiers that already satisfy that: Xbox's
+/// `Microsoft.Limitless_8wekyb3d8bbwe`, Riot's `league_of_legends` and Epic's
+/// `FabPlugin_5.8` do not.
+///
+/// **The mapping has to be injective**, and that is the part with teeth.
+/// `games.game_id` is a `PRIMARY KEY`, so two games reduced to one identifier do
+/// not collide loudly — the second silently adopts the first one's row, its
+/// per-game settings and its exclusions. Lowercasing and replacing every other
+/// character with `-` would map `Microsoft.Limitless` and `Microsoft_Limitless`
+/// onto one key. So a hash of the *raw* identifier is appended whenever the
+/// normalisation lost anything, which distinguishes every pair the
+/// normalisation would otherwise merge.
+///
+/// A shipped catalogue entry that already owns the derived identifier gets the
+/// same treatment, for the same reason: two different games must not share a
+/// row. That check is against the catalogue as it is now, so a *future* entry
+/// taking this identifier would collide with one already written down — a real
+/// edge, and one a catalogue entry for the game fixes by matching it properly.
+fn synthesised_game_id(kind: LauncherKind, app_id: &str, catalogue: &Catalogue) -> String {
+    let normalised: String = app_id
+        .chars()
+        .map(|character| {
+            let lowered = character.to_ascii_lowercase();
+            if lowered.is_ascii_lowercase() || lowered.is_ascii_digit() || lowered == '-' {
+                lowered
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let plain = format!("{}-{normalised}", kind.as_str());
+    let lossless = normalised == app_id;
+    if lossless && catalogue.find_by_id(&plain).is_none() {
+        return plain;
+    }
+
+    format!("{plain}-{:08x}", fnv1a_32(app_id.as_bytes()))
+}
+
+/// FNV-1a, 32-bit, written out here rather than taken from the standard library.
+///
+/// [`DefaultHasher`](std::collections::hash_map::DefaultHasher) is explicitly
+/// not guaranteed to be stable between releases of Rust, and this value is
+/// written into a database and a settings file. A game whose identifier changed
+/// when the toolchain moved would lose its settings and its history, silently,
+/// on an ordinary update.
+const fn fnv1a_32(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        index += 1;
+    }
+    hash
 }
 
 /// The settings that apply to one game, from the layers the user configured.
