@@ -589,8 +589,36 @@ export type ExportRecordingParams = {
  * as a value would not.
  */
 export type ApplySettingsParams = {
+  /**
+   * The game to change them for, or absent for the global settings.
+   *
+   * Naming one writes the change into that game's own section, which is what
+   * makes the value an override; every game without one goes on inheriting
+   * (AGENTS.md section 30). Only the settings a game may override are accepted
+   * with a game — the recording directory, the storage limits, the hotkeys and
+   * the notification switches are global by construction, and the recorder
+   * refuses them by name rather than writing them globally.
+   */
+  readonly game?: string;
   /** The settings to change, by the key each has in the settings file. */
   readonly values?: Readonly<Record<string, string | null>>;
+};
+
+/**
+ * Which settings to read: the global page, or one game's. A type alias for the
+ * reason {@link StartRecordingParams} is one.
+ *
+ * A game with no section of its own is not an error: every setting comes back
+ * inherited, which is what a page for a game nobody has configured should show.
+ */
+export type GetSettingsParams = {
+  /**
+   * The game to resolve for, named as the settings file names it —
+   * `counter-strike-2`.
+   *
+   * Absent is the global settings, which is what every game inherits from.
+   */
+  readonly game?: string;
 };
 
 /**
@@ -1976,6 +2004,29 @@ export interface SettingEntry {
 export interface SettingsView {
   /** The settings file they live in, as the recorder resolved it. */
   readonly file: string;
+  /**
+   * The game these were resolved for, absent for the global settings.
+   *
+   * Read rather than assumed. A recorder built before the per-game page answers
+   * the global settings whatever is asked of it, and a window that drew that
+   * under a game's name would show every value as inherited when the global
+   * settings had set half of them — so a page compares this against the game it
+   * asked about (AGENTS.md section 27).
+   */
+  readonly game?: string;
+  /**
+   * Every game the settings file holds a section of its own for, in identifier
+   * order.
+   *
+   * The games somebody has already configured, and **not** the games this
+   * machine has: which processes are games is the catalogue's answer, and no
+   * command reads it (issue #245).
+   *
+   * A game stays on this list after its last override is cleared, because the
+   * recorder keeps an empty section rather than dropping one — so it is "games
+   * with a page", not "games with an override".
+   */
+  readonly games?: readonly string[];
   /** Every setting the recorder will accept, in the order a screen lists them. */
   readonly settings: readonly SettingEntry[];
 }

@@ -303,7 +303,18 @@ impl NotificationPreferences {
     /// `apply_settings` is the settings as they now stand: what a window draws,
     /// and what it acts on, is what the recorder holds rather than what the
     /// window hoped had been saved (`crates/ipc/src/settings.rs`).
+    ///
+    /// **A per-game answer is ignored**, and that is not an optimisation. The
+    /// four switches are global — the thing a notification interrupts is a
+    /// person rather than a recording — so they are not on a game's page at all,
+    /// and [`NotificationSettings::from_view`] reads a missing switch as the
+    /// default, which is on. Adopting from one would switch every category the
+    /// user had turned off back on because they opened a game's settings
+    /// (AGENTS.md section 27, issue #63).
     pub(crate) fn adopt(&self, view: &SettingsView) {
+        if view.game.is_some() {
+            return;
+        }
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) =
             NotificationSettings::from_view(view);
     }
@@ -621,6 +632,8 @@ mod tests {
     /// [`NotificationSettings::from_view`] read the wrong key.
     fn answered(switched_off: &[NotificationCategory]) -> SettingsView {
         SettingsView {
+            game: None,
+            games: Vec::new(),
             file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
             settings: NotificationCategory::ALL
                 .into_iter()
@@ -1245,6 +1258,36 @@ mod tests {
             policy.decide(&RecorderLinkEvent::RecordingInterrupted(active("r-2"))),
             None,
             "the switch was saved and the notification arrived anyway",
+        );
+    }
+
+    #[test]
+    fn one_games_settings_leave_the_notification_switches_where_the_user_put_them() {
+        // Opening a game's settings page must not undo a switch. The four
+        // categories are global and are not on a game's page at all, and
+        // `NotificationSettings::from_view` reads a category that is not on the
+        // list as on — which is right for a recorder too old to have the
+        // setting and catastrophic for a page that never carries it (issue #63,
+        // AGENTS.md section 27).
+        let preferences = NotificationPreferences::default();
+        preferences.adopt(&answered(&[NotificationCategory::RecordingInterrupted]));
+        let chosen = preferences.current();
+        assert!(!chosen.allows(NotificationCategory::RecordingInterrupted));
+
+        // What `get_settings` answers for a game: the settings a game may
+        // override, and none of these.
+        let for_game = SettingsView {
+            game: Some("counter-strike-2".to_owned()),
+            games: vec!["counter-strike-2".to_owned()],
+            file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+            settings: Vec::new(),
+        };
+        preferences.adopt(&for_game);
+
+        assert_eq!(
+            preferences.current(),
+            chosen,
+            "a per-game answer carries no switches, so adopting it turned one back on",
         );
     }
 

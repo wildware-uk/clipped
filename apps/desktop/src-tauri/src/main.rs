@@ -766,13 +766,27 @@ fn recorder_storage(
     }
 }
 
+/// Every setting, for the global page or for one game.
+///
+/// `game` is the identifier the settings file names a game by, and absent is
+/// the global settings every game inherits from. The recorder resolves the
+/// layering; this window never folds two answers together, because whether
+/// *this* game set a value is a fact the fold destroys (`clipped-ipc`'s
+/// `GetSettings`, issue #63).
 #[tauri::command(async)]
 fn recorder_settings(
     link: tauri::State<'_, RecorderLink>,
     notifications: tauri::State<'_, NotificationPreferences>,
+    game: Option<String>,
 ) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
-    match link.call(&clipped_ipc::Command::GetSettings)? {
+    match link.call(&clipped_ipc::Command::GetSettings(
+        clipped_ipc::GetSettings { game },
+    ))? {
         clipped_ipc::Reply::Settings { settings } => {
+            // Which ignores a per-game answer: the notification switches are
+            // global and are not on a game's page, so adopting from one would
+            // read every switch as absent and turn it back on
+            // (`NotificationPreferences::adopt`).
             notifications.adopt(&settings);
             Ok(settings)
         }
@@ -796,14 +810,21 @@ fn recorder_settings(
 /// category off would save perfectly and go on notifying until Clipped was
 /// restarted, which is the control that silently does nothing of AGENTS.md
 /// section 27 (issue #252).
+///
+/// `game` names the layer the change is written into: absent is the global
+/// settings, and one game's identifier is that game's own section, which is what
+/// makes the value an override (AGENTS.md section 30). Only the settings a game
+/// may override are accepted with one, and the recorder refuses the rest by
+/// name rather than writing them globally.
 #[tauri::command(async)]
 fn apply_recorder_settings(
     link: tauri::State<'_, RecorderLink>,
     notifications: tauri::State<'_, NotificationPreferences>,
     values: std::collections::BTreeMap<String, Option<String>>,
+    game: Option<String>,
 ) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
     match link.call(&clipped_ipc::Command::ApplySettings(
-        clipped_ipc::ApplySettings { values },
+        clipped_ipc::ApplySettings { game, values },
     ))? {
         clipped_ipc::Reply::Settings { settings } => {
             notifications.adopt(&settings);

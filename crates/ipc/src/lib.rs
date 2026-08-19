@@ -165,7 +165,7 @@ pub use server::{
     MAX_CONCURRENT_CONNECTIONS,
 };
 pub use settings::{
-    ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
+    ApplySettings, AudioDevice, AudioDevices, GetSettings, MicrophoneLevel, MicrophoneLevelRequest,
     SettingEntry, SettingsView,
 };
 pub use startup::{SetStartAtLogin, StartAtLogin};

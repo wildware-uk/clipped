@@ -876,6 +876,43 @@ configured and not in the list is kept on offer as "not connected", because
 dropping it would silently change what is recorded; a list that could not be
 asked for is *said*, rather than drawn as a machine with no microphone.
 
+### The Per game section
+
+[Issue #63](https://github.com/wildware-uk/clipped/issues/63) and SPEC.md section
+31. Pick a game, and the same settings the Recording and Audio sections draw come
+back resolved against that game instead of against nothing.
+
+**Every row says where its value came from, in a word.** "Set for this game" or
+"Inherited", beside the control and inside its accessible name — a word rather
+than a colour or a mark, which is the rule the hotkey states are already drawn by
+(AGENTS.md section 46). Reset is the second signal and not a decoration: it is
+there exactly where there is something to clear, so a page with no overrides on
+it has no Reset anywhere.
+
+The window never works that out. `get_settings` takes the game and the recorder
+answers `overridden` against *that* scope, because the fold a window would do
+loses the case that matters: a game pinning `60` while the global settings also
+say `60` has set the value, and unpinning it silently the next time the global
+one moves is the control that does nothing AGENTS.md section 27 is about
+([ipc.md](ipc.md), [configuration.md](configuration.md)).
+
+**A game with no settings of its own is not a special case.** Its page shows
+every value inherited and offers no Reset; a section appears in the settings file
+the first time something is saved for it, and survives having every value on it
+reset — so the game stays on the list its page is opened from.
+
+The list of games is the games the library has recordings of, joined with the
+games the settings file already holds a section for. It is **not** every game
+Clipped would recognise: that is the catalogue, no command reads it, and the
+section says so rather than presenting a short list as a complete one
+(#245).
+
+Three things SPEC.md section 31 asks for are rows of the account rather than
+controls, and each names what it is waiting for: recording a game at all and the
+capture mode have no key in any store, and the recording directory and storage
+limits are global by construction — the recorder refuses one against a game
+rather than writing it to every game.
+
 ### The Storage section, and the one Save that can delete something
 
 SPEC.md section 27, [issue #95](https://github.com/wildware-uk/clipped/issues/95).
@@ -980,7 +1017,8 @@ saved, or nothing behind it:
 | --- | --- |
 | Recording | The quality presets and bitrate (#181, #62), and the container (#307) |
 | Audio | The per-track enable and level SPEC.md section 12 draws (#81, #33), and naming a playback endpoint, which this build cannot open at all (#316) |
-| Storage | Where deleted recordings wait, and how long the trash keeps them — the first is a key the file carries and nothing offers, the second is a key nothing has (#646). The limits are controls now, with the measurement they act on beside them (#95); per-game overrides are what the file still carries and #63 draws |
+| Storage | Where deleted recordings wait, and how long the trash keeps them — the first is a key the file carries and nothing offers, the second is a key nothing has (#646). The limits are controls now, with the measurement they act on beside them (#95) |
+| Per game | Whether Clipped records a game at all, which is the catalogue's answer and has no key anywhere (#245, #45), and the capture mode, of which this build has one (#77, #78). The eight settings a game may override are controls (#63) |
 | Hotkeys | Pressing a combination to bind it (#54). Typing one is a control now, and saving registers it without restarting the recorder (#233). The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
 | Notifications | Nothing that has a key. The four switches are controls ([#252](https://github.com/wildware-uk/clipped/issues/252)); what is left is a toast for a replay that was saved, which needs an event from the recorder to be raised from (#110) |
 | Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |

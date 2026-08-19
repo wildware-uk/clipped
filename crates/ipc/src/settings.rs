@@ -144,12 +144,64 @@ pub struct SettingEntry {
     pub not_yet_in_force: Option<String>,
 }
 
+/// Which settings to read: the global page, or one game's.
+///
+/// # Why a game is named here rather than resolved in the window
+///
+/// Because inheritance is the recorder's answer and not an arithmetic a screen
+/// can do. A window that read the global settings and a game's overrides and
+/// folded them itself would be a second implementation of
+/// `clipped_session::config`'s layering, and it would get
+/// [`SettingEntry::overridden`] wrong in the one case that matters: a game that
+/// set a value to the same text the global layer holds is *overridden* and
+/// offers Reset, and a game that set nothing is *inherited* and does not
+/// (`clipped_session::config::value`, AGENTS.md sections 27 and 30).
+///
+/// A game with no section of its own is not an error and not a special case:
+/// every setting comes back inherited, which is what a page for a game nobody
+/// has configured should show.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSettings {
+    /// The game to resolve for, named as the settings file names it —
+    /// `counter-strike-2`.
+    ///
+    /// Absent is the global settings, which is what every game inherits from
+    /// and what an older window sends by sending no parameters at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+}
+
 /// The settings, and the file they came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsView {
     /// The settings file these came from, so a window can say where they live
     /// rather than keeping its own copy of a path.
     pub file: String,
+    /// The game these were resolved for, absent for the global settings.
+    ///
+    /// Echoed back rather than assumed, so that a window drawing a per-game page
+    /// from this reply cannot draw the global settings under a game's name when
+    /// a recorder too old to understand the scope answers the global page
+    /// anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+    /// Every game the settings file holds a section of its own for, in
+    /// identifier order.
+    ///
+    /// The games somebody has already configured, which is the list a per-game
+    /// page opens from. It is **not** the games this machine has: which
+    /// processes are games is the catalogue's answer and no command reads it
+    /// ([issue #245](https://github.com/wildware-uk/clipped/issues/245)), and a
+    /// window that drew this as "your games" would be calling a settings file a
+    /// catalogue.
+    ///
+    /// A game stays on it after its last override is cleared. `set_game` stores
+    /// an empty section rather than dropping one, because a game somebody has
+    /// opened the settings for and reset every value on is a game they may well
+    /// come back to — so this is "games with a page", not "games with an
+    /// override" (`clipped_session::config::Configuration::set_game`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub games: Vec<String>,
     /// Every setting the recorder will accept, in the order a screen lists
     /// them.
     ///
@@ -168,6 +220,20 @@ pub struct SettingsView {
 /// written (`clipped_session::config` validates before anything is saved).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplySettings {
+    /// The game to change them for, or absent for the global settings.
+    ///
+    /// The same identifier [`GetSettings::game`] takes, and a change is written
+    /// into that game's own section — so it becomes an override, and every game
+    /// without one goes on inheriting (AGENTS.md section 30).
+    ///
+    /// Only the settings a game may override are accepted here. The recording
+    /// directory, the storage limits, the hotkeys and the notification switches
+    /// are global by construction — a library is one thing however many games
+    /// are in it, and Windows registers a combination once for a process — and
+    /// naming one with a game is refused rather than quietly written to the
+    /// global layer (`clipped_session::config`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
     /// The settings to change, by the key each has in the file.
     ///
     /// `null` clears one, which is Reset: it returns the setting to the value
@@ -277,8 +343,8 @@ pub struct MicrophoneLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
-        SettingEntry, SettingsView,
+        ApplySettings, AudioDevice, AudioDevices, GetSettings, MicrophoneLevel,
+        MicrophoneLevelRequest, SettingEntry, SettingsView,
     };
 
     #[test]
@@ -488,6 +554,8 @@ mod tests {
     fn a_view_names_the_file_the_settings_came_from() {
         let view = SettingsView {
             file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+            game: None,
+            games: Vec::new(),
             settings: Vec::new(),
         };
 
@@ -495,6 +563,67 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SettingsView>(&json).expect("and deserialises"),
             view,
+        );
+        assert!(
+            !json.contains("game"),
+            "the global page is the absence of a game rather than a null: {json}",
+        );
+    }
+
+    #[test]
+    fn the_global_page_and_a_games_page_are_told_apart_by_the_request_and_by_the_answer() {
+        // The two ends of the same fact. A window that sent a game and drew
+        // whatever came back would draw the global settings under a game's name
+        // against a recorder too old to know the scope, and every value on that
+        // page would read as inherited when the global page had set half of
+        // them.
+        let global: GetSettings = serde_json::from_str("{}").expect("no game is the global page");
+        assert_eq!(global.game, None);
+
+        let for_game: GetSettings =
+            serde_json::from_str(r#"{"game":"counter-strike-2"}"#).expect("a game parses");
+        assert_eq!(for_game.game.as_deref(), Some("counter-strike-2"));
+        assert_eq!(
+            serde_json::to_string(&for_game).expect("it serialises"),
+            r#"{"game":"counter-strike-2"}"#,
+        );
+
+        let view = SettingsView {
+            file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+            game: Some("counter-strike-2".to_owned()),
+            games: vec!["counter-strike-2".to_owned(), "minecraft".to_owned()],
+            settings: Vec::new(),
+        };
+        let json = serde_json::to_string(&view).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<SettingsView>(&json).expect("and deserialises"),
+            view,
+        );
+    }
+
+    #[test]
+    fn a_change_for_one_game_names_the_game_beside_the_values() {
+        // What Save sends from a per-game page, and what Reset sends from one:
+        // the same `null` that clears a value globally, against a game's own
+        // section, which is what stops the value inheriting again.
+        let request: ApplySettings =
+            serde_json::from_str(r#"{"game":"counter-strike-2","values":{"framerate":"120"}}"#)
+                .expect("a scoped change parses");
+        assert_eq!(request.game.as_deref(), Some("counter-strike-2"));
+        assert_eq!(
+            request.values.get("framerate"),
+            Some(&Some("120".to_owned()))
+        );
+
+        // And a request with no game is the global page, as every window built
+        // before the per-game page sends it.
+        let global: ApplySettings =
+            serde_json::from_str(r#"{"values":{"framerate":"120"}}"#).expect("it parses");
+        assert_eq!(global.game, None);
+        assert_eq!(
+            serde_json::to_string(&global).expect("it serialises"),
+            r#"{"values":{"framerate":"120"}}"#,
+            "a global change must not grow a null game that an older recorder would refuse",
         );
     }
 }

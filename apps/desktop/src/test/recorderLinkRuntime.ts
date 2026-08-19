@@ -102,8 +102,13 @@ export interface CommandAnswers {
    * The default is a rejection, as every recorder command's is. A stub that
    * quietly answered with an empty list of settings would let a screen test
    * pass while the screen drew a form over a recorder nobody asked (issue #51).
+   *
+   * `args['game']` is absent when the screen is asking for the global settings
+   * and present when it is asking for one game's page, so a test can answer the
+   * two differently — which is the whole distinction the per-game page is about
+   * (issue #63).
    */
-  readonly recorderSettings?: () => unknown;
+  readonly recorderSettings?: (args: Record<string, unknown>) => unknown;
   /**
    * What `recorder_storage` answers, given the limits it was asked about.
    *
@@ -352,7 +357,11 @@ export function stubRecorderLinkRuntime(
         return answered(commands.recorderDiagnostics);
       }
       if (command === 'recorder_settings') {
-        return answered(commands.recorderSettings);
+        return answered(
+          commands.recorderSettings === undefined
+            ? undefined
+            : () => commands.recorderSettings?.(args),
+        );
       }
       if (command === 'recorder_storage') {
         return answered(

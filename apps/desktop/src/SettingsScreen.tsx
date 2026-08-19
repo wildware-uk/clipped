@@ -1,29 +1,20 @@
-import type { AudioDevices, SettingEntry, SettingsView, StorageReport } from '@clipped/shared';
+import type { AudioDevices, SettingsView, StorageReport } from '@clipped/shared';
 import { railPanelId, railTabId, SectionRail, type RailSection } from '@clipped/ui';
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import { HotkeyList } from './HotkeyList';
+import { PerGameSettings } from './PerGameSettings';
+import { Field, NotInForce } from './SettingField';
 import { StorageAccount } from './StorageAccount';
 import { asProblem, describeProblem, type LibraryProblem, type LibraryRead } from './library';
 import { StartAtLoginSwitch } from './StartAtLoginSwitch';
+import { limitsFrom, previewLimits, size, LIMIT_KEYS } from './storage';
+import type { SettingScope } from './SettingField';
 import {
-  glossOf,
-  limitsFrom,
-  previewLimits,
-  size,
-  LIMIT_KEYS,
-  MAXIMUM_USAGE,
-  MINIMUM_FREE_SPACE,
-} from './storage';
-import {
-  chooseRecordingDirectory,
   describeSettingsProblem,
   HOTKEYS_SECTION,
-  isSwitch,
-  MICROPHONE,
-  microphoneOptions,
-  RECORDING_DIRECTORY,
+  PER_GAME_SECTION,
   SETTINGS_SECTIONS,
   STARTUP_SECTION,
   STORAGE_SECTION,
@@ -62,234 +53,20 @@ import { SETUP_PATH } from './setup';
 /** The name the rail's element ids are built from. */
 const RAIL = 'settings';
 
+/**
+ * The scope every control on this screen is drawn in.
+ *
+ * The global settings, always: the per-game page is `PerGameSettings`, and it
+ * holds a read and a scope of its own. Named here so that a control on this
+ * screen cannot silently be drawn as though it were on a game's page.
+ */
+const GLOBAL: SettingScope = { kind: 'global' };
+
 /** The rail's entries, which are the sections themselves. */
 const RAIL_SECTIONS: readonly RailSection[] = SETTINGS_SECTIONS.map((section) => ({
   id: section.id,
   label: section.label,
 }));
-
-/** The element id a setting's control has, so its label can name it. */
-function fieldId(key: string): string {
-  return `setting-${key}`;
-}
-
-/** The element id a setting's hint has, so its control can be described by it. */
-function hintId(key: string): string {
-  return `setting-${key}-hint`;
-}
-
-/** One setting the recorder says is in force: a control, and what it accepts. */
-function Field({
-  entry,
-  devices,
-  edited,
-  onEdit,
-  onReset,
-}: {
-  readonly entry: SettingEntry;
-  readonly devices: LibraryRead<AudioDevices>;
-  readonly edited: string | undefined;
-  readonly onEdit: (value: string) => void;
-  readonly onReset: () => void;
-}): ReactNode {
-  const value = edited ?? entry.value;
-  const options = entry.key === MICROPHONE ? microphoneOptions(entry, devices) : undefined;
-  const choices = entry.choices ?? [];
-  // Only the two settings that are a number of bytes. A maximum age is in days
-  // and "90 days is 90 bytes" would be nonsense, so the gloss is asked for by
-  // key rather than of every field that happens to hold a number.
-  const gloss =
-    entry.key === MAXIMUM_USAGE || entry.key === MINIMUM_FREE_SPACE ? glossOf(value) : undefined;
-
-  /*
-   * A setting whose only two values are `true` and `false` is a switch, and it
-   * is drawn as one. A list of those two words is what the recorder sends —
-   * every value on that protocol is the text the settings file spells it in
-   * (`crates/ipc/src/settings.rs`) — and drawing it as a two-option dropdown
-   * reading "true" and "false" would be the settings file leaking through a
-   * control (AGENTS.md section 29).
-   */
-  if (isSwitch(entry)) {
-    return (
-      <div className="clipped-field">
-        <label className="clipped-field__label" htmlFor={fieldId(entry.key)}>
-          <input
-            id={fieldId(entry.key)}
-            type="checkbox"
-            aria-describedby={hintId(entry.key)}
-            checked={value !== 'false'}
-            onChange={(event) => {
-              onEdit(event.target.checked ? 'true' : 'false');
-            }}
-          />{' '}
-          {entry.label}
-        </label>
-
-        {/*
-         * Reset, on a switch, is "stop saying anything about this" rather than
-         * "turn it on" — the two differ the day the shipped default changes.
-         */}
-        {entry.overridden ? (
-          <button
-            type="button"
-            className="clipped-btn clipped-btn--secondary"
-            onClick={onReset}
-            aria-label={`Reset ${entry.label}`}
-          >
-            Reset
-          </button>
-        ) : null}
-
-        <p className="clipped-muted" id={hintId(entry.key)}>
-          {entry.overridden ? 'You changed this.' : 'Clipped ships with this on.'}
-        </p>
-
-        <NotYetInForce entry={entry} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="clipped-field">
-      <label className="clipped-field__label" htmlFor={fieldId(entry.key)}>
-        {entry.label}
-      </label>
-
-      {options !== undefined || choices.length > 0 ? (
-        <select
-          className="clipped-input"
-          id={fieldId(entry.key)}
-          aria-describedby={hintId(entry.key)}
-          value={value}
-          onChange={(event) => {
-            onEdit(event.target.value);
-          }}
-        >
-          {(options ?? choices.map((choice) => ({ value: choice, label: choice }))).map(
-            (option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ),
-          )}
-        </select>
-      ) : (
-        <input
-          className="clipped-input"
-          id={fieldId(entry.key)}
-          aria-describedby={hintId(entry.key)}
-          type="text"
-          value={value}
-          onChange={(event) => {
-            onEdit(event.target.value);
-          }}
-        />
-      )}
-
-      {entry.key === RECORDING_DIRECTORY ? (
-        <button
-          type="button"
-          className="clipped-btn clipped-btn--secondary"
-          onClick={() => {
-            void chooseRecordingDirectory(value).then((chosen) => {
-              // Dismissed is not a choice, and must not clear what is there.
-              if (chosen !== null) {
-                onEdit(chosen);
-              }
-            });
-          }}
-        >
-          Browse…
-        </button>
-      ) : null}
-
-      {/*
-       * Enabled only for a setting this scope actually set. Reset on a value
-       * nobody configured would be a control that does nothing, and the
-       * recorder is what knows which is which (`Resolved::is_overridden`).
-       */}
-      {entry.overridden ? (
-        <button
-          type="button"
-          className="clipped-btn clipped-btn--secondary"
-          onClick={onReset}
-          aria-label={`Reset ${entry.label}`}
-        >
-          Reset
-        </button>
-      ) : null}
-
-      <p className="clipped-muted" id={hintId(entry.key)}>
-        {entry.accepted}
-        {entry.overridden ? '' : ' Nothing has changed this, so it is what Clipped ships with.'}
-        {/*
-         * The same number, read back in the unit a person reads. The field
-         * carries what the settings file carries, because that is what the
-         * recorder accepts and what its refusal names - a window with a second
-         * vocabulary for a setting is one that can disagree with the file
-         * (`crates/ipc/src/settings.rs`). This never travels: it is a gloss on
-         * what was typed, not a value.
-         */}
-        {gloss === undefined ? '' : ` That is ${gloss}.`}
-      </p>
-
-      {/*
-       * A list that could not be asked for is said, not drawn as a machine with
-       * no microphone: the two are opposite answers, and only one of them means
-       * "plug something in" (AGENTS.md sections 27 and 45).
-       */}
-      {entry.key === MICROPHONE && devices.state === 'unread' ? (
-        <p className="clipped-muted" role="status">
-          This machine’s microphones could not be listed, so only the two choices above are offered.{' '}
-          {describeSettingsProblem(devices.problem)}
-        </p>
-      ) : null}
-
-      <NotYetInForce entry={entry} />
-    </div>
-  );
-}
-
-/**
- * What is still in force, for a value that is saved and not yet the one being
- * used.
- *
- * The recording directory is the only setting that can be in this state, and it
- * is for the length of one sitting: where automatic recordings are written moves
- * between sittings and never during one, so that a sitting’s session record is
- * never separated from the files it names (AGENTS.md section 56, issue #609).
- * Without this the control looks as though it did nothing — the folder on screen
- * is the one that was saved, and the footage is going somewhere else (AGENTS.md
- * section 27).
- *
- * The recorder’s own sentence, because only the recorder knows what is in force.
- * `role="status"` so that a screen reader is told when it appears, which is
- * immediately after the save it explains.
- */
-function NotYetInForce({ entry }: { readonly entry: SettingEntry }): ReactNode {
-  if (entry.not_yet_in_force === undefined) {
-    return null;
-  }
-  return (
-    <p className="clipped-muted" role="status">
-      {entry.not_yet_in_force}
-    </p>
-  );
-}
-
-/** One setting the file can carry and nothing reads: its value, and why. */
-function NotInForce({ entry }: { readonly entry: SettingEntry }): ReactNode {
-  return (
-    <div className="clipped-field">
-      <p className="clipped-field__label">{entry.label}</p>
-      <p>
-        <code className="clipped-code">{entry.value}</code>
-      </p>
-      {/* The recorder's own sentence: only it knows what would have to land. */}
-      <p className="clipped-muted">{entry.unavailable}</p>
-    </div>
-  );
-}
 
 /** One setting this window cannot offer at all, as a row of the account. */
 function Row({ row }: { readonly row: SettingRow }): ReactNode {
@@ -514,6 +291,7 @@ function Pane({
                 key={entry.key}
                 entry={entry}
                 devices={devices}
+                scope={GLOBAL}
                 edited={edits[entry.key]}
                 onEdit={(value) => {
                   onEdit(entry.key, value);
@@ -582,6 +360,15 @@ function Pane({
        * than guessed (SPEC.md section 27, issue #95).
        */}
       {section.id === STORAGE_SECTION ? <StorageAccount refreshOn={saved} /> : null}
+
+      {/*
+       * And the fourth: one game's settings, read and saved against that game's
+       * own layer rather than the global one. It holds its own read because it
+       * is a different question — `get_settings` for a game — and folding two
+       * pages together in this window would destroy the one fact it draws
+       * (issue #63).
+       */}
+      {section.id === PER_GAME_SECTION ? <PerGameSettings devices={devices} /> : null}
 
       {section.rows.length > 0 ? (
         <table className="clipped-table">

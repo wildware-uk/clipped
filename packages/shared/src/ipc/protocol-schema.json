@@ -269,6 +269,7 @@
     "apply_settings": {
       "required": [],
       "optional": [
+        "game",
         "values"
       ]
     },
@@ -458,6 +459,12 @@
       ],
       "optional": [
         "losses"
+      ]
+    },
+    "get_settings": {
+      "required": [],
+      "optional": [
+        "game"
       ]
     },
     "get_storage": {
@@ -1071,7 +1078,10 @@
         "file",
         "settings"
       ],
-      "optional": []
+      "optional": [
+        "game",
+        "games"
+      ]
     },
     "shutdown": {
       "required": [],
@@ -1320,7 +1330,7 @@
     },
     {
       "name": "get_settings",
-      "params": null,
+      "params": "get_settings",
       "reply": "reply.settings",
       "available_in_this_build": true
     },
@@ -3163,7 +3173,7 @@
       "discriminant": "refused.not_implemented.not_implemented"
     },
     {
-      "name": "the settings, one of which nothing reads yet",
+      "name": "one game's settings: one it set, one it inherits, and one nothing reads",
       "direction": "server",
       "frame": {
         "id": 13,
@@ -3172,6 +3182,11 @@
             "reply": "settings",
             "settings": {
               "file": "C:\\Users\\alex\\AppData\\Local\\Clipped\\settings.json",
+              "game": "counter-strike-2",
+              "games": [
+                "counter-strike-2",
+                "minecraft"
+              ],
               "settings": [
                 {
                   "accepted": "\"default\", \"none\" or a device name",
@@ -3182,13 +3197,12 @@
                   "value": "name:Shure MV7"
                 },
                 {
-                  "accepted": "a folder on this machine, such as D:\\Clips",
+                  "accepted": "1-480 frames per second",
                   "applies": true,
-                  "key": "recording_directory",
-                  "label": "Recording directory",
-                  "not_yet_in_force": "Automatic recordings still go to C:\\Users\\alex\\Videos\\Clipped. They go here from the next session.",
-                  "overridden": true,
-                  "value": "D:\\Clips"
+                  "key": "framerate",
+                  "label": "Frame rate",
+                  "overridden": false,
+                  "value": "60"
                 },
                 {
                   "accepted": "\"game-window\" or \"display\"",
@@ -3201,7 +3215,7 @@
                   "label": "Capture target",
                   "not_yet_in_force": "Automatic recordings still go to the previous folder until the next session",
                   "overridden": false,
-                  "unavailable": "a recording still captures the game's own window; reading this setting when a recording starts is issue #61",
+                  "unavailable": "a recording still captures the game's own window; reading this setting when a recording starts is issue #650",
                   "value": "game-window"
                 }
               ]

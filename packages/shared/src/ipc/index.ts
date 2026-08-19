@@ -117,6 +117,7 @@ export type {
   SessionRecording,
   SessionSummary,
   ApplySettingsParams,
+  GetSettingsParams,
   SettingEntry,
   SettingsReply,
   SettingsView,
