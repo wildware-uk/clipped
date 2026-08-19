@@ -425,9 +425,15 @@ provider-based — one module per shop, so support for a new one is an addition
 rather than a change to shared logic (SPEC.md section 6). Steam is the first
 ([#43]), Epic the second, Ubisoft Connect the third, Xbox the fourth,
 Battle.net the fifth and Riot the sixth ([#44], which asks for one pull request
-per launcher). EA and GOG are the rest of [#44] and are deliberately not
-stubbed, because a provider that always answers "no" is a control that silently
-does nothing.
+per launcher).
+
+**EA and GOG are not detected**, they are deliberately not stubbed — a provider
+that always answers "no" is a control that silently does nothing — and the two
+have different reasons, both written down: [EA app](#ea-app) encrypts the only
+record it keeps of what it has installed, and nobody has had a
+[GOG Galaxy](#gog-galaxy) installation to read the format from. Games from
+either are still detected by executable name and path; what they do not get is
+the `LauncherIdentity` rung.
 
 ### Who asks them, and when
 
@@ -1114,6 +1120,116 @@ tell them apart.
 **Verified against a real installation**: `examples/riot_probe.rs` reports 1
 product, 0 problems, 6 executables checked and none claimed by the wrong product
 — with the five uninstalled products and the client itself correctly absent.
+
+### EA app
+
+**Clipped does not detect EA games.** There is no EA provider, and this section
+is what a user with an EA library needs to know rather than discover from
+behaviour: their EA games are matched by executable name and path like any game
+from a shop Clipped has never heard of, which works when the catalogue has an
+entry for the game and gives nothing extra when it does not.
+
+The reason is not that nobody has got to it. EA app keeps what it has installed
+in an **encrypted** local store, and nothing else on the machine lists it.
+Measured on a machine with EA app installed — 13.768.7.6285, by its own
+updater's record — and no EA games in it:
+
+| Where a provider would look | What is there |
+| --- | --- |
+| `HKLM\SOFTWARE\WOW6432Node\Origin Games` | absent |
+| `HKLM\SOFTWARE\WOW6432Node\EA Games` | absent |
+| `HKLM\SOFTWARE\WOW6432Node\Origin` | one value, `ClientPath`, naming `EADesktop.exe` |
+| `HKLM\SOFTWARE\WOW6432Node\Electronic Arts\EA Desktop` | the client's own executables and install location |
+| `C:\Program Files\EA Games` | exists, **zero entries** |
+| `%ProgramData%\Origin\LocalContent` | absent — legacy Origin's `.mfst` directory is gone |
+| `%ProgramData%\EA Desktop\<account>\IS` | 14,848 bytes, encrypted |
+| any `__Installer\installerdata.xml` | **none**, on any of the machine's three drives |
+
+The four hexadecimal directory names under `%ProgramData%\EA Desktop` are 64
+characters each, and one of them — `a7ffc6f8…f8434a` — is exactly the SHA3-256
+of the empty string. So they are hashes of an account identifier, not of
+anything about a game, and the empty one is the signed-out account. Each holds
+files named for what they carry — `IS` for install state, `CATS2` for the
+catalogue, and `IQ`, `NS` and `CONF-production` beside them. Every one of them
+has the same shape: 64 ASCII hexadecimal characters, then a body whose length is
+an exact multiple of 16 bytes and whose entropy is 7.99 bits per byte. That is a
+block cipher, not a file format.
+
+EA's own log says as much rather than leaving it to be inferred from entropy:
+
+```text
+ERROR (eax::services::localStorage::sendTelemetryOnError)
+    User Data Storage error: type=[DataDecryptError] category=[CATS2] msg=[Invalid result]
+```
+
+And install state does not travel between EA's own two processes as a file at
+all: the background service publishes it over a protobuf IPC channel that
+`EADesktop.exe` subscribes to, as
+`eax.services.ipc.RefreshInstallStateCompletedNotif`.
+
+So an EA provider would have to reproduce EA's key derivation to read a store
+its own client encrypts. That is not what the providers in this module do — they
+read metadata a launcher publishes — and a key recovered from one client build
+is a thing that breaks on the next update, silently, on somebody else's machine.
+
+**What a machine with EA games installed would settle**, and the only thing that
+would: install an EA game and report whether anything **plaintext** records it.
+Specifically —
+
+- does `HKLM\SOFTWARE\WOW6432Node\Origin Games` or
+  `HKLM\SOFTWARE\WOW6432Node\EA Games` appear, and what are the subkey names and
+  values under it;
+- does the game's own directory hold `__Installer\installerdata.xml`, and does
+  it carry a content identifier and a title;
+- does `%ProgramData%\EA Desktop\<account>\IS` grow while staying a multiple of
+  16 bytes with the same 64-character header, which would confirm it is the
+  install state and still encrypted.
+
+If the answer to the first two is "nothing", then EA publishes no readable
+record of what it has installed and this section is the finished answer rather
+than a gap. If it is a registry key, that key is the provider, and it can be
+written the way every other one here was — against the real thing ([#44]).
+
+### GOG Galaxy
+
+**Clipped does not detect GOG games**, for the plainer reason: nobody has had a
+GOG installation to write a provider against, and a provider written from
+documentation alone is how the gaps this module has already closed were created.
+As with EA, a GOG game is matched by executable name and path, so a catalogue
+entry still finds it — one rung weaker than it could be.
+
+Checked on this machine rather than assumed:
+
+| Where a provider would look | What is there |
+| --- | --- |
+| `HKLM\SOFTWARE\WOW6432Node\GOG.com` | absent |
+| `HKLM\SOFTWARE\GOG.com`, `HKCU\Software\GOG.com` | absent |
+| `%ProgramData%\GOG.com` | absent, so no `Galaxy\storage\galaxy-2.0.db` |
+| `C:\Program Files (x86)\GOG Galaxy` | absent |
+
+**One trap worth recording**, because it is the kind of thing a provider written
+from a directory listing would fall for. `%LocalAppData%\GOG.com` **does** exist
+here, on a machine with no GOG software of any kind installed:
+
+```text
+GOG.com\Galaxy\Applications\48767653913349277\RemoteConfigCache\
+    remote_config_cache_production_worldwide.json
+```
+
+That is the layout of the GOG Galaxy **SDK** — one directory per client
+identifier, caching the service endpoints the SDK talks to — so it was written
+by something that integrates the SDK rather than by Galaxy, and it says nothing
+about what is installed. A
+`discover` that treated `%LocalAppData%\GOG.com` as evidence of GOG Galaxy would
+report a launcher that is not on the machine — the same mistake the Riot section
+above describes as "a directory here is not an installation".
+
+**What a machine with GOG games installed would settle**: whether
+`HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\<gameID>` exists with a game name and
+an install path under it, whether `galaxy-2.0.db` is needed as well, and — the
+question the Epic and Riot sections above both turned on — whether a listing
+there is what is *installed* or what the account *owns*. Report those and the
+provider follows ([#44]).
 
 ## The process watcher
 

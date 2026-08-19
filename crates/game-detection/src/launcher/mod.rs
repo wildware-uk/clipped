@@ -15,13 +15,17 @@
 //! second, [`ubisoft`] the third, [`xbox`] the fourth, [`battlenet`] the fifth
 //! and [`riot`] the sixth
 //! ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks for one
-//! pull request per launcher and is still open for EA).
+//! pull request per launcher).
 //!
 //! EA and GOG are deliberately **not** stubbed
 //! here — an empty provider that always answers "no" is a control that silently
 //! does nothing (AGENTS.md section 27), and
 //! [`LauncherKind`](crate::catalogue::LauncherKind) already carries the
-//! vocabulary they will need.
+//! vocabulary they will need. What is *not* left to be discovered is why:
+//! `docs/game-detection.md` has a section for each saying that Clipped does not
+//! detect it and what was measured, and
+//! `every_undetected_launcher_says_so_in_the_subsystem_document` below fails if
+//! either loses it.
 //!
 //! # What every provider is expected to do, and not do
 //!
@@ -64,7 +68,37 @@
 //! second caller appeared and named exactly what the two had in common, which a
 //! trait written in advance would have had to guess at.
 //!
-//! What remains of #44 is EA and GOG. Riot was written in the end
+//! # Why EA and GOG have no provider
+//!
+//! Not "nobody has got to them". Both were driven against this machine rather
+//! than reasoned about, and they fail for different reasons.
+//!
+//! **EA app is installed here and encrypts the only record it keeps.** Its
+//! store is `%ProgramData%\EA Desktop\<account>\`, one directory per account
+//! — they are 64-character hashes, and one of them is exactly the SHA3-256 of
+//! the empty string — holding `IS` (install state),
+//! `CATS2`, `IQ`, `NS` and `CONF-production`. Every one of those files is 64
+//! ASCII hexadecimal characters followed by a body that is an exact multiple of
+//! 16 bytes at 7.99 bits of entropy per byte, and EA's own log calls a failure
+//! to read one a `DataDecryptError`. Nothing else on the machine lists an EA
+//! game: no `Origin Games` key, no `EA Games` key, no
+//! `%ProgramData%\Origin\LocalContent`, and `C:\Program Files\EA Games` exists
+//! with nothing in it. A provider would have to reproduce EA's key derivation,
+//! which is not what the providers here do and is not a thing that survives the
+//! client's next update.
+//!
+//! **GOG Galaxy is not installed here at all**, so there is no format to read.
+//! Writing one from documentation is what the Epic manifests
+//! ([#459](https://github.com/wildware-uk/clipped/issues/459)) and the Riot
+//! metadata below both demonstrate the cost of — in each case the fixtures were
+//! right about the format and wrong about its use, and only a real installation
+//! showed it.
+//!
+//! Both are written up in full in `docs/game-detection.md`, including exactly
+//! what somebody with either launcher would have to report for the provider to
+//! be written.
+//!
+//! Riot was written in the end
 //! ([#513](https://github.com/wildware-uk/clipped/pull/513)), and the thing this
 //! paragraph used to warn about turned out to be the finding rather than the
 //! obstacle: only one of eight `Metadata` directories on a real installation
@@ -113,6 +147,138 @@ mod tests {
         ("ubisoft", LauncherKind::Ubisoft, None),
         ("xbox", LauncherKind::Xbox, None),
     ];
+
+    /// The launchers this crate's vocabulary can name that no provider here
+    /// reads, and the heading `docs/game-detection.md` covers each under.
+    ///
+    /// A row is a promise that the document tells a user with that library
+    /// where they stand. Both of today's rows are [#44]'s remainder, and each
+    /// has its own reason written out there: EA app encrypts the only record it
+    /// keeps of what it has installed, and nobody has had a GOG Galaxy
+    /// installation to read the format from.
+    ///
+    /// [#44]: https://github.com/wildware-uk/clipped/issues/44
+    const UNDETECTED: &[(LauncherKind, &str)] = &[
+        (LauncherKind::Ea, "### EA app"),
+        (LauncherKind::Gog, "### GOG Galaxy"),
+    ];
+
+    /// What the document has to say about a launcher in [`UNDETECTED`], in so
+    /// many words.
+    const SAYS_SO: &str = "Clipped does not detect";
+
+    /// Every launcher the catalogue's vocabulary can express, read out of the
+    /// vocabulary itself.
+    ///
+    /// Same reasoning as [`provider_modules`]: a second list of launcher kinds
+    /// would go stale the day somebody adds one, and going stale quietly is the
+    /// whole failure this file guards against.
+    fn launcher_kinds() -> Vec<&'static str> {
+        // `entry.rs` holds more than one enum with an `as_str`, so the block is
+        // narrowed to this one before its arms are read.
+        let entry = include_str!("../catalogue/entry.rs");
+        let after = entry
+            .split_once("impl LauncherKind {")
+            .map_or("", |(_, it)| it);
+        let vocabulary = after.split_once("\n}").map_or(after, |(block, _)| block);
+
+        vocabulary
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("Self::"))
+            .filter_map(|rest| rest.split_once("=> \""))
+            .filter_map(|(_, tail)| tail.split_once('"'))
+            .map(|(kind, _)| kind)
+            .collect()
+    }
+
+    /// The subsystem document, which is the thing a user reads.
+    fn subsystem_document() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs")
+            .join("game-detection.md");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} should be readable: {error}", path.display()))
+    }
+
+    /// A launcher Clipped cannot detect says so in the subsystem document.
+    ///
+    /// # Why a test about prose
+    ///
+    /// Because the alternative is that somebody with a GOG library finds out
+    /// from behaviour. Every other guard in this file is about a provider that
+    /// exists; this one is about the launchers that have none, which is the
+    /// state [#44] has been in for longer than any provider took to write, and
+    /// which is invisible from the code — `LauncherKind::Ea` looks exactly like
+    /// `LauncherKind::Steam` from every direction except whether anything
+    /// produces it.
+    ///
+    /// It was proved to fail four ways, all of them ways this actually goes
+    /// wrong: adding a launcher to the vocabulary with neither a provider nor a
+    /// section; writing the provider and leaving the "not detected" section
+    /// behind to mislead; deleting or renaming the section while the gap is
+    /// still real; and moving the vocabulary out from under
+    /// [`launcher_kinds`], which would otherwise leave this checking nothing
+    /// and passing.
+    ///
+    /// [#44]: https://github.com/wildware-uk/clipped/issues/44
+    #[test]
+    fn every_undetected_launcher_says_so_in_the_subsystem_document() {
+        let vocabulary = launcher_kinds();
+        assert!(
+            vocabulary.contains(&"steam") && vocabulary.contains(&"other"),
+            "`LauncherKind::as_str` was read as {vocabulary:?}, which is not the vocabulary, so \
+             this guard is reading the wrong text and is checking nothing"
+        );
+
+        // `other` is the absence of a launcher rather than one of them, so
+        // there is nothing for a document to say about detecting it.
+        let mut undetected: Vec<_> = vocabulary
+            .iter()
+            .copied()
+            .filter(|kind| *kind != LauncherKind::Other.as_str())
+            .filter(|kind| {
+                !PROVIDERS
+                    .iter()
+                    .any(|(_, provided, _)| provided.as_str() == *kind)
+            })
+            .collect();
+        undetected.sort_unstable();
+
+        let mut promised: Vec<_> = UNDETECTED.iter().map(|(kind, _)| kind.as_str()).collect();
+        promised.sort_unstable();
+
+        assert_eq!(
+            undetected, promised,
+            "the launchers with no provider in this module are {undetected:?}, and `UNDETECTED` \
+             names {promised:?}. A launcher on the left and not the right is one a user has no \
+             way of knowing about: give it a section in docs/game-detection.md and a row here. \
+             One on the right and not the left now has a provider, so delete its row and the \
+             section that says it has none, before the document starts lying the other way."
+        );
+
+        let document = subsystem_document();
+        for (kind, heading) in UNDETECTED {
+            let section = document
+                .split_once(&format!("\n{heading}\n"))
+                .map(|(_, rest)| rest.split("\n## ").next().unwrap_or(rest))
+                .map(|rest| rest.split("\n### ").next().unwrap_or(rest));
+            let Some(section) = section else {
+                panic!(
+                    "docs/game-detection.md has no `{heading}` section, and `{kind}` has no \
+                     provider, so somebody with that library is left to find out from behaviour \
+                     that Clipped does not detect it"
+                );
+            };
+            assert!(
+                section.contains(SAYS_SO),
+                "the `{heading}` section of docs/game-detection.md never says \"{SAYS_SO}\", so a \
+                 reader of it cannot tell that `{kind}` games get the executable-name and path \
+                 rungs and nothing else"
+            );
+        }
+    }
 
     /// The provider modules, taken from the declarations at the top of this
     /// file rather than from a second list somebody has to remember to update.
