@@ -10,7 +10,7 @@ import { answeredForGame, describeSettingsProblem, gameChoices, useSettings } fr
  *
  * # What this page is, and what it is not
  *
- * It is the same eight settings the Recording and Audio sections draw, resolved
+ * It is the same nine settings the Recording and Audio sections draw, resolved
  * against one game instead of against nothing. Every value on it is real and
  * applies to that game; what changes is where it came from, and that is the
  * whole of what the page is for (AGENTS.md section 30).

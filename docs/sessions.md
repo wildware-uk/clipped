@@ -467,6 +467,7 @@ one sitting, one file — produces a file named after the session and nothing el
       "end_reason": "target-lost",
       "settings": {
         "capture_target": { "value": "game-window", "source": "default" },
+        "quality_preset": { "value": "high", "source": "game" },
         "resolution": { "value": "2560x1440", "source": "game" },
         "framerate": { "value": "60", "source": "global" },
         "codec": { "value": "auto", "source": "default" },
