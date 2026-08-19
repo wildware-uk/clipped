@@ -1,4 +1,4 @@
-# 0008. AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away
+# 0008. AV1 is the codec Clipped commits to where the hardware offers it, and on most machines today that means HEVC
 
 - Status: Accepted
 - Date: 2026-08-13
@@ -36,9 +36,42 @@ and the codec-patent gate refuses every tag while it is unanswered. A block that
 exists only as a sentence in a document is not a block.
 
 Nothing in the Context, the inventory, the Decision or the Alternatives is
-changed by this amendment; the Consequences bullet that stated the wrong
-acceptance condition is corrected in place, per [the ADR
+changed by this amendment — the one below does change the Decision, and says
+what and why; the Consequences bullet that stated the wrong acceptance condition
+is corrected in place, per [the ADR
 README](README.md#status-and-supersession).
+
+**2026-08-19 — the record states what it previously only implied
+([#257](https://github.com/wildware-uk/clipped/issues/257)).** Two facts were
+in this record from the day it was written, and both were reachable only by
+reading two sections and joining them. An accepted record whose headline
+misleads is worse than a proposed one, so both are now stated where a reader
+cannot miss them. **Neither is a change of position**; each is the record
+saying what it already implied.
+
+- **Most recordings today are HEVC, not AV1.** The title said "AV1 is the codec
+  Clipped commits to", which is true of `Codec::EFFICIENCY_ORDER` and false of
+  what is in most people's files: `Automatic` takes the first *measured* codec,
+  and on any GPU older than Ada, RDNA 3 or Arc that is HEVC. The inventory said
+  so already, in the third bullet of "What Clipped actually distributes today",
+  and the Decision never joined it up — so a reader who stopped at the title,
+  which is what a title is for, came away with the opposite of the truth about
+  the exposure. The title now carries the clause and the Decision now opens with
+  the consequence.
+- **Decision 2 says what it is keeping.** It kept `libopenh264` as the single
+  software fallback while "Use Cisco's openh264 the way Firefox does" called
+  that the sharpest finding in the record. It still keeps it, for the same
+  product reason, and now says it is accepting a known exposure rather than
+  leaving that to be found in the Alternatives.
+
+**On the inline citations.** The file-and-line references in this record are
+indicative: three of them had drifted within six days of it being written, which
+is what line numbers do. Every claim they support was re-verified against the
+tree on 2026-08-19 and all of them hold — `Codec::EFFICIENCY_ORDER` is
+`[Av1, Hevc, H264]`, `best_codec_for` falls back to `H264`,
+`RECORDING_AUDIO_CODEC` is `PcmS16Le`, `libopenh264` is the one software
+encoder, and nothing in the workspace names `libkvazaar` or `libvvenc`. Follow
+the symbol, not the number.
 
 ## Context
 
@@ -147,6 +180,25 @@ or HEVC encoding that it can avoid shipping, and does not make its first signed
 public release until a maintainer has put the four questions below to a lawyer
 and written the answer down.**
 
+**What that means for most people's files today: HEVC.** The default is
+`CodecPreference::Automatic`, and `best_codec_for` takes the first codec from
+`Codec::EFFICIENCY_ORDER` the machine was *measured* to support. So AV1 is
+chosen only where the GPU registers an AV1 encoder — NVIDIA Ada and later, AMD
+RDNA 3 and later, Intel Arc. On everything older, which is most of the installed
+base a recorder meets, `Automatic` resolves to **HEVC**: the one standard in this
+inventory with no free tier, licensed through more than one pool plus holders in
+neither, and whose own published FAQ declines to state a rule for software.
+"Clipped commits to AV1" is a true statement about the preference and a false
+one about the outcome, and this record is not entitled to the first sentence
+without the second. **The modal Clipped recording today is HEVC, encoded on
+vendor silicon, and the whole of its patent cover is point 5's reading.**
+
+That is accepted deliberately rather than overlooked. The alternative is the
+AV1-only option rejected below — a recorder that will not record on a GTX 1080 —
+and the exposure is one every comparable recorder carries. What this paragraph
+buys is that a reader who stops at the Decision leaves knowing it, instead of
+having to join the inventory to the alternatives to find out.
+
 That resolves into six things a contributor can check against a pull request.
 
 1. **`Codec::EFFICIENCY_ORDER` is a licensing constraint as well as an
@@ -154,13 +206,33 @@ That resolves into six things a contributor can check against a pull request.
    it, for compression reasons or compatibility reasons, is a change to this
    record and not a tuning decision.
 
-2. **Clipped adds no second software encoder for a pool codec.** `libkvazaar`
-   (HEVC) and `libvvenc` (VVC) are inside the DLLs and stay uncalled. The
-   software fallback stays exactly one encoder. Where a *second* software codec
-   is wanted, [#157](https://github.com/wildware-uk/clipped/issues/157)'s
+2. **Clipped adds no second software encoder for a pool codec, and keeps the
+   one it has knowingly.** `libkvazaar` (HEVC) and `libvvenc` (VVC) are inside
+   the DLLs and stay uncalled. The software fallback stays exactly one encoder.
+   Where a *second* software codec is wanted,
+   [#157](https://github.com/wildware-uk/clipped/issues/157)'s
    software AV1 through `libsvtav1` is the one to write, and this record makes
    that preference explicit rather than incidental: it is the software encoder
    whose patent position is a published royalty-free grant rather than a pool.
+
+   The one it keeps is `libopenh264`, and that is the sharpest exposure in this
+   record rather than an incidental detail. [Use Cisco's openh264 the way
+   Firefox does](#use-ciscos-openh264-the-way-firefox-does) establishes why:
+   Clipped ships openh264's *code*, compiled by BtbN into `avcodec-62.dll`,
+   rather than Cisco's separately downloaded binary, so Cisco's coverage does
+   not reach it and BSD-2-Clause grants nothing over the standard. It is the one
+   place where Clipped's own process performs AVC encoding in software with no
+   vendor licence behind it. **It is kept anyway, and this is the record saying
+   so rather than leaving it to be discovered.** The reason is product, not
+   licensing: a machine whose hardware encoder is absent, broken, out of session
+   slots or held by another application still has to record, which is
+   [#18](https://github.com/wildware-uk/clipped/issues/18)'s whole subject, and
+   [Hardware only](#hardware-only-keep-avc-and-hevc-delete-the-software-fallback)
+   is rejected below for exactly that reason. So this is an accepted exposure
+   with two written-down ways out already:
+   [#157](https://github.com/wildware-uk/clipped/issues/157) landing makes
+   dropping `libopenh264` cheap rather than a loss of function, and Cisco's
+   mechanism remains on the table if question 1 comes back badly.
 
 3. **The audio codec for the player and export paths
    ([#392](https://github.com/wildware-uk/clipped/issues/392)) is Opus, not

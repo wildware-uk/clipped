@@ -314,6 +314,15 @@ states its codec position rather than leaving a reader to infer one from a
 directory of licence texts. It is `Accepted`: the position is decided and
 constrains pull requests now.
 
+**AV1 is the preference, not the outcome.** The default resolves to the most
+efficient codec the machine was *measured* to support, so AV1 is chosen only on
+NVIDIA Ada and later, AMD RDNA 3 and later and Intel Arc. On everything older
+it resolves to **HEVC** — the one standard in that inventory with no free tier
+and more than one pool — and on older hardware again to H.264. Most recordings
+Clipped makes today are therefore HEVC, encoded on vendor silicon. ADR 0008
+says so in its Decision; it is repeated here because this page is the other
+place somebody arrives at the question.
+
 What it does *not* settle is whether an obligation exists, and it says so — part
 of it is four questions for a lawyer that nobody in this repository can answer.
 Those questions block the first signed public release, and that block is a
