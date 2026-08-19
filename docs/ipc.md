@@ -699,8 +699,8 @@ twice. It is absent for a recording that is not part of a sitting.
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `get_diagnostics` | none | `diagnostics` | yes |
 | `get_storage` | `limits` (optional) | `storage` | yes |
-| `get_settings` | none | `settings` | yes |
-| `apply_settings` | `values`, below | `settings` | yes |
+| `get_settings` | `game`, below | `settings` | yes |
+| `apply_settings` | `game` and `values`, below | `settings` | yes |
 | `get_audio_devices` | none | `audio_devices` | yes |
 | `get_microphone_level` | `microphone` | `microphone_level` | yes |
 | `get_start_at_login` | none | `start_at_login` | yes |
@@ -2075,8 +2075,53 @@ somebody's settings live in (AGENTS.md section 55, [#252]).
     {"key":"capture_target","label":"Capture target","value":"game-window",
      "overridden":false,"choices":["game-window","display"],
      "accepted":"\"game-window\" or \"display\"","applies":false,
-     "unavailable":"every recording captures the game's own window. Reading this setting when a recording starts is issue #61"}]}}}}
+     "unavailable":"every recording captures the game's own window. Reading this setting when a recording starts is issue #650"}]}}}}
 ```
+
+#### The global page and one game's
+
+`get_settings` takes an optional `game`, named as the settings file names one —
+`counter-strike-2`. Absent is the **global** settings, which is what every game
+inherits from and what every window built before [#63] sends. Naming one resolves
+the same settings against that game's scope, and the answer differs in exactly
+one field: `overridden` becomes "*this game* set it" rather than "the global
+settings set it, rather than the built-in default".
+
+That distinction is why the layering is not done in the window. A game that pins
+`60` while the global settings also say `60` has **set** the value: its Reset
+does something, and it will not follow the global settings when they change. A
+window that read both pages and compared the values would call that inherited,
+draw no Reset, and silently unpin the setting the next time the global one moved
+(`crates/session/src/config/value.rs`, AGENTS.md sections 27 and 30).
+
+Two fields come back with every answer:
+
+- `game` is the game that was resolved for, absent for the global settings. It
+  is **echoed back to be checked**: a recorder built before [#63] ignores the
+  parameter and answers the global settings, and a window that drew that under a
+  game's name would show every value as inherited when the global settings had
+  set half of them.
+- `games` is every game the settings file holds a section of its own for, in
+  identifier order — the list a per-game page opens from. It is not the games
+  this machine has: which processes are games is the catalogue's answer and no
+  command reads it ([#245](https://github.com/wildware-uk/clipped/issues/245)).
+  A game stays on the list after its last override is cleared, because the
+  recorder keeps an empty section rather than dropping one, so it is "games with
+  a page" rather than "games with an override".
+
+A game's page is a **shorter list**, not the global one with rows disabled. Only
+the settings a game may override are on it — `capture_target`, `resolution`,
+`framerate`, `codec`, `encoder`, `microphone`, `system_audio` and
+`replay_window_seconds`. The recording directory, the three storage limits, the
+seven hotkeys and the four notification switches are global by construction, and
+`apply_settings` refuses one against a game by name rather than writing it to the
+global layer: a window saving a quota against a game and being answered "saved"
+would have changed it for the whole library.
+
+Text that is not a game identifier is refused with `invalid_parameters` rather
+than answered with the global settings, for the same reason.
+
+[#63]: https://github.com/wildware-uk/clipped/issues/63
 
 Every value crosses as **the words the settings file spells it in** — `120`,
 `hevc`, `name:Shure MV7` — and goes back the same way. A variant per setting on
@@ -2162,6 +2207,18 @@ following it, which writing today's default in as a value would not.
 ```json
 {"type":"request","id":14,"command":"apply_settings",
  "params":{"values":{"microphone":"name:Shure MV7","framerate":null}}}
+```
+
+The same request with a `game` writes into that game's own section instead, which
+is what makes the value an override. `null` is Reset there too, and it means
+"inherit this again" rather than "return to the shipped default" — the two differ
+whenever the global settings hold the setting. A game with nothing saved for it
+has no section at all; one appears the first time something is saved for it, and
+survives having every value on it reset.
+
+```json
+{"type":"request","id":15,"command":"apply_settings",
+ "params":{"game":"counter-strike-2","values":{"framerate":"120"}}}
 ```
 
 The reply is `settings` again — the settings **as they now stand** — so a window

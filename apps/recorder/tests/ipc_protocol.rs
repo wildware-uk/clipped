@@ -493,7 +493,7 @@ fn settings_of(reply: Reply) -> SettingsView {
 fn change(key: &str, value: Option<&str>) -> ApplySettings {
     let mut values = std::collections::BTreeMap::new();
     values.insert(key.to_owned(), value.map(str::to_owned));
-    ApplySettings { values }
+    ApplySettings { game: None, values }
 }
 
 #[test]
@@ -520,7 +520,7 @@ fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_reco
 
     let before = settings_of(
         client
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("a recorder that is serving can be asked for its settings"),
     );
     let microphone = setting(&before, "microphone");
@@ -564,7 +564,7 @@ fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_reco
     let mut second = recorder.client();
     let again = settings_of(
         second
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("the settings can be read again"),
     );
     assert_eq!(setting(&again, "microphone").value, "name:Shure MV7");
@@ -642,7 +642,7 @@ fn a_notification_switched_off_in_the_window_is_in_the_one_settings_file() {
 
     let before = settings_of(
         client
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("a recorder that is serving can be asked for its settings"),
     );
     for key in [
@@ -696,7 +696,7 @@ fn a_notification_switched_off_in_the_window_is_in_the_one_settings_file() {
     let mut second = recorder.client();
     let again = settings_of(
         second
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("the settings can be read again"),
     );
     assert_eq!(setting(&again, "recorder_unavailable").value, "false");
@@ -730,7 +730,7 @@ fn a_setting_the_file_would_refuse_is_refused_with_what_would_have_been_accepted
     // And nothing was saved: a refused change leaves the settings alone.
     let view = settings_of(
         client
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("the settings can still be read"),
     );
     assert_eq!(setting(&view, "framerate").value, "60");
@@ -3032,7 +3032,7 @@ fn a_recording_directory_saved_over_the_protocol_reaches_the_next_automatic_reco
     std::thread::sleep(Duration::from_secs(2));
     let now = settings_of(
         client
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("the settings can be read"),
     );
     assert_eq!(
@@ -3183,7 +3183,7 @@ fn a_recording_directory_saved_during_a_sitting_does_not_move_that_sitting() {
     // Still open, so the screen still says the folder is waiting on it.
     let now = settings_of(
         client
-            .call(&IpcCommand::GetSettings)
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
             .expect("the settings can be read"),
     );
     assert!(

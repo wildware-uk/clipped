@@ -157,9 +157,15 @@ fn applies(key: SettingKey) -> Result<(), &'static str> {
         // because the capture target decides which handle the caller resolves
         // before a recording exists to be configured
         // (`clipped_session::config`).
+        //
+        // This named issue #61 until #61 landed without it, deliberately:
+        // reading the setting is not a line of plumbing on the settings path,
+        // it is a change to how `watch` and `serve` resolve a window. It was
+        // split out as issue #650, and this sentence names that, because a row
+        // pointing at a closed issue reads as work already done.
         SettingKey::CaptureTarget => Err(
             "every recording captures the game's own window. Reading this setting when a \
-             recording starts is issue #61",
+             recording starts is issue #650",
         ),
     }
 }
@@ -292,14 +298,21 @@ impl SettingsFile {
         })
     }
 
-    /// Every setting, as it now stands.
+    /// Every setting, as it now stands, for the global settings or for one
+    /// game.
     ///
     /// # Errors
     ///
-    /// [`ErrorCode::Internal`] when there is nowhere to keep settings at all.
-    pub fn view(&self) -> Result<SettingsView, ProtocolError> {
+    /// [`ErrorCode::Internal`] when there is nowhere to keep settings at all,
+    /// and [`ErrorCode::InvalidParameters`] when the text offered is not a game
+    /// identifier — named at the moment it is asked for rather than answered
+    /// with the global settings, because a page drawn under a game's name from
+    /// the global answer would show every value as inherited when the global
+    /// settings had set half of them.
+    pub fn view(&self, game: Option<&str>) -> Result<SettingsView, ProtocolError> {
+        let game = game.map(parse_game).transpose()?;
         let store = self.locked()?;
-        Ok(view_of(store.current(), store.path()))
+        Ok(view_of(store.current(), store.path(), game.as_ref()))
     }
 
     /// Applies changes and saves them, answering with the settings as they now
@@ -309,6 +322,21 @@ impl SettingsFile {
     /// in full and only then stored, so a request that names one good value and
     /// one bad one leaves the file exactly as it was.
     ///
+    /// # What naming a game changes
+    ///
+    /// The layer the values are written into, and nothing else. A change with
+    /// no game edits the global settings every game inherits from; a change with
+    /// one edits that game's own section, which is what makes the value an
+    /// override (AGENTS.md section 30). `null` is Reset in both, and on a game's
+    /// page it means "inherit this again" rather than "return to the shipped
+    /// default" — the two differ whenever the global settings hold the setting.
+    ///
+    /// A game whose last override is cleared keeps its section, empty.
+    /// [`Configuration::set_game`] stores one rather than dropping it, because a
+    /// game somebody has opened the settings for and reset every value on is a
+    /// game they may well come back to — so the game stays on
+    /// [`SettingsView::games`] and its page is still reachable.
+    ///
     /// # Errors
     ///
     /// [`ErrorCode::InvalidParameters`] naming the setting, the value and what
@@ -316,6 +344,7 @@ impl SettingsFile {
     /// itself cannot be read or written — carrying `clipped_session`'s own
     /// sentence, which names the file and what to do about it.
     pub fn apply(&self, request: &ApplySettings) -> Result<SettingsView, ProtocolError> {
+        let game = request.game.as_deref().map(parse_game).transpose()?;
         let mut store = self.locked()?;
 
         // Read first. What is on disk may be newer than what this process last
@@ -332,8 +361,40 @@ impl SettingsFile {
         let mut storage = configuration.storage().clone();
         let mut notifications = configuration.notifications().clone();
         let mut hotkeys = configuration.hotkeys().clone();
+        // What this game already overrides, edited in place. Empty for a game
+        // the file says nothing about, which is how a game comes to have a
+        // section: by somebody saving something for it, and never by looking at
+        // its page.
+        let mut overrides = game.as_ref().map(|game| {
+            configuration
+                .game(game)
+                .cloned()
+                .unwrap_or_else(Preferences::none)
+        });
 
         for (key, value) in &request.values {
+            // A game may override the settings `SettingKey` enumerates and
+            // nothing else. Refused by name rather than written to the global
+            // layer: a window saving a storage limit against a game and being
+            // answered "saved" would have changed the quota for every game
+            // (AGENTS.md sections 27 and 45).
+            if let Some(overrides) = overrides.as_mut() {
+                let setting = SettingKey::from_name(key).ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidParameters,
+                        format!(
+                            "`{key}` cannot be set for one game: a game may override {}, and \
+                             everything else is global",
+                            SettingKey::ALL
+                                .map(|key| format!("`{}`", key.name()))
+                                .join(", ")
+                        ),
+                    )
+                })?;
+                set_setting(overrides, setting, value.as_deref())?;
+                continue;
+            }
+
             match key.as_str() {
                 RECORDING_DIRECTORY => set_recording_directory(&mut storage, value.as_deref())?,
                 MAXIMUM_USAGE | MINIMUM_FREE_SPACE | MAXIMUM_AGE_DAYS => {
@@ -367,6 +428,15 @@ impl SettingsFile {
         configuration.set_storage(storage);
         configuration.set_notifications(notifications);
         configuration.set_hotkeys(hotkeys);
+        // Only when something was actually changed. `set_game` stores a section
+        // even when it is empty, so writing one on every save would give a
+        // section to every game whose page was merely opened — and the games
+        // with a section are what the per-game screen lists (`view_of`).
+        if let (Some(game), Some(overrides)) = (game.as_ref(), overrides) {
+            if !request.values.is_empty() {
+                configuration.set_game(game.clone(), overrides);
+            }
+        }
 
         store.store(configuration).map_err(|error| {
             ProtocolError::new(
@@ -384,10 +454,12 @@ impl SettingsFile {
         // recording. Everything else in this process reads the store directly
         // when it needs it; the automatic recorder is the one holder of a copy,
         // and this is how it is told the copy is stale (`crate::watch`, issue
-        // #51).
+        // #51). A per-game save bumps it for exactly the same reason: a frame
+        // rate saved for Counter-Strike is resolved by the session manager the
+        // driver owns, out of the copy it was handed (issue #63).
         self.generation.fetch_add(1, Ordering::Relaxed);
 
-        Ok(view_of(store.current(), store.path()))
+        Ok(view_of(store.current(), store.path(), game.as_ref()))
     }
 
     /// Records that a recording of `game` ended on `method`, so that the next
@@ -476,13 +548,34 @@ impl SettingsFile {
     }
 }
 
-/// Sets one per-game-able setting, or clears it.
+/// Reads the game a settings command named.
+///
+/// Refused rather than resolved to the global settings, because the two answers
+/// are not near-misses: a page drawn under a game's name out of the global
+/// settings shows every value as inherited when the global settings had set
+/// half of them, and offers a Reset that would clear a value for every game
+/// (AGENTS.md section 27).
+///
+/// `clipped_session`'s own sentence, which already says what a game identifier
+/// looks like and shows one (AGENTS.md section 45).
+fn parse_game(game: &str) -> Result<GameKey, ProtocolError> {
+    GameKey::parse(game)
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
+}
+
+/// Sets one setting in the layer it belongs to, or clears it.
+///
+/// `layer` is the global settings on the global page and one game's own
+/// overrides on its page. The validation is the same either way — it is the
+/// file's, reached through `Preferences::set_written` — which is what makes a
+/// value the per-game page can save exactly a value the global page can
+/// (AGENTS.md section 55).
 fn set_setting(
-    global: &mut Preferences,
+    layer: &mut Preferences,
     key: SettingKey,
     value: Option<&str>,
 ) -> Result<(), ProtocolError> {
-    global.set_written(key, value).map_err(|error| {
+    layer.set_written(key, value).map_err(|error| {
         // `clipped_session`'s own sentence, which already names the setting,
         // the value and what would have been accepted (AGENTS.md section 45).
         ProtocolError::new(ErrorCode::InvalidParameters, error.to_string())
@@ -632,10 +725,27 @@ fn set_recording_directory(
         .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
 }
 
-/// Every setting, resolved for the global scope, in the order a screen lists
-/// them.
-fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
-    let resolved = configuration.resolve_global();
+/// Every setting, resolved for one scope, in the order a screen lists them.
+///
+/// # Why the two pages are not the same list
+///
+/// A game may override the eight settings [`SettingKey`] enumerates and nothing
+/// else. The recording directory, the three storage limits, the seven hotkey
+/// bindings and the four notification switches are global by construction, each
+/// for a reason written where it lives: a library is one thing however many
+/// games are in it, Windows registers a combination once per process, and the
+/// thing a notification interrupts is a person rather than a recording
+/// (`clipped_session::config::storage`, `::hotkeys`, `::notifications`).
+///
+/// So a per-game page is not the global page with some rows disabled — it is a
+/// shorter list, and sending the global-only rows on it would be sending
+/// controls that either do nothing for this game or quietly change every game
+/// (AGENTS.md section 27).
+fn view_of(configuration: &Configuration, path: &Path, game: Option<&GameKey>) -> SettingsView {
+    let resolved = game.map_or_else(
+        || configuration.resolve_global(),
+        |game| configuration.resolve_for(game),
+    );
     let mut settings: Vec<SettingEntry> = SettingKey::ALL
         .into_iter()
         .map(|key| {
@@ -644,6 +754,13 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
                 key: key.name().to_owned(),
                 label: key.label().to_owned(),
                 value: resolved.written_value(key),
+                // The scope's own answer, not a comparison this module makes:
+                // "this game set it" on a game's page and "the global settings
+                // set it, rather than the built-in default" on the global one.
+                // A game that set a value to the same text the global layer
+                // holds is overridden and offers Reset; a game that set nothing
+                // is inherited and does not
+                // (`clipped_session::config::Resolved::is_overridden`).
                 overridden: resolved.is_overridden(key),
                 choices: choices_for(key),
                 accepted: accepted_for(key),
@@ -658,13 +775,26 @@ fn view_of(configuration: &Configuration, path: &Path) -> SettingsView {
         })
         .collect();
 
-    settings.push(recording_directory_entry(configuration.storage()));
-    settings.extend(storage_limit_entries(configuration.storage()));
-    settings.extend(hotkey_entries(configuration));
-    settings.extend(notification_entries(configuration.notifications()));
+    if game.is_none() {
+        settings.push(recording_directory_entry(configuration.storage()));
+        settings.extend(storage_limit_entries(configuration.storage()));
+        settings.extend(hotkey_entries(configuration));
+        settings.extend(notification_entries(configuration.notifications()));
+    }
 
     SettingsView {
         file: path.to_string_lossy().into_owned(),
+        game: game.map(|game| game.as_str().to_owned()),
+        // Sent on both pages. On the global one it is the list a per-game page
+        // opens from; on a game's own it is what says whether the game being
+        // looked at is one the file already has a section for, which is the
+        // difference between "everything is inherited because nobody has
+        // configured this game" and "everything is inherited because it was all
+        // reset".
+        games: configuration
+            .games()
+            .map(|(key, _)| key.as_str().to_owned())
+            .collect(),
         settings,
     }
 }
@@ -1093,7 +1223,7 @@ mod tests {
     fn change(key: &str, value: Option<&str>) -> ApplySettings {
         let mut values = BTreeMap::new();
         values.insert(key.to_owned(), value.map(str::to_owned));
-        ApplySettings { values }
+        ApplySettings { game: None, values }
     }
 
     fn entry(view: &SettingsView, key: &str) -> SettingEntry {
@@ -1113,7 +1243,7 @@ mod tests {
         let directory = TestDirectory::new("storage-limits");
         let file = SettingsFile::at(directory.file());
 
-        let unset = file.view().expect("the view reads");
+        let unset = file.view(None).expect("the view reads");
         for key in [MAXIMUM_USAGE, MINIMUM_FREE_SPACE, MAXIMUM_AGE_DAYS] {
             let row = entry(&unset, key);
             assert_eq!(
@@ -1131,7 +1261,7 @@ mod tests {
         file.apply(&change(MAXIMUM_USAGE, Some("250000000000")))
             .expect("250 GB is above the floor");
 
-        let saved = file.view().expect("the view reads");
+        let saved = file.view(None).expect("the view reads");
         assert_eq!(entry(&saved, MAXIMUM_USAGE).value, "250000000000");
         assert!(entry(&saved, MAXIMUM_USAGE).overridden);
 
@@ -1168,7 +1298,7 @@ mod tests {
         );
 
         assert_eq!(
-            file.view()
+            file.view(None)
                 .expect("the view reads")
                 .settings
                 .iter()
@@ -1258,7 +1388,7 @@ mod tests {
 
         file.remember_capture_method(&game, CaptureMethod::DesktopDuplication);
 
-        let view = file.view().expect("the view reads");
+        let view = file.view(None).expect("the view reads");
         assert_eq!(
             entry(&view, "framerate").value,
             "144",
@@ -1431,7 +1561,7 @@ mod tests {
         values.insert("framerate".to_owned(), Some("60".to_owned()));
         values.insert("resolution".to_owned(), Some("wide".to_owned()));
         let refusal = settings
-            .apply(&ApplySettings { values })
+            .apply(&ApplySettings { game: None, values })
             .expect_err("`wide` is not a size");
 
         assert_eq!(refusal.code, ErrorCode::InvalidParameters);
@@ -1472,15 +1602,18 @@ mod tests {
         // tell it from one that works.
         let directory = TestDirectory::new("unavailable");
         let view = SettingsFile::at(directory.file())
-            .view()
+            .view(None)
             .expect("a view of the defaults");
 
         let capture_target = entry(&view, "capture_target");
         assert!(!capture_target.applies);
+        // Issue #650, and deliberately not the #61 this said before: #61 landed
+        // without reading this setting, so a row pointing at it now reads as
+        // work that is already done.
         assert!(capture_target
             .unavailable
             .as_deref()
-            .is_some_and(|reason| reason.contains("#61")));
+            .is_some_and(|reason| reason.contains("#650")));
 
         let microphone = entry(&view, "microphone");
         assert!(
@@ -1559,7 +1692,7 @@ mod tests {
     #[test]
     fn there_being_nowhere_to_keep_settings_is_said_rather_than_pretended_about() {
         let refusal = SettingsFile::nowhere()
-            .view()
+            .view(None)
             .expect_err("there is nowhere to read from");
 
         assert_eq!(refusal.code, ErrorCode::Internal);
@@ -1641,7 +1774,7 @@ mod tests {
         // that a category added without a row fails here.
         let directory = TestDirectory::new("notification-rows");
         let view = SettingsFile::at(directory.file())
-            .view()
+            .view(None)
             .expect("a view of the defaults");
 
         for category in NotificationCategory::ALL {
@@ -1666,7 +1799,7 @@ mod tests {
         // without a row fails here.
         let directory = TestDirectory::new("hotkey-rows");
         let file = SettingsFile::at(directory.file());
-        let view = file.view().expect("a view of the defaults");
+        let view = file.view(None).expect("a view of the defaults");
 
         let defaults = Bindings::defaults();
         for action in ACTIONS {
@@ -1763,7 +1896,7 @@ mod tests {
         );
 
         assert_eq!(
-            entry(&file.view().expect("the view reads"), &key).value,
+            entry(&file.view(None).expect("the view reads"), &key).value,
             UNBOUND,
             "a refused change must leave the file exactly as it was, and Take screenshot ships \
              bound to nothing",
@@ -1795,7 +1928,7 @@ mod tests {
         // refuses is a control that fails when it is used.
         let directory = TestDirectory::new("choices");
         let settings = SettingsFile::at(directory.file());
-        let view = settings.view().expect("a view of the defaults");
+        let view = settings.view(None).expect("a view of the defaults");
 
         for entry in &view.settings {
             for choice in &entry.choices {
@@ -1814,5 +1947,237 @@ mod tests {
                 entry.key,
             );
         }
+    }
+    /// A change to one game's settings, as the per-game page sends it.
+    fn change_for(game: &str, key: &str, value: Option<&str>) -> ApplySettings {
+        let mut values = BTreeMap::new();
+        values.insert(key.to_owned(), value.map(str::to_owned));
+        ApplySettings {
+            game: Some(game.to_owned()),
+            values,
+        }
+    }
+
+    #[test]
+    fn a_game_nobody_has_configured_inherits_every_setting_and_offers_no_reset() {
+        // The state the per-game page opens in, and the one a screen most
+        // easily gets wrong: every value is real and none of them is this
+        // game's, so nothing on the page may offer Reset (AGENTS.md sections 27
+        // and 30).
+        let directory = TestDirectory::new("game-with-no-entry");
+        let settings = SettingsFile::at(directory.file());
+        settings
+            .apply(&change("framerate", Some("144")))
+            .expect("the global settings take a frame rate");
+
+        let view = settings
+            .view(Some("counter-strike-2"))
+            .expect("a game with no section of its own still has a page");
+
+        assert_eq!(view.game.as_deref(), Some("counter-strike-2"));
+        assert!(
+            view.games.is_empty(),
+            "looking at a game must not give it a section: {:?}",
+            view.games,
+        );
+        assert_eq!(entry(&view, "framerate").value, "144");
+        for setting in &view.settings {
+            assert!(
+                !setting.overridden,
+                "{} is not set by this game and must not draw a Reset",
+                setting.key,
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_a_game_holds_is_an_override_even_when_it_matches_what_it_would_inherit() {
+        // The case that separates "inherited 60" from "set to 60". The value is
+        // identical, so a screen comparing the two pages would call this
+        // inherited and draw no Reset — and the setting would then follow a
+        // later change to the global settings, which is exactly what the user
+        // pinned it against.
+        let directory = TestDirectory::new("same-value-override");
+        let settings = SettingsFile::at(directory.file());
+        settings
+            .apply(&change("framerate", Some("144")))
+            .expect("the global settings take a frame rate");
+        settings
+            .apply(&change_for("counter-strike-2", "framerate", Some("144")))
+            .expect("and the game pins the same one");
+
+        let view = settings.view(Some("counter-strike-2")).expect("a page");
+        let framerate = entry(&view, "framerate");
+        assert_eq!(framerate.value, "144");
+        assert!(
+            framerate.overridden,
+            "a value this game holds is this game's, whatever it would have inherited",
+        );
+
+        // And a different game inherits it, which is the other half of the same
+        // fact: one page's override is not another's.
+        let other = settings.view(Some("minecraft")).expect("a page");
+        assert_eq!(entry(&other, "framerate").value, "144");
+        assert!(!entry(&other, "framerate").overridden);
+    }
+
+    #[test]
+    fn resetting_a_games_last_override_returns_it_to_inheriting_and_keeps_its_page() {
+        // What Reset does on the per-game page: the value goes back to being
+        // inherited, and it *follows* the global settings again rather than
+        // being frozen at today's answer. The game keeps its section, so its
+        // page stays on the list somebody opens it from
+        // (`Configuration::set_game`).
+        let directory = TestDirectory::new("reset-last-override");
+        let settings = SettingsFile::at(directory.file());
+        settings
+            .apply(&change_for("counter-strike-2", "framerate", Some("120")))
+            .expect("the game takes a frame rate");
+        assert_eq!(
+            settings
+                .view(Some("counter-strike-2"))
+                .expect("a page")
+                .games,
+            vec!["counter-strike-2".to_owned()],
+        );
+
+        let after = settings
+            .apply(&change_for("counter-strike-2", "framerate", None))
+            .expect("and gives it back");
+
+        let framerate = entry(&after, "framerate");
+        assert_eq!(framerate.value, "60", "back to what Clipped ships with");
+        assert!(!framerate.overridden, "and inheriting rather than pinned");
+        assert_eq!(
+            after.games,
+            vec!["counter-strike-2".to_owned()],
+            "a game somebody has configured keeps its page after resetting it",
+        );
+
+        // Following again rather than frozen: the global settings move and this
+        // game moves with them.
+        settings
+            .apply(&change("framerate", Some("144")))
+            .expect("the global settings change");
+        let view = settings.view(Some("counter-strike-2")).expect("a page");
+        assert_eq!(entry(&view, "framerate").value, "144");
+        assert!(!entry(&view, "framerate").overridden);
+    }
+
+    #[test]
+    fn a_global_only_setting_is_refused_for_a_game_rather_than_written_to_every_game() {
+        // The refusal that keeps the per-game page honest. A storage limit
+        // saved against a game and answered "saved" would have changed the
+        // quota over the whole library, which is one thing however many games
+        // are in it (AGENTS.md section 27).
+        let directory = TestDirectory::new("global-only-for-a-game");
+        let settings = SettingsFile::at(directory.file());
+
+        for key in [
+            MAXIMUM_USAGE,
+            RECORDING_DIRECTORY,
+            "recording_failed",
+            &hotkey_key(HotkeyAction::SaveReplay),
+        ] {
+            let refusal = settings
+                .apply(&change_for("counter-strike-2", key, Some("1")))
+                .expect_err("a global setting is not a game's to hold");
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+            assert!(
+                refusal.message.contains(key) && refusal.message.contains("global"),
+                "the refusal must name the setting and say why: {}",
+                refusal.message,
+            );
+        }
+
+        // And nothing was written: the game has no section, so its page still
+        // shows everything inherited.
+        let view = settings.view(Some("counter-strike-2")).expect("a page");
+        assert!(view.games.is_empty(), "{:?}", view.games);
+    }
+
+    #[test]
+    fn a_games_page_carries_only_the_settings_a_game_may_override() {
+        // Not the global page with rows disabled: a shorter list. A hotkey or a
+        // storage limit drawn on a game's page would be a control that either
+        // does nothing for that game or changes every game.
+        let directory = TestDirectory::new("per-game-list");
+        let settings = SettingsFile::at(directory.file());
+
+        let global = settings.view(None).expect("the global page");
+        let game = settings.view(Some("counter-strike-2")).expect("a page");
+
+        assert_eq!(
+            game.settings
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            SettingKey::ALL.map(SettingKey::name).to_vec(),
+        );
+        for key in [
+            RECORDING_DIRECTORY,
+            MAXIMUM_USAGE,
+            MINIMUM_FREE_SPACE,
+            MAXIMUM_AGE_DAYS,
+            "recording_failed",
+        ] {
+            assert!(
+                global.settings.iter().any(|entry| entry.key == key),
+                "{key} belongs on the global page",
+            );
+            assert!(
+                !game.settings.iter().any(|entry| entry.key == key),
+                "{key} is global and must not be drawn on a game's page",
+            );
+        }
+    }
+
+    #[test]
+    fn text_that_is_not_a_game_identifier_is_refused_rather_than_answered_with_the_global_page() {
+        // Answering the global settings under a game's name would draw every
+        // value as inherited when the global settings had set half of them, and
+        // would offer a Reset that cleared a value for every game.
+        let directory = TestDirectory::new("bad-game-key");
+        let settings = SettingsFile::at(directory.file());
+
+        let refusal = settings
+            .view(Some("Counter Strike"))
+            .expect_err("a capital and a space is not a game identifier");
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        assert!(
+            refusal.message.contains("Counter Strike"),
+            "the refusal must name what was offered: {}",
+            refusal.message,
+        );
+
+        assert_eq!(
+            settings
+                .apply(&change_for("Counter Strike", "framerate", Some("120")))
+                .expect_err("and a save is refused the same way")
+                .code,
+            ErrorCode::InvalidParameters,
+        );
+    }
+
+    #[test]
+    fn a_setting_saved_for_a_game_moves_the_generation_the_automatic_recorder_watches() {
+        // The whole of "changes apply to the next session without restarting"
+        // for a per-game setting: the driver holds a copy of the configuration
+        // and refreshes it when this number moves (`crate::watch`, issue #51).
+        // A per-game save that did not bump it would reach a recording the
+        // window asked for and never an automatic one — which is every
+        // recording a per-game setting exists for.
+        let directory = TestDirectory::new("per-game-generation");
+        let settings = SettingsFile::at(directory.file());
+        let before = settings.generation();
+
+        settings
+            .apply(&change_for("counter-strike-2", "framerate", Some("120")))
+            .expect("the game takes a frame rate");
+
+        assert!(
+            settings.generation() > before,
+            "a per-game save has to tell the automatic recorder its copy is stale",
+        );
     }
 }

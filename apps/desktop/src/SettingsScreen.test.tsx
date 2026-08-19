@@ -627,7 +627,14 @@ describe('the Settings screen', () => {
     ['Audio', 'A named playback device', /Windows is playing through/, /#316/],
     ['Storage', 'Where deleted recordings wait', /Library screen/, /#646/],
     ['Storage', 'How long the trash keeps something', /nothing expires/, /#646/],
-    ['Storage', 'Per-game settings', /section per game/, /#63/],
+    ['Per game', 'Record this game at all', /catalogue’s answer/, /#245/],
+    ['Per game', 'Capture mode for this game', /one capture mode/, /#78/],
+    [
+      'Per game',
+      'Where this game’s recordings go, and what they may occupy',
+      /Storage section/,
+      /section 31/,
+    ],
     ['Notifications', 'Replay saved, bookmark added, screenshot taken', /nothing reports/, /#110/],
     ['Startup', 'Start Clipped’s window when I sign in', /the switch above/, /#308/],
   ])(

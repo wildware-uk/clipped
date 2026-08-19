@@ -222,7 +222,9 @@ impl Notifier {
         // in the settings file before it is read back.
         let view = match migrate_legacy_switches(app, &link) {
             Some(view) => Some(view),
-            None => match link.call(&clipped_ipc::Command::GetSettings) {
+            None => match link.call(&clipped_ipc::Command::GetSettings(
+                clipped_ipc::GetSettings::default(),
+            )) {
                 Ok(clipped_ipc::Reply::Settings { settings }) => Some(settings),
                 Ok(_) => {
                     eprintln!("clipped: the recorder answered `get_settings` with something else");
@@ -488,6 +490,7 @@ fn migrate_switches_at(
     };
 
     let view = match save(clipped_ipc::ApplySettings {
+        game: None,
         values: switches.changes(),
     }) {
         Ok(view) => view,
@@ -727,6 +730,8 @@ mod tests {
     /// What the recorder answers a successful `apply_settings` with.
     fn saved() -> SettingsView {
         SettingsView {
+            game: None,
+            games: Vec::new(),
             file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
             settings: Vec::new(),
         }

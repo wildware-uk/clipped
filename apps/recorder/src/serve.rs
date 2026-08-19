@@ -944,8 +944,8 @@ impl CommandHandler for RecorderService {
             // or writing one small file shares nothing with a recording, and
             // the only lock it takes is the settings file's own
             // (`crate::settings`, issue #51).
-            Command::GetSettings => Ok(Reply::Settings {
-                settings: self.settings_in_force(self.settings.view()?),
+            Command::GetSettings(request) => Ok(Reply::Settings {
+                settings: self.settings_in_force(self.settings.view(request.game.as_deref())?),
             }),
             // Answered with the settings as they now stand, so the window draws
             // what was saved rather than what it hoped had been — and, for the
@@ -5259,6 +5259,7 @@ mod tests {
         values.insert("microphone".to_owned(), Some("name:Shure MV7".to_owned()));
         let reply = service
             .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                game: None,
                 values,
             }))
             .expect("a device name is a value the settings file can hold");
@@ -5319,6 +5320,7 @@ mod tests {
         );
         service
             .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                game: None,
                 values,
             }))
             .expect("250 GB is a quota the settings file will hold");
@@ -5353,6 +5355,7 @@ mod tests {
         );
         service
             .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                game: None,
                 values,
             }))
             .expect_err("a thousand bytes is not a library");

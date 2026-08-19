@@ -1,4 +1,10 @@
-import type { AudioDevices, SettingEntry, SettingsView, StartAtLogin } from '@clipped/shared';
+import type {
+  AudioDevices,
+  LibraryGame,
+  SettingEntry,
+  SettingsView,
+  StartAtLogin,
+} from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useState } from 'react';
@@ -177,6 +183,136 @@ export const RECORDING_DIRECTORY = 'recording_directory';
 export const STORAGE_SECTION = 'storage';
 
 /**
+ * The section holding one game's settings.
+ *
+ * Named here for the reason {@link HOTKEYS_SECTION} is: renaming the section
+ * must not silently stop the per-game page being drawn.
+ */
+export const PER_GAME_SECTION = 'per-game';
+
+/**
+ * Whether a value was set by the scope whose page this is, or inherited.
+ *
+ * The recorder's answer, read and never recomputed: `overridden` is
+ * `Resolved::is_overridden` asked against the scope that was resolved for, and
+ * a window comparing two pages' values instead would get the one case that
+ * matters wrong. A game that pins 60 while the global settings say 60 has *set*
+ * it — the value is identical and the meaning is not, because the pin survives
+ * the day the global settings change (`crates/session/src/config/value.rs`).
+ */
+export interface Inheritance {
+  /**
+   * The word beside the control.
+   *
+   * A word rather than a colour or a mark alone: the distinction has to be
+   * legible to somebody who cannot tell one tag from another (AGENTS.md section
+   * 46, the rule `HotkeyList` already draws its states by).
+   */
+  readonly tag: string;
+  /** What that means for this setting, in one sentence. */
+  readonly hint: string;
+}
+
+/**
+ * What a per-game page says about where a value came from.
+ *
+ * A pure function, beside the screen rather than inside it, for the reason
+ * `describeGameDetection` is one: the wording is the part worth testing, and
+ * every state has exactly one rendering rather than a chain of conditions
+ * inside a component.
+ *
+ * The inherited sentence deliberately does not say "from your global settings".
+ * A `SettingEntry` carries whether *this* scope set the value and not which
+ * layer below it did, so a value that is inherited may be the global settings'
+ * or the one Clipped ships with — and naming the wrong one would be a claim
+ * this window has not got the answer to.
+ */
+export function describeInheritance(entry: SettingEntry): Inheritance {
+  if (entry.overridden) {
+    return {
+      tag: 'Set for this game',
+      hint: 'Set for this game. Reset returns it to whatever the settings above resolve to, and keeps following them.',
+    };
+  }
+  return {
+    tag: 'Inherited',
+    hint: 'Inherited: whatever the settings above resolve to. Changing it here sets it for this game only.',
+  };
+}
+
+/** One game a per-game page can be opened for. */
+export interface GameChoice {
+  /** The identifier the settings file names it by, which is what is sent. */
+  readonly id: string;
+  /** What it is called in the list. */
+  readonly label: string;
+  /** Whether the settings file already holds a section for it. */
+  readonly configured: boolean;
+}
+
+/**
+ * The games a per-game page can be opened for, and what each is called.
+ *
+ * Two sources, because neither is the answer on its own and this window cannot
+ * get the answer that would be:
+ *
+ * - the settings file's own sections ({@link SettingsView.games}), which are the
+ *   games somebody has already configured — including one whose recordings have
+ *   all been deleted, and one this build's catalogue no longer lists;
+ * - the library's games, which are the games with recordings, and the only
+ *   place a *name* comes from at all.
+ *
+ * What is missing is the catalogue: the list of games Clipped would recognise if
+ * they launched. No protocol command reads it and this window has no permission
+ * to read the file, which is issue #245 — so a game that has never been recorded
+ * and has never been configured cannot be opened here, and the screen says so
+ * rather than drawing a list that looks complete (AGENTS.md section 27).
+ *
+ * A configured game with no library row is listed by its identifier. That is
+ * what the settings file calls it, and it is what somebody hand-editing the file
+ * would see.
+ */
+export function gameChoices(
+  configured: readonly string[],
+  library: readonly LibraryGame[],
+): readonly GameChoice[] {
+  const named = new Map<string, string>();
+  for (const game of library) {
+    if (game.game_id !== undefined && game.name !== undefined) {
+      named.set(game.game_id, game.name);
+    }
+  }
+
+  const ids = new Set<string>(configured);
+  for (const game of library) {
+    if (game.game_id !== undefined) {
+      ids.add(game.game_id);
+    }
+  }
+
+  return [...ids]
+    .map((id) => ({
+      id,
+      label: named.get(id) ?? id,
+      configured: configured.includes(id),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+/**
+ * Whether the recorder answered about the game it was asked about.
+ *
+ * A recorder built before the per-game page ignores the scope and answers the
+ * global settings, and a window that drew that under a game's name would show
+ * every value as inherited when the global settings had set half of them — and
+ * would offer a Reset that cleared the value for every game. So the answer is
+ * checked rather than assumed (AGENTS.md section 27).
+ */
+export function answeredForGame(view: SettingsView, game: string): boolean {
+  return view.game === game;
+}
+
+/**
  * Whether a setting is a switch rather than a field or a list.
  *
  * True exactly when the only values the recorder will accept are `true` and
@@ -207,9 +343,18 @@ export const NO_DEVICE = 'none';
  */
 export const DEVICE_PREFIX = 'name:';
 
-/** Asks the recorder for every setting, as it now stands. */
-export async function readSettings(): Promise<SettingsView> {
-  return invoke<SettingsView>('recorder_settings');
+/**
+ * Asks the recorder for every setting, as it now stands.
+ *
+ * `game` is the identifier the settings file names a game by, and leaving it out
+ * is the global settings every game inherits from. The recorder resolves the
+ * layering: this window never reads the two pages and folds them together,
+ * because the fold destroys the one fact a per-game page is about — whether
+ * *this game* set the value, or is only inheriting it
+ * (`crates/session/src/config/value.rs`, AGENTS.md section 30).
+ */
+export async function readSettings(game?: string): Promise<SettingsView> {
+  return invoke<SettingsView>('recorder_settings', game === undefined ? {} : { game });
 }
 
 /**
@@ -222,8 +367,12 @@ export async function readSettings(): Promise<SettingsView> {
  */
 export async function saveSettings(
   values: Readonly<Record<string, string | null>>,
+  game?: string,
 ): Promise<SettingsView> {
-  return invoke<SettingsView>('apply_recorder_settings', { values });
+  return invoke<SettingsView>(
+    'apply_recorder_settings',
+    game === undefined ? { values } : { values, game },
+  );
 }
 
 /** Asks the recorder which microphones this machine has. */
@@ -362,13 +511,22 @@ export interface SettingsControl {
  * another window changed a moment earlier, cannot be drawn as saved
  * (`crates/ipc/src/settings.rs`).
  */
-export function useSettings(): SettingsControl {
+export function useSettings(game?: string): SettingsControl {
+  /*
+   * Nothing here resets when `game` changes, and nothing has to: a caller
+   * drawing more than one game's page mounts a component per game — `key={game}`
+   * — so a new game is a new hook with a fresh `reading`. Blanking the state
+   * inside the effect instead would be a setState in an effect body, and it is
+   * the *stale* half that matters: what is on screen while a second game is
+   * being read is the first game's overrides, drawn under the second one's name
+   * (AGENTS.md section 27, `PerGameSettings.tsx`).
+   */
   const [read, setRead] = useState<LibraryRead<SettingsView>>({ state: 'reading' });
   const [save, setSave] = useState<SaveState>({ state: 'idle' });
 
   useEffect(() => {
     let current = true;
-    readSettings()
+    readSettings(game)
       .then((settings) => {
         if (current) {
           setRead({ state: 'read', value: settings });
@@ -382,23 +540,26 @@ export function useSettings(): SettingsControl {
     return () => {
       current = false;
     };
-  }, []);
+  }, [game]);
 
-  const apply = useCallback(async (values: Readonly<Record<string, string | null>>) => {
-    setSave({ state: 'saving' });
-    try {
-      const settings = await saveSettings(values);
-      setRead({ state: 'read', value: settings });
-      setSave({ state: 'saved' });
-      return true;
-    } catch (thrown: unknown) {
-      // The edits stay on screen: a refused value is one somebody has to be
-      // able to correct, and a form that cleared itself would take the rest of
-      // their work with it (AGENTS.md section 45).
-      setSave({ state: 'refused', problem: asProblem(thrown) });
-      return false;
-    }
-  }, []);
+  const apply = useCallback(
+    async (values: Readonly<Record<string, string | null>>) => {
+      setSave({ state: 'saving' });
+      try {
+        const settings = await saveSettings(values, game);
+        setRead({ state: 'read', value: settings });
+        setSave({ state: 'saved' });
+        return true;
+      } catch (thrown: unknown) {
+        // The edits stay on screen: a refused value is one somebody has to be
+        // able to correct, and a form that cleared itself would take the rest of
+        // their work with it (AGENTS.md section 45).
+        setSave({ state: 'refused', problem: asProblem(thrown) });
+        return false;
+      }
+    },
+    [game],
+  );
 
   return { read, save, apply };
 }
@@ -626,12 +787,57 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           'Issue #646: a retention key, and something that runs `Trash::expire` against it. ' +
           'The type and the expiry are written and nothing configures or calls them.',
       },
+    ],
+  },
+  {
+    id: PER_GAME_SECTION,
+    label: 'Per game',
+    /*
+     * "the next recording of that game" and not "at once": the settings a
+     * recording is made with are resolved when it starts and nothing re-reads
+     * them under a running encoder, and the automatic recorder picks a saved
+     * change up on its next watcher pass, about a second later
+     * (`docs/configuration.md`, issues #51 and #61).
+     */
+    lead:
+      'What one game records at, on top of the settings above. A value you set here is that ' +
+      'game’s and nothing else’s; everything you leave alone follows the settings above, ' +
+      'including when you change them later. A change reaches the next recording of that game — ' +
+      'not one already running, and without restarting the recorder.',
+    keys: [],
+    rows: [
       {
-        label: 'Per-game settings',
+        label: 'Record this game at all',
         today:
-          'Not offered here. The settings file carries a section per game, which every game ' +
-          'inherits the values above through, and it is edited by hand.',
-        needs: 'Issue #63 for the per-game screen SPEC.md section 31 draws.',
+          'Nothing here. Whether a process is a game, and whether Clipped records it, is the ' +
+          'catalogue’s answer rather than the settings file’s — there is no key for it, so ' +
+          'there is nothing this page could save.',
+        needs:
+          'Issue #245: a command that reads and writes the game catalogue, which is where ' +
+          'excluding an application already lives (issue #45). SPEC.md section 31 lists ' +
+          '`enabled` as a per-game override and no store has a key for it.',
+      },
+      {
+        label: 'Capture mode for this game',
+        today:
+          'Nothing. There is one capture mode in this build — a continuous recording with a ' +
+          'replay buffer over it — so there is nothing to choose between, and no key carries a ' +
+          'choice.',
+        needs:
+          'Issues #78 and #77 for the Match Recording and Highlights Only modes SPEC.md ' +
+          'section 7 draws, and a setting for them to be chosen with.',
+      },
+      {
+        label: 'Where this game’s recordings go, and what they may occupy',
+        today:
+          'Not offered, and it will not be here: the recording directory and the three storage ' +
+          'limits are on the Storage section above, because a library is one thing however many ' +
+          'games are in it. The recorder refuses them for a game rather than saving them ' +
+          'globally.',
+        needs:
+          'Nothing. SPEC.md section 31 lists storage behaviour per game; ' +
+          '`clipped_session::config::storage` records why the quota is not one of the things it ' +
+          'can mean.',
       },
     ],
   },

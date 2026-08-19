@@ -625,8 +625,15 @@ function readStorageReport(value: JsonValue | undefined): StorageReport {
 
 function readSettingsView(value: JsonValue | undefined): SettingsView {
   const view = object(value, 'the settings');
+  const game = optionalStringField(view, 'game', 'the settings');
+  const games = optionalStringArrayField(view, 'games', 'the settings');
   return {
     file: stringField(view, 'file', 'the settings'),
+    // Absent is the global settings, and it is also what a recorder built
+    // before the per-game page answers whatever it was asked — which is why a
+    // page compares this against the game it asked about rather than assuming.
+    ...(game === undefined ? {} : { game }),
+    ...(games === undefined ? {} : { games }),
     settings: arrayField(view['settings'], 'a settings list', readSettingEntry),
   };
 }
@@ -636,6 +643,7 @@ function readSettingEntry(value: JsonValue | undefined): SettingEntry {
   const what = 'a setting';
   const choices = optionalStringArrayField(entry, 'choices', what);
   const unavailable = optionalStringField(entry, 'unavailable', what);
+  const notYetInForce = optionalStringField(entry, 'not_yet_in_force', what);
   return {
     key: stringField(entry, 'key', what),
     label: stringField(entry, 'label', what),
@@ -649,6 +657,11 @@ function readSettingEntry(value: JsonValue | undefined): SettingEntry {
     // Present exactly when nothing reads the setting, and it is the sentence
     // the screen shows in place of a working control.
     ...(unavailable === undefined ? {} : { unavailable }),
+    // And the other sentence: a setting that *is* read and whose saved value is
+    // not the one in use yet. Dropping it here left a client parsing a reply
+    // unable to say so at all, which is the control that looks as though it did
+    // nothing (AGENTS.md section 27, issue #609).
+    ...(notYetInForce === undefined ? {} : { not_yet_in_force: notYetInForce }),
   };
 }
 

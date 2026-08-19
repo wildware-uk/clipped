@@ -619,6 +619,10 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_preview_track(), &[]),
         ),
         (
+            "get_settings".to_owned(),
+            structure_of(&exemplar_get_settings(), &[]),
+        ),
+        (
             "apply_settings".to_owned(),
             structure_of(&exemplar_apply_settings(), &[]),
         ),
@@ -754,6 +758,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryEvents(_) => Some("library_events".to_owned()),
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::GetStorage(_) => Some("get_storage".to_owned()),
+                Command::GetSettings(_) => Some("get_settings".to_owned()),
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::SetFavourite(_) => Some("set_favourite".to_owned()),
@@ -771,7 +776,6 @@ fn commands() -> Vec<CommandSchema> {
                 | Command::Plugins
                 | Command::GetHotkeys
                 | Command::GetDiagnostics
-                | Command::GetSettings
                 | Command::GetAudioDevices
                 | Command::GetStartAtLogin => None,
             },
@@ -801,7 +805,7 @@ fn commands() -> Vec<CommandSchema> {
                 // Both settings commands answer with the same reply: what a
                 // change produced is the settings as they now stand
                 // (`crate::settings`).
-                Command::GetSettings | Command::ApplySettings(_) => {
+                Command::GetSettings(_) | Command::ApplySettings(_) => {
                     Some("reply.settings".to_owned())
                 }
                 Command::GetAudioDevices => Some("reply.audio_devices".to_owned()),
@@ -1720,7 +1724,7 @@ fn samples() -> Vec<Sample> {
             ServerMessage::Refused(crate::server::metrics_refusal()),
         ),
         (
-            "the settings, one of which nothing reads yet",
+            "one game's settings: one it set, one it inherits, and one nothing reads",
             ServerMessage::Response(Response {
                 id: 13,
                 outcome: Outcome::Ok(Reply::Settings {
@@ -2347,13 +2351,30 @@ fn exemplar_error() -> ProtocolError {
     crate::server::metrics_refusal()
 }
 
+/// A read of one game's settings, which is what the per-game page asks
+/// (issue #63).
+///
+/// The global page sends no game at all, and so does every window built before
+/// that page existed; naming one is what the field is here to show.
+fn exemplar_get_settings() -> crate::settings::GetSettings {
+    crate::settings::GetSettings {
+        game: Some("counter-strike-2".to_owned()),
+    }
+}
+
 /// A settings change: one value set and one reset, which are the two things a
 /// settings screen sends.
+///
+/// Scoped to a game, so the schema sees the field. A change with no game is the
+/// global settings, which is what the Settings screen's other sections send.
 fn exemplar_apply_settings() -> crate::settings::ApplySettings {
     let mut values = std::collections::BTreeMap::new();
     values.insert("microphone".to_owned(), Some("name:Shure MV7".to_owned()));
     values.insert("framerate".to_owned(), None);
-    crate::settings::ApplySettings { values }
+    crate::settings::ApplySettings {
+        game: Some("counter-strike-2".to_owned()),
+        values,
+    }
 }
 
 /// One setting, with every field populated so the schema sees them all.
@@ -2370,14 +2391,14 @@ fn exemplar_setting_entry() -> crate::settings::SettingEntry {
         applies: false,
         unavailable: Some(
             "a recording still captures the game's own window; reading this setting when a \
-             recording starts is issue #61"
+             recording starts is issue #650"
                 .to_owned(),
         ),
         // Populated so that the schema sees the field, like every other field
-        // on this exemplar. No real row carries both sentences at once — one
-        // is a setting nothing reads and the other is a setting that is read
-        // and has not got there yet — and `exemplar_settings_view` below is
-        // where each of them is shown on the row it belongs to.
+        // on this exemplar. No real row carries both sentences at once — one is
+        // a setting nothing reads and the other is a setting that is read and
+        // has not got there yet, and only the recording directory can be in the
+        // second state (issue #609).
         not_yet_in_force: Some(
             "Automatic recordings still go to the previous folder until the next session"
                 .to_owned(),
@@ -2385,12 +2406,28 @@ fn exemplar_setting_entry() -> crate::settings::SettingEntry {
     }
 }
 
-/// The settings a window is sent: one in force, one that is saved and not yet
-/// used, and one nothing reads at all.
+/// The settings a window is sent for one game: one that game set, one it
+/// inherits, and one nothing reads at all.
+///
+/// A per-game page rather than the global one, because the three rows below are
+/// the three states that page exists to tell apart, and because `game` and
+/// `games` are absent from the global answer — a schema derived from it would
+/// not see them (issue #63).
+///
+/// `recording_directory` is not on it, and cannot be: where the library lives
+/// is one thing however many games are in it, so it is a global-only setting
+/// and `apply_settings` refuses it against a game
+/// (`clipped_session::config::storage`). Its saved-but-not-yet-used sentence is
+/// on [`exemplar_setting_entry`] instead.
 fn exemplar_settings_view() -> crate::settings::SettingsView {
     crate::settings::SettingsView {
         file: r"C:\Users\alex\AppData\Local\Clipped\settings.json".to_owned(),
+        game: Some("counter-strike-2".to_owned()),
+        games: vec!["counter-strike-2".to_owned(), "minecraft".to_owned()],
         settings: vec![
+            // Set for this game: `overridden` is true, which is what enables
+            // Reset on this page and what a screen draws as "set for this game"
+            // rather than as "inherited" (`Resolved::is_overridden`).
             crate::settings::SettingEntry {
                 key: "microphone".to_owned(),
                 label: "Microphone".to_owned(),
@@ -2402,24 +2439,21 @@ fn exemplar_settings_view() -> crate::settings::SettingsView {
                 unavailable: None,
                 not_yet_in_force: None,
             },
-            // The saved-but-not-yet-used row, which only the recording
-            // directory can be: it moves between sittings and never during one,
-            // so a directory saved while a game is being recorded is in the
-            // file and is not yet where the next few minutes of footage is
-            // going (issue #609).
+            // Inherited: the value is the one that applies, and this game did
+            // not set it. The pair is the whole of AGENTS.md section 30 on the
+            // wire — a screen cannot tell "inherited 60" from "set to 60" out
+            // of the value alone, and a Reset for a value nobody set is a
+            // control that does nothing.
             crate::settings::SettingEntry {
-                key: "recording_directory".to_owned(),
-                label: "Recording directory".to_owned(),
-                value: r"D:\Clips".to_owned(),
-                overridden: true,
+                key: "framerate".to_owned(),
+                label: "Frame rate".to_owned(),
+                value: "60".to_owned(),
+                overridden: false,
                 choices: Vec::new(),
-                accepted: r"a folder on this machine, such as D:\Clips".to_owned(),
+                accepted: "1-480 frames per second".to_owned(),
                 applies: true,
                 unavailable: None,
-                not_yet_in_force: Some(
-                    r"Automatic recordings still go to C:\Users\alex\Videos\Clipped. They go here from the next session."
-                        .to_owned(),
-                ),
+                not_yet_in_force: None,
             },
             exemplar_setting_entry(),
         ],
@@ -3180,7 +3214,7 @@ fn every_built_command() -> Vec<Command> {
         Command::GetHotkeys,
         Command::GetDiagnostics,
         Command::GetStorage(exemplar_get_storage()),
-        Command::GetSettings,
+        Command::GetSettings(exemplar_get_settings()),
         Command::ApplySettings(exemplar_apply_settings()),
         Command::GetAudioDevices,
         Command::GetMicrophoneLevel(exemplar_microphone_level_request()),
@@ -3212,7 +3246,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::GetHotkeys
             | Command::GetDiagnostics
             | Command::GetStorage(_)
-            | Command::GetSettings
+            | Command::GetSettings(_)
             | Command::ApplySettings(_)
             | Command::GetAudioDevices
             | Command::GetMicrophoneLevel(_)
@@ -3851,6 +3885,7 @@ mod tests {
             "reply.audio_devices",
             "setting_entry",
             "settings_view",
+            "get_settings",
             "apply_settings",
             "audio_device",
             "audio_devices",

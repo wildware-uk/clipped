@@ -51,7 +51,7 @@ use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::preview::{OpenPreview, Preview};
 use crate::settings::{
-    ApplySettings, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest, SettingsView,
+    ApplySettings, AudioDevices, GetSettings, MicrophoneLevel, MicrophoneLevelRequest, SettingsView,
 };
 use crate::startup::{SetStartAtLogin, StartAtLogin};
 use crate::status::{
@@ -156,7 +156,13 @@ pub enum Command {
     /// Asked of the recorder rather than read from the file, because the
     /// recorder is the process that owns `settings.json` and the only one that
     /// knows which settings this build acts on (`crate::settings`).
-    GetSettings,
+    ///
+    /// The request names a game or does not, and that is the whole of the
+    /// difference between the global page and a per-game one: the recorder
+    /// resolves the same settings against a different scope and answers with
+    /// which of them *that* scope set (`crate::settings::GetSettings`, issue
+    /// #63).
+    GetSettings(GetSettings),
     /// Change settings, and save them.
     ///
     /// Answered with the settings as they now stand, so a window draws what was
@@ -229,7 +235,7 @@ impl Command {
             Self::GetHotkeys => "get_hotkeys",
             Self::GetDiagnostics => "get_diagnostics",
             Self::GetStorage(_) => "get_storage",
-            Self::GetSettings => "get_settings",
+            Self::GetSettings(_) => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
             Self::GetAudioDevices => "get_audio_devices",
             Self::GetMicrophoneLevel(_) => "get_microphone_level",
@@ -271,7 +277,7 @@ impl Command {
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "get_diagnostics" => Ok(Self::GetDiagnostics),
             "get_storage" => Ok(Self::GetStorage(parse_params(request)?)),
-            "get_settings" => Ok(Self::GetSettings),
+            "get_settings" => Ok(Self::GetSettings(parse_params(request)?)),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
             "get_audio_devices" => Ok(Self::GetAudioDevices),
             "get_microphone_level" => Ok(Self::GetMicrophoneLevel(parse_params(request)?)),
@@ -302,9 +308,9 @@ impl Command {
             | Self::Plugins
             | Self::GetHotkeys
             | Self::GetDiagnostics
-            | Self::GetSettings
             | Self::GetAudioDevices
             | Self::GetStartAtLogin => Ok(serde_json::Value::Null),
+            Self::GetSettings(request) => serde_json::to_value(request),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::GetStorage(request) => serde_json::to_value(request),
@@ -1024,12 +1030,24 @@ mod tests {
         );
         assert_eq!(applied.values.get("framerate"), Some(&None));
 
-        // And the two reads take nothing at all, so a window can ask without
-        // knowing anything about the settings first.
+        // And a read takes nothing at all, so a window can ask without knowing
+        // anything about the settings first — which is also what every window
+        // built before the per-game page sends.
         assert_eq!(
             Command::from_request(&request("get_settings", serde_json::Value::Null))
                 .expect("it parses"),
-            Command::GetSettings,
+            Command::GetSettings(GetSettings { game: None }),
+        );
+        // Naming a game asks the same question against that game's scope.
+        assert_eq!(
+            Command::from_request(&request(
+                "get_settings",
+                serde_json::json!({"game": "counter-strike-2"}),
+            ))
+            .expect("it parses"),
+            Command::GetSettings(GetSettings {
+                game: Some("counter-strike-2".to_owned()),
+            }),
         );
         assert_eq!(
             Command::from_request(&request("get_audio_devices", serde_json::Value::Null))

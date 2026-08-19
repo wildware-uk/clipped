@@ -46,6 +46,7 @@ import type {
   ActiveRecording,
   AddBookmarkParams,
   ApplySettingsParams,
+  GetSettingsParams,
   AudioDevice,
   AudioDevices,
   AudioDevicesReply,
@@ -793,7 +794,12 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     unavailable: 'optional',
     not_yet_in_force: 'optional',
   }),
-  settings_view: fields<SettingsView>({ file: 'required', settings: 'required' }),
+  settings_view: fields<SettingsView>({
+    file: 'required',
+    game: 'optional',
+    games: 'optional',
+    settings: 'required',
+  }),
   'reply.settings': fields<SettingsReply>({ reply: 'required', settings: 'required' }),
   audio_device: fields<AudioDevice>({ name: 'required', is_default: 'required' }),
   audio_devices: fields<AudioDevices>({ microphones: 'required' }),
@@ -816,7 +822,8 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     start_at_login: 'required',
   }),
-  apply_settings: fields<ApplySettingsParams>({ values: 'optional' }),
+  apply_settings: fields<ApplySettingsParams>({ game: 'optional', values: 'optional' }),
+  get_settings: fields<GetSettingsParams>({ game: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
   'recorder_status.recording': fields<RecordingStatus>({
@@ -993,8 +1000,10 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    // The scope is a parameter now: a game, or nothing for the global settings
+    // every game inherits from (issue #63).
     name: 'get_settings',
-    params: null,
+    params: 'get_settings',
     reply: 'reply.settings',
     available_in_this_build: true,
   },

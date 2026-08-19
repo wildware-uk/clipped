@@ -731,7 +731,7 @@ a second time
 | Setting | What re-reads it after a save |
 | --- | --- |
 | every per-game setting: `resolution`, `framerate`, `codec`, `encoder`, `microphone`, `system_audio`, `replay_window_seconds` | the **next recording**. A recording started from the window resolves it as it starts; the automatic recorder compares `SettingsFile::generation` on every watcher pass and refreshes its copy when it moves ([#51](https://github.com/wildware-uk/clipped/issues/51)) |
-| `capture_target` | **nothing** — every recording captures the game's own window whatever this says, and the settings screen draws that sentence instead of a control ([#61](https://github.com/wildware-uk/clipped/issues/61)) |
+| `capture_target` | **nothing** — every recording captures the game's own window whatever this says, and the settings screen draws that sentence instead of a control ([#650](https://github.com/wildware-uk/clipped/issues/650), split out of [#61](https://github.com/wildware-uk/clipped/issues/61) because reading it changes how a window is resolved rather than how a setting is read) |
 | `storage.maximum_usage_bytes`, `storage.minimum_free_space_bytes`, `storage.maximum_age_days` | the **storage sweep**, after every reconciliation. `apply_settings` pushes the saved limits to the library indexer ([#95](https://github.com/wildware-uk/clipped/issues/95)) |
 | `storage.recording_directory` | the **next sitting**. Held while one is open and taken up when it ends, which the row's `not_yet_in_force` says on screen ([#609](https://github.com/wildware-uk/clipped/issues/609)) |
 | `storage.trash_directory` | the **storage sweep**, out of the same limits push. No settings command carries it; it is edited by hand |
