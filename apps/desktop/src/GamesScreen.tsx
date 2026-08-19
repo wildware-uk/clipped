@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 
 import { describeGameDetection, whatWorksToday } from './gameDetection';
+import { GamesTable } from './GamesTable';
+import { describeProblem, useGames } from './library';
 import type { RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -42,6 +44,14 @@ import { WaitingOn, type Waiting } from './WaitingOn';
  * Everything SPEC.md sections 6 and 17 ask of this screen, against what each
  * one is waiting for.
  *
+ * One row left here when issue #55 closed and nobody came back: "sessions,
+ * clips, favourites and storage against each game", waiting on "the library
+ * index that counts them". That index has existed for some time, `library_games`
+ * carries exactly those figures to this window, and `useGames` — whose own
+ * documentation says "the figures on the Games screen" — was being used by Home
+ * and by the per-game settings and not by this screen. The table below is that
+ * row, drawn.
+ *
  * This table is the alternative to drawing four convincing empty columns. An
  * empty table headed Game / Recording / Last played is indistinguishable from a
  * machine that has played nothing, and this screen would be claiming to have
@@ -64,10 +74,6 @@ const MISSING: readonly Waiting[] = [
       'The same command, able to write the user overlay rather than the shipped seed data. Issues #45 and #245',
   },
   {
-    shows: 'Sessions, clips, favourites and storage against each game (SPEC.md section 17)',
-    needs: 'The library index that counts them. Issue #55',
-  },
-  {
     shows: 'Which game is being recorded now, and which session the file belongs to',
     needs: 'A protocol that can name a game and a session rather than a capture target. Issue #241',
   },
@@ -88,6 +94,7 @@ export interface GamesScreenProps {
 /** The Games screen. */
 export function GamesScreen({ link }: GamesScreenProps): ReactNode {
   const detection = describeGameDetection(link);
+  const games = useGames();
 
   return (
     <>
@@ -109,6 +116,34 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
         <h2 className="clipped-panel__heading">{detection.state}</h2>
         <p className="clipped-panel__body">{detection.detail}</p>
         <p className="clipped-panel__body clipped-muted">{whatWorksToday(link)}</p>
+      </section>
+
+      <h2 className="clipped-screen__heading">What has been recorded</h2>
+
+      <section className="clipped-panel" aria-label="Games recorded">
+        {games.state === 'reading' && (
+          <p className="clipped-panel__body clipped-muted" aria-busy="true">
+            Reading your library…
+          </p>
+        )}
+        {games.state === 'unread' && (
+          <p className="clipped-panel__body">{describeProblem(games.problem)}</p>
+        )}
+        {/*
+         * "No games recorded yet" and not an empty table. SPEC.md section 6 asks
+         * for an empty state that reflects the truth rather than sample data,
+         * and an empty table under those headings is indistinguishable from a
+         * library that could not be read.
+         */}
+        {games.state === 'read' && games.value.length === 0 && (
+          <p className="clipped-panel__body">
+            Your library was read and holds no games yet. A game appears here once Clipped has
+            recorded a sitting of it.
+          </p>
+        )}
+        {games.state === 'read' && games.value.length > 0 && (
+          <GamesTable games={games.value} showing="everything" label="Games recorded" />
+        )}
       </section>
 
       <h2 className="clipped-screen__heading">What this screen will show</h2>

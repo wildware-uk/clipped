@@ -1,7 +1,8 @@
 import type { SessionSummary } from '@clipped/shared';
 import type { ReactNode } from 'react';
 
-import { describeProblem, formatBytes, useGames, useSessions } from './library';
+import { GamesTable } from './GamesTable';
+import { describeProblem, useGames, useSessions } from './library';
 import { describeRecordControl } from './recording';
 import { describeRecordingNow, describeResizeEnding, WHERE_RECORDINGS_GO } from './recordingNow';
 import { SessionList } from './SessionList';
@@ -235,33 +236,13 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
           <p className="clipped-screen__lead">Your library was read and holds no games yet.</p>
         )}
         {games.state === 'read' && games.value.length > 0 && (
-          <table className="clipped-table" aria-label="Games">
-            <thead>
-              <tr>
-                <th scope="col">Game</th>
-                <th scope="col">Sessions</th>
-                <th scope="col">Recordings</th>
-                <th scope="col">Size</th>
-                <th scope="col">Files</th>
-              </tr>
-            </thead>
-            <tbody>
-              {games.value.map((game) => (
-                <tr key={game.game_id ?? 'unattributed'}>
-                  <td>{game.name ?? 'Not recognised'}</td>
-                  <td>{game.sessions}</td>
-                  <td>{game.recordings}</td>
-                  {/*
-                   * A missing file contributes nothing to the size — the space
-                   * it is not occupying is not being used — and is counted
-                   * beside it instead, in words (docs/library.md).
-                   */}
-                  <td>{formatBytes(game.bytes)}</td>
-                  <td>{game.missing === 0 ? 'All present' : `${String(game.missing)} missing`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          /*
+           * The summary width. The Games screen draws the same component with
+           * the columns SPEC.md section 17 asks for; Home is what has been
+           * recorded lately, above a list of sittings, and seven columns here
+           * would bury it.
+           */
+          <GamesTable games={games.value} showing="summary" label="Games" />
         )}
       </section>
 

@@ -398,7 +398,6 @@ describe('the Games screen', () => {
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['the catalogue of games', /every game Clipped knows/i, [245]],
     ['registering, renaming, excluding and disabling', /adding an unknown executable/i, [45, 245]],
-    ['counts and storage per game', /sessions, clips, favourites and storage/i, [55]],
     ['what is being recorded right now', /which game is being recorded now/i, [241]],
   ];
 
@@ -413,7 +412,10 @@ describe('the Games screen', () => {
     renderApp();
     await openGames(user);
 
-    const rows = within(screen.getByRole('table')).getAllByRole('row').slice(1);
+    // By name: this screen now draws a second table, of what has actually been
+    // recorded, and an unqualified `getByRole('table')` would be ambiguous.
+    const owed = screen.getByRole('table', { name: 'What the Games screen will show' });
+    const rows = within(owed).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(MUST_BE_NAMED.length);
 
     for (const [subject, shows, issues] of MUST_BE_NAMED) {
@@ -468,5 +470,108 @@ describe('the Games screen', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toContain('What this screen will show');
+  });
+});
+
+/**
+ * The table SPEC.md section 17 asks for, which this screen owed for as long as
+ * it named issue #55 as the thing that would land it.
+ *
+ * #55 closed, `library_games` has carried these figures to this window since,
+ * and `useGames` — whose own documentation says "the figures on the Games
+ * screen" — was used by Home and by the per-game settings and not by the screen
+ * it was named for. These cases are what stops that happening again quietly.
+ */
+describe('the Games screen, listing what has been recorded', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const TWO_GAMES = [
+    {
+      game_id: 'counter-strike-2',
+      name: 'Counter-Strike 2',
+      sessions: 3,
+      recordings: 5,
+      clips: 2,
+      favourites: 1,
+      bytes: 1_500_000_000,
+      missing: 0,
+      last_played_at: '2026-08-14T09:51:11+01:00',
+    },
+    // The row for sittings the catalogue would not attribute: no identifier and
+    // no name, at most one, last. Drawn rather than hidden — those are
+    // recordings somebody made.
+    {
+      sessions: 1,
+      recordings: 1,
+      clips: 0,
+      favourites: 0,
+      bytes: 2_400_000,
+      missing: 1,
+    },
+  ];
+
+  it('draws a row for each game, with what it has recorded of it', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } },
+      null,
+      { games: () => Promise.resolve(TWO_GAMES) },
+    );
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games recorded' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+
+    const first = within(rows[0] as HTMLElement)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent);
+    expect(first[0]).toBe('Counter-Strike 2');
+    expect(first).toContain('3');
+    expect(first).toContain('5');
+
+    // The unattributed row is named rather than blank: a cell with nothing in
+    // it reads as a game whose name was lost.
+    const second = within(rows[1] as HTMLElement).getAllByRole('cell')[0]?.textContent;
+    expect(second).toBe('Not recognised');
+  });
+
+  it('says the library holds no games rather than drawing an empty table', async () => {
+    // SPEC.md section 6 asks for an empty state that reflects the truth rather
+    // than sample data. An empty table under those headings is
+    // indistinguishable from a library that could not be read.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } },
+      null,
+      { games: () => Promise.resolve([]) },
+    );
+    renderApp();
+    await openGames(user);
+
+    expect(await screen.findByText(/holds no games yet/i)).toBeVisible();
+    expect(screen.queryByRole('table', { name: 'Games recorded' })).toBeNull();
+  });
+
+  it('says why when the library cannot be read, rather than showing nothing', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } },
+      null,
+      { games: () => Promise.reject(new Error('the library is locked')) },
+    );
+    renderApp();
+    await openGames(user);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('table', { name: 'Games recorded' })).toBeNull();
+    });
+    // The screen still stands: the detection block and the owed table are
+    // unaffected by a library that would not open.
+    expect(screen.getByRole('table', { name: 'What the Games screen will show' })).toBeVisible();
   });
 });
