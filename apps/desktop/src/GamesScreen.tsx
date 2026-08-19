@@ -30,9 +30,12 @@ import { WaitingOn, type Waiting } from './WaitingOn';
  *   issue #55. The session sidecars `clipped-recorder watch` writes beside its
  *   recordings (`docs/sessions.md`) are the only record that exists today, and
  *   nothing can read one from here;
- * - which game is being recorded *now* is issue #241: the protocol describes a
- *   recording by its capture target — `process 4242` — and has no vocabulary
- *   for a game or a session.
+ * - which game is being recorded *now* was issue #241, and is not waiting on
+ *   anything: the status carries a `SessionSummary` with `game_id` and
+ *   `game_name`, and Home draws it through `describeRecordingNow`. It is not
+ *   drawn twice. SPEC.md section 6 asks this screen for detection sources and
+ *   the game database rather than for a live recording panel, so this is a
+ *   choice about where one thing is shown and not a promise outstanding.
  *
  * What is left is real, and it is the one thing somebody opening this screen
  * most needs to know: **whether anything is detecting games at all**. That is
@@ -72,10 +75,6 @@ const MISSING: readonly Waiting[] = [
       'Adding an unknown executable, renaming a game, excluding an application, and disabling capture per game',
     needs:
       'The same command, able to write the user overlay rather than the shipped seed data. Issues #45 and #245',
-  },
-  {
-    shows: 'Which game is being recorded now, and which session the file belongs to',
-    needs: 'A protocol that can name a game and a session rather than a capture target. Issue #241',
   },
 ];
 

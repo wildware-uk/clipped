@@ -398,7 +398,6 @@ describe('the Games screen', () => {
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['the catalogue of games', /every game Clipped knows/i, [245]],
     ['registering, renaming, excluding and disabling', /adding an unknown executable/i, [45, 245]],
-    ['what is being recorded right now', /which game is being recorded now/i, [241]],
   ];
 
   it('names each thing it owes, and the issue that lands it', async () => {
