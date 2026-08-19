@@ -430,15 +430,33 @@ and it is a quarter of the bytes a list of objects would cost. Zero tracks is a
 successful answer and not a failure, which is what every recording Clipped
 writes today produces.
 
+## Where these numbers are drawn
+
+Two screens, and one set of arithmetic between them
+(`apps/desktop/src/waveformOutline.ts`): peaks in, an SVG path out, and one rule
+about what a missing waveform looks like.
+
+- **The playback screen**, since issue #448. One row per sound track of the
+  recording it is playing, drawn under the transport, at the width the panel is.
+- **The clip editor's lanes**, since issue #66. One row per audio track of the
+  *edit*, which is a different thing: the lane counts edit-document time and
+  these peaks are in recording time, so a lane is **one picture per segment**,
+  each holding the slice of buckets that segment uses. A clip trimmed from the
+  middle of a session draws the peaks of that part, and a clip cut from two
+  recordings draws each piece from its own file
+  (`apps/desktop/src/editor/lanePeaks.ts`, `docs/desktop-ui.md`).
+
+The three states above reach both. `Pending` and `Unavailable` are different
+sentences on both screens, and neither draws a line through the middle of a lane.
+
 ## What is not built
 
-- **Nothing draws these numbers on a timeline yet.** The playback screen draws
-  the peaks of the recording it is playing — the first time any of these numbers
-  has been on a screen — and issue #65 has since put the recording's *marks* on a
-  strip below them, but the two are not one picture: there is no playhead over the
-  peaks and nothing to scrub, which is issue #66. The clip editor's own lanes are
-  issue #83, and that screen still cannot open a clip at all (issue #306), so they
-  still say "No waveform".
+- The **resolution a clip's lane gets is set by the recording's length**, not by
+  the clip's. `open_preview` answers with at most 4,096 buckets spread over the
+  whole file, so an eight-second lane cut out of a three-hour session is a
+  handful of them — while the pyramid above holds that same audio at 10 ms.
+  Nothing is missing from the generator or the cache; what is missing is a way to
+  ask for a **range** of a recording, which is issue #657.
 - Nothing **suspends** the service when a recording starts. The recorder hosts
   it — `LibraryIndexer::for_this_user` starts it beside the indexer — but
   nothing calls `suspend_for_recording` or `resume`, so what protects a

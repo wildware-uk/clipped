@@ -75,7 +75,7 @@ function elementFor(screen: Screen, view: RecorderLinkView, notice: string | und
     case 'games':
       return <GamesScreen link={view.link} />;
     case 'editor':
-      return <EditorRoute />;
+      return <EditorRoute link={view.link} />;
     case 'settings':
       return <SettingsScreen />;
     case 'diagnostics':

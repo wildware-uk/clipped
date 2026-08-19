@@ -2,8 +2,10 @@ import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { useClipDocument } from './clipDocument';
+import { useClipWaveforms } from './clipWaveforms';
 import { EditorScreen } from './EditorScreen';
 import { CLIP_PARAMETER } from './route';
+import type { RecorderLinkState } from '../useRecorderLink';
 
 /**
  * The Editor route: a clip is named in the address, and its document is fetched
@@ -27,13 +29,19 @@ import { CLIP_PARAMETER } from './route';
  * hands it a string, with no recorder and no round trip in the way. This is the
  * part that talks to the recorder, and it is the part with three states of its
  * own to draw.
+ *
+ * The **waveforms** are asked for here for the same reason and are handed down
+ * the same way (issue #66). A clip draws on as many recordings as it has
+ * sources, and each one's peaks are a round trip; `useClipWaveforms` makes them
+ * and answers for a recording, so the screen and the timeline below it stay
+ * functions of what they are told.
  */
 
 /** The Editor route. */
-export function EditorRoute(): ReactNode {
+export function EditorRoute({ link }: { readonly link: RecorderLinkState | null }): ReactNode {
   const [parameters] = useSearchParams();
   const clip = parameters.get(CLIP_PARAMETER);
-  return <EditorFor clip={clip} />;
+  return <EditorFor clip={clip} link={link} />;
 }
 
 /**
@@ -41,8 +49,21 @@ export function EditorRoute(): ReactNode {
  *
  * Exported for its tests, which drive it with a clip rather than with a route.
  */
-export function EditorFor({ clip }: { readonly clip: string | null }): ReactNode {
+export function EditorFor({
+  clip,
+  link = null,
+}: {
+  readonly clip: string | null;
+  readonly link?: RecorderLinkState | null;
+}): ReactNode {
   const { read } = useClipDocument(clip);
+  /*
+   * Asked of the document that arrived rather than of the clip's identifier:
+   * which recordings a clip draws on is inside the document, and there is
+   * nothing to ask about until it is here. `null` while it is in flight asks
+   * nothing, and the hook is still called on every render, as it must be.
+   */
+  const waveforms = useClipWaveforms(read.state === 'read' ? read.value.document : null, link);
 
   if (clip === null) {
     // No clip chosen. `EditorScreen` says what the editor is and what still has
@@ -84,5 +105,5 @@ export function EditorFor({ clip }: { readonly clip: string | null }): ReactNode
     );
   }
 
-  return <EditorScreen clip={read.value.document} opened={read.value} />;
+  return <EditorScreen clip={read.value.document} opened={read.value} waveforms={waveforms} />;
 }

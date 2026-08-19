@@ -424,6 +424,14 @@ describe('the editor', () => {
       ['styles', '\\.clipped-timeline__playhead', 'background'],
       ['styles', '\\.clipped-timeline__segment', 'background'],
     ],
+    /*
+     * The peaks under an audio lane (issue #66). A waveform is the only thing
+     * that says how loud a second of the recording was, so 1.4.11 applies to it
+     * exactly as it does to a cut; and because one declaration fills the
+     * outlines on both screens, measuring it here measures the playback
+     * screen's as well.
+     */
+    ['the peaks under an audio lane', ['styles', '\\.clipped-timeline__peaks path', 'fill'], LANE],
   ];
 
   it.each(NON_TEXT)('draws %s at 3:1 or better', (_name, ink, ground) => {

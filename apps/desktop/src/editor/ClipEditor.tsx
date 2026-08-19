@@ -12,6 +12,8 @@ import {
 import { recordingOf, type AudioTrack, type EditDocument } from './document';
 import { countByKind, describeKind, kindsPresent, type EventMark } from '../events';
 import { ExportDialog } from './ExportDialog';
+import { lanePieces, type LaneAbsence, type LanePiece, type PeaksOf } from './lanePeaks';
+import { LANE } from '../waveformOutline';
 import {
   boundaries,
   formatTickLabel,
@@ -58,18 +60,28 @@ import {
  * what the dialog says an export of this clip would be — and that no export can
  * be started from this window yet — is `ExportDialog`'s.
  *
- * # Two things are absent rather than drawn
+ * # The waveforms under the lanes
  *
- * Neither is a gap in this component; both are things this window cannot reach
- * at all, and section 27 says an unavailable feature is represented as
- * unavailable rather than mocked up:
+ * Real peaks, since issue #66: `crates/waveform` computes them beside each
+ * recording and `open_preview` carries them, so a lane draws the sound of the
+ * part of the recording its segments use. `lanePeaks.ts` is the arithmetic and
+ * argues the hard half of it — the lane counts **edit-document** time and the
+ * peaks are in **recording** time, so a clip trimmed from the middle of a
+ * session draws a *slice*, and a clip cut from two recordings draws a piece per
+ * segment from its own file's peaks.
  *
- * - **the picture.** A frame lives in a recording, and this window has no
- *   file-system permission and no command that serves one.
- * - **the waveforms.** `crates/waveform` computes the peaks (#66) and writes
- *   them beside the recordings; the window cannot read a file, so a lane says
- *   it has no waveform rather than drawing a flat line, which is exactly what
- *   `docs/waveforms.md` says a missing waveform must never look like.
+ * What has not changed is the rule a missing waveform is drawn by: **never a
+ * flat line**, which `docs/waveforms.md` forbids by name because it is
+ * indistinguishable from silence. A lane with nothing to draw says so in
+ * words — and says which of "not yet", "not at all" and "this track takes
+ * nothing from this recording" it is, because those send somebody to three
+ * different places (AGENTS.md sections 27 and 45).
+ *
+ * # One thing is still absent rather than drawn
+ *
+ * **The picture.** A frame lives in a recording, and this window has no
+ * file-system permission and no command that serves one. Section 27 says an
+ * unavailable feature is represented as unavailable rather than mocked up.
  *
  * # Nothing here changes anything, with one exception
  *
@@ -106,6 +118,18 @@ export interface ClipEditorProps {
    * where there had merely been no question (AGENTS.md section 27).
    */
   readonly events?: readonly EventMark[] | null;
+  /**
+   * Where each recording this clip draws on stands for peaks, from
+   * `clipWaveforms.ts` (issue #66).
+   *
+   * `null` — the default — is "nobody has asked", which is not the same as any
+   * of the four answers a lookup can give and is drawn differently: one "No
+   * waveform" for the lane rather than a piece-by-piece account of a question
+   * nothing put. A caller that has a recorder to ask always passes a lookup,
+   * and the lookup answers `unasked` for a recorder that cannot make waveforms
+   * (AGENTS.md section 27).
+   */
+  readonly waveforms?: PeaksOf | null;
 }
 
 /** One event mark, at the place on the edited timeline where it is drawn. */
@@ -186,7 +210,12 @@ function describeLevel(track: AudioTrack, index: number, solo: Solo): string {
 }
 
 /** The editor. */
-export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorProps): ReactNode {
+export function ClipEditor({
+  clip,
+  durationNanos,
+  events = null,
+  waveforms = null,
+}: ClipEditorProps): ReactNode {
   const [playheadNanos, setPlayheadNanos] = useState(0);
   const [zoom, setZoom] = useState(ZOOM_STEPS[0] ?? 1);
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
@@ -227,6 +256,18 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
         ? null
         : eventMarks.placed.filter((one) => !hiddenKinds.has(one.mark.kind)),
     [eventMarks, hiddenKinds],
+  );
+  /*
+   * What each audio lane draws, and where. Held because it is a walk over every
+   * segment of every track and the timeline re-renders on every arrow key —
+   * and `null` when nobody has asked, which is a different lane entirely.
+   */
+  const lanes = useMemo(
+    () =>
+      waveforms === null
+        ? null
+        : clip.audio_tracks.map((_, index) => lanePieces(clip, index, durationNanos, waveforms)),
+    [clip, durationNanos, waveforms],
   );
   const placement = locate(clip, playheadNanos);
   const interval = tickIntervalNanos(durationNanos, zoom);
@@ -390,7 +431,7 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
         <div className="clipped-editor__frame">
           <p className="clipped-editor__frame-note">
             No picture. A frame is in the recording, and this window cannot open one: it has no
-            file-system permission and no command that serves frames. Issue #306.
+            file-system permission and no command that serves frames. Issue #658.
           </p>
         </div>
 
@@ -634,9 +675,18 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
                 })}
               </div>
 
-              {clip.audio_tracks.map((track) => (
+              {clip.audio_tracks.map((track, index) => (
                 <div className="clipped-timeline__lane" key={track.name}>
-                  <span className="clipped-timeline__absent">No waveform</span>
+                  {lanes === null ? (
+                    // Nobody has asked. One statement for the lane, because
+                    // "nothing was asked" is a fact about the whole of it and
+                    // not about any one segment.
+                    <span className="clipped-timeline__absent">No waveform</span>
+                  ) : (
+                    (lanes[index] ?? []).map((piece) => (
+                      <LanePeaks key={piece.segment} piece={piece} lane={track.name} />
+                    ))
+                  )}
                 </div>
               ))}
 
@@ -651,13 +701,7 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
 
       <EventNote events={events} marks={eventMarks} />
 
-      {clip.audio_tracks.length > 0 && (
-        <p className="clipped-editor__note clipped-muted">
-          No lane has a waveform. The peaks are computed from the recording and written beside it
-          (issue #66); this window cannot read a file, so a lane is drawn empty rather than as a
-          flat line, which would be indistinguishable from silence. Issue #306.
-        </p>
-      )}
+      <WaveformNote clip={clip} waveforms={waveforms} />
 
       {showExport && (
         <ExportDialog
@@ -727,6 +771,166 @@ function EventNote({
       cut, which would be a mark for footage this clip does not contain.
     </p>
   );
+}
+
+/**
+ * What a lane says when it has no peaks for one segment, in the lane itself.
+ *
+ * Four states and three sentences, because one of them is not a sentence: a
+ * round trip in flight draws nothing at all rather than a label that appears
+ * for an instant and is replaced by a picture.
+ *
+ * The other three are deliberately different words. "Not yet" is the ordinary
+ * state of a recording written a minute ago and it resolves itself; "No
+ * waveform" will not; and a track that takes nothing from the recording under
+ * this part of the clip is not missing anything at all — the exported track is
+ * silent there. Collapsing them into one string is the fabricated state
+ * AGENTS.md section 27 is about, and `docs/waveforms.md` names the first two as
+ * the pair that must never read alike.
+ */
+const ABSENT: Record<LaneAbsence, string | null> = {
+  asking: null,
+  pending: 'No waveform yet',
+  none: 'No waveform',
+  silent: 'Not in this recording',
+};
+
+/**
+ * One segment's worth of one audio lane.
+ *
+ * The picture is an inline `<svg>` for the reasons `Waveform.tsx` gives — it
+ * scales without being told, at the 200% this window runs at, and it can carry
+ * a name, which is the whole of what a screen reader gets from a waveform. Its
+ * `viewBox` is one unit per bucket and `preserveAspectRatio="none"` stretches
+ * that to whatever width the segment has at this zoom, so zooming in draws the
+ * same peaks wider rather than asking for more of them.
+ *
+ * **The label names the range**, and that is not decoration. "A waveform is
+ * drawn" is true of a build that put the whole recording's peaks under a clip
+ * trimmed from its middle; "Game from 01:32.000 to 01:44.000 of rec-…" is not,
+ * so the failure that catches it names what went wrong instead of saying an
+ * image is missing.
+ */
+function LanePeaks({
+  piece,
+  lane,
+}: {
+  readonly piece: LanePiece;
+  readonly lane: string;
+}): ReactNode {
+  const style = {
+    left: percent(piece.startFraction),
+    width: percent(piece.widthFraction),
+  };
+
+  if (!piece.content.drawn) {
+    const said = ABSENT[piece.content.why];
+    return said === null ? null : (
+      <span className="clipped-timeline__absent clipped-timeline__absent--part" style={style}>
+        {said}
+      </span>
+    );
+  }
+
+  return (
+    <svg
+      className="clipped-timeline__peaks"
+      style={style}
+      viewBox={`0 0 ${String(piece.content.buckets)} ${String(LANE)}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={describePeaks(piece, lane)}
+    >
+      <path d={piece.content.outline} />
+    </svg>
+  );
+}
+
+/**
+ * What one piece of a lane is called to somebody who cannot see it.
+ *
+ * The lane, the part of the recording drawn, and which recording — in the
+ * recording's own time, because that is the question a waveform answers and it
+ * is the one the timeline's own timecodes cannot: the ruler above is counting
+ * the clip.
+ */
+function describePeaks(piece: LanePiece, lane: string): string {
+  const range = `${formatTimecode(piece.fromNanos)} to ${formatTimecode(piece.toNanos)}`;
+  return `${lane} from ${range} of ${piece.recording ?? 'an undeclared source'}`;
+}
+
+/**
+ * What the timeline says about the waveforms beyond the lanes themselves.
+ *
+ * Nothing at all in the ordinary case — every recording answered and every lane
+ * drew — because a note repeating what is on the screen is a note nobody reads
+ * the day it says something. What it does carry is the two things a lane has no
+ * room for: which recording an absence is about, and what to do about it
+ * (AGENTS.md sections 28 and 45).
+ */
+function WaveformNote({
+  clip,
+  waveforms,
+}: {
+  readonly clip: EditDocument;
+  readonly waveforms: PeaksOf | null;
+}): ReactNode {
+  if (clip.audio_tracks.length === 0) {
+    return null;
+  }
+
+  if (waveforms === null) {
+    return (
+      <p className="clipped-editor__note clipped-muted">
+        No lane has a waveform: the peaks of these recordings have not been asked for. That is not
+        the same as their having none.
+      </p>
+    );
+  }
+
+  const said = describeWaveforms(clip, waveforms);
+  return said.length === 0 ? null : (
+    <p className="clipped-editor__note clipped-muted">{said.join(' ')}</p>
+  );
+}
+
+/**
+ * A sentence for each recording whose peaks are not here, and why.
+ *
+ * One per *recording* rather than one per lane: the answer is about a file, so
+ * a clip with four audio tracks over one recording that is still being read has
+ * one thing to say and not four.
+ */
+function describeWaveforms(clip: EditDocument, waveforms: PeaksOf): readonly string[] {
+  const said: string[] = [];
+  let older = false;
+
+  for (const recording of new Set(clip.sources.map((source) => source.recording))) {
+    const view = waveforms(recording);
+    if (view.state === 'unasked') {
+      older = true;
+    } else if (view.state === 'refused') {
+      said.push(`Clipped could not ask for the sound of ${recording}. ${view.problem.message}`);
+    } else if (view.state === 'answered' && view.preview.state === 'pending') {
+      said.push(
+        `Clipped is still reading the sound of ${recording}. Its peaks appear the next time this clip is opened.`,
+      );
+    } else if (view.state === 'answered' && view.preview.state === 'unavailable') {
+      said.push(
+        `There will be no waveform for ${recording}.${view.preview.reason === undefined ? '' : ` ${view.preview.reason}`}`,
+      );
+    }
+  }
+
+  if (older) {
+    // Reached whenever the attached recorder does not advertise `previews`,
+    // which is every recorder built before issue #448. The remedy is an
+    // up-to-date Clipped rather than a different clip, so that is what it says.
+    said.unshift(
+      'The recorder that is running is older than this window and cannot make waveforms. Restarting Clipped starts the recorder that came with it.',
+    );
+  }
+  return said;
 }
 
 /** How a segment's speed reads, so that "unchanged" is said rather than 1/1. */

@@ -155,13 +155,17 @@ describe('the Editor screen with a clip open', () => {
   });
 
   it('says a lane has no waveform rather than drawing a flat line', () => {
+    // Nothing has been asked here: this screen is handed a document and no
+    // lookup, so each lane says so once. The lanes drawn from real peaks are
+    // `EditorWaveforms.test.tsx`'s, and the three states they can be in with
+    // them; what this holds is that an editor given nothing draws nothing —
+    // never a line through the middle of a lane, which `docs/waveforms.md`
+    // forbids by name because it is indistinguishable from silence.
     renderWithClip();
 
-    // `docs/waveforms.md` is explicit: a track that could not be read is left
-    // out with its reason rather than included as a flat line, which is
-    // indistinguishable from a silent track.
     expect(screen.getAllByText('No waveform')).toHaveLength(2);
-    expect(screen.getByText(/peaks are computed from the recording/)).toBeVisible();
+    expect(screen.getByText(/have not been asked for/)).toBeVisible();
+    expect(document.querySelectorAll('path')).toHaveLength(0);
   });
 
   it('says there is no picture, rather than drawing an empty frame', () => {

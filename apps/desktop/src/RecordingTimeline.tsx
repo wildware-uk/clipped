@@ -19,15 +19,14 @@ import { formatTimecode, NANOS_PER_SECOND } from './timecode';
  *
  * # Why it is on the playback screen and not in the Editor
  *
- * Because this is where a recording is. The Editor cannot open a clip — nothing
- * in this window does, which is issue #306 — so its lanes are drawn over a
- * document handed in by a test and `ClipEditor` renders "No waveform" for every
- * track it has. A timeline whose whole purpose is to seek needs something that
- * plays, and the playback screen has had one since issue #304. The Editor keeps
- * its own event lane, over edit-document time, and it and this share the
- * vocabulary rather than the placement (`events.ts`): the two count different
- * clocks, which is the distinction `docs/desktop-ui.md` calls "the whole reason
- * that screen is hard".
+ * Because this is where a recording is. A timeline whose whole purpose is to
+ * seek needs something that plays, and the playback screen has had one since
+ * issue #304; the Editor has a document, and its own event lane over
+ * edit-document time. The two share the vocabulary rather than the placement
+ * (`events.ts`): they count different clocks, which is the distinction
+ * `docs/desktop-ui.md` calls "the whole reason that screen is hard" — and it is
+ * the same division that makes the Editor's waveforms a slice of a recording per
+ * segment rather than one picture per lane (issue #66).
  *
  * # What tells one mark's source from another's
  *

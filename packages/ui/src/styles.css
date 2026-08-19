@@ -728,6 +728,31 @@ code {
 }
 
 /*
+ * The same sentence over one *part* of a lane (#66), which is a segment of the
+ * clip whose recording has no peaks. Its `left` and `width` are the segment's
+ * own and arrive as a style, so the padding replaces the fixed offset above;
+ * the overflow is clipped rather than wrapped because a lane is one line tall
+ * and a short segment would otherwise push its words over its neighbours.
+ */
+.clipped-timeline__absent--part {
+  overflow: hidden;
+  padding-left: var(--space-1);
+  white-space: nowrap;
+}
+
+/*
+ * The peaks of the part of a recording one segment uses (#66). Positioned by
+ * the segment, and stretched to it: the `viewBox` is one unit per bucket and
+ * `preserveAspectRatio="none"` in the element is what lets a zoom draw the same
+ * peaks wider rather than ask for more of them.
+ */
+.clipped-timeline__peaks {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+/*
  * The lane of game events on a recording's timeline (issue #71). It sits above
  * the lanes rather than inside them because those are one `role="slider"` - the
  * playhead - and a button inside a slider is not a control a keyboard or a
@@ -964,8 +989,14 @@ code {
  * maxima along the top and the minima along the bottom of one closed path.
  * `--color-accent-600` on `--color-surface` is a mark rather than words, which
  * is the distinction `--color-accent-text` exists for.
+ *
+ * One declaration for both screens, deliberately (#66): the editor's lanes draw
+ * the same outlines through the same arithmetic, and a second fill here is how
+ * a waveform under the player and a waveform under a lane would start being
+ * different colours.
  */
-.clipped-waveform__lane-picture path {
+.clipped-waveform__lane-picture path,
+.clipped-timeline__peaks path {
   fill: var(--color-accent-600);
 }
 

@@ -1,7 +1,7 @@
 import type { Preview, PreviewTrack } from '@clipped/shared';
 import type { ReactNode } from 'react';
 
-import { envelope, LANE } from './waveformOutline';
+import { bucketCount, envelope, LANE } from './waveformOutline';
 
 /**
  * A recording's sound, drawn from the peaks the recorder answered with
@@ -31,12 +31,23 @@ import { envelope, LANE } from './waveformOutline';
  *
  * # What this does not do
  *
- * It is not a timeline. There is no playhead over it and nothing to scrub, which
- * is issue #66; a control drawn here that did nothing would be AGENTS.md section
- * 27. What is drawn is what the peaks say and nothing else. The recording's
- * marks are a strip of their own below this one — `RecordingTimeline.tsx`,
- * issue #65 — because they are placed by the recorder in the file's own time and
- * have nothing to do with what a bucket of peaks says.
+ * It is not a timeline. There is no playhead over it and nothing to scrub; a
+ * control drawn here that did nothing would be AGENTS.md section 27, and the
+ * screen that puts peaks under a playhead is the Editor (issue #66). What is
+ * drawn is what the peaks say and nothing else. The recording's marks are a
+ * strip of their own below this one — `RecordingTimeline.tsx`, issue #65 —
+ * because they are placed by the recorder in the file's own time and have
+ * nothing to do with what a bucket of peaks says.
+ *
+ * # The other screen that draws these
+ *
+ * The Editor's lanes, since issue #66. They share `waveformOutline.ts` and one
+ * CSS declaration and nothing else: this draws a row per sound track of one
+ * *file*, and that draws a row per audio track of an *edit* — in output time,
+ * at a zoom, one picture per segment holding the slice of a recording that
+ * segment uses (`editor/lanePeaks.ts`). Sharing the arithmetic is the point;
+ * a second copy of it is how the two would start disagreeing about what silence
+ * looks like.
  */
 
 /** What a waveform is drawn for. */
@@ -125,7 +136,7 @@ function TrackLane({
       ) : (
         <svg
           className="clipped-waveform__lane-picture"
-          viewBox={`0 0 ${(track.peaks?.length ?? 0) / 2} ${LANE}`}
+          viewBox={`0 0 ${bucketCount(track)} ${LANE}`}
           preserveAspectRatio="none"
           role="img"
           aria-label={`Sound of ${label} in ${of}`}
