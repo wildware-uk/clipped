@@ -65,6 +65,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::catalogue::{CatalogueExecutable, CatalogueGame, EntrySource};
 use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
 use crate::diagnostics::{
     AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
@@ -791,6 +792,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
+                | Command::CatalogueGames
                 | Command::Plugins
                 | Command::GetHotkeys
                 | Command::GetDiagnostics
@@ -807,6 +809,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::SaveReplay(_) => Some("reply.replay_saved".to_owned()),
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
+                Command::CatalogueGames => Some("reply.catalogue_games".to_owned()),
                 Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
                 Command::LibraryClipDocument(_) => Some("reply.library_clip_document".to_owned()),
                 Command::SaveClipDocument(_) => Some("reply.clip_document_saved".to_owned()),
@@ -1466,6 +1469,15 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "every game the catalogue knows, shipped and the user's own",
+            ServerMessage::Response(Response {
+                id: 12,
+                outcome: Outcome::Ok(Reply::CatalogueGames {
+                    games: exemplar_catalogue_games(),
+                }),
+            }),
+        ),
+        (
             "a recording copied into MP4 without everything it held",
             ServerMessage::Response(Response {
                 id: 11,
@@ -2111,6 +2123,56 @@ fn error_discriminant(error: &ProtocolError) -> String {
     }
 }
 
+/// Three catalogue entries, because the shape has three states and a mirror
+/// written against one of them would be wrong about the others.
+///
+/// A shipped entry recognised by its launcher identifier; a shipped entry
+/// recognised by a path-qualified executable name, which is how two games that
+/// ship one binary are told apart; and one of the user's own that they have
+/// excluded. An exemplar of only the first would leave `path_contains`,
+/// `EntrySource::User` and `excluded: true` undescribed, and the TypeScript
+/// mirror would be written as though they did not exist.
+fn exemplar_catalogue_games() -> Vec<CatalogueGame> {
+    vec![
+        CatalogueGame {
+            game_id: "counter-strike-2".to_owned(),
+            name: "Counter-Strike 2".to_owned(),
+            source: EntrySource::Shipped,
+            executables: vec![CatalogueExecutable {
+                name: "cs2.exe".to_owned(),
+                path_contains: Some("steamapps/common/Counter-Strike Global Offensive".to_owned()),
+            }],
+            launcher: Some("steam".to_owned()),
+            launcher_app_id: Some("730".to_owned()),
+            excluded: false,
+        },
+        CatalogueGame {
+            game_id: "half-life-2".to_owned(),
+            name: "Half-Life 2".to_owned(),
+            source: EntrySource::Shipped,
+            executables: vec![CatalogueExecutable {
+                name: "hl2.exe".to_owned(),
+                path_contains: Some("steamapps/common/Half-Life 2".to_owned()),
+            }],
+            launcher: Some("steam".to_owned()),
+            launcher_app_id: Some("220".to_owned()),
+            excluded: false,
+        },
+        CatalogueGame {
+            game_id: "a-game-of-my-own".to_owned(),
+            name: "A game of my own".to_owned(),
+            source: EntrySource::User,
+            executables: vec![CatalogueExecutable {
+                name: "mygame.exe".to_owned(),
+                path_contains: None,
+            }],
+            launcher: None,
+            launcher_app_id: None,
+            excluded: true,
+        },
+    ]
+}
+
 /// What a reply turned out to be, including the wire strings underneath it.
 fn reply_discriminant(reply: &Reply) -> String {
     match reply {
@@ -2201,6 +2263,7 @@ fn reply_discriminant(reply: &Reply) -> String {
             Some(_) => "library_sessions.more".to_owned(),
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
+        Reply::CatalogueGames { .. } => "catalogue_games".to_owned(),
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
         // Whether a recording is being captured is part of the path, for the
         // reason `shutting_down`'s `finalising` is: a mirror that dropped
@@ -3358,6 +3421,7 @@ fn every_built_command() -> Vec<Command> {
         Command::SaveReplay(exemplar_save_replay()),
         Command::LibrarySessions(exemplar_library_sessions()),
         Command::LibraryGames,
+        Command::CatalogueGames,
         Command::LibraryEvents(crate::library::LibraryEvents {
             recording: "1".to_owned(),
         }),
@@ -3410,6 +3474,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::SaveReplay(_)
             | Command::LibrarySessions(_)
             | Command::LibraryGames
+            | Command::CatalogueGames
             | Command::LibraryEvents(_)
             | Command::LibraryClipDocument(_)
             | Command::SaveClipDocument(_)
@@ -3603,6 +3668,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::LibraryGames {
             games: vec![exemplar_library_game()],
         },
+        Reply::CatalogueGames {
+            games: exemplar_catalogue_games(),
+        },
         Reply::RecordingExported {
             export: exemplar_export(),
         },
@@ -3758,6 +3826,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::ReplaySaved { .. }
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
+            | Reply::CatalogueGames { .. }
             | Reply::LibraryEvents { .. }
             | Reply::LibraryClipDocument { .. }
             | Reply::ClipDocumentSaved { .. }

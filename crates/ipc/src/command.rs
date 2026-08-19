@@ -38,6 +38,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalogue::CatalogueGame;
 use crate::diagnostics::Diagnostics;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
@@ -83,6 +84,13 @@ pub enum Command {
     LibrarySessions(LibrarySessions),
     /// Read what the library holds per game (SPEC.md section 17).
     LibraryGames,
+    /// Read the games the catalogue knows, shipped and the user's own.
+    ///
+    /// Deliberately not [`Self::LibraryGames`], which is what has been
+    /// *recorded*. A game can be in the catalogue and never played, which is
+    /// most of them, and a sitting can be recorded under no catalogue entry at
+    /// all (issue #245).
+    CatalogueGames,
 
     /// The game events of one recording, placed in its file.
     LibraryEvents(LibraryEvents),
@@ -238,6 +246,7 @@ impl Command {
             Self::SaveReplay(_) => "save_replay",
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
+            Self::CatalogueGames => "catalogue_games",
             Self::LibraryEvents(_) => "library_events",
             Self::LibraryClipDocument(_) => "library_clip_document",
             Self::SaveClipDocument(_) => "save_clip_document",
@@ -282,6 +291,7 @@ impl Command {
             "save_replay" => Ok(Self::SaveReplay(parse_params(request)?)),
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
+            "catalogue_games" => Ok(Self::CatalogueGames),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
             "library_clip_document" => Ok(Self::LibraryClipDocument(parse_params(request)?)),
             "save_clip_document" => Ok(Self::SaveClipDocument(parse_params(request)?)),
@@ -325,6 +335,7 @@ impl Command {
             Self::Ping
             | Self::GetStatus
             | Self::LibraryGames
+            | Self::CatalogueGames
             | Self::Plugins
             | Self::GetHotkeys
             | Self::GetDiagnostics
@@ -828,6 +839,12 @@ pub enum Reply {
         /// One row per game, and one for the sittings nothing was attributed
         /// to.
         games: Vec<LibraryGame>,
+    },
+    /// The games the catalogue knows.
+    CatalogueGames {
+        /// One row per entry, shipped and the user's own, in the order the
+        /// catalogue holds them.
+        games: Vec<CatalogueGame>,
     },
     /// A recording was copied into MP4, and the file is finished.
     ///

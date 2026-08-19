@@ -396,7 +396,6 @@ describe('the Games screen', () => {
    * the count is asserted for that reason rather than for tidiness.
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    ['the catalogue of games', /every game Clipped knows/i, [245]],
     ['registering, renaming, excluding and disabling', /adding an unknown executable/i, [45, 245]],
   ];
 
@@ -572,5 +571,115 @@ describe('the Games screen, listing what has been recorded', () => {
     // The screen still stands: the detection block and the owed table are
     // unaffected by a library that would not open.
     expect(screen.getByRole('table', { name: 'What the Games screen will show' })).toBeVisible();
+  });
+});
+
+/**
+ * The catalogue, which this screen could not list until the protocol could be
+ * asked (issue #245).
+ *
+ * Two things are worth guarding. That the table is drawn from what the recorder
+ * answered rather than from anything this window knows — the catalogue is half
+ * compiled into the recorder and half a file this process has no permission to
+ * open, so a screen that invented a row would be inventing the whole thing. And
+ * that a recorder which cannot be asked says so, rather than showing an empty
+ * table: "this recorder is older than this window" and "you have no games" are
+ * different sentences and only one of them is ever true here.
+ */
+describe('the Games screen, listing what Clipped knows', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const CATALOGUE = [
+    {
+      game_id: 'counter-strike-2',
+      name: 'Counter-Strike 2',
+      source: 'shipped',
+      executables: [
+        { name: 'cs2.exe', path_contains: 'steamapps/common/Counter-Strike Global Offensive' },
+      ],
+      launcher: 'steam',
+      launcher_app_id: '730',
+      excluded: false,
+    },
+    {
+      game_id: 'a-game-of-my-own',
+      name: 'A game of my own',
+      source: 'user',
+      executables: [{ name: 'mygame.exe' }],
+      excluded: true,
+    },
+  ];
+
+  function attached(features: readonly string[]) {
+    return {
+      link: 'attached' as const,
+      recorder_process_id: 7,
+      features,
+      status: { state: 'idle' as const },
+    };
+  }
+
+  it('lists what the recorder answered, saying which entries are the user’s own', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached(['catalogue']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+
+    const shipped = within(rows[0] as HTMLElement)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent);
+    expect(shipped[0]).toContain('Counter-Strike 2');
+    expect(shipped[1]).toContain('cs2.exe');
+    expect(shipped[2]).toContain('steam');
+    expect(shipped[3]).toContain('shipped');
+
+    const mine = within(rows[1] as HTMLElement)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent);
+    expect(mine[3]).toContain('yours');
+    // An exclusion is a decision about an entry rather than the deletion of
+    // one, so it is listed and said in words.
+    expect(mine[0]).toContain('excluded');
+    // An entry with no launcher says so rather than leaving the cell blank,
+    // which reads as a launcher whose name was lost.
+    expect(mine[2]).toContain('by name only');
+  });
+
+  it('says a recorder that cannot be asked is older, rather than showing an empty table', async () => {
+    // The feature is asked before the table is drawn. Without this the screen
+    // would send a command the recorder refuses and then report a failed read,
+    // and "your catalogue could not be read" is not what happened.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached([]), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+    });
+    renderApp();
+    await openGames(user);
+
+    expect(await screen.findByText(/cannot list its catalogue/i)).toBeVisible();
+    expect(screen.queryByRole('table', { name: 'Games Clipped knows' })).toBeNull();
+  });
+
+  it('says why when the catalogue cannot be read', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached(['catalogue']), null, {
+      catalogue: () => Promise.reject(new Error('the overlay is not valid TOML')),
+    });
+    renderApp();
+    await openGames(user);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('table', { name: 'Games Clipped knows' })).toBeNull();
+    });
+    expect(screen.queryByText(/cannot list its catalogue/i)).toBeNull();
   });
 });

@@ -103,6 +103,7 @@ import type {
   LibraryClipDocument,
   LibraryClipDocumentReply,
   SaveClipDocument,
+  CatalogueGamesReply,
   LibraryGame,
   LibraryEventsReply,
   LibraryTrashReply,
@@ -689,6 +690,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     games: 'required',
   }),
+  'reply.catalogue_games': fields<CatalogueGamesReply>({
+    reply: 'required',
+    games: 'required',
+  }),
   'reply.library_events': fields<LibraryEventsReply>({
     reply: 'required',
     lane: 'required',
@@ -957,6 +962,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'catalogue_games',
+    params: null,
+    reply: 'reply.catalogue_games',
+    available_in_this_build: true,
+  },
+  {
     name: 'library_events',
     params: 'library_events',
     reply: 'reply.library_events',
@@ -1133,6 +1144,8 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'catalogue_games':
+      return 'catalogue_games';
     case 'plugins':
       return 'plugins';
     case 'library_clip_document':

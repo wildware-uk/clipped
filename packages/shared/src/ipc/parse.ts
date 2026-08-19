@@ -85,6 +85,8 @@ import type {
   StartAtLogin,
   PluginState,
   RefusedPlugin,
+  CatalogueExecutable,
+  CatalogueGame,
   LibraryGame,
   LibraryRecording,
   LibrarySession,
@@ -411,6 +413,11 @@ function readReply(value: JsonValue | undefined): Reply {
       return {
         reply: 'library_games',
         games: arrayField(reply['games'], 'a games list', readLibraryGame),
+      };
+    case 'catalogue_games':
+      return {
+        reply: 'catalogue_games',
+        games: arrayField(reply['games'], 'a catalogue list', readCatalogueGame),
       };
     case 'library_events':
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
@@ -1464,6 +1471,37 @@ function readLibraryGame(value: JsonValue | undefined): LibraryGame {
     favourites: numberField(game, 'favourites', what),
     bytes: numberField(game, 'bytes', what),
     missing: numberField(game, 'missing', what),
+  };
+}
+
+function readCatalogueExecutable(value: JsonValue | undefined): CatalogueExecutable {
+  const rule = object(value, 'an executable rule');
+  const what = 'an executable rule';
+  const qualifier = optionalStringField(rule, 'path_contains', what);
+  return {
+    name: stringField(rule, 'name', what),
+    // Absent is a rule that asked for nothing beyond the name, which is a
+    // different thing from one that asked for an empty fragment.
+    ...(qualifier === undefined ? {} : { path_contains: qualifier }),
+  };
+}
+
+function readCatalogueGame(value: JsonValue | undefined): CatalogueGame {
+  const game = object(value, 'a catalogue entry');
+  const what = 'a catalogue entry';
+  const launcher = optionalStringField(game, 'launcher', what);
+  const appId = optionalStringField(game, 'launcher_app_id', what);
+  return {
+    game_id: stringField(game, 'game_id', what),
+    name: stringField(game, 'name', what),
+    // Read as the string it is rather than narrowed here: an entry source this
+    // build does not know is a newer recorder's, and refusing the whole
+    // catalogue over one unfamiliar word would lose every entry beside it.
+    source: stringField(game, 'source', what) as CatalogueGame['source'],
+    executables: arrayField(game['executables'], 'an executables list', readCatalogueExecutable),
+    ...(launcher === undefined ? {} : { launcher }),
+    ...(appId === undefined ? {} : { launcher_app_id: appId }),
+    excluded: booleanField(game, 'excluded', what),
   };
 }
 

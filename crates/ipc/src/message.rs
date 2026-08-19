@@ -128,6 +128,16 @@ pub mod features {
         RECORDING = "recording";
         /// The recorder can report its status, and push status events.
         STATUS_EVENTS = "status_events";
+        /// The recorder can list the games its catalogue knows.
+        ///
+        /// A UI asks for this before drawing a list of games, because a
+        /// recorder built before
+        /// [issue #245](https://github.com/wildware-uk/clipped/issues/245) has
+        /// no `catalogue_games` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// and an empty table is indistinguishable from a machine that knows no
+        /// games, which is the confusion this list exists to prevent.
+        CATALOGUE = "catalogue";
         /// The recorder can mark a moment in the recording it is making.
         ///
         /// A UI asks for this before offering an "Add Bookmark" control,

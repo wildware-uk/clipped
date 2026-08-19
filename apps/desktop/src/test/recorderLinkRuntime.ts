@@ -45,6 +45,13 @@ export interface CommandAnswers {
   /** What `library_events` answers, given the request. */
   readonly events?: (args: Record<string, unknown>) => Promise<unknown>;
   /**
+   * What `catalogue_games` answers.
+   *
+   * A rejection by default, like every other read: a stub that handed back a
+   * catalogue would let a screen pass while the recorder was never asked.
+   */
+  readonly catalogue?: () => Promise<unknown>;
+  /**
    * What `library_clip_document` answers, given the clip asked for.
    *
    * A rejection by default, like every other library read: a stub that quietly
@@ -344,6 +351,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'library_games') {
         return commands.games?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'catalogue_games') {
+        return commands.catalogue?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'library_events') {
         return commands.events?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);

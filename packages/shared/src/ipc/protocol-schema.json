@@ -42,6 +42,7 @@
         "save_replay",
         "library_sessions",
         "library_games",
+        "catalogue_games",
         "library_events",
         "library_clip_document",
         "save_clip_document",
@@ -135,6 +136,7 @@
       "values": [
         "recording",
         "status_events",
+        "catalogue",
         "bookmarks",
         "screenshots",
         "shutdown",
@@ -204,6 +206,7 @@
         "replay_saved",
         "library_sessions",
         "library_games",
+        "catalogue_games",
         "recording_exported",
         "playback_opened",
         "preview_opened",
@@ -833,6 +836,13 @@
       ],
       "optional": []
     },
+    "reply.catalogue_games": {
+      "required": [
+        "games",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.clip_document_saved": {
       "required": [
         "reply",
@@ -1302,6 +1312,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "catalogue_games",
+      "params": null,
+      "reply": "reply.catalogue_games",
+      "available_in_this_build": true
+    },
+    {
       "name": "library_events",
       "params": "library_events",
       "reply": "reply.library_events",
@@ -1662,6 +1678,7 @@
         "features": [
           "recording",
           "status_events",
+          "catalogue",
           "bookmarks",
           "screenshots",
           "shutdown",
@@ -2582,6 +2599,62 @@
       },
       "parses": true,
       "discriminant": "response.ok.recording_exported"
+    },
+    {
+      "name": "every game the catalogue knows, shipped and the user's own",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "games": [
+              {
+                "excluded": false,
+                "executables": [
+                  {
+                    "name": "cs2.exe",
+                    "path_contains": "steamapps/common/Counter-Strike Global Offensive"
+                  }
+                ],
+                "game_id": "counter-strike-2",
+                "launcher": "steam",
+                "launcher_app_id": "730",
+                "name": "Counter-Strike 2",
+                "source": "shipped"
+              },
+              {
+                "excluded": false,
+                "executables": [
+                  {
+                    "name": "hl2.exe",
+                    "path_contains": "steamapps/common/Half-Life 2"
+                  }
+                ],
+                "game_id": "half-life-2",
+                "launcher": "steam",
+                "launcher_app_id": "220",
+                "name": "Half-Life 2",
+                "source": "shipped"
+              },
+              {
+                "excluded": true,
+                "executables": [
+                  {
+                    "name": "mygame.exe"
+                  }
+                ],
+                "game_id": "a-game-of-my-own",
+                "name": "A game of my own",
+                "source": "user"
+              }
+            ],
+            "reply": "catalogue_games"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.catalogue_games"
     },
     {
       "name": "a recording copied into MP4 without everything it held",
