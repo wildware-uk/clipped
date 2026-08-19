@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 
 import { ClipEditor } from './ClipEditor';
 import { readEditDocument } from './document';
-import type { EventMark } from './events';
+import type { EventMark } from '../events';
 import { totalOutputNanos } from './timeline';
 
 /**

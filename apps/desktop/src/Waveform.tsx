@@ -31,10 +31,12 @@ import { envelope, LANE } from './waveformOutline';
  *
  * # What this does not do
  *
- * It is not a timeline. There is no playhead, no scrubbing, no bookmarks and no
- * events on it — those are issues #65 and #64, and a control drawn here that
- * did nothing would be AGENTS.md section 27. What is drawn is what the peaks
- * say and nothing else.
+ * It is not a timeline. There is no playhead over it and nothing to scrub, which
+ * is issue #66; a control drawn here that did nothing would be AGENTS.md section
+ * 27. What is drawn is what the peaks say and nothing else. The recording's
+ * marks are a strip of their own below this one — `RecordingTimeline.tsx`,
+ * issue #65 — because they are placed by the recorder in the file's own time and
+ * have nothing to do with what a bucket of peaks says.
  */
 
 /** What a waveform is drawn for. */

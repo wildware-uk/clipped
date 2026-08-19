@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest';
 
 import { storedDocument } from '../test/editDocumentFixture';
 import { readEditDocument, type EditDocument } from './document';
-import { countByKind, describeKind, kindsPresent, KNOWN_KINDS, type EventMark } from './events';
+import { countByKind, describeKind, kindsPresent, KNOWN_KINDS, type EventMark } from '../events';
 import { outputPositionsOf } from './timeline';
 
 /** The two recordings the fixture clip draws on. */

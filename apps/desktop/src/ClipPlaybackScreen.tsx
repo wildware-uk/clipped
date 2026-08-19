@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router';
 
 import {
@@ -7,6 +7,7 @@ import {
   formatElapsed,
   type HandedRecording,
   MISSING,
+  markedRecording,
   playbackSource,
   recordingOf,
   resolveClip,
@@ -19,6 +20,8 @@ import {
   usePlayback,
 } from './playback';
 import { PREVIEWS, pictureUri, type ThumbnailView, useThumbnail, useWaveform } from './preview';
+import { RecordingTimeline } from './RecordingTimeline';
+import { useRecordingMarks } from './recordingMarks';
 import { recorderCanDo, type RecorderLinkView } from './useRecorderLink';
 import { Waveform } from './Waveform';
 
@@ -56,6 +59,18 @@ import { Waveform } from './Waveform';
  * `clip` scheme this screen plays through still serves recordings and only
  * recordings (`src-tauri/src/playback.rs`,
  * `docs/adr/0016-derived-pictures-cross-the-control-protocol.md`).
+ *
+ * # The timeline under it
+ *
+ * `RecordingTimeline` draws the marks the library holds for this recording, and
+ * pressing one moves the player to it (issue #65). It is here rather than in the
+ * Editor because this is the screen that has a recording open — the Editor
+ * cannot open a clip yet, which is issue #306 — and because the marks are
+ * already placed in *this file* by the recorder, in the file's own time.
+ *
+ * The length they are placed against is the element's own `duration`, taken from
+ * `loadedmetadata`, for the same reason everything else here is: it is the
+ * timeline the seek actually happens on.
  *
  * # What is drawn only when it is true
  *
@@ -138,6 +153,22 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
   const video = useRef<HTMLVideoElement>(null);
   /** Where the recording was when a different track was asked for. */
   const resumeAt = useRef<number | null>(null);
+  /*
+   * The recording's length, as the element measured it. Held in state rather
+   * than read off the ref, because a ref changing is not a render and the
+   * timeline below has to be drawn again once there is something to place marks
+   * against. `NaN` until a container has been read, and a track change starts
+   * that again from a fresh element.
+   */
+  const [durationSeconds, setDurationSeconds] = useState<number | null>(null);
+
+  /*
+   * The marks the library holds for this recording (issue #65). Asked for by the
+   * index's own key, which is only in the address when the Library put it there
+   * — `markedRecording` is where that is argued.
+   */
+  const marked = markedRecording(recordingId, handed, resolution);
+  const marks = useRecordingMarks(marked.recording);
 
   return (
     <>
@@ -192,8 +223,10 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
              * `controls` is the element's own transport: play, pause, a
              * scrubber over a duration it measured, and the volume. Clipped
              * draws none of its own, because every one of them would be a
-             * second answer to something the element already knows (SPEC.md
-             * section 42's frame-accurate seeking is issue #52).
+             * second answer to something the element already knows (a transport
+             * of Clipped's own is SPEC.md section 42 and issue #52; its
+             * frame-accurate seeking is already here, which is the correction
+             * in ADR 0011).
              */}
             {/* eslint-disable-next-line jsx-a11y/media-has-caption -- a recording of somebody's game has no caption track, and there is nothing to write one from. */}
             <video
@@ -212,6 +245,13 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
                 if (resume !== null && video.current !== null) {
                   video.current.currentTime = resume;
                 }
+                // The one measurement of this recording's length anything in
+                // this window has. A container still being written, or one the
+                // element could not read, reports `NaN` or `Infinity`, and the
+                // timeline below says it has no length rather than drawing
+                // marks against one.
+                const length = video.current?.duration ?? Number.NaN;
+                setDurationSeconds(Number.isFinite(length) && length > 0 ? length : null);
               }}
             />
 
@@ -224,6 +264,24 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
             <Waveform
               preview={peaks.state === 'answered' ? peaks.preview : null}
               of={fileName(source.file)}
+            />
+
+            {/*
+             * The recording's own timeline (issue #65). Under the waveform,
+             * because both describe the whole file and this one is the thing
+             * that moves the player: pressing a marker seeks the element to the
+             * position the recorder placed that event at.
+             */}
+            <RecordingTimeline
+              read={marks}
+              durationSeconds={durationSeconds}
+              of={fileName(source.file)}
+              unasked={marked.recording === null ? marked.why : ''}
+              onSeek={(seconds: number) => {
+                if (video.current !== null) {
+                  video.current.currentTime = seconds;
+                }
+              }}
             />
 
             {playback.stream.audio_tracks.length > 1 && (

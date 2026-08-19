@@ -432,12 +432,13 @@ writes today produces.
 
 ## What is not built
 
-- **Nothing draws these numbers on a timeline yet.** The transport is here and
-  the peaks reach the window; the timeline is issue #65 and the clip editor is
-  issue #83, and the Editor screen still cannot open a clip at all (issue #306),
-  so its lanes still say "No waveform". The playback screen draws the peaks of
-  the recording it is playing, which is the first time any of these numbers has
-  been on a screen.
+- **Nothing draws these numbers on a timeline yet.** The playback screen draws
+  the peaks of the recording it is playing — the first time any of these numbers
+  has been on a screen — and issue #65 has since put the recording's *marks* on a
+  strip below them, but the two are not one picture: there is no playhead over the
+  peaks and nothing to scrub, which is issue #66. The clip editor's own lanes are
+  issue #83, and that screen still cannot open a clip at all (issue #306), so they
+  still say "No waveform".
 - Nothing **suspends** the service when a recording starts. The recorder hosts
   it — `LibraryIndexer::for_this_user` starts it beside the indexer — but
   nothing calls `suspend_for_recording` or `resume`, so what protects a

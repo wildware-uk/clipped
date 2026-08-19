@@ -1261,21 +1261,123 @@ are asked for at the width they will be drawn at, which is what the pyramid in
 and a sentence, never as a flat line**, because a flat line is
 indistinguishable from silence.
 
-It is not a timeline. There is no playhead, nothing to scrub, and no bookmarks
-or events on it — those are
-[#64](https://github.com/wildware-uk/clipped/issues/64) and
-[#65](https://github.com/wildware-uk/clipped/issues/65), and a control drawn
-here that did nothing would be AGENTS.md section 27.
+It is not a timeline. There is no playhead over it and nothing to scrub, which
+is [#66](https://github.com/wildware-uk/clipped/issues/66). The marks are drawn
+below it, on a strip of their own.
+
+### The recording's timeline
+
+[#65](https://github.com/wildware-uk/clipped/issues/65), and the first thing in
+this window to read `library_events`. `RecordingTimeline.tsx` draws the marks the
+library holds for this recording; `recordingMarks.ts` places them and decides who
+each came from.
+
+**Why it is here and not in the Editor.** Because this is the screen that has a
+recording open. The Editor's own event lane has existed since
+[#71](https://github.com/wildware-uk/clipped/issues/71) and has never had
+anything to draw on — nothing in this window opens a clip, which is
+[#306](https://github.com/wildware-uk/clipped/issues/306), and it is why
+`ClipEditor` still renders "No waveform" for every track. A timeline whose whole
+purpose is to seek needs something that plays, and this screen has had one since
+#304. The two share the *vocabulary* (`events.ts`) and not the placement: the
+Editor counts edit-document time and this counts the recording's own.
+
+**Which recording's marks, and why not always.** `library_events` names a
+recording by the **index's own integer key** — the recorder parses it as an
+`i64` before it opens the database — and the only identifier in this window that
+is that key is the one the Library puts in the address when Play is pressed,
+beside the row it hands over. The recorder's `recording_id` for a recording being
+written now, or one a recorder died in the middle of, is a different identifier
+in a different space. So the timeline is drawn when a row was handed over, and
+otherwise the screen says which identifier it has and that it is not the
+library's. Sending the wrong one would spend a round trip to be told the
+parameters were invalid and put "your library could not be read" on a screen
+whose library is fine.
+
+**How accurately a marker seeks.** Pressing a marker sets the element's
+`currentTime` to that mark's own position — the recorder's nanoseconds divided by
+a thousand million, rounded nowhere. What that is worth had to be measured, and
+it was: [ADR 0011](adr/0011-what-the-webview-plays.md) carries the figures, and
+#65 is why it carries a **correction**. That record used to say a seek was not
+frame-accurate and that the picture came up at the nearest keyframe, which had
+never been measured and is wrong — `fastSeek` is the keyframe-only one, and
+assigning to `currentTime` is not.
+
+Measured against a Clipped-shaped file with a keyframe every two seconds and
+every frame colour-coded with its own index, in the same engine this window is
+drawn by: **the position is exact to the precision `currentTime` holds — about a
+microsecond, a five-hundredth of a frame at 60 fps — and the frame on screen is
+the frame at that position, not the keyframe up to two seconds before it.** Seeks
+took 32 to 61 milliseconds. So a marker is worth its own timecode, which is what
+its accessible name announces to the millisecond.
+
+What SPEC.md section 42 still wants past this is a transport of Clipped's own —
+[#52](https://github.com/wildware-uk/clipped/issues/52) — not a more accurate
+seek.
+
+**What keeps it usable on a multi-hour recording.** The recording is divided into
+`TIMELINE_COLUMNS` — 240 — and **one marker is drawn per occupied column**, so
+the number of nodes is bounded by the width of the panel rather than by the
+length of the recording. A marker seeks to the *earliest* mark under it and says
+how many are there; nothing is dropped, and marks the recorder placed outside the
+file are counted and reported rather than drawn at the ends.
+
+As with [scrolling a large library](#scrolling-a-large-library), **no frame rate
+is claimed and none was observed** — nothing in a Vitest process paints. What
+`recordingMarks.test.ts` and `RecordingTimeline.test.tsx` measure is the property
+a frame rate depends on, against a written-down fixture: **ten thousand marks
+across a three-hour recording**, bunched the way a game's really are. However
+many marks there are, no more than 240 markers are mounted; they are at distinct,
+increasing positions across the whole recording; every mark is under exactly one
+of them; and each still seeks to a mark's own nanosecond. Ten thousand is an
+order of magnitude past the worst real case — a three-hour Counter-Strike sitting
+is on the order of a thousand marks — and it is the same figure
+[library.md](library.md) measures the index against.
+
+**Telling one mark's source from another's.** Three signals, and the third is the
+only colour, so removing colour altogether loses nothing (AGENTS.md section 46):
+
+| Signal | What it is |
+| --- | --- |
+| A word in the accessible name | "reported by the `counter-strike-2` plugin", "marked by Clipped", "labelled by you" |
+| An outline | a triangle for an integration, a square for Clipped's own, a diamond for a label of yours, a cross where marks of more than one of those share a marker |
+| A legend above the strip | each origin that is on *this* recording, named in words beside its outline, with what it accounts for |
+
+The window works none of that out for itself. `EventKind::UserLabelled` has a
+wire form of its own — `user:` and then the words — and `EventSource::plugin`
+refuses `clipped` and anything under it, so "not the application" *is* "a
+plugin". The kind is read before the source, because a label of somebody's own is
+written *by* the application and so carries `clipped` as its source: reading the
+source first would put a person's own words down as something Clipped noticed.
+`crates/plugins/src/report.rs` refuses a plugin that reports a `UserLabelled`
+kind, and this strip is what that guard exists for.
+
+**What is deliberately not drawn.** SPEC.md section 18 asks for marks from
+bookmarks, clipping, microphone activity and screenshots as well as from
+integrations. **None of those four is written as a game event by anything in this
+build.** `ReportedEvent::into_event` is the only production `GameEvent::new` in
+the workspace, so every mark that reaches this screen came from a plugin: a
+bookmark is a `BookmarkFile` beside the recording
+([#64](https://github.com/wildware-uk/clipped/issues/64)), a saved clip and a
+screenshot are `SessionEventKind` rows against the *sitting*, and microphone
+activity is not written down at all. A lane each would be four empty rows that
+looked like four features that had stopped working, so the screen names them in a
+sentence under the strip instead, and the row in the table below names the work.
+Producing them is the other half of #71.
 
 ### What is not built
 
-Frame-accurate seeking and keyboard shortcuts of Clipped's own: what is drawn is
-the media element's transport, which seeks to a keyframe (SPEC.md section 42,
-[#52](https://github.com/wildware-uk/clipped/issues/52)). A playhead across the
-waveform and marks on it (#64, #65), and a waveform that follows the track being
+Keyboard shortcuts and a transport of Clipped's own: what is drawn is the media
+element's transport (SPEC.md section 42,
+[#52](https://github.com/wildware-uk/clipped/issues/52)). *Frame-accurate
+seeking* is no longer on this list — ADR 0011's correction measured it, and the
+element already gives it. A playhead across the waveform and something to
+scrub, and a waveform that follows the track being
 played rather than showing every one of them
-([#66](https://github.com/wildware-uk/clipped/issues/66)). Each is a row on the
-screen naming the work, which is the contract every unbuilt row keeps.
+([#66](https://github.com/wildware-uk/clipped/issues/66)). Bookmarks,
+screenshots, saved clips and microphone activity as marks, which needs something
+to produce them (#64, #71). Each is a row on the screen naming the work, which is
+the contract every unbuilt row keeps.
 
 ## The tray
 

@@ -24,7 +24,10 @@ import type { InterruptedRecording, RecorderLinkView } from './useRecorderLink';
  * (`src-tauri/src/playback.rs`).
  *
  * What is still not drawn is in {@link MISSING}, and each row names the work
- * that supplies it. Nothing here is drawn over an answer nobody gave: the
+ * that supplies it. The recording's marks *are* drawn, and pressing one seeks:
+ * `recordingMarks.ts` places them and `RecordingTimeline.tsx` draws them
+ * (issue #65), and {@link markedRecording} is what decides whether this screen
+ * has an identifier the library would recognise. Nothing here is drawn over an answer nobody gave: the
  * duration, the position and the picture size are the media element's own
  * measurements of the file it was handed (AGENTS.md section 27).
  */
@@ -257,6 +260,58 @@ export function playbackSource(
   }
 }
 
+/**
+ * Which recording the marks on the timeline can be asked for, or why they
+ * cannot be (issue #65).
+ *
+ * `library_events` names a recording by the **index's own integer key** — the
+ * recorder parses it as an `i64` before it opens the database
+ * (`apps/recorder/src/library.rs`) — and the only identifier in this window that
+ * is that key is the one the Library puts in the address when its Play button is
+ * pressed, alongside the row it hands over. The recorder's `recording_id` for a
+ * recording being written now, or for one a recorder died in the middle of, is a
+ * different identifier in a different space: sending it would spend a round trip
+ * to be told the parameters were invalid and would put "your library could not
+ * be read" on a screen whose library is perfectly well.
+ *
+ * So the row being handed over is what says the address is a library key. It is
+ * the same fact {@link playbackSource} already turns on, read for a different
+ * purpose.
+ */
+export type MarkedRecording =
+  /** Ask `library_events` about this. */
+  | { readonly recording: string; readonly why: null }
+  /** There is nothing to ask about, and this is what to say instead. */
+  | { readonly recording: null; readonly why: string };
+
+/** Which recording's marks this screen may read, given what it was told. */
+export function markedRecording(
+  recordingId: string,
+  handed: HandedRecording | null,
+  resolution: ClipResolution,
+): MarkedRecording {
+  if (handed !== null) {
+    return { recording: recordingId, why: null };
+  }
+  switch (resolution.found) {
+    case 'in-progress':
+      return {
+        recording: null,
+        why: 'A recording still being written has no timeline yet. Its marks are read from the library index, which picks a sitting up once the recording has finished.',
+      };
+    case 'interrupted':
+      return {
+        recording: null,
+        why: 'This recording is named by the identifier the recorder gave it, which is not the one the library indexes it under, so its marks cannot be looked up from here. Issue #52 is what would reconcile the two.',
+      };
+    case 'unindexed':
+      return {
+        recording: null,
+        why: 'This window has not been told which recording in the library this is, so there is nothing to read marks for.',
+      };
+  }
+}
+
 /** One thing this screen will show, and the work that has to land before it can. */
 export interface Missing {
   /** What the playback screen will do. */
@@ -280,14 +335,19 @@ export const MISSING: readonly Missing[] = [
       'The address carries the library’s own identifier and the row is handed over by whatever opened this screen, so a reload has nothing to look up. Looking one up cold is issue #52',
   },
   {
-    shows: 'Frame-accurate seeking, and keyboard shortcuts of Clipped’s own',
+    shows: 'Keyboard shortcuts and a transport of Clipped’s own',
     needs:
-      'What is drawn is the media element’s own transport, which seeks to a keyframe. SPEC.md section 42 asks for more, and it is issue #52',
+      'What is drawn is the media element’s own transport. Seeking is not what is missing — ADR 0011’s correction measured it landing on the frame it was given rather than on a keyframe — but SPEC.md section 42 asks for controls of Clipped’s own, and that is issue #52',
   },
   {
-    shows: 'Bookmarks and events on the waveform, and a playhead across it',
+    shows: 'A playhead across the waveform, and something to scrub',
     needs:
-      'The peaks are drawn (issue #448) and what is under them is not a timeline: there is no playhead, nothing to scrub and no marks on it. Bookmarks are written beside the recording already (issue #64) and issue #65 is the timeline that carries them',
+      'The recording’s marks are drawn and clicking one seeks (issue #65), but the transport is still the media element’s own: there is no playhead over the peaks and nothing to drag. Issue #66 is the waveform that would carry one',
+  },
+  {
+    shows: 'Bookmarks, screenshots, saved clips and microphone activity on the timeline',
+    needs:
+      'The timeline draws what the library holds as game events, and nothing in the recorder writes any of those four as one — a bookmark is a file beside the recording (issue #64) and the rest are recorded against the sitting. Issue #71 is the half that would produce them',
   },
   {
     shows: 'A waveform that follows the track being played',

@@ -924,8 +924,8 @@ code {
  * Laid out like the editor's timeline above and deliberately: a name column of
  * a fixed width beside a picture that takes what is left, so the names line up
  * down the column whatever they are called. It is not that timeline — there is
- * no ruler, no playhead and nothing to scroll, because a waveform is all that
- * has reached this window (#65 is the timeline).
+ * no ruler, no playhead and nothing to scroll, which is #66. The recording's
+ * marks are `.clipped-marks` below it (#65).
  */
 .clipped-waveform {
   margin: var(--space-3) 0 0;
@@ -967,4 +967,136 @@ code {
  */
 .clipped-waveform__lane-picture path {
   fill: var(--color-accent-600);
+}
+
+/*
+ * The recording's timeline, under the waveform on the playback screen
+ * (issue #65).
+ *
+ * It is a list of markers over one strip rather than a lane per source: the
+ * only marks anything in this build writes are a game integration's, so lanes
+ * for a bookmark, a screenshot, a saved clip and microphone activity would be
+ * four empty rows that looked broken. The strip is the editor's lane height, so
+ * a timeline here and a timeline there are the same size.
+ */
+.clipped-marks {
+  margin: var(--space-4) 0 0;
+}
+
+/*
+ * What each shape means, in words, above the strip. It is the third of the
+ * three signals a mark's source is told by - the accessible name and the
+ * outline are the other two - and it is the one that names them, so nothing
+ * about a marker's source rests on its colour (AGENTS.md section 46).
+ */
+.clipped-marks__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  font-size: var(--text-sm);
+  list-style: none;
+}
+
+.clipped-marks__legend-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.clipped-marks__lane {
+  position: relative;
+  height: var(--editor-lane-height);
+  margin: 0;
+  padding: 0;
+  border-bottom: var(--hairline) solid var(--color-divider);
+  background: var(--color-surface);
+  list-style: none;
+}
+
+.clipped-marks__at {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+/*
+ * The marker itself: an outline at the top of the strip and a stem down from it
+ * to the bottom, so that the shape is readable and the moment is still a line.
+ * The whole button is the target, which is the mark's width either side of the
+ * stem rather than the stem's two pixels (AGENTS.md section 46).
+ */
+.clipped-marks__mark {
+  display: flex;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  justify-content: center;
+  width: var(--mark-size);
+  margin-left: calc(var(--mark-size) / -2);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.clipped-marks__mark::after {
+  content: '';
+  position: absolute;
+  top: var(--mark-size);
+  right: 0;
+  bottom: 0;
+  left: 50%;
+  width: var(--rule-weight);
+  margin-left: calc(var(--rule-weight) / -2);
+  background: var(--color-neutral-700);
+}
+
+.clipped-marks__glyph {
+  flex: none;
+  width: var(--mark-size);
+  height: var(--mark-size);
+}
+
+/*
+ * Four outlines with four different numbers of corners: a triangle for a game
+ * integration, a square for Clipped's own, a diamond for something the user
+ * named, and a cross where marks of more than one of those are under one
+ * marker. The colours differ too and none of them carries the meaning on its
+ * own - the shape does, and `contrast.test.ts` measures each fill against the
+ * strip it is drawn on.
+ */
+.clipped-marks__glyph--plugin path {
+  fill: var(--color-neutral-900);
+}
+
+.clipped-marks__glyph--clipped path {
+  fill: var(--color-accent-700);
+}
+
+.clipped-marks__glyph--you path {
+  fill: var(--color-accent-900);
+}
+
+.clipped-marks__glyph--several path {
+  fill: var(--color-neutral-700);
+}
+
+/* The two ends of the strip, so a position on it can be read as a time. */
+.clipped-marks__span {
+  display: flex;
+  justify-content: space-between;
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+/* What a marker did, for a screen reader and for anybody who cannot see the
+   player's own transport move. */
+.clipped-marks__sought {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
 }
