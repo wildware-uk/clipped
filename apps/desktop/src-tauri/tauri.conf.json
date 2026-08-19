@@ -37,6 +37,11 @@
     "copyright": "The Clipped contributors",
     "licenseFile": "../../../LICENSE",
     "shortDescription": "Automatic game recorder",
-    "longDescription": "Clipped records your games in the background and keeps the moments worth keeping."
+    "longDescription": "Clipped records your games in the background and keeps the moments worth keeping.",
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer.nsh"
+      }
+    }
   }
 }
