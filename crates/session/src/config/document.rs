@@ -620,6 +620,56 @@ pub(crate) fn written_setting(settings: &ResolvedSettings, key: SettingKey) -> S
     }
 }
 
+/// One setting a *recording* is running with, in the same vocabulary.
+///
+/// The sibling of [`written_setting`], and beside it for the reason that one is
+/// beside the parser: the settings file, the command line, the log line a
+/// recording starts with, the session record and the diagnostics reading all
+/// spell a setting the same way, and a second renderer is how two of them come
+/// to disagree (AGENTS.md section 55).
+///
+/// Only the settings a [`RecordingSettings`] has a field for; `capture_target`
+/// and `replay_window_seconds` are not among them, and asking for either is a
+/// programming error rather than a value to invent
+/// (`crate::config::effective`).
+///
+/// # Panics
+///
+/// On [`SettingKey::CaptureTarget`] or [`SettingKey::ReplayWindow`].
+pub(crate) fn written_recording_setting(
+    recording: &crate::settings::RecordingSettings,
+    key: SettingKey,
+) -> String {
+    match key {
+        SettingKey::Resolution => write_resolution(recording.resolution()),
+        SettingKey::Framerate => recording.framerate().to_string(),
+        SettingKey::Codec => write_codec(recording.codec()),
+        SettingKey::Encoder => write_encoder(recording.encoder()),
+        SettingKey::Microphone => write_source(recording.microphone()),
+        SettingKey::SystemAudio => write_source(recording.system_audio()),
+        SettingKey::CaptureTarget | SettingKey::ReplayWindow => unreachable!(
+            "{key} is not a field of a recording; the list in `crate::config::effective` is              what keeps this unreachable"
+        ),
+    }
+}
+
+/// A recording's own name for an audio selection, in the file's vocabulary.
+///
+/// [`write_device`]'s counterpart for
+/// [`AudioSourceSetting`](crate::settings::AudioSourceSetting), which is what a
+/// recording carries rather than what a settings layer holds
+/// ([`AudioDeviceSetting::as_source`] is the conversion between them). The two
+/// produce the same three spellings, which is the point.
+fn write_source(source: &crate::settings::AudioSourceSetting) -> String {
+    match source {
+        crate::settings::AudioSourceSetting::SystemDefault => "default".to_owned(),
+        crate::settings::AudioSourceSetting::Off => "none".to_owned(),
+        crate::settings::AudioSourceSetting::Named(name) => {
+            format!("{LITERAL_DEVICE_PREFIX}{name}")
+        }
+    }
+}
+
 fn write_preferences(preferences: &Preferences) -> Map<String, Value> {
     let mut object = Map::new();
     if let Some(target) = preferences.capture_target() {

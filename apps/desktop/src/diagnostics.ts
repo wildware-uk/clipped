@@ -1,4 +1,9 @@
-import type { CaptureAccount, Diagnostics, EncoderAccount } from '@clipped/shared';
+import type {
+  CaptureAccount,
+  Diagnostics,
+  EffectiveSetting,
+  EncoderAccount,
+} from '@clipped/shared';
 import { PROTOCOL_VERSION } from '@clipped/shared';
 
 import { name as INTERFACE_NAME, version as INTERFACE_VERSION } from '../package.json';
@@ -260,6 +265,74 @@ export function describeEncoder(read: LibraryRead<Diagnostics>): Diagnostic {
 }
 
 /**
+ * What one row says about the settings the recording in progress is running
+ * with.
+ *
+ * The same four answers `describeCaptureBackend` has, and for the same reason:
+ * a recorder nobody has reached, a recorder that could not be reached, a
+ * recorder with nothing being recorded, and a recording with answers. The third
+ * is the one worth being careful about — a settings *file* exists between
+ * recordings and says what the next recording would be made with, and drawing
+ * that here would tell somebody their recording had used a setting they saved
+ * after it started (`docs/configuration.md`).
+ */
+export function describeRecordingSettings(read: LibraryRead<Diagnostics>): Diagnostic {
+  const subject = 'Recording settings';
+
+  if (read.state === 'reading') {
+    return { subject, reported: 'Being read from the recorder.', known: false };
+  }
+  if (read.state === 'unread') {
+    return { subject, reported: describeDiagnosticsProblem(read.problem), known: false };
+  }
+
+  const settings = read.value.settings;
+  if (settings === undefined || settings.length === 0) {
+    return {
+      subject,
+      reported:
+        'Nothing is being recorded, so no settings are in force. This is reported for the ' +
+        'recording in progress: a settings file says what the next recording would be made ' +
+        'with, which is not the same thing.',
+      known: false,
+    };
+  }
+
+  return {
+    subject,
+    reported: settings.map((setting) => describeSetting(setting)).join(' '),
+    known: true,
+  };
+}
+
+/** One setting, and where this recording got it. */
+function describeSetting(setting: EffectiveSetting): string {
+  return `${setting.setting} ${setting.value} (${describeSettingSource(setting.source)}).`;
+}
+
+/**
+ * Where an answer came from, in words.
+ *
+ * An unrecognised source is passed through rather than replaced, because a
+ * newer recorder may know a layer this window does not and a row reading
+ * "unknown" would be this window's ignorance shown as the recorder's.
+ */
+function describeSettingSource(source: string): string {
+  switch (source) {
+    case 'game':
+      return 'this game’s own settings';
+    case 'global':
+      return 'inherited from the global settings';
+    case 'default':
+      return 'the value Clipped ships with';
+    case 'request':
+      return 'asked for when this recording started';
+    default:
+      return source;
+  }
+}
+
+/**
  * The encoders in one sentence, for the table.
  *
  * The whole report is drawn below it; this is the line somebody reads first.
@@ -345,6 +418,7 @@ export function diagnostics(
       known: false,
     },
     describeEncoder(recorder),
+    describeRecordingSettings(recorder),
     {
       subject: 'Dropped frames',
       reported:
@@ -357,9 +431,9 @@ export function diagnostics(
     {
       subject: 'Audio devices',
       reported:
-        'Not reported. A recording does capture audio (issue #180) and the recorder can list ' +
-        'this machine’s microphones for the Settings screen, but which devices a recording ' +
-        'used is not carried into diagnostics. Issue #100.',
+        'Not reported. Recording settings above says which microphone and output a recording ' +
+        'was told to open (issue #61); which endpoint Windows actually gave it is a different ' +
+        'answer and nothing carries it. Issue #100.',
       known: false,
     },
     {
@@ -490,12 +564,14 @@ function recorderDiagnosticsFields(read: LibraryRead<Diagnostics>): readonly Fie
     return [
       ['Capture backend', 'the recorder had not answered when this was taken'],
       ['Encoders', 'the recorder had not answered when this was taken'],
+      ['Recording settings', 'the recorder had not answered when this was taken'],
     ];
   }
   if (read.state === 'unread') {
     return [
       ['Capture backend', `not read: ${redactPathsIn(read.problem.message)}`],
       ['Encoders', `not read (${read.problem.code})`],
+      ['Recording settings', `not read (${read.problem.code})`],
     ];
   }
 
@@ -548,6 +624,21 @@ function recorderDiagnosticsFields(read: LibraryRead<Diagnostics>): readonly Fie
       ? `taken just now, in ${String(encoders.elapsed_ms)} ms`
       : `stored, taken ${encoders.detected_at}`,
   ]);
+
+  // What the recording is running with, and the layer each answer came from.
+  // The layer is half the field: "recorded at 60" and "recorded at 60 because
+  // this game is set to 60" are the difference between a bug report somebody
+  // can answer and one they cannot.
+  const settings = read.value.settings;
+  fields.push([
+    'Recording settings',
+    settings === undefined || settings.length === 0
+      ? 'none — nothing is being recorded'
+      : 'the answers this recording was started with',
+  ]);
+  for (const setting of settings ?? []) {
+    fields.push([`  ${setting.setting}`, `${setting.value} (${setting.source})`]);
+  }
 
   return fields;
 }

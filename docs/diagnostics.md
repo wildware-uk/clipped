@@ -9,7 +9,9 @@ something is wrong, and the report they send.
 It is also the honest account of what that screen can and cannot show, and why
 the rest is a list of what is missing rather than a dashboard of zeros. Four of
 the twelve reach the window; nine of the remaining rows name the work that would
-supply them.
+supply them. Two rows on the screen are not on the specification's list at all —
+what a recording is running with, and where the log files are — and both are
+there for the same reason: they are things this build can actually say.
 
 Related standards: SPEC.md sections 36 and 37, AGENTS.md sections 13, 27 and 45,
 [privacy.md](privacy.md), [logging.md](logging.md).
@@ -143,18 +145,19 @@ counted.
 | **Capture backend** | **The method capturing the recording in progress**, what it was asked for, the method that recording started with, and every replacement and restart with the recorder's own reason. From `clipped_capture::CaptureStatus` ([#97](https://github.com/wildware-uk/clipped/issues/97)) through [`get_diagnostics`](ipc.md#get_diagnostics). Absent when nothing is being recorded, because there is no backend running then. |
 | Resolution changes | Not reported. A recording follows its target being resized ([#98](https://github.com/wildware-uk/clipped/issues/98)); nothing counts the times it happened. |
 | **Encoder** | **The adapters, the encoder families, the codecs and the limits** — everything `clipped-recorder capabilities` prints ([#14](https://github.com/wildware-uk/clipped/issues/14), [encoder-capabilities.md](encoder-capabilities.md)), through the same command, drawn as its own section below the table. |
+| **Recording settings** | **What the recording in progress is running with**, setting by setting, and which layer of the settings file supplied each answer — or that the recording asked for it itself. Not on SPEC.md section 36's list; it is [#61](https://github.com/wildware-uk/clipped/issues/61)'s third acceptance criterion, through the same [`get_diagnostics`](ipc.md#get_diagnostics). Absent when nothing is being recorded, because a settings file says what the *next* recording would be made with and that is a different fact. |
 | Dropped frames | Not reported. The `metrics` event stream is defined and this recorder refuses it with `not_implemented`. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Encoder latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Audio drift | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
-| Audio devices | Not reported. A recording does capture audio (#180) and the recorder can list this machine's microphones for the Settings screen; which devices a *recording* used is not carried into diagnostics. [#100](https://github.com/wildware-uk/clipped/issues/100) |
+| Audio devices | Not reported. Recording settings above says which microphone and output a recording was *told* to open ([#61](https://github.com/wildware-uk/clipped/issues/61)); which endpoint Windows actually gave it is a different answer, and nothing carries it. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | **Recording paths** | **The path of the recording in progress**, which arrives inside a `recording` status — or, when nothing is being recorded, that there is none. |
 | Muxer status | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Disk latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Plugin events | Not reported. There is no plugin system. [#69](https://github.com/wildware-uk/clipped/issues/69) |
 | Log files | `%LOCALAPPDATA%\Clipped\logs`, rotated hourly with the newest 48 kept. This window can neither read them nor open the folder. [#303](https://github.com/wildware-uk/clipped/issues/303) |
 
-The last row is not on the specification's list and is on the screen because it
-is the one thing a user can act on today: the logs exist, they are the primary
+The last row is not on the specification's list either, and is on the screen
+because it is the one thing a user can act on today: the logs exist, they are the primary
 diagnostic, and attaching them by hand is a thing a person can do.
 
 **How the four get here, and why the rest do not.** The window reaches the
@@ -222,6 +225,13 @@ Capture backend        Desktop Duplication
                        (capture_failed): the compositor stopped delivering frames
 Encoders               nvenc on NVIDIA GeForce RTX 4090 (h264, hevc, av1)
   reading              stored, taken 2026-08-11T20:14:00+01:00
+Recording settings     the answers this recording was started with
+  resolution           2560x1440 (game)
+  framerate            60 (game)
+  codec                h264 (request)
+  encoder              auto (default)
+  microphone           none (global)
+  system_audio         default (default)
 Recording failed       r-7
   seen                 2026-08-12T09:13:12.000Z
   code                 recording_failed
@@ -268,6 +278,7 @@ to be added to that list, and to this table, before the suite goes green.
 | `Elapsed when observed` | The `recording` status | How long it had been going when the recorder last answered |
 | `Capture health` | The summary above, redacted | One line saying what the screen said |
 | `Capture backend` + `asked for`, `started with`, `changed` | [`get_diagnostics`](ipc.md#get_diagnostics) | Which backend recorded the file, and every one it fell past. `none — nothing is being recorded` when there is no recording, `not read: …` when the recorder could not be asked — the two are different facts and neither is left blank |
+| `Recording settings` + one row per setting | The same reply | What the recording is *running with*, and the layer that supplied each answer. The value alone is half a fact: "recorded at 60" and "recorded at 60 because this game is set to 60" are the difference between a bug report somebody can answer and one they cannot. `none — nothing is being recorded` when there is no recording, for the reason the capture backend says the same |
 | `Encoders` + `reading` | The same reply | What this machine can encode, and whether the answer was taken now or stored. A recording that failed on a machine whose driver was updated last week reads differently from one that failed on a machine with no hardware encoder |
 | `Recording failed` + `seen`, `code`, `message`, `file` | The `recording_failed` event | The reason anybody sends a report at all |
 | `Recording interrupted` + `target`, `file`, `elapsed` | The `recording_interrupted` event | A recorder that died mid-recording, and the file it left |
@@ -418,13 +429,31 @@ summary says what restarting Clipped does in the meantime.
 - **A recorder that could not be asked is not drawn as a machine with nothing to
   report.** "Clipped found no encoder here" and "Clipped never asked" are the two
   readings this whole command exists to keep apart (AGENTS.md section 27).
+- **What a recording is running with reaches the report, with its layer**, and a
+  recorder with nothing being recorded says so rather than printing the settings
+  file — which is the one claim this reading must never make, because a settings
+  file answers a different question and answers it differently every time
+  somebody saves during a game.
 - **The report carries the fields it says it carries and no others**, as an exact
   list. A check that only looked for known leaks could not see a new kind of one.
 - **What is copied is what was shown.**
 - **Both clipboard failures say so** — no clipboard, and a clipboard that
   refuses — and both name the way out.
 
-The recorder's half is in `cargo test`, against a real recorder over a real pipe:
+The recorder's half of the settings reading is
+`apps/recorder/src/serve.rs::the_settings_an_automatic_recording_is_running_with_reach_get_diagnostics`,
+which drives the real dispatch against a recording handed over the way a game
+launching hands one over. That case is the load-bearing one: `RecordingState`
+never resolves an automatic recording's settings itself — a session manager on
+the driver's thread did, and then laid them over that driver's command line — so
+the only thing that can put them on a `get_diagnostics` is the handover carrying
+them. Its sibling asserts the absence when nothing is being recorded. And
+`apps/recorder/tests/automatic_sessions.rs::each_game_records_at_the_settings_its_own_entry_asks_for`
+is the same claim made about files rather than about a reply: two games, two
+settings, `ffprobe` on both recordings ([configuration.md](configuration.md)).
+
+The rest of the recorder's half is in `cargo test`, against a real recorder over
+a real pipe:
 `apps/recorder/tests/ipc_protocol.rs::a_recorder_reports_what_this_machine_can_encode_without_a_terminal`
 for the encoder report, which needs no GPU because a machine with no hardware
 encoder is exactly the report it must produce;

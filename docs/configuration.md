@@ -16,10 +16,10 @@ always will; that is what a command line is for. The Settings screen
 through `apply_settings` — the recorder is what saves it, because the window may
 not open it — so it is no longer a file only a text editor changes.
 
-What #61 still does not have is its evidence: two games recorded at two
-resolutions and checked with `ffprobe`, an encoder substitution seen happening,
-and the effective settings in diagnostics and session metadata. The issue lists
-those as unmet.
+Two games recorded at two resolutions and read back with `ffprobe` is
+[what proves it](#what-two-games-recording-differently-looks-like), and the
+settings a recording is running with are on `get_diagnostics` as well as in the
+session record beside the files.
 
 This is stated first, and plainly, because a configuration API that looked as
 though it were in force — or one that looked as though it were not — would be
@@ -909,6 +909,77 @@ at is the scattering AGENTS.md section 30 forbids, and
 `ResolvedSettings::apply_to` is the one conversion from what a user configured
 into what a recording is told.
 
+### What two games recording differently looks like
+
+Issue #61's first acceptance criterion, and the measurement rather than the
+claim: **one game records at 1440p60 while another records at 1080p60
+automatically, verified with `ffprobe`**. The test is
+`apps/recorder/tests/automatic_sessions.rs::each_game_records_at_the_settings_its_own_entry_asks_for`,
+which runs the built recorder as a child process against a settings file and a
+catalogue overlay of its own and reads back the two files it left. Measured on
+this project's machine on 2026-08-19:
+
+| Game | Its own entry says | `ffprobe` says |
+| --- | --- | --- |
+| `clipped-pattern-alpha` | `2560x1440`, `60`, `h264` | 2560x1440 h264, 345 decoded pictures over 5.81 s = **59.4 fps** |
+| `clipped-pattern-beta` | `1920x1080`, `60`, `hevc` | 1920x1080 hevc, 353 decoded pictures over 5.87 s = **60.1 fps** |
+
+The two layers below them said something else on purpose. The global layer of the
+same file says `framerate 15, codec av1`, and the recorder's command line says
+`--resolution 1280x720 --framerate 24`. **Neither reading above can be produced
+by either**, which is what makes it a measurement of the per-game layer rather
+than of two windows.
+
+Three things about that are worth stating rather than leaving to be discovered.
+
+- **The frame rate is the load-bearing reading.** It is what
+  `clipped_session::pacing` decides — which captured frames are encoded — so it
+  can only come from the rate this recording was given. A build where the
+  per-game layer stopped reaching a recording records both games at 24 and the
+  test says so, naming `framerate` and naming the layer the wrong answer came
+  from.
+- **The resolution is not, on its own.** This build has no scaler
+  ([recorder-cli.md](recorder-cli.md)), so a recording is encoded at whatever
+  size capture is producing and a per-game `resolution` naming that size is
+  *honoured* rather than *causal* — two files of different sizes would otherwise
+  say only that two windows were different sizes. What makes it causal in that
+  test is the command line, which names a size **neither** window is: a command
+  line's choice is refused rather than substituted (below), so a recording that
+  did not receive this game's own `resolution` is a recording that does not
+  exist.
+- **`avg_frame_rate` and `r_frame_rate` are not the reading.** Both were measured
+  and neither reads back what the recording was configured for: a 2560x1440 H.264
+  file encoded at 60 from a source drawing 30 reports `r_frame_rate=120/1` and
+  `avg_frame_rate=125/2`, while an AV1 file encoded at 20 reports `20/1` for
+  both. They are what the container and the bitstream declare, by a different
+  route per codec. Decoded pictures over the file's duration is the reading.
+
+### What a recording is running with, and how to see it
+
+The settings a recording was started with are in two places, and they answer two
+different questions.
+
+| Where | What it answers | Who reads it |
+| --- | --- | --- |
+| the session record beside the files | what was **configured** for this game when this file started, per setting, with its layer | the library, and anybody reading a sitting months later (`docs/sessions.md`) |
+| [`get_diagnostics`](ipc.md#get_diagnostics) | what the recording in progress is **running with**, per setting, with its layer or `request` | the Diagnostics screen and the support report ([diagnostics.md](diagnostics.md)) |
+
+They differ, and the difference is the point. A driver builds a recording from
+its own command line and lays the configured settings over it
+([below](#the-two-ways-a-caller-applies-them-and-which-one-to-use)), so a setting
+no layer above the shipped default mentions keeps the *caller's* answer — and
+reporting the resolved one for it would name a value the encoder is not using.
+`clipped_session::config::effective_settings` is the one place that reading is
+taken: a setting whose value matches what the configuration resolved is reported
+against the layer that resolved it, and every other setting is reported as
+`request`. That is exactly the inverse of what `apply_configured_to` did, so the
+two cannot drift apart without the reading changing.
+
+Six settings, and the two that are absent are absent on purpose: `capture_target`,
+which nothing in this build reads, and `replay_window_seconds`, which sizes a
+buffer rather than being a property of the recording. A row for either would be a
+value invented to fill a table (AGENTS.md section 27).
+
 ### What a stale setting does, and why it is not what a flag does
 
 A per-game setting is not a sentence somebody typed a second ago. It was chosen
@@ -1010,5 +1081,6 @@ standing when it did not — the two rows of the table above.
 | `crates/session/src/config/game.rs`        | How a settings file names a game                             |
 | `crates/session/src/config/capture_memory.rs` | What Clipped observed about capturing each game           |
 | `crates/session/src/config/document.rs`    | The file format, versions and migration                      |
+| `crates/session/src/config/effective.rs`   | What a recording is running with, for diagnostics            |
 | `crates/session/src/config/store.rs`       | Reading, saving, and what survives a bad file                |
 | `crates/session/src/config/tests.rs`       | Inheritance, validation, migration and the file              |

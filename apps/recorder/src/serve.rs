@@ -117,7 +117,7 @@ use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
 use clipped_session::automatic::{ManualSession, RecordedProcess, RecordingOutcome};
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
-use clipped_session::config::Configuration;
+use clipped_session::config::{Configuration, EffectiveSetting};
 use clipped_session::screenshot::{
     Screenshot, ScreenshotError, ScreenshotFormat, ScreenshotRequests, ScreenshotSettings,
     StillFrame,
@@ -928,6 +928,7 @@ impl CommandHandler for RecorderService {
             Command::GetDiagnostics => Ok(Reply::Diagnostics {
                 diagnostics: crate::diagnostics::diagnostics(
                     self.recordings.capture_account().as_ref(),
+                    self.recordings.effective_settings().as_deref(),
                 )?,
             }),
             // The one read here that walks the filesystem, and still on the
@@ -1255,6 +1256,18 @@ struct Running {
     /// session policy behind one, and the recording ending *is* the session
     /// ending.
     asked_to_stop: Option<Arc<AtomicBool>>,
+    /// What this recording is running with, and where each answer came from.
+    ///
+    /// Taken once, at the moment the settings were settled and before the
+    /// recording thread starts, because that is the only moment they exist:
+    /// what governs the encoder is the caller's request with the configured
+    /// settings laid over it, and nothing writes that back into the
+    /// configuration (`clipped_session::config::effective`).
+    ///
+    /// [`None`] for the sliver of a recording between [`RecordingState::begin`]
+    /// building this and [`RecordingState::start`] settling them, which is under
+    /// one lock and is never observed. `adopt` fills it in as it builds one.
+    settings: Option<Vec<EffectiveSetting>>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
@@ -1452,6 +1465,10 @@ impl RecordingState {
         let sitting = Box::new(crate::watch::sitting_of(session.session()));
 
         Running {
+            // Settled by `start`, once the request and the configuration have
+            // been folded together. `begin` opens the session; it does not know
+            // what the caller asked for.
+            settings: None,
             id,
             bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
             output,
@@ -1509,6 +1526,7 @@ impl RecordingState {
         progress: &RecordingProgress,
         stop: &crate::shutdown::ShutdownSignal,
         asked_to_stop: &Arc<AtomicBool>,
+        settings: Vec<EffectiveSetting>,
     ) -> Result<Adopted, String> {
         let mut current = self
             .current
@@ -1555,6 +1573,12 @@ impl RecordingState {
             // for is a decision about memory that issue did not make.
             replay: None,
             asked_to_stop: Some(Arc::clone(asked_to_stop)),
+            // Handed over rather than read here, and that is the point: an
+            // automatic recording's settings were resolved by a session manager
+            // on the driver's thread and then laid over that driver's command
+            // line, and this state has neither. Issue #302 built the transport
+            // and #61 is what put an answer on it.
+            settings: Some(settings),
             outcome: None,
         });
         // The watcher's state read under `current`, which is the order every
@@ -1762,6 +1786,25 @@ impl RecordingState {
             .and_then(|running| running.capture.account())
     }
 
+    /// What the recording in progress is running with, or [`None`] when there is
+    /// none.
+    ///
+    /// The same two ways to get [`None`] as [`Self::capture_account`], and the
+    /// same discipline: a clone of a small value taken out of the lock. It is
+    /// deliberately **not** answered from the settings file when nothing is
+    /// being recorded — the file says what the *next* recording would be made
+    /// with, and a window drawing that as what a recording is doing would be
+    /// wrong every time somebody saved a setting during a game
+    /// (`docs/configuration.md`).
+    fn effective_settings(&self) -> Option<Vec<EffectiveSetting>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|running| running.outcome.is_none())
+            .and_then(|running| running.settings.clone())
+    }
+
     /// What the watcher is doing, as [`status_of`] needs it.
     ///
     /// Read through a poisoned lock for the reason [`Self::status`] is: what is
@@ -1939,6 +1982,15 @@ impl RecordingState {
         // 144 frames per second would record at 60 on every machine with no
         // settings file. Two callers, one rule (AGENTS.md section 55).
         let settings = running.resolved_settings().apply_configured_to(asked_for);
+        // And what that folding produced, for `get_diagnostics` to answer with.
+        // Read from the settings the encoder is about to be opened with rather
+        // than from the configuration they were folded from, because a
+        // parameter this request named and no layer overrode is not in that
+        // configuration at all (issue #61).
+        running.settings = Some(clipped_session::config::effective_settings(
+            &settings,
+            &running.resolved_settings(),
+        ));
 
         running.thread = Some(spawn_recording(
             self,
@@ -5462,6 +5514,9 @@ mod tests {
                 &progress,
                 &stop,
                 &asked_to_stop,
+                // Nothing: what these cases are about is the handover, and the
+                // one that reads the settings back builds its own.
+                Vec::new(),
             )
             .expect("nothing else is being recorded");
 
@@ -5532,6 +5587,115 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_an_automatic_recording_is_running_with_reach_get_diagnostics() {
+        // Issue #61's third acceptance criterion, on the half issue #302 built
+        // the transport for. Through the real dispatch, and against a recording
+        // handed over the way a launch hands one over: `RecordingState` never
+        // resolves an automatic recording's settings itself — the driver's
+        // session manager did, on another thread — so the only thing that can
+        // put them on a `get_diagnostics` is the handover carrying them.
+        //
+        // The two rows are the two readings the `source` field exists for. The
+        // frame rate is what this game's own layer set, over a command line
+        // that said something else; the codec is what the command line asked
+        // for and no layer overrode, which is the row a reading taken from the
+        // configuration alone would report as `auto` while the encoder ran
+        // H.264.
+        let directory = scratch("adopted-diagnostics");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+        );
+
+        let game = clipped_session::config::GameKey::parse("a-test-game").expect("a valid key");
+        let mut preferences = clipped_session::config::Preferences::none();
+        preferences.set_framerate(Some(120)).expect("in range");
+        let mut configuration = Configuration::defaults();
+        configuration.set_game(game.clone(), preferences);
+        let resolved = configuration.resolve_for(&game);
+
+        let asked_for = RecordingSettings::new(
+            CaptureTargetSettings::window(0x1234, 1920, 1080),
+            output.clone(),
+        )
+        .with_framerate(30)
+        .with_codec(clipped_session::CodecPreference::Fixed(
+            clipped_encoder::Codec::H264,
+        ));
+        let running_with = resolved.apply_configured_to(asked_for);
+
+        let _adopted = service
+            .recordings
+            .adopt(
+                &output,
+                "A Test Game".to_owned(),
+                &RecordingProgress::new(),
+                &crate::shutdown::ShutdownSignal::new(),
+                &Arc::new(AtomicBool::new(false)),
+                clipped_session::config::effective_settings(&running_with, &resolved),
+            )
+            .expect("nothing else is being recorded");
+
+        let Reply::Diagnostics { diagnostics } = service
+            .call(Command::GetDiagnostics)
+            .expect("a recorder can say how it is capturing and what it can encode")
+        else {
+            panic!("`get_diagnostics` was answered with something else");
+        };
+
+        let reported = diagnostics
+            .settings
+            .expect("a recorder that is recording says what that recording is running with");
+        let row = |name: &str| {
+            reported
+                .iter()
+                .find(|setting| setting.setting == name)
+                .unwrap_or_else(|| panic!("`{name}` should be reported: {reported:?}"))
+                .clone()
+        };
+
+        assert_eq!(
+            (row("framerate").value.as_str(), row("framerate").source.as_str()),
+            ("120", "game"),
+            "the frame rate this game's own layer set reached the recording, so the reading has              to say so rather than crediting the 30 it replaced: {reported:?}"
+        );
+        assert_eq!(
+            (row("codec").value.as_str(), row("codec").source.as_str()),
+            ("h264", "request"),
+            "nothing configured the codec, so the recording is running with what it was asked              for — and a reading taken from the configuration would say `auto`: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn a_recorder_with_nothing_recording_reports_no_settings_rather_than_the_settings_file() {
+        // The claim this reading must never make. A settings file says what the
+        // *next* recording would be made with, and the two differ every time
+        // somebody saves a setting during a game — which is when a recording is
+        // running. So there is no reading between recordings, and the absence is
+        // the answer (AGENTS.md section 27).
+        let directory = scratch("idle-diagnostics");
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+        );
+
+        let Reply::Diagnostics { diagnostics } = service
+            .call(Command::GetDiagnostics)
+            .expect("an idle recorder still answers")
+        else {
+            panic!("`get_diagnostics` was answered with something else");
+        };
+
+        assert_eq!(diagnostics.settings, None);
+        assert_eq!(diagnostics.capture, None);
+    }
+
+    #[test]
     fn a_game_launching_while_somebody_is_recording_by_hand_is_refused_the_encoder() {
         // One recording at a time is this process's rule whoever asked for it,
         // and the person who pressed record is the one looking at the screen.
@@ -5549,6 +5713,7 @@ mod tests {
                 &RecordingProgress::new(),
                 &crate::shutdown::ShutdownSignal::new(),
                 &Arc::new(AtomicBool::new(false)),
+                Vec::new(),
             )
             .expect_err("this recorder is already recording something");
 

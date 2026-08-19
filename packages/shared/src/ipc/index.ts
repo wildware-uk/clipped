@@ -18,6 +18,7 @@ export type {
   ConnectionRole,
   Diagnostics,
   DiagnosticsReply,
+  EffectiveSetting,
   EncoderAccount,
   EncoderSummary,
   ErrorCode,

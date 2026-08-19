@@ -67,8 +67,8 @@ use serde_json::{json, Value};
 
 use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
 use crate::diagnostics::{
-    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics, EncoderAccount,
-    EncoderSummary,
+    AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
+    EffectiveSetting, EncoderAccount, EncoderSummary,
 };
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
@@ -679,6 +679,15 @@ fn structures() -> BTreeMap<String, Structure> {
     structures.insert(
         "capture_account".to_owned(),
         structure_of(&exemplar_capture_account(), &[]),
+    );
+    structures.insert(
+        "effective_setting".to_owned(),
+        structure_of(
+            exemplar_effective_settings()
+                .first()
+                .expect("the exemplar carries settings"),
+            &[],
+        ),
     );
     structures.insert(
         "capture_method_change".to_owned(),
@@ -1642,6 +1651,9 @@ fn samples() -> Vec<Sample> {
                 outcome: Outcome::Ok(Reply::Diagnostics {
                     diagnostics: Diagnostics {
                         capture: None,
+                        // Absent for the same reason `capture` is: these are
+                        // one recording's answers, and there is no recording.
+                        settings: None,
                         encoders: EncoderAccount {
                             probed: true,
                             detected_at: None,
@@ -3637,7 +3649,28 @@ fn exemplar_diagnostics() -> Diagnostics {
     Diagnostics {
         capture: Some(exemplar_capture_account()),
         encoders: exemplar_encoder_account(),
+        settings: Some(exemplar_effective_settings()),
     }
+}
+
+/// What a recording is running with, one entry per setting a recording carries.
+///
+/// One from a layer of the settings file and one the recording asked for
+/// itself, because the two are the readings the `source` field exists to keep
+/// apart and a schema that only ever saw one of them would not describe it.
+fn exemplar_effective_settings() -> Vec<EffectiveSetting> {
+    vec![
+        EffectiveSetting {
+            setting: "resolution".to_owned(),
+            value: "2560x1440".to_owned(),
+            source: "game".to_owned(),
+        },
+        EffectiveSetting {
+            setting: "codec".to_owned(),
+            value: "hevc".to_owned(),
+            source: "request".to_owned(),
+        },
+    ]
 }
 
 /// How a recording is capturing, with a backend that fell back so that the

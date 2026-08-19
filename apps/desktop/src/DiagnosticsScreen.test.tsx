@@ -1,4 +1,4 @@
-import type { Diagnostics, EncoderAccount } from '@clipped/shared';
+import type { Diagnostics, EffectiveSetting, EncoderAccount } from '@clipped/shared';
 import { PROTOCOL_VERSION } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -119,6 +119,22 @@ const ENCODERS: EncoderAccount = {
 function answered(overrides: Partial<Diagnostics> = {}): LibraryRead<Diagnostics> {
   return { state: 'read', value: { encoders: ENCODERS, ...overrides } };
 }
+
+/**
+ * What a recording is running with, as `get_diagnostics` carries it.
+ *
+ * Two layers and a request, which is the whole reason the `source` field is on
+ * the wire: a value alone cannot tell a recording following the global settings
+ * from one following the command line it was started with.
+ */
+const RUNNING_WITH: readonly EffectiveSetting[] = [
+  { setting: 'resolution', value: '2560x1440', source: 'game' },
+  { setting: 'framerate', value: '60', source: 'game' },
+  { setting: 'codec', value: 'h264', source: 'request' },
+  { setting: 'encoder', value: 'auto', source: 'default' },
+  { setting: 'microphone', value: 'none', source: 'global' },
+  { setting: 'system_audio', value: 'default', source: 'default' },
+];
 
 /** A recorder that could not be asked at all. */
 const UNREACHABLE: LibraryRead<Diagnostics> = {
@@ -511,6 +527,7 @@ describe('the support report', () => {
       'Capture health',
       'Capture backend',
       'Encoders',
+      'Recording settings',
       'Recording failed',
       'seen',
       'code',
@@ -522,6 +539,45 @@ describe('the support report', () => {
       'elapsed',
       'Notice',
     ]);
+  });
+
+  /*
+   * Issue #61's third acceptance criterion, in the half a bug report carries.
+   * The value on its own is not the answer: "recorded at 60" and "recorded at 60
+   * because this game is set to 60" are the difference between a report somebody
+   * can act on and one they cannot, so the layer travels with every row.
+   */
+  it('carries what the recording is running with, and the layer each answer came from', () => {
+    const report = buildDiagnosticsReport({
+      view: recording('D:\\clips\\match.mkv'),
+      notice: undefined,
+      userAgent: 'jsdom',
+      takenAt: new Date('2026-08-12T09:14:02.311Z'),
+      recorder: answered({ settings: RUNNING_WITH }),
+    });
+
+    expect(report).toMatch(/Recording settings\s+the answers this recording was started with/);
+    expect(report).toMatch(/resolution\s+2560x1440 \(game\)/);
+    expect(report).toMatch(/codec\s+h264 \(request\)/);
+    expect(report).toMatch(/microphone\s+none \(global\)/);
+  });
+
+  /*
+   * And the claim it must never make. A settings file exists between recordings
+   * and says what the *next* one would be made with; a report that printed it
+   * under this heading would tell somebody their recording had used a setting
+   * they saved after it ended.
+   */
+  it('says there are no recording settings rather than reading the settings file', () => {
+    const report = buildDiagnosticsReport({
+      view: view(),
+      notice: undefined,
+      userAgent: 'jsdom',
+      takenAt: new Date('2026-08-12T09:14:02.311Z'),
+      recorder: answered(),
+    });
+
+    expect(report).toMatch(/Recording settings\s+none — nothing is being recorded/);
   });
 
   /*
@@ -715,10 +771,11 @@ describe('the Diagnostics screen', () => {
     ['Capture backend', []],
     ['Resolution changes', [98]],
     ['Encoder', []],
+    ['Recording settings', []],
     ['Dropped frames', [100]],
     ['Encoder latency', [100]],
     ['Audio drift', [100]],
-    ['Audio devices', [100, 180]],
+    ['Audio devices', [61, 100]],
     ['Recording paths', []],
     ['Muxer status', [100]],
     ['Disk latency', [100]],
