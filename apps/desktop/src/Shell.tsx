@@ -6,7 +6,7 @@ import { Link, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { ClipPlaybackScreen } from './ClipPlaybackScreen';
 import { CLIP_ROUTE, clipPath, isClipPath } from './clipPlayback';
 import { DiagnosticsScreen } from './DiagnosticsScreen';
-import { EditorScreen } from './editor/EditorScreen';
+import { EditorRoute } from './editor/EditorRoute';
 import { GamesScreen } from './GamesScreen';
 import { HomeScreen } from './HomeScreen';
 import { LibraryScreen } from './LibraryScreen';
@@ -60,11 +60,11 @@ function titleFor(pathname: string, screen: Screen | undefined): string {
  * names the issue building it. The change that builds another screen adds it
  * here, which is the one place that knows a screen from a placeholder.
  *
- * The Editor is given no clip, because nothing in this window can open one: a
- * clip's edit document is a row of a database this process may not read
- * (issue #306). The screen says so rather than drawing an empty timeline, and
- * takes the document as a prop so that the day something can supply one, this is
- * the line that changes.
+ * The Editor is a route rather than a bare screen, because it takes a subject:
+ * `#/editor` is the empty editor and `#/editor?clip=3` is clip 3, whose document
+ * `EditorRoute` fetches over the control protocol (issue #306). Keeping the clip
+ * in the address rather than in a store means the back button works and there is
+ * one answer to "which clip is open".
  */
 function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
   switch (screen.id) {
@@ -75,7 +75,7 @@ function elementFor(screen: Screen, view: RecorderLinkView, notice: string | und
     case 'games':
       return <GamesScreen link={view.link} />;
     case 'editor':
-      return <EditorScreen />;
+      return <EditorRoute />;
     case 'settings':
       return <SettingsScreen />;
     case 'diagnostics':

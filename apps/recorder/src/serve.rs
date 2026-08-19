@@ -155,6 +155,12 @@ fn features_of_this_build() -> Vec<String> {
         // so that a recorder built before issue #301 is told apart from a
         // library with nothing in it.
         features::LIBRARY.to_owned(),
+        // And for this before it offers to open a clip in the editor, so that a
+        // recorder built before issue #306 — which can neither serve a
+        // document nor take one back — is told apart from a clip that will not
+        // open. Drawing the editor first and finding out on the save is the
+        // worst order: the work is already done by then.
+        features::EDITING.to_owned(),
         // And for this before it draws an Export control, so that nobody is
         // asked to choose a file name for a file an older recorder was never
         // going to write (issue #399).
@@ -842,6 +848,14 @@ impl CommandHandler for RecorderService {
             }),
             Command::LibraryGames => Ok(Reply::LibraryGames {
                 games: self.library.games()?,
+            }),
+            Command::LibraryClipDocument(request) => Ok(Reply::LibraryClipDocument {
+                clip: self.library.clip_document(&request)?,
+            }),
+            Command::SaveClipDocument(request) => Ok(Reply::ClipDocumentSaved {
+                saved: self
+                    .library
+                    .save_clip_document(&request, SystemTime::now())?,
             }),
             Command::LibraryEvents(request) => Ok(Reply::LibraryEvents {
                 lane: self.library.events(&request)?,

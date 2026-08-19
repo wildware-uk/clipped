@@ -35,7 +35,7 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
@@ -3232,6 +3232,272 @@ fn the_sitting_being_recorded(
     }
 
     panic!("no recording carrying a sitting within {within:?}; the last status was {last:?}")
+}
+
+/// Where a recorder started under `home` keeps its library index.
+///
+/// `%LOCALAPPDATA%\Clipped\library.db`, which `ServedRecorder::start_under`
+/// points the child at by setting `LOCALAPPDATA` (`apps/recorder/src/library.rs`,
+/// `docs/storage.md`).
+fn library_under(home: &Path) -> PathBuf {
+    home.join("AppData")
+        .join("Local")
+        .join("Clipped")
+        .join("library.db")
+}
+
+/// A library holding one sitting, one recording and one clip nobody has edited.
+///
+/// Written before the recorder starts, so that the row is there the first time
+/// it is asked for and nothing races the indexer. `edit` is left NULL, which is
+/// what a saved replay's row looks like: a clip that exists and has never been
+/// opened in an editor.
+fn a_clip_nobody_has_edited(home: &Path, recording: &Path) {
+    let path = library_under(home);
+    std::fs::create_dir_all(path.parent().expect("the library has a directory"))
+        .expect("the application directory can be made");
+    let database = clipped_storage::Database::open(&path).expect("a library opens");
+    let connection = database.connection();
+    connection
+        .execute(
+            "INSERT INTO sessions (session_id, started_at) VALUES ('sitting', ?1)",
+            clipped_storage::rusqlite::params!["2026-08-11T20:14:00+01:00"],
+        )
+        .expect("the sitting is written");
+    connection
+        .execute(
+            "INSERT INTO recordings \
+                 (recording_id, session_id, session_index, path, started_at, duration_seconds) \
+             VALUES (1, 'sitting', 1, ?1, ?2, 120.0)",
+            clipped_storage::rusqlite::params![
+                recording.to_string_lossy(),
+                "2026-08-11T20:14:00+01:00"
+            ],
+        )
+        .expect("the recording is written");
+    connection
+        .execute(
+            "INSERT INTO clips \
+                 (clip_id, session_id, source_recording_id, title, created_at, \
+                  source_start_seconds, source_end_seconds, duration_seconds) \
+             VALUES (7, 'sitting', 1, 'Ace on Mirage', ?1, 4.0, 34.0, 30.0)",
+            clipped_storage::rusqlite::params!["2026-08-11T21:02:00+01:00"],
+        )
+        .expect("the clip is written");
+}
+
+#[test]
+fn a_real_recorder_opens_a_clip_for_the_editor_and_takes_the_edit_back() {
+    // Issue #306 over a real recorder, a real pipe and a real handshake, which
+    // is the hop that says the commands are *served* rather than merely
+    // defined: a build that advertised `editing` and never dispatched either
+    // command would pass every unit test in `crates/ipc` and in
+    // `apps/recorder/src/library.rs`. Eleven subsystems in this repository have
+    // been complete, tested and called by nothing; this is what stops the
+    // twelfth being the editor.
+    //
+    // No GPU, no window and no encoder. The recording is a file of zeroes
+    // nothing decodes: an edit document is metadata over recordings that are
+    // never opened, and this test is the proof of that as much as of anything
+    // else — it never reads a frame because nothing in this path does.
+    let home = scratch_home("clip-document");
+    let recordings = home.join("Videos").join("Clipped");
+    std::fs::create_dir_all(&recordings).expect("the recordings folder can be made");
+    let output = recordings.join("clipped-mirage.mkv");
+    std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+    a_clip_nobody_has_edited(&home, &output);
+
+    let recorder = ServedRecorder::start_under("clip-document", Some(&home));
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::EDITING),
+        "a recorder that serves a clip's document has to say so, or the window will not offer to \
+         open one: {:?}",
+        client.welcome().features
+    );
+
+    // Opening a clip nobody has edited.
+    let Reply::LibraryClipDocument { clip } = client
+        .call(&IpcCommand::LibraryClipDocument(
+            clipped_ipc::LibraryClipDocument {
+                clip: "7".to_owned(),
+            },
+        ))
+        .expect("a clip in the index opens")
+    else {
+        panic!("`library_clip_document` was answered with something else");
+    };
+
+    assert_eq!(clip.clip, "7");
+    assert!(
+        clip.synthesised,
+        "this clip has no stored document, so the recorder built its starting one"
+    );
+    assert_eq!(clip.converted_from, None);
+
+    let opened = clipped_edit::EditDocument::read(&clip.document)
+        .expect("what crossed the wire is a document this build reads")
+        .document;
+    // The assertions that matter, and the reason they are about the contents:
+    // "the editor opened a clip" is true of an editor showing an *empty*
+    // document, which is the state AGENTS.md section 27 forbids and the one a
+    // careless test here would bless.
+    assert_eq!(
+        opened.title, "Ace on Mirage",
+        "the document the editor is given has to be about this clip"
+    );
+    assert_eq!(
+        opened.sources.len(),
+        1,
+        "an editor drawing a document with no sources is drawing a clip that plays nothing"
+    );
+    assert_eq!(
+        opened.sources[0].recording,
+        clipped_edit::RecordingId::new("1"),
+        "and the source has to be the recording the clip was cut from"
+    );
+    assert_eq!(
+        opened.segments.len(),
+        1,
+        "an editor drawing a document with no segments is drawing an empty timeline"
+    );
+    assert_eq!(
+        opened.segments[0].span.start(),
+        clipped_edit::SourceTime::from_nanos(4_000_000_000),
+        "the clip starts four seconds into the recording, which is what its row says"
+    );
+    assert_eq!(
+        opened.segments[0].span.end(),
+        clipped_edit::SourceTime::from_nanos(34_000_000_000),
+        "and ends thirty seconds later"
+    );
+
+    // Editing it and saving it back.
+    let mut edited = opened.clone();
+    edited.title = "Ace on Mirage, trimmed".to_owned();
+    let text = edited.write().expect("an edited document writes");
+
+    let Reply::ClipDocumentSaved { saved } = client
+        .call(&IpcCommand::SaveClipDocument(
+            clipped_ipc::SaveClipDocument {
+                clip: "7".to_owned(),
+                document: text,
+            },
+        ))
+        .expect("an edit saves")
+    else {
+        panic!("`save_clip_document` was answered with something else");
+    };
+    assert_eq!(saved.clip, "7");
+    assert_eq!(
+        saved.superseded, None,
+        "there was no stored document to keep, so nothing was superseded"
+    );
+
+    // And opening it again gives back what was saved rather than the starting
+    // document. Without this the save could be writing nowhere.
+    let Reply::LibraryClipDocument { clip: reopened } = client
+        .call(&IpcCommand::LibraryClipDocument(
+            clipped_ipc::LibraryClipDocument {
+                clip: "7".to_owned(),
+            },
+        ))
+        .expect("the saved clip opens")
+    else {
+        panic!("`library_clip_document` was answered with something else");
+    };
+    assert!(
+        !reopened.synthesised,
+        "the clip now has a document of its own and must not be built again"
+    );
+    assert_eq!(
+        clipped_edit::EditDocument::read(&reopened.document)
+            .expect("it is a document")
+            .document
+            .title,
+        "Ace on Mirage, trimmed",
+        "the edit that was saved is the edit that comes back"
+    );
+
+    // The recording is untouched by all of it, which is the rule the editor is
+    // built on (AGENTS.md sections 56 and 57).
+    assert_eq!(
+        std::fs::metadata(&output)
+            .expect("the recording is still there")
+            .len(),
+        4096,
+        "nothing in this path may modify, move, truncate or re-encode a recording"
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_real_recorder_refuses_an_edit_it_cannot_read_and_leaves_the_clip_alone() {
+    // The failure that has to say what to do. A window sending a document this
+    // recorder cannot read must not be able to damage a clip, and the refusal
+    // has to say the clip is untouched — otherwise the only safe response to a
+    // save that failed is to close the editor and hope (AGENTS.md section 56).
+    let home = scratch_home("clip-document-refused");
+    let recordings = home.join("Videos").join("Clipped");
+    std::fs::create_dir_all(&recordings).expect("the recordings folder can be made");
+    let output = recordings.join("clipped-mirage.mkv");
+    std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+    a_clip_nobody_has_edited(&home, &output);
+
+    let recorder = ServedRecorder::start_under("clip-document-refused", Some(&home));
+    let mut client = recorder.client();
+
+    let refusal = client
+        .call(&IpcCommand::SaveClipDocument(
+            clipped_ipc::SaveClipDocument {
+                clip: "7".to_owned(),
+                document: r#"{"schema_version": 9999, "sources": [], "segments": []}"#.to_owned(),
+            },
+        ))
+        .expect_err("a document from a build ahead of this one does not save");
+
+    let ClientError::Refused(refusal) = refusal else {
+        panic!("a document this recorder cannot read is a refusal, not a transport failure");
+    };
+    assert_eq!(refusal.code, clipped_ipc::ErrorCode::EditUnreadable);
+    assert!(
+        refusal.message.contains("Update Clipped"),
+        "the refusal has to say what to do about it: {}",
+        refusal.message
+    );
+    assert!(
+        refusal.message.contains("exactly as it was"),
+        "and that the clip was not touched: {}",
+        refusal.message
+    );
+
+    // And it was not: the clip is still the one nobody has edited.
+    let Reply::LibraryClipDocument { clip } = client
+        .call(&IpcCommand::LibraryClipDocument(
+            clipped_ipc::LibraryClipDocument {
+                clip: "7".to_owned(),
+            },
+        ))
+        .expect("the clip still opens")
+    else {
+        panic!("`library_clip_document` was answered with something else");
+    };
+    assert!(
+        clip.synthesised,
+        "a refused save must leave the clip with no stored document, exactly as it found it"
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

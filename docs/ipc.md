@@ -346,7 +346,7 @@ user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
 `shutdown`, `library`, `export`, `playback`, `previews`, `hotkeys`, `replay`,
 `export_progress`, `settings`, `microphone_level`, `diagnostics`, `startup`,
-`automatic`, `storage`.
+`automatic`, `storage`, `editing`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -421,6 +421,14 @@ name, once for every recording on the screen, and a window that did not check
 would draw a grid of empty squares that looks exactly like a library whose
 pictures have not been generated yet. Those are opposite answers: one is worth
 waiting for and the other never resolves.
+
+`editing` is the check in front of offering to edit a clip at all. A recorder
+built before [`library_clip_document`](#library_clip_document) can neither serve
+a document nor take one back, and refuses both by name. It is one capability and
+not two deliberately: a recorder that could serve a document but not store one
+would be an editor that silently discards work, which is worse than one that
+does not open, so nothing can advertise the half that reads without the half
+that writes.
 
 `hotkeys` is the one where the two answers are *opposites*. A recorder built
 before [`get_hotkeys`](#get_hotkeys) registers no global hotkey at all, so every
@@ -689,6 +697,8 @@ twice. It is absent for a recording that is not part of a sitting.
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
 | `library_events` | `recording` | `library_events` | yes |
+| `library_clip_document` | `clip` | `library_clip_document` | yes |
+| `save_clip_document` | `clip`, `document` | `clip_document_saved` | yes |
 | `library_trash` | none | `library_trash` | yes |
 | `restore_from_trash` | `kind`, `id` | `restored` | yes |
 | `empty_trash` | `items`, `bytes` | `trash_emptied` | yes |
@@ -1326,6 +1336,98 @@ Three properties of this reply are deliberate:
 A recording whose span the library does not know — one that produced no frame,
 or a row indexed before the span was recorded — has no marks rather than marks
 in the wrong place.
+
+### `library_clip_document`
+
+One clip's edit document, as text: what the clip *is* — which recordings to
+play, which parts of them, in which order, how loud each track is and what is
+drawn over the picture. This is the command the editor opens a clip with
+([issue #306](https://github.com/wildware-uk/clipped/issues/306)).
+
+```json
+{"type":"request","id":12,"command":"library_clip_document","params":{"clip":"3"}}
+```
+
+```json
+{"type":"response","id":12,"outcome":{"ok":{
+  "reply":"library_clip_document",
+  "clip":{"clip":"3","document":"{\n  \"schema_version\": 2, …}","synthesised":false}}}}
+```
+
+`document` is the same JSON `clipped_edit::EditDocument::write` produces, not a
+second representation of it ([editing.md](editing.md)). The window has a reader
+for that JSON and nothing else needs one; a protocol that reshaped a document on
+the way would be a second implementation of the model for the two to disagree
+about.
+
+Three things the recorder decides, so that the window never has to:
+
+- **Converting.** A document written by an older build is brought forward
+  through `crates/edit`'s migration chain and sent at the current version, with
+  `converted_from` carrying the version the stored text is in. **In memory
+  only** — nothing is written, and the stored text is still the older one until
+  somebody saves. This is what makes the window's own refusal of an older
+  document correct rather than a limitation: it never receives one.
+- **Synthesising.** A clip with no document at all is a saved replay, made
+  before there was an editor. The recorder builds the document that means "this
+  recording, this span, no edits" from the columns the index already holds, and
+  sets `synthesised` so the window can say the clip has never been edited.
+  It is built in one place on purpose: two builds inventing a starting document
+  separately would disagree about what an unedited clip is, and the
+  disagreement would only surface the first time somebody saved one. Nothing is
+  stored by this.
+- **Refusing.** A document this build cannot read — one from a newer Clipped
+  above all — is `edit_unreadable`, carrying the sentence `crates/edit` writes
+  for it, and nothing is changed.
+
+Refused with `invalid_parameters` if `clip` is not an identifier this library
+uses, if there is no such clip, if the clip is in the trash, or if it has
+neither a document nor a recording to build one from; with `edit_unreadable` if
+the stored document will not open; and with `library_unavailable` if the index
+could not be read.
+
+### `save_clip_document`
+
+Stores an edited document against a clip. It is the only command in this
+protocol that changes what a clip *is*, and it changes nothing else: no
+recording is modified, moved, truncated or re-encoded by it (AGENTS.md sections
+56 and 57).
+
+```json
+{"type":"request","id":15,"command":"save_clip_document",
+ "params":{"clip":"3","document":"{\n  \"schema_version\": 2, …}"}}
+```
+
+```json
+{"type":"response","id":15,"outcome":{"ok":{
+  "reply":"clip_document_saved","saved":{"clip":"3","superseded":1}}}}
+```
+
+Two guarantees, and they are the reason this command exists rather than a
+column write somewhere:
+
+- **Nothing unreadable reaches the database.** The document is read and
+  validated before anything is written — `crates/edit` validates on every read
+  *and* every write — and what is stored is what the writer produced. A client
+  sending text that is not a document fails to save; it cannot corrupt a clip.
+  The refusal says the clip is exactly as it was, because otherwise the only
+  safe response to a failed save is to close the editor and hope.
+- **The older text is kept.** When the document being replaced was in an older
+  format, a copy of it is stored beside the new one in the same transaction, and
+  `superseded` carries the version it was in. That is
+  [editing.md](editing.md)'s "the caller decides whether to store the result,
+  and must keep the original when it does" — the recorder is that caller. The
+  copy is written **once** and never overwritten: it holds the only text this
+  build could not have produced, so a later save replacing it with text this
+  build wrote would destroy the thing it is for. `superseded` is therefore
+  absent on that later save, because that save kept nothing.
+
+Refused with `invalid_parameters` if `clip` is not an identifier this library
+uses, if there is no such clip, or if the clip is in the trash; with
+`edit_unreadable` if the document sent will not open — a document at a version
+this build does not know says so and says to update — or if the one already
+stored will not; and with `library_unavailable` if the index could not be
+written. Every refusal leaves the stored document exactly as it was.
 
 Refused with `invalid_parameters` if `recording` is not an identifier this
 library uses, and with `library_unavailable` on the same terms as

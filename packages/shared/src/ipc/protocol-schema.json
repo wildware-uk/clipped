@@ -43,6 +43,8 @@
         "library_sessions",
         "library_games",
         "library_events",
+        "library_clip_document",
+        "save_clip_document",
         "library_trash",
         "restore_from_trash",
         "empty_trash",
@@ -99,6 +101,7 @@
         "export_failed",
         "playback_failed",
         "library_unavailable",
+        "edit_unreadable",
         "internal"
       ],
       "tolerates_unrecognised": true
@@ -136,6 +139,7 @@
         "screenshots",
         "shutdown",
         "library",
+        "editing",
         "export",
         "playback",
         "hotkeys",
@@ -210,6 +214,8 @@
         "start_at_login",
         "shutting_down",
         "library_events",
+        "library_clip_document",
+        "clip_document_saved",
         "library_trash",
         "restored",
         "trash_emptied",
@@ -326,6 +332,24 @@
         "category"
       ],
       "optional": []
+    },
+    "clip_document": {
+      "required": [
+        "clip",
+        "document",
+        "synthesised"
+      ],
+      "optional": [
+        "converted_from"
+      ]
+    },
+    "clip_document_saved": {
+      "required": [
+        "clip"
+      ],
+      "optional": [
+        "superseded"
+      ]
     },
     "codec_summary": {
       "required": [
@@ -528,6 +552,12 @@
         "size_bytes",
         "title"
       ]
+    },
+    "library_clip_document": {
+      "required": [
+        "clip"
+      ],
+      "optional": []
     },
     "library_game": {
       "required": [
@@ -803,6 +833,13 @@
       ],
       "optional": []
     },
+    "reply.clip_document_saved": {
+      "required": [
+        "reply",
+        "saved"
+      ],
+      "optional": []
+    },
     "reply.diagnostics": {
       "required": [
         "diagnostics",
@@ -820,6 +857,13 @@
     "reply.hotkeys": {
       "required": [
         "hotkeys",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.library_clip_document": {
+      "required": [
+        "clip",
         "reply"
       ],
       "optional": []
@@ -1006,6 +1050,13 @@
       "optional": [
         "path"
       ]
+    },
+    "save_clip_document": {
+      "required": [
+        "clip",
+        "document"
+      ],
+      "optional": []
     },
     "save_replay": {
       "required": [],
@@ -1254,6 +1305,18 @@
       "name": "library_events",
       "params": "library_events",
       "reply": "reply.library_events",
+      "available_in_this_build": true
+    },
+    {
+      "name": "library_clip_document",
+      "params": "library_clip_document",
+      "reply": "reply.library_clip_document",
+      "available_in_this_build": true
+    },
+    {
+      "name": "save_clip_document",
+      "params": "save_clip_document",
+      "reply": "reply.clip_document_saved",
       "available_in_this_build": true
     },
     {
@@ -1603,6 +1666,7 @@
           "screenshots",
           "shutdown",
           "library",
+          "editing",
           "export",
           "playback",
           "hotkeys",
@@ -2182,6 +2246,65 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_events"
+    },
+    {
+      "name": "a clip's edit document",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "clip": {
+              "clip": "3",
+              "document": "{\n  \"schema_version\": 2,\n  \"title\": \"Ace on Mirage\",\n  \"aspect_ratio\": null,\n  \"sources\": [\n    {\n      \"id\": 0,\n      \"recording\": \"1\"\n    }\n  ],\n  \"segments\": [\n    {\n      \"source\": 0,\n      \"span\": {\n        \"start\": 4000000000,\n        \"end\": 34000000000\n      },\n      \"speed\": {\n        \"numerator\": 1,\n        \"denominator\": 1\n      },\n      \"crop\": null,\n      \"rotation\": \"none\"\n    }\n  ],\n  \"audio_tracks\": [],\n  \"overlays\": []\n}",
+              "synthesised": false
+            },
+            "reply": "library_clip_document"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_clip_document.stored"
+    },
+    {
+      "name": "the starting document of a clip nobody has edited",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "clip": {
+              "clip": "3",
+              "document": "{\n  \"schema_version\": 2,\n  \"title\": \"Ace on Mirage\",\n  \"aspect_ratio\": null,\n  \"sources\": [\n    {\n      \"id\": 0,\n      \"recording\": \"1\"\n    }\n  ],\n  \"segments\": [\n    {\n      \"source\": 0,\n      \"span\": {\n        \"start\": 4000000000,\n        \"end\": 34000000000\n      },\n      \"speed\": {\n        \"numerator\": 1,\n        \"denominator\": 1\n      },\n      \"crop\": null,\n      \"rotation\": \"none\"\n    }\n  ],\n  \"audio_tracks\": [],\n  \"overlays\": []\n}",
+              "synthesised": true
+            },
+            "reply": "library_clip_document"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_clip_document.synthesised"
+    },
+    {
+      "name": "an edited document stored, keeping the older text it replaced",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "ok": {
+            "reply": "clip_document_saved",
+            "saved": {
+              "clip": "3",
+              "superseded": 1
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.clip_document_saved.superseded"
     },
     {
       "name": "what is waiting in the trash, and what emptying it would take",

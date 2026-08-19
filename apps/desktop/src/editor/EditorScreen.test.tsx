@@ -59,12 +59,18 @@ function renderWithClip(changes: Record<string, unknown> = {}): void {
 }
 
 describe('the Editor screen with nothing open', () => {
-  it('says that no clip can be opened, and names the work that changes it', () => {
+  it('says how to open one rather than that none can be opened', () => {
+    // This used to assert the screen named issue #306 as the way in, which was
+    // true while nothing in the window could open a clip. It can now
+    // (`EditorRoute`), so the panel says where clips are chosen instead —
+    // naming the ticket would send somebody to a closed issue for a thing that
+    // works.
     render(<EditorScreen />);
 
     const panel = screen.getByRole('region', { name: 'Open clip' });
     expect(within(panel).getByRole('heading', { name: 'No clip is open' })).toBeVisible();
-    expect(within(panel).getByText(/#306/)).toBeVisible();
+    expect(within(panel).getByText(/Choose a clip in the Library/)).toBeVisible();
+    expect(within(panel).queryByText(/#306/)).toBeNull();
   });
 
   it('draws no timeline at all rather than an empty one', () => {

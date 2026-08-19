@@ -1,3 +1,4 @@
+import type { ClipDocument } from '@clipped/shared';
 import type { ReactNode } from 'react';
 
 import { ClipEditor } from './ClipEditor';
@@ -17,22 +18,24 @@ import { totalOutputNanos } from './timeline';
  * re-encoded because somebody made a clip (AGENTS.md sections 56 and 57,
  * `docs/editing.md`). Nothing on this screen or below it writes a file at all.
  *
- * # Why it usually has nothing open
+ * # Where the document comes from
  *
  * An edit document is stored as text in the library's database (issue #55), and
- * **this window cannot read a single row of it**: the desktop reaches the
- * recorder over the control protocol, which has no command about a library, and
- * reaches its own Tauri host through two commands, `recorder_link_state` and
- * `startup_notice`. It has no file-system permission either —
- * `src-tauri/capabilities/default.json` grants three `core:` permissions and
- * nothing else — and it may not link `clipped-library` or `clipped-edit`, which
+ * this window can read no row of it directly: it has no file-system permission
+ * — `src-tauri/capabilities/default.json` is the whole of its privilege — and
+ * it may not link `clipped-library` or `clipped-edit`, which
  * `tests/integration/tests/workspace_layering.rs` asserts.
  *
- * So this screen is given the stored text of a clip's edit document and shows
- * it, and nothing supplies one yet. It says that, and names the work that
- * changes it, rather than drawing an empty timeline — an editor with an empty
- * timeline and a dead playhead is indistinguishable from a broken one, which is
- * what AGENTS.md section 27 forbids.
+ * So it asks. `EditorRoute` fetches the document over the control protocol
+ * (`library_clip_document`, issue #306) and hands the text here; this screen is
+ * given a document and draws it, which keeps every state it can be in — a
+ * document that will not parse, one from a newer build, one whose segments have
+ * no length — a test that hands it a string.
+ *
+ * Opened from the sidebar with no clip named, it says what the editor is and
+ * what is still being built, rather than drawing an empty timeline: an editor
+ * with an empty timeline and a dead playhead is indistinguishable from a broken
+ * one, which is what AGENTS.md section 27 forbids.
  */
 
 /** One thing the editor will do, and the work that has to land before it can. */
@@ -54,28 +57,13 @@ interface Missing {
  */
 const MISSING: readonly Missing[] = [
   {
-    does: 'Open a clip, and save the edit back',
-    needs:
-      'A command that serves a clip’s edit document and takes an edited one back. The protocol reads the library (library_sessions, library_games, library_events) and says nothing about a clip’s document. Issue #306',
-  },
-  {
     does: 'Trim the start and end, split, and delete a section',
     needs:
-      'The operations exist in crates/edit with undo and redo (issue #84). The controls need the same path to the document as opening one. Issues #84 and #306',
+      'The operations exist in crates/edit with undo and redo (issue #84). Opening a clip and saving one back are built (issue #306); what each control still needs is its own wiring to an operation. Issue #84',
   },
   {
     does: 'Track volume, mute and fades; crop, rotate and speed; text overlays; combining recordings',
     needs: 'Issues #85, #86, #87 and #88, each of which owns its own control',
-  },
-  {
-    does: 'Show what a plugin reported during the recording, on the timeline, filtered by kind',
-    needs:
-      'The lane, the filter and the arithmetic are built (issue #71), and the recorder serves the marks already placed in the file: library_events, which readEvents calls (issue #329). What is missing is a clip to draw them on — nothing opens one in this window yet. Issue #306',
-  },
-  {
-    does: 'The picture at the playhead, and a waveform under each audio track',
-    needs:
-      'A path from the window to the recording itself: a frame to draw, and the peaks crates/waveform computes (issue #66). Issue #306',
   },
   {
     does: 'Export the clip to a file',
@@ -98,6 +86,16 @@ export interface EditorScreenProps {
    */
   readonly clip?: string | null;
   /**
+   * What the recorder said about where that text came from, when it came from
+   * the recorder at all.
+   *
+   * Absent when a test or a caller supplied the text directly. Present, it
+   * carries the two facts a person editing wants and the document itself cannot
+   * say: whether this clip has ever been edited, and whether the text stored
+   * for it is in an older format than the one on screen.
+   */
+  readonly opened?: ClipDocument;
+  /**
    * The game events of the recordings the clip draws on, each already placed in
    * one of them by `clipped_library::events` (issue #71).
    *
@@ -109,7 +107,7 @@ export interface EditorScreenProps {
 }
 
 /** The Editor screen. */
-export function EditorScreen({ clip = null, events = null }: EditorScreenProps): ReactNode {
+export function EditorScreen({ clip = null, events = null, opened }: EditorScreenProps): ReactNode {
   return (
     <>
       <h1 className="clipped-screen__title">Editor</h1>
@@ -120,7 +118,7 @@ export function EditorScreen({ clip = null, events = null }: EditorScreenProps):
         nothing else — no recording is modified, moved or re-encoded because you made a clip.
       </p>
 
-      {clip === null ? <NothingOpen /> : <Opened clip={clip} events={events} />}
+      {clip === null ? <NothingOpen /> : <Opened clip={clip} events={events} opened={opened} />}
     </>
   );
 }
@@ -132,13 +130,8 @@ function NothingOpen(): ReactNode {
       <section className="clipped-panel" aria-label="Open clip">
         <h2 className="clipped-panel__heading">No clip is open</h2>
         <p className="clipped-panel__body">
-          Nothing in this window can open one yet. A clip’s edit document is stored in the library’s
-          database, and this window has no file-system permission to read it. The control protocol
-          can be asked about the library — which sittings exist, what each game holds, the marks on
-          a recording’s timeline — and says nothing about a clip’s document.
-        </p>
-        <p className="clipped-panel__body clipped-muted">
-          Issue #306 is the way in: a command that serves a document and takes an edited one back.
+          Choose a clip in the Library to edit it. A clip opens with the edit somebody saved for it,
+          or — for a recording nobody has edited — with the whole of it, ready to cut.
         </p>
       </section>
 
@@ -178,9 +171,11 @@ function NothingOpen(): ReactNode {
 function Opened({
   clip,
   events,
+  opened,
 }: {
   readonly clip: string;
   readonly events: readonly EventMark[] | null;
+  readonly opened: ClipDocument | undefined;
 }): ReactNode {
   const read = readEditDocument(clip);
   if (!read.ok) {
@@ -201,7 +196,52 @@ function Opened({
     );
   }
 
-  return <ClipEditor clip={read.document} durationNanos={durationNanos} events={events} />;
+  return (
+    <>
+      <Provenance opened={opened} />
+      <ClipEditor clip={read.document} durationNanos={durationNanos} events={events} />
+    </>
+  );
+}
+
+/**
+ * What the recorder said about the document that was opened.
+ *
+ * Two facts the document itself cannot carry, and both change what somebody
+ * should expect when they save:
+ *
+ * - **Nobody has edited this clip.** What is on screen was built from the
+ *   recording rather than read from the library, and nothing is stored for this
+ *   clip until a save. Saying so is the difference between "your edit is
+ *   already here" and "this is where it starts".
+ * - **The stored text is older than this.** Reading converted it in memory and
+ *   changed nothing. Saving will store the converted document and keep the
+ *   original, which is worth saying before somebody saves rather than after.
+ *
+ * Nothing is drawn when neither applies, which is the ordinary case.
+ */
+function Provenance({ opened }: { readonly opened: ClipDocument | undefined }): ReactNode {
+  if (opened === undefined) {
+    return null;
+  }
+  if (opened.converted_from !== undefined) {
+    return (
+      <p className="clipped-screen__lead clipped-muted">
+        This clip was saved by an older version of Clipped (format {opened.converted_from}). It has
+        been brought up to date to show here; nothing has been changed. Saving stores the newer
+        version and keeps the original.
+      </p>
+    );
+  }
+  if (opened.synthesised) {
+    return (
+      <p className="clipped-screen__lead clipped-muted">
+        Nobody has edited this clip yet, so it starts as the whole of what was recorded. Nothing is
+        stored for it until you save.
+      </p>
+    );
+  }
+  return null;
 }
 
 /** Why a clip did not open, in the one place that says it. */

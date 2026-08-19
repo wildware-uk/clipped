@@ -11,6 +11,13 @@ publish = false
 
 [dev-dependencies]
 serde_json = "1"
+# The edit document model, for `edit_documents_cross_the_protocol.rs`. Two
+# copies of what a document looks like live outside this crate -- the protocol
+# schema's exemplar and the window's `EDIT_SCHEMA_VERSION` -- and neither can be
+# checked where it lives: `clipped-ipc` may not link `clipped-edit` (both are at
+# layer 0, and `workspace_layering.rs` requires a strictly lower one), and the
+# other is TypeScript. This crate is where both ends are visible at once.
+clipped-edit.workspace = true
 
 [lints]
 workspace = true

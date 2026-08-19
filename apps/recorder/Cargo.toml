@@ -42,6 +42,20 @@ clipped-game-detection.workspace = true
 # and the handshake live there so that both ends of the connection use one
 # implementation of them; what lives here is the recorder behind it.
 clipped-ipc.workspace = true
+# The edit document model, for the two commands that carry one (`src/library.rs`,
+# issue #306). The recorder is the process that may link this: the window is
+# allowed exactly one member of this workspace and `clipped-edit` is not it
+# (tests/integration/tests/workspace_layering.rs), and the window has no
+# file-system permission for the database the document is a column of either.
+#
+# What this dependency buys is the conversion and the validation. A document
+# older than this build is converted here before it is sent, and a document
+# arriving from the window is validated here before anything is stored, so the
+# database can never take text that will not open again (docs/editing.md).
+# `clipped-library` already brings this crate in for `VirtualClip`; naming it
+# here is what deny.toml's `wildcards = "deny"` asks of a dependency this
+# package uses directly.
+clipped-edit.workspace = true
 # The recording library the desktop application reads through this process
 # (issue #301, `src/library.rs`). The window may not link it — the workspace
 # layering test permits `apps/desktop/src-tauri` exactly one member of this

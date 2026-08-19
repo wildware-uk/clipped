@@ -1,10 +1,12 @@
 # Editing
 
 **Status: the document model, the operations that cut a clip up and the mix
-exist and are tested, and the editor screen draws a document it is given — but
-nothing in the desktop application can open one yet
-([#306](https://github.com/wildware-uk/clipped/issues/306)), and nothing
-renders a clip to a file.** `crates/edit` defines what an edit *is*,
+exist and are tested, the editor screen draws a document it is given, and the
+desktop application can now open a clip and save an edit back over the control
+protocol — `library_clip_document` and `save_clip_document`
+([#306](https://github.com/wildware-uk/clipped/issues/306),
+[ipc.md](ipc.md)). What is still missing is a control per operation, and
+nothing renders a clip to a file.** `crates/edit` defines what an edit *is*,
 reads and writes it, converts an older one, answers the question an exporter
 asks — "what is on screen at this moment, where does it come from, and how loud
 is each track here?" — and performs the seven edits a user can make: trim start,
@@ -541,6 +543,14 @@ three consequences worth stating:
   written by an older build converts it in memory and reports that it did; the
   caller decides whether to store the result, and must keep the original when it
   does. Nothing is rewritten by the model.
+
+  **The recorder is that caller.** `save_clip_document` copies the older text
+  into `clips.edit_superseded` in the same transaction that replaces it
+  (migration `0008`), once and never again — the column holds the only text
+  this build could not have produced, so a later save must not overwrite it
+  with text this build wrote. Reading a document writes nothing at all: a user
+  who opens a clip made by an older Clipped and closes it again has changed
+  nothing.
 
 ## Compatibility
 

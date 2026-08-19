@@ -534,6 +534,22 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_library_clip(), &[]),
         ),
         (
+            "library_clip_document".to_owned(),
+            structure_of(&exemplar_library_clip_document(), &[]),
+        ),
+        (
+            "clip_document".to_owned(),
+            structure_of(&exemplar_clip_document(), &[]),
+        ),
+        (
+            "save_clip_document".to_owned(),
+            structure_of(&exemplar_save_clip_document(), &[]),
+        ),
+        (
+            "clip_document_saved".to_owned(),
+            structure_of(&exemplar_clip_document_saved(), &[]),
+        ),
+        (
             "library_game".to_owned(),
             structure_of(&exemplar_library_game(), &[]),
         ),
@@ -756,6 +772,8 @@ fn commands() -> Vec<CommandSchema> {
                 Command::SaveReplay(_) => Some("save_replay".to_owned()),
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
                 Command::LibraryEvents(_) => Some("library_events".to_owned()),
+                Command::LibraryClipDocument(_) => Some("library_clip_document".to_owned()),
+                Command::SaveClipDocument(_) => Some("save_clip_document".to_owned()),
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::GetStorage(_) => Some("get_storage".to_owned()),
                 Command::GetSettings(_) => Some("get_settings".to_owned()),
@@ -790,6 +808,8 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
+                Command::LibraryClipDocument(_) => Some("reply.library_clip_document".to_owned()),
+                Command::SaveClipDocument(_) => Some("reply.clip_document_saved".to_owned()),
                 Command::LibraryTrash(_) => Some("reply.library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
@@ -1186,6 +1206,50 @@ fn samples() -> Vec<Sample> {
                             },
                         ],
                     },
+                }),
+            }),
+        ),
+        (
+            "a clip's edit document",
+            ServerMessage::Response(Response {
+                id: 12,
+                outcome: Outcome::Ok(Reply::LibraryClipDocument {
+                    clip: crate::library::ClipDocument {
+                        // The ordinary answer: the library held this text and
+                        // it was already the version this build writes, so
+                        // nothing was converted and the key is absent rather
+                        // than null.
+                        converted_from: None,
+                        ..exemplar_clip_document()
+                    },
+                }),
+            }),
+        ),
+        (
+            "the starting document of a clip nobody has edited",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::LibraryClipDocument {
+                    clip: crate::library::ClipDocument {
+                        // A saved replay: `clips.edit` is NULL and the recorder
+                        // built the document that means "this recording, this
+                        // span, no edits". The window has to be able to tell
+                        // this from a document somebody made, which is why the
+                        // flag is on the wire and not inferred from the shape
+                        // of the document.
+                        synthesised: true,
+                        converted_from: None,
+                        ..exemplar_clip_document()
+                    },
+                }),
+            }),
+        ),
+        (
+            "an edited document stored, keeping the older text it replaced",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Ok(Reply::ClipDocumentSaved {
+                    saved: exemplar_clip_document_saved(),
                 }),
             }),
         ),
@@ -2064,6 +2128,30 @@ fn reply_discriminant(reply: &Reply) -> String {
         // tells "none" from "not asked" is that `marks` is always present, and
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
+        // Two discriminants, because a window draws them differently: a clip
+        // whose document the library held, and one that had none and was given
+        // a starting document built from the recording it is a window of. The
+        // second is a clip nobody has ever edited, and an editor that could not
+        // tell them apart could not say so (AGENTS.md section 27).
+        Reply::LibraryClipDocument { clip } => {
+            if clip.synthesised {
+                "library_clip_document.synthesised".to_owned()
+            } else {
+                "library_clip_document.stored".to_owned()
+            }
+        }
+        // And two here for the reason `storage` has two: whether the older text
+        // was kept is the whole point of the reply, and a mirror that dropped
+        // `superseded` would reach the same discriminant for a save that
+        // preserved a document and one that had nothing to preserve
+        // (AGENTS.md section 56).
+        Reply::ClipDocumentSaved { saved } => {
+            if saved.superseded.is_some() {
+                "clip_document_saved.superseded".to_owned()
+            } else {
+                "clip_document_saved".to_owned()
+            }
+        }
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
         // Whether the limits were proposed is part of the path. A mirror that
         // dropped `proposed` would reach the same discriminant for a report of
@@ -2792,6 +2880,93 @@ fn exemplar_library_clip() -> LibraryClip {
     }
 }
 
+/// The text of a clip's edit document, exactly as `clipped_edit` writes one.
+///
+/// # Why a literal, and what stops it from being a lie
+///
+/// This crate may not link `clipped-edit`: both are at layer 0 of README.md's
+/// dependency table, and `tests/integration/tests/workspace_layering.rs`
+/// requires a dependency to point at a *strictly* lower layer. So the exemplar
+/// cannot be produced by calling the writer, and a literal is the only option
+/// left.
+///
+/// A literal copy of somebody else's format is exactly the thing that rots
+/// quietly, so it is not trusted:
+/// `tests/integration/tests/edit_documents_cross_the_protocol.rs` builds the
+/// same document with `EditDocument::from_recording` and asserts this string is
+/// what `EditDocument::write` produces. A field added to the model, or a
+/// version bumped, fails there rather than shipping a sample the window is
+/// fixtured from and nothing else agrees with.
+///
+/// It is the document of an unedited thirty-second window of one recording,
+/// which is what an editor most often opens: a saved replay, before anybody has
+/// cut anything.
+const EXEMPLAR_EDIT_DOCUMENT: &str = r#"{
+  "schema_version": 2,
+  "title": "Ace on Mirage",
+  "aspect_ratio": null,
+  "sources": [
+    {
+      "id": 0,
+      "recording": "1"
+    }
+  ],
+  "segments": [
+    {
+      "source": 0,
+      "span": {
+        "start": 4000000000,
+        "end": 34000000000
+      },
+      "speed": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "crop": null,
+      "rotation": "none"
+    }
+  ],
+  "audio_tracks": [],
+  "overlays": []
+}"#;
+
+/// Asking for the document of the clip `exemplar_library_clip` describes.
+fn exemplar_library_clip_document() -> crate::library::LibraryClipDocument {
+    crate::library::LibraryClipDocument {
+        clip: "3".to_owned(),
+    }
+}
+
+/// A clip's document, with every optional field present.
+///
+/// `converted_from` among them, and it is optional: the ordinary answer is a
+/// document that was already the version this build writes, and a mirror that
+/// made the field required would refuse every frame but the unusual one.
+fn exemplar_clip_document() -> crate::library::ClipDocument {
+    crate::library::ClipDocument {
+        clip: "3".to_owned(),
+        document: EXEMPLAR_EDIT_DOCUMENT.to_owned(),
+        converted_from: Some(1),
+        synthesised: false,
+    }
+}
+
+/// Storing an edited document back against the same clip.
+fn exemplar_save_clip_document() -> crate::library::SaveClipDocument {
+    crate::library::SaveClipDocument {
+        clip: "3".to_owned(),
+        document: EXEMPLAR_EDIT_DOCUMENT.to_owned(),
+    }
+}
+
+/// A save that replaced a format 1 document and kept it.
+fn exemplar_clip_document_saved() -> crate::library::ClipDocumentSaved {
+    crate::library::ClipDocumentSaved {
+        clip: "3".to_owned(),
+        superseded: Some(1),
+    }
+}
+
 /// One thing waiting in the trash, with every optional field present.
 ///
 /// `path` and `original_path` among them, and they are optional: an item can
@@ -3186,6 +3361,8 @@ fn every_built_command() -> Vec<Command> {
         Command::LibraryEvents(crate::library::LibraryEvents {
             recording: "1".to_owned(),
         }),
+        Command::LibraryClipDocument(exemplar_library_clip_document()),
+        Command::SaveClipDocument(exemplar_save_clip_document()),
         Command::LibraryTrash(crate::library::LibraryTrash {}),
         Command::RestoreFromTrash(crate::library::RestoreFromTrash {
             kind: "recording".to_owned(),
@@ -3234,6 +3411,8 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::LibraryEvents(_)
+            | Command::LibraryClipDocument(_)
+            | Command::SaveClipDocument(_)
             | Command::LibraryTrash(_)
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
@@ -3278,6 +3457,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::ExportFailed,
         ErrorCode::PlaybackFailed,
         ErrorCode::LibraryUnavailable,
+        ErrorCode::EditUnreadable,
         ErrorCode::Internal,
     ];
     for code in &codes {
@@ -3299,6 +3479,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::ExportFailed
             | ErrorCode::PlaybackFailed
             | ErrorCode::LibraryUnavailable
+            | ErrorCode::EditUnreadable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
         }
@@ -3472,6 +3653,15 @@ fn every_reply() -> Vec<Reply> {
                 }],
             },
         },
+        // `converted_from` present, or the field is skipped and the schema
+        // would never see it — the same reason `ShuttingDown` carries a
+        // `Some` above.
+        Reply::LibraryClipDocument {
+            clip: exemplar_clip_document(),
+        },
+        Reply::ClipDocumentSaved {
+            saved: exemplar_clip_document_saved(),
+        },
         Reply::LibraryTrash {
             trash: crate::library::TrashListing {
                 items: vec![crate::library::TrashedItem {
@@ -3569,6 +3759,8 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
             | Reply::LibraryEvents { .. }
+            | Reply::LibraryClipDocument { .. }
+            | Reply::ClipDocumentSaved { .. }
             | Reply::LibraryTrash { .. }
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }

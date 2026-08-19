@@ -202,6 +202,8 @@ fn main() {
             startup_notice,
             library_sessions,
             library_events,
+            library_clip_document,
+            save_clip_document,
             library_games,
             library_trash,
             restore_from_trash,
@@ -606,6 +608,60 @@ fn library_events(
     match reply {
         clipped_ipc::Reply::LibraryEvents { lane } => Ok(lane),
         _ => Err(wrong_reply("library_events")),
+    }
+}
+
+/// One clip's edit document, as text (issue #306).
+///
+/// The command the Editor screen opens a clip with. Everything about the
+/// document — converting one an older build wrote, building a starting one for
+/// a clip nobody has edited, refusing one this build cannot read — is decided
+/// in the recorder, because this process may link neither `clipped-edit` nor
+/// `clipped-library` and has no file-system permission for the database the
+/// document is a column of.
+///
+/// What arrives here is therefore always text at the version the window's own
+/// reader (`src/editor/document.ts`) understands, or a refusal saying why not.
+///
+/// `async` for the reason [`library_sessions`] is.
+#[tauri::command(async)]
+fn library_clip_document(
+    link: tauri::State<'_, RecorderLink>,
+    clip: String,
+) -> Result<clipped_ipc::ClipDocument, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::LibraryClipDocument(
+        clipped_ipc::LibraryClipDocument { clip },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::LibraryClipDocument { clip } => Ok(clip),
+        _ => Err(wrong_reply("library_clip_document")),
+    }
+}
+
+/// Stores an edited document against a clip (issue #306).
+///
+/// The only thing this window can ask to have changed about a clip, and it
+/// changes nothing else: no recording is modified, moved or re-encoded because
+/// somebody edited one (AGENTS.md sections 56 and 57). The recorder validates
+/// the document before storing it and keeps the text it replaced when that text
+/// was in an older format, so a save either succeeds or leaves the clip exactly
+/// as it was.
+///
+/// `async` for the reason [`library_sessions`] is.
+#[tauri::command(async)]
+fn save_clip_document(
+    link: tauri::State<'_, RecorderLink>,
+    clip: String,
+    document: String,
+) -> Result<clipped_ipc::ClipDocumentSaved, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::SaveClipDocument(
+        clipped_ipc::SaveClipDocument { clip, document },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::ClipDocumentSaved { saved } => Ok(saved),
+        _ => Err(wrong_reply("save_clip_document")),
     }
 }
 
