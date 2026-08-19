@@ -597,10 +597,10 @@ and the wiring that shows a document.
 ├──────────┬───────────────────────────────────────────────┤
 │          │ 00:00      00:05      00:10      00:15        │
 │ Video    │ ├─ seg 0 ──┼───── seg 1 ─────┼── seg 2 ──┤    │
-│ Game     │ No waveform         ▮                         │
-│ −3.0 dB  │                     playhead                  │
-│ Micro…   │ No waveform                                   │
-│ Muted    │                                               │
+│ Game     │ ▃▅▆▃▇▆▄▅▃▮▅▇▅▄▃▅▆▃▇▆▄▅▄│▃▅▆▃▇▆▄▅              │
+│ −3.0 dB  │ 30s–38s of rec… playhead  5s–9s of rec…-b     │
+│ Micro…   │ ▁▁▃▇▅▁▁▃▆▁▁▁▅▁▁▃▆▁▁▁▅▁▁▁│Not in this recording│
+│ Muted    │                         │(no input from it)   │
 └──────────┴───────────────────────────────────────────────┘
 ```
 
@@ -644,26 +644,54 @@ by *version* rather than misread, one with no version is refused rather than
 guessed at, and one carrying an unknown field is refused rather than opened with
 the field silently dropped.
 
+### The waveforms under the lanes
+
+[#66](https://github.com/wildware-uk/clipped/issues/66)'s first criterion, and
+the second screen in Clipped to draw peaks. `crates/waveform` computes them
+beside each recording and `open_preview` carries them (#448), so `EditorRoute`
+asks for the peaks of every recording the open clip draws on and the lanes draw
+them.
+
+**A lane is pieces, not a waveform.** The lane counts **edit-document** time and
+the peaks are in **recording** time, which is the same division the two-kinds-of-
+time section above is about, and it is where this is easy to get subtly wrong: a
+clip trimmed from the middle of a session must draw the peaks of *that part*, not
+the whole recording scaled to fit. So `src/editor/lanePeaks.ts` walks the
+segments and places one picture per segment, each holding the slice of one
+recording's buckets that segment uses — and a clip cut from two recordings draws
+each piece from its own file. `lanePeaks.test.ts` reads the drawn samples back
+off the path and compares *bucket numbers*, because "a waveform is drawn" is true
+of every one of those mistakes.
+
+A segment played at a speed changes where a piece goes and not what is in it: the
+same buckets, stretched into a narrower box. So does the zoom — the `viewBox` is
+one unit per bucket and `preserveAspectRatio="none"` does the rest, which is why
+zooming in never asks the recorder for anything.
+
+**What a lane says when it has nothing to draw**, and none of it is a flat line
+(`docs/waveforms.md` is explicit that a flat line is indistinguishable from
+silence):
+
+| In the lane | Means |
+| --- | --- |
+| nothing at all | the round trip is still in flight; a label that appeared for an instant and was replaced by a picture would be worse than none |
+| "No waveform yet" | `pending` — the ordinary state of a recording written a minute ago. Asking is what queued it, and it appears the next time the clip is opened |
+| "No waveform" | `unavailable`, a refusal, or a recording that carries no such stream. Which of the three is said **under** the timeline, where there is room for the recorder's own sentence |
+| "Not in this recording" | the output track lists no input for the recording this segment plays, so the exported track is silent here (`docs/editing.md`). Not a missing waveform at all |
+
+The resolution a lane gets is set by the *recording* rather than by the clip:
+`open_preview` answers with at most `MAX_PREVIEW_BUCKETS` buckets spread over the
+whole file, so eight seconds cut out of a three-hour session is a handful of
+them. `crates/waveform`'s pyramid holds the detail; asking for a **range** of a
+recording is [#657](https://github.com/wildware-uk/clipped/issues/657).
+
 ### Nothing is drawn that this window cannot get
 
-**No clip can be opened at all.** An edit document is stored as text in the
-library's database (#55), and this window can neither read that database nor ask
-the recorder for a row of it: the control protocol has no command about a
-library, and the window has no file-system permission. So the screen says so and
-names the work — **issue #306** for a clip's document, a frame and its
-waveforms; **#301** for the library index behind it — rather than drawing an
-empty timeline with a dead playhead, which is indistinguishable from a broken
-editor (AGENTS.md section 27).
-
-The screen takes the document as a prop, so the day something can supply one,
-one line of `Shell.tsx` changes.
-
-Given a document, two things are still absent rather than drawn:
+One thing is still absent rather than drawn:
 
 | | Why | Drawn as |
 | --- | --- | --- |
-| The picture at the playhead | A frame is inside a recording this window cannot open | The sentence saying so, on the ground a frame would be drawn on |
-| A waveform under each lane | `crates/waveform` computes the peaks (#66) beside the recording; the window cannot read a file | "No waveform" in the lane. **Never a flat line** — `docs/waveforms.md` is explicit that a flat line is indistinguishable from silence |
+| The picture at the playhead | A frame is inside a recording this window cannot open: it has no file-system permission and there is no command that serves one | The sentence saying so, on the ground a frame would be drawn on |
 
 What the screen *does* show is all real, computed from the document: the
 recording under the playhead, its source time, which segment of how many and
@@ -1261,9 +1289,16 @@ are asked for at the width they will be drawn at, which is what the pyramid in
 and a sentence, never as a flat line**, because a flat line is
 indistinguishable from silence.
 
-It is not a timeline. There is no playhead over it and nothing to scrub, which
-is [#66](https://github.com/wildware-uk/clipped/issues/66). The marks are drawn
-below it, on a strip of their own.
+It is not a timeline. There is no playhead over it and nothing to scrub; the
+screen that puts peaks under a playhead is the Editor. The marks are drawn below
+it, on a strip of their own.
+
+The Editor draws the same outlines through the same arithmetic
+(`src/waveformOutline.ts`, and one CSS declaration fills both), which is
+deliberate: a second copy is how the two screens would start disagreeing about
+what silence looks like. What differs is the *geometry* — a row per sound track
+of one file here, against a row per audio track of an edit, in output time, at a
+zoom, in a scroller there — and that is `src/editor/lanePeaks.ts`'s.
 
 ### The recording's timeline
 
@@ -1274,13 +1309,15 @@ each came from.
 
 **Why it is here and not in the Editor.** Because this is the screen that has a
 recording open. The Editor's own event lane has existed since
-[#71](https://github.com/wildware-uk/clipped/issues/71) and has never had
-anything to draw on — nothing in this window opens a clip, which is
-[#306](https://github.com/wildware-uk/clipped/issues/306), and it is why
-`ClipEditor` still renders "No waveform" for every track. A timeline whose whole
-purpose is to seek needs something that plays, and this screen has had one since
-#304. The two share the *vocabulary* (`events.ts`) and not the placement: the
-Editor counts edit-document time and this counts the recording's own.
+[#71](https://github.com/wildware-uk/clipped/issues/71) and has still never had
+anything to draw on: nothing in this window can ask the library for a
+recording's events, which is #329. A timeline whose whole purpose is to seek
+needs something that plays, and this screen has had one since #304. The two
+share the *vocabulary* (`events.ts`) and not the placement: the Editor counts
+edit-document time and this counts the recording's own — which is the same
+division that makes the Editor's *waveforms* a slice of a recording per segment
+rather than one picture per lane
+([#66](https://github.com/wildware-uk/clipped/issues/66)).
 
 **Which recording's marks, and why not always.** `library_events` names a
 recording by the **index's own integer key** — the recorder parses it as an
@@ -2330,6 +2367,7 @@ They are not from the reference pages, which have no screen in them:
 | `.clipped-path` | A file path, printed in full: monospaced, and broken anywhere, because a Windows path has no spaces to break at. It sets no size, so it takes whatever block it sits in, and no colour, so it is the window's own ink |
 | `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
 | `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below. `.clipped-editor__header` carries the clip's name and Export, and `.clipped-editor__reasons` is the export dialog's list of what decides an export; both are the Editor's, and neither sets a colour |
+| `.clipped-timeline__peaks`, `.clipped-timeline__absent--part` | One segment's worth of an audio lane ([#66](https://github.com/wildware-uk/clipped/issues/66)): the peaks of the part of a recording that segment uses, or the sentence saying why there are none. Both are positioned and sized by the segment, in percentages, so they move with the zoom; the picture's `viewBox` is one unit per bucket and `preserveAspectRatio="none"` stretches it. The fill is **one declaration shared with the player's waveform**, so a waveform there and a waveform here cannot become different colours |
 | `.clipped-thumb` + `--absent` | A recording's thumbnail in the Library's list, and the tile that stands in for one there is no picture for ([#448](https://github.com/wildware-uk/clipped/issues/448)). One shape for all four states, on the dark ground the player and the editor's frame already use, so an empty tile reads as a frame with nothing in it rather than as a hole in the layout. What tells "not made yet" from "there will not be one" is the **word** in the tile, never its shade; `contrast.test.ts` measures that word on that ground. `--thumb-width` is its one metric, and it is deliberately not the deck's 320-pixel grid tile: this is a row in a dense table |
 | `.clipped-waveform` + `__lane`, `__name`, `__lane-picture` | A recording's sound under the player, one row per track ([#448](https://github.com/wildware-uk/clipped/issues/448)). Laid out like the Editor's timeline and on purpose — a name column of `--editor-lane-label-width` beside a picture that takes what is left, so a waveform here and a waveform there are the same size. The path is **filled** rather than stroked, because the outline is a shape and a stroke of a fixed width would thicken as the picture is stretched; `--color-accent-600` on `--color-surface` is a mark rather than words, which is what `--color-accent-text` exists to distinguish |
 
@@ -2710,8 +2748,18 @@ deliberate:
 - `EditorScreen.test.tsx` drives **real keys at the real element** and asserts
   the timecode the screen shows, so a key that moved a variable nothing draws
   would fail. It also asserts the absences: no timeline at all when no clip is
-  open, "No waveform" in every lane, no picture, and that the only controls on
-  the screen are the three zoom buttons.
+  open, "No waveform" in every lane when nobody has asked for any, no picture,
+  and that the only controls on the screen are the three zoom buttons.
+- `lanePeaks.test.ts` and `EditorWaveforms.test.tsx` split the waveforms in two,
+  because the interesting failures are invisible on a screen. The first drives
+  peaks that are a **ramp** — bucket `n` carries a sample saying which bucket it
+  is — and reads the drawn samples back off the path, so a build that put the
+  whole recording under a clip trimmed from its middle fails with `[0, 1, 2, …]`
+  against `[30, 31, …]` rather than with a missing element. The second asserts
+  what only a render can: that each picture's accessible name says which seconds
+  of which recording it is, that the three states of a preview are three
+  different sentences, that **no `<path>` exists at all** for any of them, and
+  that opening a clip really asks the recorder for every recording it draws on.
 
 `SettingsScreen.test.tsx` is about three things, and the middle one is the
 awkward one. That the screen offers nothing that would change a setting is

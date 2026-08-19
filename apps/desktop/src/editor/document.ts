@@ -445,3 +445,21 @@ export function readEditDocument(stored: string): EditDocumentRead {
 export function recordingOf(document: EditDocument, source: number): string | undefined {
   return document.sources.find((declared) => declared.id === source)?.recording;
 }
+
+/**
+ * Every recording a stored document draws on, each named once.
+ *
+ * For the one caller that needs the *list* without the document —
+ * `clipWaveforms.ts`, which asks the recorder for the peaks of each before
+ * anything has drawn a lane. It goes through {@link readEditDocument} rather
+ * than reaching into the JSON, so a document this build refuses is a clip with
+ * no recordings to ask about rather than a second, laxer reader of the model
+ * (AGENTS.md section 55).
+ *
+ * Deduplicated, because two sources may name the same file — a clip cut from
+ * one recording twice — and that is one round trip, not two.
+ */
+export function recordingsIn(stored: string): readonly string[] {
+  const read = readEditDocument(stored);
+  return read.ok ? [...new Set(read.document.sources.map((source) => source.recording))] : [];
+}

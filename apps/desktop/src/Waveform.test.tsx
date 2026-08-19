@@ -6,7 +6,7 @@ import { cleanup } from '@testing-library/react';
 import type { Preview, PreviewTrack } from '@clipped/shared';
 
 import { Waveform } from './Waveform';
-import { envelope } from './waveformOutline';
+import { bucketsOver, envelope } from './waveformOutline';
 
 /**
  * What the peaks the recorder answered with turn into (issue #448).
@@ -79,6 +79,50 @@ describe('the outline', () => {
     // the middle is indistinguishable from silence, and a track the recorder
     // returned nothing for is not silent, it is unknown.
     expect(envelope(track([]))).toBeNull();
+  });
+});
+
+describe('the buckets a range of a recording covers', () => {
+  /** A track of `buckets` buckets spread over `seconds` of a recording. */
+  const over = (buckets: number, seconds: number): PreviewTrack => ({
+    ...track(Array.from({ length: buckets * 2 }, () => 0)),
+    duration_seconds: seconds,
+  });
+
+  it('rounds outwards, so a piece never draws less audio than it covers', () => {
+    // One bucket a second. Two and a half to seven and a half seconds is
+    // buckets 2 to 8, not 3 to 7: `docs/waveforms.md` rounds peaks outwards for
+    // the same reason, which is that somebody hunting for the quiet start of a
+    // sound must not be shown less of it than there is.
+    expect(bucketsOver(over(60, 60), 2_500_000_000, 7_500_000_000)).toEqual({ from: 2, to: 8 });
+  });
+
+  it('is the exact buckets when the range is already on their boundaries', () => {
+    expect(bucketsOver(over(60, 60), 30_000_000_000, 38_000_000_000)).toEqual({ from: 30, to: 38 });
+  });
+
+  it('clamps to the track rather than reading past its peaks', () => {
+    // A segment that reaches past the end of the recording it names — a
+    // document written against a file that has since been trimmed. The overlap
+    // is drawn and the rest is not invented.
+    expect(bucketsOver(over(60, 60), 55_000_000_000, 90_000_000_000)).toEqual({ from: 55, to: 60 });
+  });
+
+  it('is nothing at all for a range the track does not reach', () => {
+    // Never a flat line, and never the last bucket stretched across the piece.
+    expect(bucketsOver(over(60, 60), 90_000_000_000, 95_000_000_000)).toBeNull();
+    expect(bucketsOver(over(0, 60), 0, 5_000_000_000)).toBeNull();
+    expect(bucketsOver(over(60, 0), 0, 5_000_000_000)).toBeNull();
+    expect(bucketsOver(over(60, 60), 8_000_000_000, 8_000_000_000)).toBeNull();
+  });
+
+  it('draws only the buckets of the range, re-based so the picture starts at zero', () => {
+    // The editor's lanes draw part of a recording (issue #66). The path has to
+    // start at x of zero however far into the file the material is, because the
+    // `viewBox` it goes in is the slice rather than the track.
+    const ramped = track([-1, 1, -2, 2, -3, 3, -4, 4]);
+
+    expect(envelope(ramped, { from: 2, to: 4 })).toBe(envelope(track([-3, 3, -4, 4])));
   });
 });
 

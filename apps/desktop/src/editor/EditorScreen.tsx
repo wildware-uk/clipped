@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { ClipEditor } from './ClipEditor';
 import { readEditDocument } from './document';
 import type { EventMark } from '../events';
+import type { PeaksOf } from './lanePeaks';
 import { totalOutputNanos } from './timeline';
 
 /**
@@ -104,10 +105,24 @@ export interface EditorScreenProps {
    * two it got rather than drawing the same empty lane for both.
    */
   readonly events?: readonly EventMark[] | null;
+  /**
+   * Where the peaks of each recording the clip draws on stand (issue #66).
+   *
+   * Passed straight through to the timeline. It is the route's rather than this
+   * screen's, for the reason the document text is: this screen is given what
+   * there is and draws it, so every state of a lane is a test that hands it a
+   * lookup and no round trip.
+   */
+  readonly waveforms?: PeaksOf | null;
 }
 
 /** The Editor screen. */
-export function EditorScreen({ clip = null, events = null, opened }: EditorScreenProps): ReactNode {
+export function EditorScreen({
+  clip = null,
+  events = null,
+  opened,
+  waveforms = null,
+}: EditorScreenProps): ReactNode {
   return (
     <>
       <h1 className="clipped-screen__title">Editor</h1>
@@ -118,7 +133,11 @@ export function EditorScreen({ clip = null, events = null, opened }: EditorScree
         nothing else — no recording is modified, moved or re-encoded because you made a clip.
       </p>
 
-      {clip === null ? <NothingOpen /> : <Opened clip={clip} events={events} opened={opened} />}
+      {clip === null ? (
+        <NothingOpen />
+      ) : (
+        <Opened clip={clip} events={events} opened={opened} waveforms={waveforms} />
+      )}
     </>
   );
 }
@@ -172,10 +191,12 @@ function Opened({
   clip,
   events,
   opened,
+  waveforms,
 }: {
   readonly clip: string;
   readonly events: readonly EventMark[] | null;
   readonly opened: ClipDocument | undefined;
+  readonly waveforms: PeaksOf | null;
 }): ReactNode {
   const read = readEditDocument(clip);
   if (!read.ok) {
@@ -199,7 +220,12 @@ function Opened({
   return (
     <>
       <Provenance opened={opened} />
-      <ClipEditor clip={read.document} durationNanos={durationNanos} events={events} />
+      <ClipEditor
+        clip={read.document}
+        durationNanos={durationNanos}
+        events={events}
+        waveforms={waveforms}
+      />
     </>
   );
 }
