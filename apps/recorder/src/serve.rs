@@ -1442,7 +1442,13 @@ impl Running {
 }
 
 impl RecordingState {
-    fn new(
+    /// `pub(crate)` so that `crate::watch`'s tests can build one.
+    ///
+    /// The seam `Driver::take_the_settings_the_user_saved` runs on needs a real
+    /// `RecordingState` to have a generation to notice, and until this was
+    /// reachable the only driver test built one with `recordings: None` — so the
+    /// refresh never ran in any test at all (issue #648).
+    pub(crate) fn new(
         events: EventPublisher,
         indexer: Arc<LibraryIndexer>,
         settings: Arc<crate::settings::SettingsFile>,
