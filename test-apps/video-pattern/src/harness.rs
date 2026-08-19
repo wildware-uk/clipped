@@ -37,11 +37,12 @@ use core::fmt;
 use core::time::Duration;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Instant;
+
+use crate::child_output::{self, Lines, NoLine};
 
 /// How long [`Drop`] gives the application to stop cleanly before killing it.
 const DROP_GRACE: Duration = Duration::from_secs(3);
@@ -63,7 +64,7 @@ pub struct TestApp {
     /// thread receives them. Reading them all is not curiosity: an unread pipe
     /// makes the application's own writes fail, and its last line is the frame
     /// count a test cross-checks its capture against.
-    lines: Receiver<std::io::Result<String>>,
+    lines: Lines,
     window: usize,
     client: (u32, u32),
     presentation: String,
@@ -240,14 +241,17 @@ impl TestApp {
             })?;
 
         let stdout = child.stdout.take().ok_or(HarnessError::NoPipe)?;
-        let lines = match read_lines(stdout) {
+        let lines = match child_output::reading(stdout) {
             Ok(lines) => lines,
-            Err(error) => {
+            Err(source) => {
                 // The application is this function's to clean up until the
                 // struct that owns it exists.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(error);
+                return Err(HarnessError::Spawn {
+                    executable: "the reader thread".to_owned(),
+                    source,
+                });
             }
         };
 
@@ -265,7 +269,7 @@ impl TestApp {
     /// back so the caller can kill it.
     fn from_ready_line(
         child: Child,
-        lines: Receiver<std::io::Result<String>>,
+        lines: Lines,
         ready_timeout: Duration,
     ) -> Result<Self, (Child, HarnessError)> {
         let line = match next_line_within(&lines, ready_timeout) {
@@ -651,56 +655,23 @@ fn parse_tone(line: &str) -> Result<ToneEvent, HarnessError> {
     })
 }
 
-/// Reads the application's standard output on a thread of its own.
-///
-/// A thread, rather than reading in the test, for two reasons. A child that
-/// never writes anything would otherwise block the test for ever, and there is
-/// no portable way to put a deadline on a pipe read. And the pipe has to keep
-/// being read for the whole run: a child whose standard output fills up blocks
-/// in `write`, and this one would then stop presenting frames — the subject
-/// would freeze because the test stopped listening.
-///
-/// The thread ends when the pipe closes, which happens when the application
-/// exits; [`TestApp`]'s `Drop` guarantees that it does.
-fn read_lines(stdout: ChildStdout) -> Result<Receiver<std::io::Result<String>>, HarnessError> {
-    let (sender, receiver) = mpsc::channel();
-    thread::Builder::new()
-        .name("test-app-output".to_owned())
-        .spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if sender.send(line).is_err() {
-                    // The test has gone. `Drop` is dealing with the process.
-                    break;
-                }
-            }
-        })
-        .map_err(|source| HarnessError::Spawn {
-            executable: "the reader thread".to_owned(),
-            source,
-        })?;
-    Ok(receiver)
-}
-
 /// Takes the next line the application printed, giving up after `timeout`.
-fn next_line_within(
-    lines: &Receiver<std::io::Result<String>>,
-    timeout: Duration,
-) -> Result<String, HarnessError> {
-    match lines.recv_timeout(timeout) {
-        Ok(Ok(line)) => Ok(line.trim_end().to_owned()),
-        Ok(Err(source)) => Err(HarnessError::NoOutput {
-            detail: format!("could not read from the test application: {source}"),
-        }),
-        Err(RecvTimeoutError::Timeout) => Err(HarnessError::NoOutput {
-            detail: format!(
+///
+/// The wait itself is [`child_output::next_line_within`]; what is here is this
+/// harness's wording for the three ways it can come to nothing.
+fn next_line_within(lines: &Lines, timeout: Duration) -> Result<String, HarnessError> {
+    child_output::next_line_within(lines, timeout).map_err(|reason| HarnessError::NoOutput {
+        detail: match reason {
+            NoLine::Unreadable(source) => {
+                format!("could not read from the test application: {source}")
+            }
+            NoLine::Silent(timeout) => format!(
                 "the test application printed nothing within {:.1}s",
                 timeout.as_secs_f64()
             ),
-        }),
-        Err(RecvTimeoutError::Disconnected) => Err(HarnessError::NoOutput {
-            detail: "the test application exited without announcing itself".to_owned(),
-        }),
-    }
+            NoLine::Ended => "the test application exited without announcing itself".to_owned(),
+        },
+    })
 }
 
 /// What the application said it did, from its last line.

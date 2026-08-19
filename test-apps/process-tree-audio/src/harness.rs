@@ -37,21 +37,42 @@
 //! input — which is how the application is asked to stop — waits briefly, and
 //! kills it if it has not gone. There is no path, panic included, on which the
 //! subject outlives the test that started it (AGENTS.md sections 25 and 58).
+//!
+//! # Every wait here is bounded
+//!
+//! Nothing in this file blocks on a pipe. The subject's standard output is
+//! drained by a thread from the moment it starts and read through
+//! [`clipped_video_pattern::child_output`], the same mechanism the video
+//! subject's harness uses, so a subject that starts and then says nothing — a
+//! player wedged in the audio endpoint it is opening, say — fails its test in
+//! seconds rather than hanging the run. That distinction is not theoretical
+//! here: an unbounded `child.wait()` in `plugins/cs2/tests/plugin_process.rs`
+//! once cost a six-hour continuous-integration job.
 
 use core::time::Duration;
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Instant;
+
+use clipped_video_pattern::child_output::{self, Lines, NoLine};
 
 /// How long [`Drop`] gives the subject to stop cleanly before killing it.
 const DROP_GRACE: Duration = Duration::from_secs(2);
+
+/// How long [`ToneSubject::start`] waits for the subject's first line.
+///
+/// Generous, because what a player does before it can announce anything is open
+/// a shared-mode audio endpoint, and a machine that is cold, busy or already
+/// recording can take seconds over it. Bounded all the same: a subject that
+/// never announces itself is a test that never finishes, and the seconds saved
+/// by a tighter number are not worth a run that never ends.
+pub const ANNOUNCEMENT_PATIENCE: Duration = Duration::from_secs(30);
 
 /// A running subject.
 #[derive(Debug)]
 pub struct ToneSubject {
     process: Child,
-    output: Option<BufReader<ChildStdout>>,
+    output: Lines,
     pid: u32,
     /// What the subject said about its own sound, if it is a player.
     tone: Option<PlayingTone>,
@@ -77,27 +98,60 @@ impl ToneSubject {
     /// start, it said nothing, or — for a player — this machine cannot play a
     /// tone at all, which is a reason to skip a test rather than to fail one.
     pub fn start(executable: impl AsRef<OsStr>, arguments: &[&str]) -> Result<Self, String> {
+        Self::start_within(executable, arguments, ANNOUNCEMENT_PATIENCE)
+    }
+
+    /// Starts the subject and waits `patience` for it to announce itself.
+    ///
+    /// [`start`](Self::start) with the wait named. Every test takes the
+    /// default; this exists for the one that proves the wait is really bounded,
+    /// which has to point the harness at a program that announces nothing and
+    /// cannot spend [`ANNOUNCEMENT_PATIENCE`] finding that out.
+    ///
+    /// # Errors
+    ///
+    /// [`start`](Self::start)'s, plus: the subject printed nothing within
+    /// `patience`. The process is stopped before that is reported — a subject
+    /// nobody is listening to any more must not be left running, least of all
+    /// one holding an audio endpoint (AGENTS.md section 58).
+    pub fn start_within(
+        executable: impl AsRef<OsStr>,
+        arguments: &[&str],
+        patience: Duration,
+    ) -> Result<Self, String> {
         let mut process = Command::new(executable)
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .map_err(|error| format!("the test subject would not start: {error}"))?;
-        let output = BufReader::new(
-            process
-                .stdout
-                .take()
-                .expect("standard output was asked for"),
-        );
+        let stdout = process
+            .stdout
+            .take()
+            .expect("standard output was asked for");
+        let output = match child_output::reading(stdout) {
+            Ok(output) => output,
+            Err(error) => {
+                // The process is this function's to clean up until the struct
+                // that owns it exists.
+                let _ = process.kill();
+                let _ = process.wait();
+                return Err(format!("the subject's output could not be read: {error}"));
+            }
+        };
 
         let mut subject = Self {
             process,
-            output: Some(output),
+            output,
             pid: 0,
             tone: None,
         };
 
-        let announcement = subject.next_line()?;
+        // Every failure from here leaves through `subject`, so `Drop` stops the
+        // process: no early return abandons a running player.
+        let announcement = subject
+            .next_line(patience)
+            .map_err(|reason| silence(&reason))?;
         if let Some(reason) = announcement.strip_prefix("unavailable reason=") {
             return Err(reason.to_owned());
         }
@@ -162,12 +216,29 @@ impl ToneSubject {
     ) -> Result<(u32, PlayingTone), String> {
         self.send(command)?;
 
+        // The deadline bounds the whole exchange rather than each line: a
+        // parent printing something that is not a `child` line every few
+        // milliseconds must not extend the wait for ever, and one printing
+        // nothing at all must not stop the deadline being looked at. Both come
+        // from asking `next_line` for only the time that is left.
         let deadline = Instant::now() + patience;
         loop {
-            if Instant::now() > deadline {
-                return Err("the subject did not start a child in time".to_owned());
+            let left = deadline.saturating_duration_since(Instant::now());
+            // Not merely tidiness before a zero-length wait: a subject printing
+            // lines that are not `child` lines faster than they are read would
+            // otherwise hand this loop a line on every turn for ever, and the
+            // deadline it has already passed would never be acted on.
+            if left.is_zero() {
+                return Err(no_child(patience));
             }
-            let line = self.next_line()?;
+            let line = match self.next_line(left) {
+                Ok(line) => line,
+                // Running out of time is this wait's failure and is worded as
+                // one. A subject that stopped, or whose pipe broke, failed in
+                // its own right and says so in its own words.
+                Err(NoLine::Silent(_)) => return Err(no_child(patience)),
+                Err(reason) => return Err(silence(&reason)),
+            };
             let Some(rest) = line.strip_prefix("child ") else {
                 continue;
             };
@@ -215,18 +286,13 @@ impl ToneSubject {
             .map_err(|error| format!("the subject stopped listening: {error}"))
     }
 
-    /// The next line the subject printed.
-    fn next_line(&mut self) -> Result<String, String> {
-        let output = self
-            .output
-            .as_mut()
-            .ok_or_else(|| "the subject has already been stopped".to_owned())?;
-        let mut line = String::new();
-        match output.read_line(&mut line) {
-            Ok(0) => Err("the subject stopped without saying anything".to_owned()),
-            Ok(_) => Ok(line.trim().to_owned()),
-            Err(error) => Err(format!("the subject's output could not be read: {error}")),
-        }
+    /// The next line the subject printed, waiting no longer than `timeout`.
+    ///
+    /// The reason is left unworded because the callers word it differently: a
+    /// subject that never announced itself and a parent that never started a
+    /// child are different failures to read at three in the morning.
+    fn next_line(&mut self, timeout: Duration) -> Result<String, NoLine> {
+        child_output::next_line_within(&self.output, timeout)
     }
 }
 
@@ -234,6 +300,26 @@ impl Drop for ToneSubject {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// What a missing line means, for a caller with nothing more specific to say.
+fn silence(reason: &NoLine) -> String {
+    match reason {
+        NoLine::Unreadable(error) => format!("the subject's output could not be read: {error}"),
+        NoLine::Silent(timeout) => format!(
+            "the subject said nothing within {:.1}s",
+            timeout.as_secs_f64()
+        ),
+        NoLine::Ended => "the subject stopped without saying anything".to_owned(),
+    }
+}
+
+/// What a parent that did not start a child in time is reported as.
+fn no_child(patience: Duration) -> String {
+    format!(
+        "the subject did not start a child within {:.1}s",
+        patience.as_secs_f64()
+    )
 }
 
 /// The value of `name=` in one of the subject's lines.
