@@ -502,7 +502,7 @@ mod tests {
         // instruction (AGENTS.md section 27), so this test is both halves: the
         // file does come back, and the header does not claim otherwise.
         let directory = scratch_directory("deleted");
-        let installation = Installation::new(&directory, "gamestate_integration_clipped.cfg")
+        let installation = Installation::new(&*directory, "gamestate_integration_clipped.cfg")
             .expect("a plain file name");
         let contents = integration().render(&token());
 
@@ -561,7 +561,7 @@ mod tests {
         let neighbour = directory.join("gamestate_integration_someone_else.cfg");
         fs::write(&neighbour, "\"Someone Else\"\n{\n}\n").expect("a neighbour can be written");
 
-        let installation = Installation::new(&directory, "gamestate_integration_clipped.cfg")
+        let installation = Installation::new(&*directory, "gamestate_integration_clipped.cfg")
             .expect("a plain file name");
         installation
             .apply(&integration().render(&token()))

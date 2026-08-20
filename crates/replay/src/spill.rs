@@ -265,16 +265,69 @@ mod tests {
 
     use clipped_encoder::{EncodedPacket, PictureKind};
 
-    /// A directory of this test's own.
-    fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "clipped-spill-{}-{name}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).expect("a scratch directory can be made");
-        directory
+    /// A scratch directory that removes itself when the test that made it passes.
+    ///
+    /// The pattern PR #597 settled, and the two halves of it that matter
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)):
+    ///
+    /// - **A failing test keeps its directory**, with the path printed, because the
+    ///   files in it are the evidence. Removing unconditionally buys tidiness with
+    ///   the thing somebody needs at exactly the moment they need it.
+    /// - **A removal that fails is said aloud.** Windows refuses to remove a
+    ///   directory holding an open file, and a discarded `Err` turns that into a
+    ///   test that reports success having leaked — which is how these accumulated
+    ///   unnoticed in the first place.
+    ///
+    /// Never a sweep of the temporary directory by prefix: several of these suites
+    /// run at once, and a sweep would delete another run's directories out from
+    /// under it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "clipped-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch directory can be made");
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("scratch directory kept for diagnosis: {}", self.0.display());
+                return;
+            }
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                eprintln!(
+                    "scratch directory could not be removed: {} ({error})",
+                    self.0.display()
+                );
+            }
+        }
+    }
+
+    /// A directory of this test's own, removed again when it passes.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("spill-{name}"))
     }
 
     fn a_segment(id: u64) -> Segment {
