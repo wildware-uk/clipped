@@ -340,18 +340,13 @@ export const MISSING: readonly Missing[] = [
       'What is drawn is the media element’s own transport. Seeking is not what is missing — ADR 0011’s correction measured it landing on the frame it was given rather than on a keyframe — but SPEC.md section 42 asks for controls of Clipped’s own, and that is issue #52',
   },
   {
-    shows: 'A playhead across the waveform, and something to scrub',
-    needs:
-      'The recording’s marks are drawn and clicking one seeks (issue #65), but the transport is still the media element’s own: there is no playhead over the peaks and nothing to drag. Issue #694 is the interaction that would carry one',
-  },
-  {
     shows: 'Bookmarks, screenshots, saved clips and microphone activity on the timeline',
     needs:
       'The timeline draws what the library holds as game events, and nothing in the recorder writes any of those four as one — a bookmark is a file beside the recording (issue #64) and the rest are recorded against the sitting. Issue #71 is the half that would produce them',
   },
   {
-    shows: 'A waveform that follows the track being played',
+    shows: 'Zooming into the part of the recording being played',
     needs:
-      'What is drawn is every sound track of the recording, which is what the recorder computed. Highlighting the one the element is playing, and zooming into it, is issue #694',
+      'Every sound track is drawn, the lane being played is marked and the playhead runs across all of them (issue #694). What is still the whole recording is the scale: there is no way to look closely at a few seconds of it. A transport of Clipped’s own is issue #52',
   },
 ];
