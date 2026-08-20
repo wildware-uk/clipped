@@ -132,9 +132,10 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
   // two differ in what this screen may do with the identifier in the address:
   // a recording's is what the library indexes marks under, and a clip's is not
   // (`clipPlayback.ts`, `markedRecording`).
-  const routeState = useLocation().state as
-    | { recording?: HandedRecording; clip?: HandedClip }
-    | null;
+  const routeState = useLocation().state as {
+    recording?: HandedRecording;
+    clip?: HandedClip;
+  } | null;
   const handed: Handed | null =
     routeState?.clip !== undefined
       ? { kind: 'clip', item: routeState.clip }

@@ -252,10 +252,7 @@ export type PlaybackSource =
  * be reading a file another process is appending to. Saying so beats a player
  * that behaves strangely for reasons nobody on screen can see.
  */
-export function playbackSource(
-  resolution: ClipResolution,
-  handed: Handed | null,
-): PlaybackSource {
+export function playbackSource(resolution: ClipResolution, handed: Handed | null): PlaybackSource {
   if (handed !== null) {
     const { item } = handed;
     // The library already knows this file has gone, and it looked at the disk
