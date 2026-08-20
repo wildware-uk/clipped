@@ -57,6 +57,10 @@ name = "recorded_frames"
 path = "../../tests/capture/recorded_frames.rs"
 
 [[test]]
+name = "soak"
+path = "../../tests/capture/soak.rs"
+
+[[test]]
 name = "screenshot_during_recording"
 path = "../../tests/capture/screenshot_during_recording.rs"
 
@@ -141,6 +145,8 @@ windows = { workspace = true, features = [
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
