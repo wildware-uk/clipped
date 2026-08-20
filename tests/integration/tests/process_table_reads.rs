@@ -36,6 +36,15 @@
 //! `tests/integration/tests/foreground_rules.rs` made, and for the same
 //! reason.
 //!
+//! # The second question, which is not "how many reads" but "which call"
+//!
+//! `QUERY_SITES` guards the other API that answers this same question,
+//! `NtQuerySystemInformation`. It is there for the opposite reason to
+//! `READ_SITES`: not because a second copy would be subtly wrong, but because
+//! issue #288 measured it, found no saving at all, and a measurement nothing
+//! guards is one the next person takes again. The figure, and how to reproduce
+//! it, are on the constant.
+//!
 //! # What it does not claim
 //!
 //! That two reads is wrong. It is a decision, taken on #289 and recorded in
@@ -86,6 +95,36 @@ const READ_SITES: &[(&str, &str)] = &[
          the two places the two reads deliberately differ.",
     ),
 ];
+
+/// Every file that may call `NtQuerySystemInformation`, and why that one may.
+///
+/// The other way to read the process table, and the one
+/// [issue #288](https://github.com/wildware-uk/clipped/issues/288) asked about:
+/// `CreateToolhelp32Snapshot` is built on it, Microsoft documents it as subject
+/// to change, and it was expected to be several times cheaper.
+///
+/// It is not. Measured by the example below on the machine the issue was
+/// written on — 448 processes, 150 rounds of each API, interleaved — it is
+/// **0.88x the speed of the snapshot**, which is to say slightly slower, and
+/// that figure repeated to two decimal places across three runs. What it is
+/// paying for is in the same output: `SystemProcessInformation` answers with a
+/// `SYSTEM_THREAD_INFORMATION` for every thread of every process — 13,155 of
+/// them in 1.28 MB, for a question about 448 — and there is no way to ask it
+/// not to.
+///
+/// So this list exists to stop the *next* person paying for the experiment
+/// again. The cost of the undocumented API is not the reading of an
+/// undocumented field, which works — the example checks every row against
+/// Toolhelp and they agree, parent identifiers included. It is that the field
+/// is `Reserved2` in `windows-rs`, positional, and unnamed on purpose. Buying
+/// that for no measured saving is the trade this records as refused.
+const QUERY_SITES: &[(&str, &str)] = &[(
+    "crates/windows/examples/process_table_apis.rs",
+    "the measurement itself, which has to make the call to time it. It is an \
+     example rather than a test so that it runs against a real machine in \
+     ordinary use, and a dev-dependency feature rather than a library one so \
+     that nothing shipped links `ntdll` (issue #288).",
+)];
 
 /// Every `.rs` and `.toml` file of this repository.
 ///
@@ -248,5 +287,55 @@ fn only_the_crates_that_read_the_table_can_reach_the_bindings() {
          TOOLHELP_MANIFESTS is a third read being made possible; one in \
          TOOLHELP_MANIFESTS that is not here is a feature that has been removed and a \
          list that has gone stale.",
+    );
+}
+
+#[test]
+fn the_undocumented_process_query_is_called_only_where_it_is_written_down() {
+    let root = repository();
+
+    // The open bracket again, and for the same reason: `QUERY_SITES` describes
+    // the call at length and the doc comment above names it several times.
+    let mut found = BTreeSet::new();
+    for source in sources(&root) {
+        if is_this_file(&source) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&source) else {
+            continue;
+        };
+        if text.contains("NtQuerySystemInformation(") {
+            found.insert(relative(&root, &source));
+        }
+    }
+
+    let permitted: BTreeSet<String> = QUERY_SITES
+        .iter()
+        .map(|(path, _)| (*path).to_owned())
+        .collect();
+
+    let unexpected: Vec<&String> = found.difference(&permitted).collect();
+    let reasons: String = QUERY_SITES
+        .iter()
+        .map(|(path, why)| format!("\n\n  {path}\n    {why}"))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "these files call NtQuerySystemInformation, which this repository has measured \
+         and decided against: {unexpected:#?}\n\nIt was expected to be several times \
+         cheaper than CreateToolhelp32Snapshot and is not — 0.88x the speed of it, \
+         because SystemProcessInformation returns every thread of every process and \
+         cannot be asked not to. Run the example below to see the figure on this \
+         machine before disagreeing with it:{reasons}\n\ncargo run --release -p \
+         clipped-windows --example process_table_apis",
+    );
+
+    let missing: Vec<&String> = permitted.difference(&found).collect();
+    assert!(
+        missing.is_empty(),
+        "QUERY_SITES names files that no longer call NtQuerySystemInformation: \
+         {missing:#?}. The measurement is the only thing keeping this decision \
+         falsifiable, so losing it silently is how the next person repeats it.",
     );
 }
