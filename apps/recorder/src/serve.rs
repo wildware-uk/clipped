@@ -150,6 +150,19 @@ fn features_of_this_build() -> Vec<String> {
     vec![
         features::RECORDING.to_owned(),
         features::STATUS_EVENTS.to_owned(),
+        // The window checks for this before it draws the Games screen's table
+        // at all, so that a recorder built before issue #245 is told apart from
+        // a machine that knows no games. It was missing from this list for the
+        // whole life of `catalogue_games`: the command worked, the gate never
+        // opened, and the screen drew its empty state on every machine
+        // (issue #684). The test at the foot of this file is what now notices.
+        features::CATALOGUE.to_owned(),
+        // The window checks for this before it draws the Games screen's table
+        // at all, so that a recorder built before issue #245 is told apart from
+        // a machine that knows no games. It was missing from this list for the
+        // whole life of `catalogue_games`: the command worked, the gate never
+        // opened, and the screen drew its empty state on every machine
+        // (issue #684). The test at the foot of this file is what now notices.
         features::BOOKMARKS.to_owned(),
         features::SCREENSHOTS.to_owned(),
         // The window checks for this before it draws a library screen at all,
@@ -6028,5 +6041,139 @@ excluded = true
         );
 
         drop(adopted);
+    }
+
+    /// Every capability the window gates a control on is one this recorder
+    /// claims.
+    ///
+    /// `catalogue_games` shipped complete and tested, and the Games screen drew
+    /// its empty state on every machine for the whole life of it, because
+    /// `features::CATALOGUE` was never added to `features_of_this_build`
+    /// (issue #684). Nothing noticed: the window's own tests stub the link with
+    /// `attached(['catalogue'])`, so they run on the one configuration a real
+    /// machine never has, and the recorder's tests never look at the window.
+    ///
+    /// **The window's side is derived from its source, not listed here.** A
+    /// list typed into this test would be a third place to forget, which is the
+    /// mistake this exists to catch. So it reads every `recorderCanDo(…)` in
+    /// `apps/desktop/src` and requires the answer to be a capability the
+    /// recorder advertises.
+    ///
+    /// A gate is written either as a literal — `recorderCanDo(link,
+    /// 'catalogue')` — or through a constant, `recorderCanDo(view.link,
+    /// PREVIEWS)`, which the window declares as `export const PREVIEWS: Feature
+    /// = 'previews'`. Both are read, the constant by lowering its name, and the
+    /// assertion below that every name found is one the protocol defines is
+    /// what stops that convention drifting silently.
+    #[test]
+    fn every_capability_the_window_gates_on_is_one_this_recorder_advertises() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("desktop")
+            .join("src");
+
+        let mut sources = Vec::new();
+        collect_window_sources(&root, &mut sources);
+        assert!(
+            sources.len() > 20,
+            "the window's source was not found at {}; this test would pass by \
+             reading nothing, which is the failure it exists to prevent",
+            root.display()
+        );
+
+        let mut gated = std::collections::BTreeSet::new();
+        for source in &sources {
+            let text = std::fs::read_to_string(source).expect("a window source file reads");
+            for (_, after) in text
+                .match_indices("recorderCanDo(")
+                .map(|(at, found)| (at, &text[at + found.len()..]))
+            {
+                let Some(comma) = after.find(',') else {
+                    continue;
+                };
+                let Some(close) = after.find(')') else {
+                    continue;
+                };
+                if comma > close {
+                    continue;
+                }
+                let argument = after[comma + 1..close].trim();
+                let name = if let Some(quoted) = argument.strip_prefix('\'') {
+                    match quoted.strip_suffix('\'') {
+                        Some(name) => name.to_owned(),
+                        None => continue,
+                    }
+                } else if !argument.is_empty()
+                    && argument
+                        .chars()
+                        .all(|character| character.is_ascii_uppercase() || character == '_')
+                {
+                    argument.to_ascii_lowercase()
+                } else {
+                    // The declaration of `recorderCanDo` itself, whose second
+                    // parameter is `feature: Feature`.
+                    continue;
+                };
+                gated.insert(name);
+            }
+        }
+
+        assert!(
+            gated.contains("catalogue"),
+            "the Games screen's gate was not found, so this test is reading the \
+             wrong thing: {gated:?}"
+        );
+
+        let mut advertised: std::collections::BTreeSet<String> =
+            features_of_this_build().into_iter().collect();
+        // Advertised by this build but not from that list: `automatic` is
+        // conditional on detection having started (`RecorderService::features`)
+        // and `shutdown` is added by `Server::serve` rather than by the
+        // application. Both are capabilities this recorder can claim, which is
+        // what this test is about.
+        advertised.insert(features::AUTOMATIC.to_owned());
+        advertised.insert(features::SHUTDOWN.to_owned());
+
+        for name in &gated {
+            assert!(
+                clipped_ipc::features::ALL.contains(&name.as_str()),
+                "the window gates a control on `{name}`, which is not a capability the \
+                 protocol defines at all"
+            );
+            assert!(
+                advertised.contains(name),
+                "the window will not draw a control unless the recorder claims `{name}`, and \
+                 this recorder never claims it — so that control is drawn on no machine, \
+                 whatever the command behind it does (issue #684). Either add it to \
+                 `features_of_this_build` or stop gating on it."
+            );
+        }
+    }
+
+    /// Every `.ts` and `.tsx` under the window's source that is not a test.
+    ///
+    /// Tests are skipped because they *stub* the link — `attached(['catalogue'])`
+    /// — and reading them would let the stub stand in for the recorder's claim,
+    /// which is precisely the confusion that let #684 ship.
+    fn collect_window_sources(directory: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_window_sources(&path, into);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.contains(".test.") {
+                continue;
+            }
+            if name.ends_with(".ts") || name.ends_with(".tsx") {
+                into.push(path);
+            }
+        }
     }
 }
