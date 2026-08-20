@@ -462,7 +462,6 @@ describe('the Library screen', () => {
 
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
-    ['waveforms', /^a waveform under each/i, [448, 694]],
     // Playing a *recording* is no longer on this list: Play is a control on
     // every row since issue #304, and a row promising what the screen already
     // does is worse than no row. Playing a **clip** is still waiting, and on

@@ -94,11 +94,6 @@ const WAITING: readonly Waiting[] = [
       'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
   },
   {
-    shows: 'A waveform under each of a recording’s sound tracks',
-    needs:
-      'Peaks reach this window already, by the same command a thumbnail arrives on (#448 landed it). What is missing is the surface that draws them: a waveform belongs under a track on the playback screen rather than in a row of this table, which is issue #694',
-  },
-  {
     shows: 'Playing a clip, from the list',
     needs:
       'Clips themselves: the virtual clip model (#74) and clip creation (#91). A recording plays from here already (#304)',
