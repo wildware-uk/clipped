@@ -373,6 +373,39 @@ describe('the clips a sitting produced', () => {
     expect(revealed).toEqual(['D:/clips/session-1-replay-1.mkv']);
   });
 
+  /*
+   * The wiring, not the mapping. `clipPlayback.test.ts` covers what the
+   * playback screen does with a clip it is handed; what could still be wrong
+   * after that is a Play button that hands over the wrong thing, or nothing.
+   */
+  it('offers Play, and hands over the clip itself', async () => {
+    const played: LibraryClip[] = [];
+    const user = userEvent.setup();
+    render(
+      <SessionList
+        sessions={[withClip()]}
+        label="Sessions"
+        actions={ACTIONS}
+        onPlayClip={(clip) => played.push(clip)}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^Play session-1-replay-1\.mkv/ }));
+
+    expect(played).toHaveLength(1);
+    expect(played[0]?.clip_id).toBe(7);
+  });
+
+  /*
+   * A screen with nowhere to play a clip must not draw a control that does
+   * nothing, which is the failure AGENTS.md section 27 is about.
+   */
+  it('draws no Play where nothing can play a clip', () => {
+    render(<SessionList sessions={[withClip()]} label="Sessions" actions={ACTIONS} />);
+
+    expect(screen.queryByRole('button', { name: /^Play / })).toBeNull();
+  });
+
   it('prefers the clip’s own title when it has one', () => {
     render(
       <SessionList

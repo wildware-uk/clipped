@@ -1,4 +1,5 @@
 import type {
+  LibraryClip,
   ExportProgress,
   LibraryRecording,
   RestoredItem,
@@ -419,6 +420,27 @@ export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
     void navigate(clipPath(String(recording.recording_id)), { state: { recording } });
   };
 
+  /*
+   * Under its own key in the route state, not as a `recording`. The playback
+   * screen reads the identifier in the address as a recording's when it is
+   * handed one, and a clip's identifier means nothing to the index that holds
+   * marks — so passing a clip as a recording would draw another recording's
+   * game events on this clip's timeline.
+   */
+  const playClip = (clip: LibraryClip): void => {
+    if (clip.path === undefined) {
+      return;
+    }
+    void navigate(clipPath(String(clip.clip_id)), {
+      state: {
+        clip: {
+          path: clip.path,
+          ...(clip.missing_since === undefined ? {} : { missing_since: clip.missing_since }),
+        },
+      },
+    });
+  };
+
   return (
     <>
       <h1 className="clipped-screen__title">Library</h1>
@@ -514,6 +536,7 @@ export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
             favourites={favourites}
             locks={locks}
             onPlay={play}
+            onPlayClip={playClip}
             /*
              * Asked of the recorder that is attached rather than assumed of the
              * one this window shipped with. A recorder from before issue #448

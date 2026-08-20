@@ -1,4 +1,4 @@
-import type { LibraryRecording } from '@clipped/shared';
+import type { LibraryClip, LibraryRecording } from '@clipped/shared';
 
 import type { InterruptedRecording, RecorderLinkView } from './useRecorderLink';
 
@@ -208,6 +208,30 @@ export function formatElapsed(milliseconds: number): string {
 export type HandedRecording = Pick<LibraryRecording, 'path' | 'missing_since'>;
 
 /**
+ * A clip handed over by the screen somebody came from.
+ *
+ * The same two fields, and a different type on purpose. A clip and a recording
+ * point a `<video>` at a file in exactly the same way and differ in what else
+ * this screen may do with them: a recording has an identifier the library
+ * indexes marks under, and a clip has an identifier of its own that means
+ * nothing to that index.
+ *
+ * Handing a clip over as a recording would therefore look right and read the
+ * wrong marks — clip 7's timeline would be recording 7's game events — which is
+ * a screen confidently showing somebody another recording's history. Keeping
+ * them apart in the type is what stops that.
+ */
+export type HandedClip = Pick<LibraryClip, 'path' | 'missing_since'> & {
+  /** Required here, unlike on the protocol's own clip: there is nothing to play without one. */
+  readonly path: string;
+};
+
+/** Whichever of the two the screen was handed, if either. */
+export type Handed =
+  | { readonly kind: 'recording'; readonly item: HandedRecording }
+  | { readonly kind: 'clip'; readonly item: HandedClip };
+
+/**
  * What the screen has to point a `<video>` at, or why it has nothing.
  *
  * Three sources, in this order, and the order is the point: a recording handed
@@ -228,16 +252,14 @@ export type PlaybackSource =
  * be reading a file another process is appending to. Saying so beats a player
  * that behaves strangely for reasons nobody on screen can see.
  */
-export function playbackSource(
-  resolution: ClipResolution,
-  handed: HandedRecording | null,
-): PlaybackSource {
+export function playbackSource(resolution: ClipResolution, handed: Handed | null): PlaybackSource {
   if (handed !== null) {
+    const { item } = handed;
     // The library already knows this file has gone, and it looked at the disk
     // to find that out. Saying so here costs no round trip and is the same
     // answer the recorder would give (`docs/library.md`, issue #56).
-    return handed.missing_since === undefined
-      ? { file: handed.path, why: null }
+    return item.missing_since === undefined
+      ? { file: item.path, why: null }
       : {
           file: null,
           why: 'The library could not find this file the last time it looked. It may have been moved or deleted, or the drive it is on may not be connected.',
@@ -287,11 +309,21 @@ export type MarkedRecording =
 /** Which recording's marks this screen may read, given what it was told. */
 export function markedRecording(
   recordingId: string,
-  handed: HandedRecording | null,
+  handed: Handed | null,
   resolution: ClipResolution,
 ): MarkedRecording {
   if (handed !== null) {
-    return { recording: recordingId, why: null };
+    // A clip's identifier is its own, and the library indexes marks against
+    // *recordings*. Looking these up under a clip's id would find whichever
+    // recording happens to share the number and draw its game events on this
+    // clip's timeline — a screen being confidently wrong, which is worse than
+    // one saying it has nothing (AGENTS.md section 27).
+    return handed.kind === 'clip'
+      ? {
+          recording: null,
+          why: 'A clip is not a recording in the library index, so there are no marks to read for it. The marks belong to the recording it was cut from.',
+        }
+      : { recording: recordingId, why: null };
   }
   switch (resolution.found) {
     case 'in-progress':
