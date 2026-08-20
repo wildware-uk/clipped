@@ -63,6 +63,7 @@ pub mod harness;
 pub mod pattern;
 #[cfg(windows)]
 pub mod render_stream;
+pub mod resources;
 pub mod sequence;
 #[cfg(windows)]
 pub mod steady_tone;

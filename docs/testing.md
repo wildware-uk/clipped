@@ -424,6 +424,69 @@ recorder's own unit tests can say about a sitting on a status and a sitting
 ending, which they say over a real pipe rather than by calling the publisher
 (`apps/recorder/src/test_events.rs`).
 
+## The soak
+
+`tests/capture/soak.rs` records the subject over and over and asks whether the
+process is holding more at the end than it was
+([#105](https://github.com/wildware-uk/clipped/issues/105), AGENTS.md sections
+58 and 59). It is `#[ignore]`d with the rest.
+
+```text
+# A few minutes, enough to see the shape.
+cargo test -p clipped-video-pattern --test soak -- --ignored --nocapture
+
+# A real soak.
+CLIPPED_SOAK_MINUTES=180 cargo test -p clipped-video-pattern --test soak -- --ignored --nocapture
+```
+
+**Repeated recordings rather than one long one.** A recording is written at the
+encoder's bitrate for as long as it runs — around 8 GB an hour — so a three-hour
+single recording wants 24 GB of somebody's drive, and each cycle here deletes
+its own file so the space used is flat whatever the duration. It is also where
+the faults are: one long recording opens a capture session, an encoder and a
+muxer exactly once, and starting and stopping is where a texture, a thread or a
+handle goes unreleased.
+
+### The thresholds, and why they are caps rather than rates
+
+What separates a leak from a process settling is whether growth **scales with
+the work**. A leak of any size reaches any cap if the run is long enough; a
+one-off step does not move however long you wait. So the test caps total growth
+— 32 MB of committed memory and 96 handles — and its sensitivity comes from the
+length of the run rather than from the tightness of the number. At 32 MB, a leak
+of 512 KB per recording is caught within about sixty cycles and one of 32 KB per
+recording within a thousand.
+
+Two earlier versions of this test got that wrong, which is worth recording
+because both looked reasonable:
+
+- **A per-cycle average** reported *"1.03 handles per recording"* and read as a
+  leak. The run was 37 cycles, which is exactly the window in which a fresh
+  process climbs; the climb divided by the cycles became a rate.
+- **"Is it still growing?" over the last third** is right for handles and wrong
+  for memory, because committed memory takes a single ~10 MB step at around
+  cycle 60 and whichever window that lands in looks like growth.
+
+### What a healthy run looks like
+
+Measured on an RTX 4090 with NVENC AV1, 1280x720 at 60 fps, six seconds per
+recording:
+
+| Run | Cycles | Frames | Private | Handles | Settled window |
+| --- | --- | --- | --- | --- | --- |
+| 12 min | 119 | 40,820 | +10.0 MB | +38 | — |
+| 15 min | 149 | 51,189 | +14.4 MB | +36 | private +1.7 MB, handles **-2** over 49 cycles |
+
+The handle count rises to +38 by cycle 30 and then does not move again: +38 at
+cycle 40 and +38 at cycle 110. Committed memory sits near 99 MB for about sixty
+cycles, steps once to about 109 MB, and holds. Both are bounded, which is the
+answer #105 wanted.
+
+### What it does not cover
+
+#105's scope also names repeated replay saves, repeated game launches, audio
+device changes and a large library. This is the recording cycle only.
+
 ## Which tests cannot share the machine
 
 Some of what these tests use is exclusive **per process** or **machine-wide**,
