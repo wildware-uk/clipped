@@ -215,16 +215,67 @@ fn is_abandoned(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// A directory of this test's own.
-    fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "clipped-atomic-{}-{name}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).expect("a scratch directory can be made");
-        directory
+    /// A directory of this test's own, removed again when the test passes.
+    ///
+    /// It used to return a bare [`PathBuf`] and nothing removed it, so this
+    /// suite left one behind every run
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)).
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("atomic-{name}"))
+    }
+
+    /// A scratch directory that removes itself when the test that made it
+    /// passes.
+    ///
+    /// The pattern PR #597 settled, and both halves matter: a **failing** test
+    /// keeps its directory with the path printed, because the files in it are
+    /// the evidence; and a removal that **fails** is said aloud, because a
+    /// discarded `Err` is how a suite reports success having leaked.
+    ///
+    /// Never a sweep by prefix — several suites run at once, and a sweep
+    /// deletes another run's directories out from under it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "clipped-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("a scratch directory can be made");
+            Self(path)
+        }
+    }
+
+    impl core::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("scratch directory kept for diagnosis: {}", self.0.display());
+                return;
+            }
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                eprintln!(
+                    "scratch directory could not be removed: {} ({error})",
+                    self.0.display()
+                );
+            }
+        }
     }
 
     /// Makes a temporary that looks like one an older process left behind.

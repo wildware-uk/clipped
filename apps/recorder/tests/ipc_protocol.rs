@@ -4294,12 +4294,65 @@ fn the_catalogue_can_be_read_and_changed_over_the_protocol() {
     assert_still_serving(&recorder);
 }
 
-fn scratch_home(label: &str) -> std::path::PathBuf {
-    let home =
-        std::env::temp_dir().join(format!("clipped-ipc-home-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).expect("a scratch home can be made");
-    home
+/// A home directory of one test's own, removed again when it passes.
+///
+/// Held by the caller for the length of its test, and that is load-bearing: a
+/// recorder is running against this directory, so dropping it early removes a
+/// home the child process then recreates, and what is left belongs to nobody
+/// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)).
+fn scratch_home(label: &str) -> ScratchHome {
+    ScratchHome::new(label)
+}
+
+/// A scratch home, removed when the test that made it passes.
+///
+/// Both halves of the pattern PR #597 settled: a **failing** test keeps its
+/// home with the path printed, because the settings file, the library and the
+/// logs inside it are what a failure is diagnosed from; and a removal that
+/// **fails** is said aloud rather than discarded — a recorder holding its
+/// library open is exactly why one would, and swallowing it turns a leak into
+/// a green run.
+///
+/// Never a sweep by prefix: these run in parallel with each other.
+struct ScratchHome(std::path::PathBuf);
+
+impl ScratchHome {
+    fn new(label: &str) -> Self {
+        let home =
+            std::env::temp_dir().join(format!("clipped-ipc-home-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home can be made");
+        Self(home)
+    }
+}
+
+impl std::ops::Deref for ScratchHome {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchHome {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchHome {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("scratch home kept for diagnosis: {}", self.0.display());
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "scratch home could not be removed: {} ({error})",
+                self.0.display()
+            );
+        }
+    }
 }
 
 /// Asserts the recorder is still answering, on a connection of its own.

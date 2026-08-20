@@ -6352,7 +6352,7 @@ excluded = true
         // because some capabilities are conditional and a list of those here
         // would be the hand-maintained thing this test exists to replace. This
         // one has a games file, so it claims `catalogue_editing` too.
-        let (service, _overlay) = service_over_a_scratch_games_file("gates");
+        let (service, _overlay, _scratch) = service_over_a_scratch_games_file("gates");
         let mut advertised: std::collections::BTreeSet<String> =
             service.features().into_iter().collect();
         // The two a service cannot claim from a standing start. `automatic`
@@ -6427,7 +6427,16 @@ name = "cs2.exe"
     ///
     /// Never the real one: a test that wrote the user's own games file would be
     /// editing the catalogue of whoever is running it (AGENTS.md section 25).
-    fn service_over_a_scratch_games_file(name: &str) -> (RecorderService, PathBuf) {
+    ///
+    /// The [`Scratch`] is handed back rather than dropped here, and that is the
+    /// whole of why: dropping it at the end of this function removes the
+    /// directory immediately, the recorder recreates it the moment it writes
+    /// `games.toml`, and what is left behind belongs to nobody. These tests
+    /// leaked one directory each that way until it was measured
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)) — and
+    /// they passed throughout, because a recreated directory is as good as an
+    /// original one to everything except the machine it accumulates on.
+    fn service_over_a_scratch_games_file(name: &str) -> (RecorderService, PathBuf, Scratch) {
         let directory = scratch(name);
         let overlay = directory.join("games.toml");
         let service = RecorderService::with_catalogue_file(
@@ -6438,7 +6447,7 @@ name = "cs2.exe"
                 .expect("the shipped fixture is a valid catalogue"),
             overlay.clone(),
         );
-        (service, overlay)
+        (service, overlay, directory)
     }
 
     /// The catalogue as a fresh `catalogue_games` gives it.
@@ -6464,7 +6473,7 @@ name = "cs2.exe"
         // #45 with no caller in the product at all — only its own integration
         // test — so the Games screen drew no controls, because a button that
         // writes nothing may not be drawn (AGENTS.md section 27).
-        let (service, overlay) = service_over_a_scratch_games_file("register-game");
+        let (service, overlay, _scratch) = service_over_a_scratch_games_file("register-game");
 
         let Reply::CatalogueEdited { game_id, games } = service
             .call(Command::RegisterGame(RegisterGame {
@@ -6524,7 +6533,7 @@ name = "cs2.exe"
         // copy of the entry, so a later release may correct that game's
         // executables and the user still sees the name they chose
         // (`docs/game-detection.md`).
-        let (service, _overlay) = service_over_a_scratch_games_file("rename-game");
+        let (service, _overlay, _scratch) = service_over_a_scratch_games_file("rename-game");
 
         let Reply::CatalogueEdited { games, .. } = service
             .call(Command::RenameGame(RenameGame {
@@ -6571,7 +6580,7 @@ name = "cs2.exe"
         // about an entry and not the deletion of one: the entry stays and is
         // still listed, which is what stops the next update resurrecting a game
         // somebody excluded.
-        let (service, _overlay) = service_over_a_scratch_games_file("exclude-game");
+        let (service, _overlay, _scratch) = service_over_a_scratch_games_file("exclude-game");
 
         let Reply::CatalogueEdited { games, .. } = service
             .call(Command::SetGameExcluded(SetGameExcluded {
@@ -6610,7 +6619,7 @@ name = "cs2.exe"
 
     #[test]
     fn a_game_the_user_added_can_be_forgotten() {
-        let (service, overlay) = service_over_a_scratch_games_file("forget-game");
+        let (service, overlay, _scratch) = service_over_a_scratch_games_file("forget-game");
 
         service
             .call(Command::RegisterGame(RegisterGame {
@@ -6651,7 +6660,7 @@ name = "cs2.exe"
         // that cannot be satisfied rather than a machine that failed. The
         // difference is what the error code says, and a client told `internal`
         // would show "something went wrong" for a field the person can correct.
-        let (service, overlay) = service_over_a_scratch_games_file("register-path");
+        let (service, overlay, _scratch) = service_over_a_scratch_games_file("register-path");
 
         let error = service
             .call(Command::RegisterGame(RegisterGame {
@@ -6714,7 +6723,7 @@ name = "cs2.exe"
 
     #[test]
     fn a_recorder_with_a_games_file_claims_it_can_change_the_catalogue() {
-        let (service, _overlay) = service_over_a_scratch_games_file("claims-editing");
+        let (service, _overlay, _scratch) = service_over_a_scratch_games_file("claims-editing");
         assert!(
             service
                 .features()
