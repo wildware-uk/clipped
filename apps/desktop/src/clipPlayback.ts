@@ -332,12 +332,7 @@ export const MISSING: readonly Missing[] = [
   {
     shows: 'A recording opened here directly, rather than from the screen you came from',
     needs:
-      'The address carries the library’s own identifier and the row is handed over by whatever opened this screen, so a reload has nothing to look up. Looking one up cold is issue #52',
-  },
-  {
-    shows: 'Keyboard shortcuts and a transport of Clipped’s own',
-    needs:
-      'What is drawn is the media element’s own transport. Seeking is not what is missing — ADR 0011’s correction measured it landing on the frame it was given rather than on a keyframe — but SPEC.md section 42 asks for controls of Clipped’s own, and that is issue #52',
+      'The address carries the library’s own identifier and the row is handed over by whatever opened this screen, so a reload has nothing to look up. Looking one up cold is issue #723',
   },
   {
     shows: 'Bookmarks, screenshots, saved clips and microphone activity on the timeline',
@@ -347,6 +342,6 @@ export const MISSING: readonly Missing[] = [
   {
     shows: 'Zooming into the part of the recording being played',
     needs:
-      'Every sound track is drawn, the lane being played is marked and the playhead runs across all of them (issue #694). What is still the whole recording is the scale: there is no way to look closely at a few seconds of it. A transport of Clipped’s own is issue #52',
+      'Every sound track is drawn, the lane being played is marked and the playhead runs across all of them (issue #694). What is still the whole recording is the scale: there is no way to look closely at a few seconds of it, which is issue #724',
   },
 ];
