@@ -1118,6 +1118,71 @@ describe('the Home screen', () => {
     expect(cells[4]).toBe('3 missing');
   });
 
+  /**
+   * One sitting per query, so the two lists cannot be the same read relabelled.
+   *
+   * The favourites list is a `library_sessions` call with `favourite` in the
+   * query, and the only way to show it really carries that query is to answer
+   * differently depending on it. A stub that returned one list for both would
+   * pass against a screen that asked for everything twice and captioned one of
+   * them "Favourites", which is precisely the defect issue #695 is about:
+   * favourites that can be marked and never seen.
+   */
+  function sessionsByQuery(args: Record<string, unknown>): Promise<unknown> {
+    const query = String(args['query'] ?? '');
+    const name = query.includes('favourite') ? 'A game I kept' : 'A game I played';
+    return Promise.resolve({
+      sessions: [
+        {
+          session_id: query.includes('favourite') ? 'kept-1' : 'played-1',
+          game_name: name,
+          started_at: '2026-08-11T20:14:00+01:00',
+          favourite: query.includes('favourite'),
+          recordings: [
+            {
+              recording_id: 12,
+              session_index: 1,
+              path: 'D:\\clips\\one.mkv',
+              started_at: '2026-08-11T20:14:00+01:00',
+              duration_seconds: 60,
+              size_bytes: 1024,
+              favourite: query.includes('favourite'),
+              tags: [],
+            },
+          ],
+          clips: [],
+        },
+      ],
+    });
+  }
+
+  it('lists favourites, read with a query rather than shown as everything again', async () => {
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, { sessions: sessionsByQuery });
+    renderApp();
+
+    const favourites = await screen.findByRole('table', { name: 'Favourites' });
+    expect(favourites).toHaveTextContent('A game I kept');
+
+    // And the other list is the other read, so neither is the other's caption.
+    const recent = screen.getByRole('table', { name: 'Recent sessions' });
+    expect(recent).toHaveTextContent('A game I played');
+    expect(recent).not.toHaveTextContent('A game I kept');
+  });
+
+  it('says nothing is marked yet, rather than leaving the favourites list blank', async () => {
+    // An empty table under a heading reads as a library that could not be
+    // opened. It also has to say what marking one does, because the reason to
+    // mark a sitting is that cleanup then leaves it alone.
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
+      sessions: () => Promise.resolve({ sessions: [] }),
+    });
+    renderApp();
+
+    expect(await screen.findByText(/nothing is marked a favourite yet/i)).toBeVisible();
+    expect(screen.queryByRole('table', { name: 'Favourites' })).toBeNull();
+    expect(screen.getByText(/keeps it out of automatic cleanup/i)).toBeVisible();
+  });
+
   it('says a library it could not read could not be read, rather than showing it as empty', async () => {
     stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
       sessions: () =>
@@ -1128,8 +1193,15 @@ describe('the Home screen', () => {
     });
     renderApp();
 
-    expect(await screen.findByText(/the drive is not connected/)).toBeInTheDocument();
+    // Twice, and that is the truth rather than a duplicate: Home makes two
+    // reads of the library — recent sittings, and favourites (issue #695) — and
+    // each section says why it is empty. A section that stayed silent because
+    // another had already explained would be a section a reader takes for "you
+    // have none".
+    const said = await screen.findAllByText(/the drive is not connected/);
+    expect(said).toHaveLength(2);
     expect(screen.queryByRole('table', { name: 'Recent sessions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Favourites' })).not.toBeInTheDocument();
   });
 
   /*
@@ -1144,7 +1216,6 @@ describe('the Home screen', () => {
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['recently clipped', /recently clipped/i, [74, 91]],
-    ['favourites', /^favourites/i, [58, 695]],
   ];
 
   it('names each list it still owes, and the issue that lands it', async () => {

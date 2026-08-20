@@ -63,11 +63,6 @@ const WAITING: readonly Waiting[] = [
     shows: 'Recently clipped, and the clips a session produced',
     needs: 'The virtual clip model (#74) and clip creation (#91). The read carries clips already',
   },
-  {
-    shows: 'Favourites, which are also what storage cleanup protects',
-    needs:
-      'A read that asks for them. Marking works on the Library screen (#58 landed it) and `favourite` is already in the query language, so this is a `library_sessions` call with a query (`docs/search.md`). Issue #695',
-  },
 ];
 
 /** What the Home screen is given. */
@@ -100,6 +95,9 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
   const resized = describeResizeEnding(ended);
   const control = describeRecordControl(link, recording.status, recording.target);
   const { read: sessions } = useSessions('', RECENT);
+  // A second read with a query rather than a command of its own: `favourite` is
+  // already in the query language, and the library answers it (issue #695).
+  const { read: favourites } = useSessions('favourite', RECENT);
   const games = useGames();
 
   return (
@@ -219,6 +217,34 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
         )}
         {sessions.state === 'read' && sessions.value.length > 0 && (
           <SessionList sessions={sessions.value} label="Recent sessions" />
+        )}
+      </section>
+
+      <section aria-label="Favourites">
+        <h2 className="clipped-screen__heading">Favourites</h2>
+        {/*
+         * Here rather than only on the Library screen because these are what
+         * automatic cleanup protects. Somebody who marks a sitting to keep it
+         * and can never see which are marked cannot check that the thing
+         * protecting their footage is working -- they find out when something
+         * they meant to keep has gone (issue #695).
+         */}
+        {favourites.state === 'reading' && (
+          <p className="clipped-screen__lead clipped-muted" aria-busy="true">
+            Reading your library…
+          </p>
+        )}
+        {favourites.state === 'unread' && (
+          <p className="clipped-screen__lead">{describeProblem(favourites.problem)}</p>
+        )}
+        {favourites.state === 'read' && favourites.value.length === 0 && (
+          <p className="clipped-screen__lead">
+            Nothing is marked a favourite yet. Marking a sitting keeps it out of automatic cleanup,
+            and it appears here.
+          </p>
+        )}
+        {favourites.state === 'read' && favourites.value.length > 0 && (
+          <SessionList sessions={favourites.value} label="Favourites" />
         )}
       </section>
 
