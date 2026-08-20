@@ -1274,14 +1274,23 @@ file at the size the window was, because "the file it did produce" is only worth
 saying if the file plays. It needs the same GPU, encoder and desktop session, and
 is `#[ignore]`d with the rest.
 
-What is **not** asserted is that the decoded pictures are the frames the source
-drew, in order. The video pattern carries a decodable counter for exactly that,
-but its decoder lives in `clipped-video-pattern`, which the workspace layering
-places above `clipped-recorder` so that nothing in the product can depend on a
-test application — dev-dependencies included. A test that reads those counters
-back out of a recording belongs beside `tests/capture/wgc_video_pattern.rs`,
-which already reads them out of captured frames, and is
-[#183](https://github.com/wildware-uk/clipped/issues/183).
+That the decoded pictures are the frames the source drew, **in order**, is
+asserted too — but not here. The video pattern carries a decodable counter for
+exactly that, and its decoder lives in `clipped-video-pattern`, which the
+workspace layering places above `clipped-recorder` so that nothing in the
+product can depend on a test application (dev-dependencies included). So the
+test that reads those counters back out of a recording is owned by the crate at
+the top: `tests/capture/recorded_frames.rs`, beside
+`tests/capture/wgc_video_pattern.rs`, which asks the same questions of captured
+frames ([#183](https://github.com/wildware-uk/clipped/issues/183)).
+
+It records the subject, extracts every picture as BGRA with the pinned FFmpeg,
+reads the counter out of each, and holds duplication and disorder to **zero** —
+neither has an honest cause, where a missing frame does. On the machine it was
+written on, four seconds at 60 fps gave counters 13 to 240: 228 encoded, 228
+decoded, none missing, none duplicated, none out of order. Submitting every
+hundredth frame twice makes it fail naming what happened, which is how that zero
+is known to mean something.
 
 ## Testing the command line
 
