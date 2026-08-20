@@ -53,6 +53,10 @@ path = "../../tests/capture/screenshot.rs"
 # criterion, which the rendezvous' own unit tests cannot reach because they do
 # not run a capture loop or an encoder (issue #452's sibling case).
 [[test]]
+name = "recorded_frames"
+path = "../../tests/capture/recorded_frames.rs"
+
+[[test]]
 name = "screenshot_during_recording"
 path = "../../tests/capture/screenshot_during_recording.rs"
 

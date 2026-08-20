@@ -59,6 +59,7 @@ use clipped_capture::{
 };
 use clipped_video_pattern::harness::TestApp;
 use clipped_video_pattern::pattern::{self, Region, Surface};
+use clipped_video_pattern::sequence::CounterRun;
 
 use readback::FrameReader;
 
@@ -182,23 +183,18 @@ struct Accounting {
     region: Option<Region>,
     /// Frames the backend handed over.
     delivered: u64,
-    /// Frames that decoded as a pattern.
-    decoded: u64,
+    /// The counters those frames carried, and what they say about the run.
+    ///
+    /// One implementation of that arithmetic, shared with the test that asks
+    /// the same questions of a finished recording rather than of a capture
+    /// (`clipped_video_pattern::sequence`, issue #183). Two copies of it would
+    /// eventually disagree, and the disagreement would be silent.
+    run: CounterRun,
     /// Frames that did not decode after the pattern had been found once, with
     /// the first few reasons.
     undecodable: Vec<String>,
     /// Frames the backend had nothing to give.
     timeouts: u64,
-    /// The first and last counters decoded.
-    first: Option<u32>,
-    last: Option<u32>,
-    /// Counters the source presented in that span that never arrived.
-    dropped: u64,
-    /// Counters that arrived more than once.
-    duplicated: u64,
-    /// Counters that went backwards, which would mean frames delivered out of
-    /// order.
-    out_of_order: u64,
     /// What the backend itself reported as missed, for comparison.
     backend_missed: u64,
     /// Whether the backend reported a missed count at all.
@@ -211,22 +207,12 @@ struct Accounting {
 impl Accounting {
     /// Records one decoded frame against the one before it.
     fn record(&mut self, index: u32) {
-        match self.last {
-            None => self.first = Some(index),
-            Some(previous) if index == previous => self.duplicated += 1,
-            Some(previous) if index < previous => self.out_of_order += 1,
-            Some(previous) => self.dropped += u64::from(index - previous) - 1,
-        }
-        self.last = Some(index);
-        self.decoded += 1;
+        self.run.record(index);
     }
 
     /// The frames the source presented between the first and last one seen.
     fn presented(&self) -> u64 {
-        match (self.first, self.last) {
-            (Some(first), Some(last)) if last >= first => u64::from(last - first) + 1,
-            _ => 0,
-        }
+        self.run.presented()
     }
 
     /// Prints the accounting, which is the evidence a run produces.
@@ -254,18 +240,18 @@ impl Accounting {
             self.region
                 .map_or_else(|| "not found".to_owned(), |region| region.to_string()),
             self.delivered,
-            self.decoded,
+            self.run.decoded(),
             self.timeouts,
-            self.first.map_or(0, |first| first),
-            self.last.map_or(0, |last| last),
-            self.dropped,
+            self.run.first().map_or(0, |first| first),
+            self.run.last().map_or(0, |last| last),
+            self.run.missing(),
             if presented == 0 {
                 0.0
             } else {
-                self.dropped as f64 * 100.0 / presented as f64
+                self.run.missing() as f64 * 100.0 / presented as f64
             },
-            self.duplicated,
-            self.out_of_order,
+            self.run.duplicated(),
+            self.run.out_of_order(),
             if self.backend_reports_missed {
                 self.backend_missed.to_string()
             } else {
@@ -295,10 +281,10 @@ impl Accounting {
         // that is a run whose numbers mean nothing.
         let expected = u64::from(SOURCE_FPS) * CAPTURE_FOR.as_secs();
         assert!(
-            self.decoded >= expected / 3,
+            self.run.decoded() >= expected / 3,
             "only {} frames decoded in {:.0}s of capturing a {SOURCE_FPS} fps source, \
              which is too few to conclude anything from; expected around {expected}",
-            self.decoded,
+            self.run.decoded(),
             CAPTURE_FOR.as_secs_f64()
         );
 
@@ -313,7 +299,8 @@ impl Accounting {
         );
 
         assert_eq!(
-            self.out_of_order, 0,
+            self.run.out_of_order(),
+            0,
             "frames arrived in a different order from the one they were presented in, \
              which would put the recording's timeline out of step with the game's"
         );
@@ -324,21 +311,22 @@ impl Accounting {
         // over twice, so a duplicate is a defect in the pipeline rather than a
         // symptom of the machine. Every measured run on issue #23 saw none.
         assert_eq!(
-            self.duplicated, 0,
+            self.run.duplicated(),
+            0,
             "{} captured frames carried a counter that had already arrived, so the same \
              source frame was delivered more than once. An encoder would have written \
              each of them into the recording, which is a stutter at playback and a \
              timeline longer than the run",
-            self.duplicated
+            self.run.duplicated()
         );
 
         let presented = self.presented();
-        let dropped = self.dropped as f64 / presented.max(1) as f64;
+        let dropped = self.run.missing() as f64 / presented.max(1) as f64;
         assert!(
             dropped <= ACCEPTABLE_DROP_FRACTION,
             "{} of the {presented} frames the source presented never arrived ({:.1}%), \
              which is more than the {:.1}% a busy machine explains",
-            self.dropped,
+            self.run.missing(),
             dropped * 100.0,
             ACCEPTABLE_DROP_FRACTION * 100.0
         );
@@ -361,7 +349,10 @@ impl Accounting {
              because of anything else"
         );
 
-        let last = self.last.expect("a healthy run decoded at least one frame");
+        let last = self
+            .run
+            .last()
+            .expect("a healthy run decoded at least one frame");
         assert!(
             last < stopped.frames,
             "the last counter captured was {last} and the application says it only ever \
@@ -544,10 +535,10 @@ mod accounting {
     #[test]
     fn the_same_counter_twice_is_counted_as_one_duplicate() {
         let accounting = accounting_of([5, 6, 6, 7]);
-        assert_eq!(accounting.duplicated, 1);
-        assert_eq!(accounting.dropped, 0);
-        assert_eq!(accounting.out_of_order, 0);
-        assert_eq!(accounting.decoded, 4);
+        assert_eq!(accounting.run.duplicated(), 1);
+        assert_eq!(accounting.run.missing(), 0);
+        assert_eq!(accounting.run.out_of_order(), 0);
+        assert_eq!(accounting.run.decoded(), 4);
     }
 
     #[test]
@@ -571,7 +562,7 @@ mod accounting {
         // `duplicated: 180` on its way through.
         let doubled = healthy_run().into_iter().flat_map(|index| [index, index]);
         let accounting = accounting_of(doubled);
-        assert_eq!(accounting.duplicated, u64::from(SOURCE_FPS) * 6);
+        assert_eq!(accounting.run.duplicated(), u64::from(SOURCE_FPS) * 6);
 
         let message = rejection(&accounting).expect(
             "a run in which every frame arrived twice must fail, or a duplicate-delivery \
@@ -590,7 +581,7 @@ mod accounting {
         let mut counters = healthy_run();
         counters.insert(100, 99);
         let accounting = accounting_of(counters);
-        assert_eq!(accounting.duplicated, 1);
+        assert_eq!(accounting.run.duplicated(), 1);
         assert!(rejection(&accounting).is_some());
     }
 
@@ -613,7 +604,7 @@ mod accounting {
         let mut counters = healthy_run();
         counters.swap(100, 101);
         let accounting = accounting_of(counters);
-        assert_eq!(accounting.out_of_order, 1);
+        assert_eq!(accounting.run.out_of_order(), 1);
         assert!(rejection(&accounting).is_some());
     }
 
