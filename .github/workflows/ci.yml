@@ -301,10 +301,24 @@ jobs:
       # still build and would silently skip every test that proves the harness
       # detects a truncated file, a missing track or a rewound cluster. The
       # build failing first is not a guarantee that covers them.
+      #
+      # CLIPPED_REQUIRE_HOTKEYS is the same argument for `crates/hotkeys`
+      # (issue #235). Those tests register real combinations and synthesise real
+      # keystrokes, and two things they cannot control — a window station that
+      # will not register a hotkey, and a session that will not accept injected
+      # input — make them print `SKIPPED (hotkeys)` and pass. That is the right
+      # default for somebody who has just run the suite and useless as evidence
+      # here.
+      #
+      # Whether a hosted `windows-latest` runner does either was the open
+      # question in #235, and setting this is the answer: if it cannot, this
+      # step fails and names which precondition was not met, which is a better
+      # outcome than a green run that proved nothing.
       - name: Test
         env:
           CLIPPED_REQUIRE_CAPTURE: '1'
           CLIPPED_REQUIRE_MEDIA: '1'
+          CLIPPED_REQUIRE_HOTKEYS: '1'
         run: cargo test --workspace
 
       # What a release is legally obliged to ship (docs/licensing.md): the
