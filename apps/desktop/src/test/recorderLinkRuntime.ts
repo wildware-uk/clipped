@@ -52,6 +52,18 @@ export interface CommandAnswers {
    */
   readonly catalogue?: () => Promise<unknown>;
   /**
+   * What the four catalogue edits answer.
+   *
+   * One stub for all of them, because they share a reply: what an edit
+   * produced is the whole catalogue as it now stands. The command name is
+   * passed through so a test can assert *which* edit was asked for, which is
+   * the thing a screen can get wrong while still looking right.
+   *
+   * A rejection by default, like every read: a stub that answered would let a
+   * screen pass while the recorder was never asked to change anything.
+   */
+  readonly catalogueEdit?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+  /**
    * What `library_clip_document` answers, given the clip asked for.
    *
    * A rejection by default, like every other library read: a stub that quietly
@@ -354,6 +366,14 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'catalogue_games') {
         return commands.catalogue?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (
+        command === 'register_game' ||
+        command === 'rename_game' ||
+        command === 'set_game_excluded' ||
+        command === 'forget_game'
+      ) {
+        return commands.catalogueEdit?.(command, args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'library_events') {
         return commands.events?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);

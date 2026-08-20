@@ -2,6 +2,8 @@ import type { ReactNode } from 'react';
 
 import { describeGameDetection, whatWorksToday } from './gameDetection';
 import { GamesTable } from './GamesTable';
+import { CatalogueGames } from './CatalogueGames';
+import { useCatalogueEditor } from './catalogueEdits';
 import { describeProblem, useCatalogue, useGames } from './library';
 import { recorderCanDo } from './useRecorderLink';
 import type { RecorderLinkState } from './useRecorderLink';
@@ -96,6 +98,12 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
   // refuses it, and "this recorder is older than this window" is a different
   // sentence from "your catalogue could not be read" (AGENTS.md section 27).
   const canList = recorderCanDo(link, 'catalogue');
+  // Separate from listing on purpose. A recorder built between #245's read half
+  // and its write half lists games and refuses every change, so inferring the
+  // controls from the table would draw four buttons that answer
+  // `unknown_command` (AGENTS.md section 27).
+  const canEdit = recorderCanDo(link, 'catalogue_editing');
+  const editor = useCatalogueEditor(catalogue.state === 'read' ? catalogue.value : null);
 
   return (
     <>
@@ -142,44 +150,23 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
             is expected to be in.
           </p>
         )}
-        {canList && catalogue.state === 'read' && catalogue.value.length > 0 && (
-          <table className="clipped-table" aria-label="Games Clipped knows">
-            <thead>
-              <tr>
-                <th scope="col">Game</th>
-                <th scope="col">Recognised by</th>
-                <th scope="col">Launcher</th>
-                <th scope="col">Entry</th>
-              </tr>
-            </thead>
-            <tbody>
-              {catalogue.value.map((game) => (
-                <tr key={game.game_id}>
-                  <td>
-                    {game.name}
-                    {/*
-                     * In words rather than by colour or by leaving the row out.
-                     * An exclusion is a decision about an entry rather than the
-                     * deletion of one, and somebody who excluded a game has to
-                     * be able to find it again (AGENTS.md section 46).
-                     */}
-                    {game.excluded && <span className="clipped-muted"> · excluded</span>}
-                  </td>
-                  <td>{game.executables.map((rule) => rule.name).join(', ')}</td>
-                  <td>
-                    {game.launcher === undefined ? (
-                      <span className="clipped-muted">by name only</span>
-                    ) : (
-                      game.launcher
-                    )}
-                  </td>
-                  <td className="clipped-muted">
-                    {game.source === 'user' ? 'yours' : 'shipped with Clipped'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {canList && editor.games !== null && editor.games.length > 0 && (
+          <CatalogueGames editor={editor} canEdit={canEdit} />
+        )}
+        {/*
+         * Said once, under the table, rather than beside every row that has no
+         * button. A recorder that lists and cannot change is a normal thing to
+         * be attached to — it is simply older than this window — and drawing
+         * nothing at all would leave somebody looking for controls that are not
+         * coming (AGENTS.md section 27).
+         */}
+        {canList && !canEdit && editor.games !== null && editor.games.length > 0 && (
+          <p className="clipped-panel__body clipped-muted">
+            This recorder can list its catalogue and not change it. A newer one adds a game, renames
+            one and excludes one from here; until then, edit
+            <code> games.toml </code>
+            yourself and the recorder picks it up without a restart.
+          </p>
         )}
       </section>
 
