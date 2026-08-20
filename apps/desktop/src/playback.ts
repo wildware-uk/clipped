@@ -170,3 +170,100 @@ export function describePlaybackProblem(problem: LibraryProblem): string {
       return problem.message;
   }
 }
+
+/** What a key press asks the player to do. */
+export type PlaybackKeyAction =
+  | { readonly kind: 'toggle' }
+  | { readonly kind: 'seek'; readonly seconds: number }
+  | { readonly kind: 'start' }
+  | { readonly kind: 'end' };
+
+/** How far an arrow moves, and how far it moves with Shift held. */
+const STEP_SECONDS = 5;
+const FINE_STEP_SECONDS = 1;
+
+/**
+ * What a key press on the playback screen asks for, or `null` for one this
+ * screen does not claim.
+ *
+ * `<video controls>` already answers these keys **when the transport has
+ * focus**, and that is the whole reason this exists: for the rest of the
+ * screen it answers nothing, so somebody who has just pressed a track button
+ * or a mark finds that space does not play. SPEC.md section 42 asks for
+ * keyboard shortcuts and [issue #52](https://github.com/wildware-uk/clipped/issues/52)
+ * is where they were owed.
+ *
+ * # What it deliberately does not claim
+ *
+ * A key the focused control is going to use. Space activates a focused button
+ * and a link; typing goes into a field. Claiming those would make the track
+ * buttons unusable by keyboard in order to add a keyboard shortcut, which is a
+ * trade nobody asked for — so the caller passes what has focus and this
+ * declines.
+ *
+ * Modified presses are left alone as well, apart from Shift on the arrows.
+ * `Ctrl+Left` is a word jump on a machine, `Alt+Left` is Back, and neither is
+ * this window's to take.
+ */
+export function playbackKeyAction(
+  event: {
+    readonly key: string;
+    readonly ctrlKey: boolean;
+    readonly altKey: boolean;
+    readonly metaKey: boolean;
+    readonly shiftKey: boolean;
+  },
+  focused: string | null,
+): PlaybackKeyAction | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return null;
+  }
+  if (usesTheKey(focused, event.key)) {
+    return null;
+  }
+
+  const step = event.shiftKey ? FINE_STEP_SECONDS : STEP_SECONDS;
+  switch (event.key) {
+    case ' ':
+    case 'k':
+    case 'K':
+      return { kind: 'toggle' };
+    case 'ArrowLeft':
+      return { kind: 'seek', seconds: -step };
+    case 'ArrowRight':
+      return { kind: 'seek', seconds: step };
+    case 'Home':
+      return { kind: 'start' };
+    case 'End':
+      return { kind: 'end' };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether the control with focus is going to use this key itself.
+ *
+ * `focused` is the tag name, which is all this needs and all a caller can hand
+ * over without passing the element into a pure function.
+ */
+function usesTheKey(focused: string | null, key: string): boolean {
+  if (focused === null) {
+    return false;
+  }
+  const tag = focused.toUpperCase();
+  // A field takes every key, including the arrows and space.
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+    return true;
+  }
+  // The transport answers all of these itself, and better: it knows its own
+  // frame rate and its own scrub granularity.
+  if (tag === 'VIDEO' || tag === 'AUDIO') {
+    return true;
+  }
+  // Space and Enter activate a focused button or link.
+  if ((tag === 'BUTTON' || tag === 'A') && (key === ' ' || key === 'Enter')) {
+    return true;
+  }
+  return false;
+}

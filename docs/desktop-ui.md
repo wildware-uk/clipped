@@ -1423,11 +1423,21 @@ Producing them is the other half of #71.
 
 ### What is not built
 
-Keyboard shortcuts and a transport of Clipped's own: what is drawn is the media
-element's transport (SPEC.md section 42,
-[#52](https://github.com/wildware-uk/clipped/issues/52)). *Frame-accurate
-seeking* is no longer on this list — ADR 0011's correction measured it, and the
-element already gives it. A playhead across the waveform and something to
+A transport of Clipped's own: what is drawn is the media element's transport
+(SPEC.md section 42, [#52](https://github.com/wildware-uk/clipped/issues/52)),
+and drawing a second one would be a second answer to something the element
+already knows.
+
+Two things are no longer on this list. *Frame-accurate seeking* went when ADR
+0011's correction measured it and found the element already gives it. *Keyboard
+shortcuts* went with #52: space and `K` play and pause, the arrows seek five
+seconds and one with Shift held, and Home and End go to the ends — from anywhere
+on the screen rather than only while the transport has focus, which is the case
+that already worked and the case where nobody needs a shortcut. What the screen
+deliberately does **not** claim is a key the focused control is going to use
+itself, so tabbing to a track button leaves space activating that button; the
+alternative would be buying a shortcut with a control that keyboard users can no
+longer press. A playhead across the waveform and something to
 scrub, and a waveform that follows the track being
 played rather than showing every one of them
 ([#66](https://github.com/wildware-uk/clipped/issues/66)). Bookmarks,

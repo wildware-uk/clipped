@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router';
 
 import {
@@ -16,6 +16,7 @@ import { fileName } from './recordingActions';
 import {
   describePlaybackProblem,
   headlinePlaybackProblem,
+  playbackKeyAction,
   trackLabel,
   usePlayback,
 } from './playback';
@@ -181,6 +182,71 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
    */
   const marked = markedRecording(recordingId, handed, resolution);
   const marks = useRecordingMarks(marked.recording);
+
+  /*
+   * The screen's keyboard shortcuts (SPEC.md section 42, issue #52).
+   *
+   * On the document rather than on a container, because the point is the keys
+   * working when focus is *anywhere on this screen* — after pressing a track
+   * button, a mark, or nothing at all. A handler on a wrapper answers only
+   * while focus is inside it, which is the case that already worked.
+   *
+   * `playbackKeyAction` is given what has focus and declines every key that
+   * control is going to use, so this adds shortcuts without taking the track
+   * buttons away from anybody navigating by keyboard.
+   */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      const element = video.current;
+      if (element === null) {
+        return;
+      }
+      const focused = document.activeElement?.tagName ?? null;
+      const action = playbackKeyAction(event, focused);
+      if (action === null) {
+        return;
+      }
+      // Only once it is certain this screen is answering: a `preventDefault`
+      // before that would stop the page scrolling on a space this screen was
+      // about to decline.
+      event.preventDefault();
+
+      switch (action.kind) {
+        case 'toggle':
+          if (element.paused) {
+            void element.play();
+          } else {
+            element.pause();
+          }
+          break;
+        case 'seek': {
+          // Clamped, because assigning past the end is a seek to the end
+          // followed by an `ended` event, and assigning below zero throws in
+          // some engines. The length is the element's own, which is `NaN`
+          // until it has read a container.
+          const length = element.duration;
+          const wanted = element.currentTime + action.seconds;
+          element.currentTime = Number.isFinite(length)
+            ? Math.min(Math.max(wanted, 0), length)
+            : Math.max(wanted, 0);
+          break;
+        }
+        case 'start':
+          element.currentTime = 0;
+          break;
+        case 'end':
+          if (Number.isFinite(element.duration)) {
+            element.currentTime = element.duration;
+          }
+          break;
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
 
   return (
     <>
