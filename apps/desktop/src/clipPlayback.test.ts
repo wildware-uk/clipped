@@ -5,6 +5,7 @@ import {
   describeClip,
   formatElapsed,
   isClipPath,
+  markedRecording,
   MISSING,
   playbackSource,
   recordingOf,
@@ -181,7 +182,8 @@ describe('what the screen plays', () => {
     // The ordinary way in: the Library has the row in its hand when Play is
     // pressed. Nothing here reads it back out of the index.
     const source = playbackSource(resolveClip('12', NOTHING), {
-      path: 'D:\\clips\\match.mkv',
+      kind: 'recording',
+      item: { path: 'D:\\clips\\match.mkv' },
     });
 
     expect(source.file).toBe('D:\\clips\\match.mkv');
@@ -192,8 +194,8 @@ describe('what the screen plays', () => {
     // the recorder to open it anyway would end in the same answer one round
     // trip later, over a player that had already been drawn.
     const source = playbackSource(resolveClip('12', NOTHING), {
-      path: 'D:\\clips\\match.mkv',
-      missing_since: '2026-08-14T09:51:00+01:00',
+      kind: 'recording',
+      item: { path: 'D:\\clips\\match.mkv', missing_since: '2026-08-14T09:51:00+01:00' },
     });
 
     expect(source.file).toBeNull();
@@ -226,5 +228,63 @@ describe('the tables the screen draws', () => {
     for (const entry of MISSING) {
       expect(entry.needs).toMatch(/#\d+/);
     }
+  });
+});
+
+/**
+ * A clip is not a recording, and the difference is a wrong answer rather than a
+ * missing one.
+ *
+ * Both point a `<video>` at a file the same way. They differ in the identifier
+ * in the address: a recording's is what the library indexes marks under, and a
+ * clip's is its own. Handing a clip over as a recording would look right and
+ * quietly draw *another recording's* game events on the clip's timeline —
+ * whichever recording happened to share the number.
+ */
+describe('playing a clip rather than a recording', () => {
+  it('plays the clip that was handed over', () => {
+    const source = playbackSource(resolveClip('7', NOTHING), {
+      kind: 'clip',
+      item: { path: 'D:/clips/match-replay-1.mkv' },
+    });
+
+    expect(source.file).toBe('D:/clips/match-replay-1.mkv');
+  });
+
+  it('says a clip whose file has gone has gone, rather than opening it', () => {
+    const source = playbackSource(resolveClip('7', NOTHING), {
+      kind: 'clip',
+      item: { path: 'D:/clips/gone.mkv', missing_since: '2026-08-14T09:51:00+01:00' },
+    });
+
+    expect(source.file).toBeNull();
+    expect(source.why).toMatch(/could not find/i);
+  });
+
+  /*
+   * The case this split exists for. Clip 7 and recording 7 are different
+   * things, and reading marks under the number would put one's history on the
+   * other's timeline.
+   */
+  it('reads no marks for a clip, and says why rather than reading the wrong ones', () => {
+    const marked = markedRecording(
+      '7',
+      { kind: 'clip', item: { path: 'D:/clips/match-replay-1.mkv' } },
+      resolveClip('7', NOTHING),
+    );
+
+    expect(marked.recording).toBeNull();
+    expect(marked.why).toMatch(/not a recording in the library index/i);
+  });
+
+  it('still reads marks for a recording handed over under the same number', () => {
+    const marked = markedRecording(
+      '7',
+      { kind: 'recording', item: { path: 'D:/clips/match.mkv' } },
+      resolveClip('7', NOTHING),
+    );
+
+    expect(marked.recording).toBe('7');
+    expect(marked.why).toBeNull();
   });
 });

@@ -126,6 +126,16 @@ export interface SessionListProps {
    */
   readonly onPlay?: (recording: LibraryRecording) => void;
   /**
+   * Opens a clip on the playback screen.
+   *
+   * Separate from {@link onPlay} rather than a widened one, because the screen
+   * they both lead to treats the two differently: a recording's identifier is
+   * what the library indexes marks under and a clip's is not, so handing a clip
+   * over as a recording would draw another recording's game events on its
+   * timeline (`clipPlayback.ts`).
+   */
+  readonly onPlayClip?: (clip: LibraryClip) => void;
+  /**
    * Marking a sitting or a recording as one to keep (issue #58).
    *
    * Absent draws no stars at all. Home passes none for the same reason it
@@ -163,6 +173,7 @@ export function SessionList({
   favourites,
   locks,
   onPlay,
+  onPlayClip,
   thumbnails = false,
 }: SessionListProps): ReactNode {
   const table = useRef<HTMLTableElement>(null);
@@ -263,6 +274,7 @@ export function SessionList({
                 key={clip.clip_id}
                 clip={clip}
                 actions={actions}
+                onPlayClip={onPlayClip}
                 session={session}
                 thumbnails={thumbnails}
               />
@@ -306,11 +318,13 @@ export function SessionList({
 function ClipRow({
   clip,
   actions,
+  onPlayClip,
   session,
   thumbnails,
 }: {
   readonly clip: LibraryClip;
   readonly actions: RecordingActions;
+  readonly onPlayClip: ((clip: LibraryClip) => void) | undefined;
   readonly session: LibrarySession;
   readonly thumbnails: boolean;
 }): ReactNode {
@@ -351,6 +365,26 @@ function ClipRow({
         {why !== undefined && <span className="clipped-muted"> · {why}</span>}
       </td>
       <td>
+        {onPlayClip !== undefined && clip.path !== undefined && (
+          <>
+            {/*
+             * First, for the reason a recording's Play is first: watching it is
+             * what most people came for, and it is the one action that happens
+             * here rather than in another application.
+             */}
+            <button
+              type="button"
+              disabled={!available}
+              title={why}
+              aria-label={`Play ${of}`}
+              onClick={() => {
+                onPlayClip(clip);
+              }}
+            >
+              Play
+            </button>{' '}
+          </>
+        )}
         <button
           type="button"
           disabled={!available || busy !== undefined}

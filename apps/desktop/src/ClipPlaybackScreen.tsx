@@ -5,6 +5,8 @@ import { useLocation, useParams } from 'react-router';
 import {
   describeClip,
   formatElapsed,
+  type Handed,
+  type HandedClip,
   type HandedRecording,
   MISSING,
   markedRecording,
@@ -125,7 +127,20 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
   // its hand when the Play button is pressed, and passing it is what saves a
   // second read of the same thing; a reload has none, and the screen says so
   // rather than inventing one (issue #52).
-  const handed = (useLocation().state as { recording?: HandedRecording } | null)?.recording ?? null;
+  //
+  // A clip arrives under its own key rather than as a recording, because the
+  // two differ in what this screen may do with the identifier in the address:
+  // a recording's is what the library indexes marks under, and a clip's is not
+  // (`clipPlayback.ts`, `markedRecording`).
+  const routeState = useLocation().state as
+    | { recording?: HandedRecording; clip?: HandedClip }
+    | null;
+  const handed: Handed | null =
+    routeState?.clip !== undefined
+      ? { kind: 'clip', item: routeState.clip }
+      : routeState?.recording !== undefined
+        ? { kind: 'recording', item: routeState.recording }
+        : null;
 
   const resolution = resolveClip(recordingId, view);
   const description = describeClip(resolution);
