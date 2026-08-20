@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use clipped_ipc::catalogue::{EntrySource as CatalogueEntrySource, ForgetGame, RegisterGame};
 use clipped_ipc::frame::{read_message, write_message};
 use clipped_ipc::transport::connect;
 use clipped_ipc::{
@@ -4181,6 +4182,118 @@ fn status_on_the_wire(recorder: &ServedRecorder) -> String {
 
 /// A home directory of this test's own, for a recorder that must not touch the
 /// library or the recordings of whoever is running the tests.
+/// The catalogue, over the pipe, against the file a real recorder would write.
+///
+/// [Issue #692](https://github.com/wildware-uk/clipped/issues/692). This suite
+/// drove no catalogue command until now, and the only capabilities any welcome
+/// asserted were `recording`, `status_events` and `replay` — each named
+/// individually. That is why nothing here caught
+/// [#684](https://github.com/wildware-uk/clipped/issues/684), where
+/// `features::CATALOGUE` was defined, documented as the gate the Games screen
+/// checks, and never added to the list a recorder advertises. The command
+/// worked; the screen drew its empty state on every machine.
+///
+/// `LOCALAPPDATA` moves with the rest of the home, because the recorder resolves
+/// the overlay from it (`clipped_game_detection::catalogue::overlay_path`). A
+/// test that let that fall through would register a game in the catalogue of
+/// whoever is running it, and `forget` it again afterwards if it got that far
+/// (AGENTS.md section 25).
+#[test]
+fn the_catalogue_can_be_read_and_changed_over_the_protocol() {
+    let home = scratch_home("catalogue");
+    let recorder = ServedRecorder::start_under("catalogue", Some(&home));
+    let mut client = recorder.client();
+
+    // Both, and by name. A recorder that can list and not change is a real
+    // build — every one between #245's two halves — so a window that inferred
+    // the controls from the list would draw four that answer `unknown_command`.
+    for capability in [features::CATALOGUE, features::CATALOGUE_EDITING] {
+        assert!(
+            client
+                .welcome()
+                .features
+                .iter()
+                .any(|feature| feature == capability),
+            "a recorder with a games file to write advertises `{capability}`, or the window \
+             draws no control that uses it whatever the command behind it does (issue #684). \
+             It advertised: {:?}",
+            client.welcome().features
+        );
+    }
+
+    let shipped = match client.call(&IpcCommand::CatalogueGames) {
+        Ok(Reply::CatalogueGames { games }) => games,
+        other => panic!("`catalogue_games` was answered with {other:?}"),
+    };
+    assert!(
+        !shipped.is_empty(),
+        "the catalogue compiled into this build names games, so an empty answer here is a read \
+         that failed rather than a machine that knows none"
+    );
+    assert!(
+        shipped
+            .iter()
+            .all(|game| game.source == CatalogueEntrySource::Shipped),
+        "nothing is the user's own yet: this recorder has a home of its own and has written \
+         nothing to it"
+    );
+
+    let registered = match client.call(&IpcCommand::RegisterGame(RegisterGame {
+        name: "A game of my own".to_owned(),
+        executable: "mygame.exe".to_owned(),
+        path_contains: None,
+    })) {
+        Ok(Reply::CatalogueEdited { game_id, games }) => {
+            assert_eq!(
+                games.len(),
+                shipped.len() + 1,
+                "the entry joins the shipped ones rather than replacing them"
+            );
+            game_id
+        }
+        other => panic!("`register_game` was answered with {other:?}"),
+    };
+
+    // The file, because a reply can be assembled without one being written, and
+    // a catalogue that vanishes on restart is the whole subject of issue #245.
+    let overlay = home
+        .join("AppData")
+        .join("Local")
+        .join("Clipped")
+        .join("games.toml");
+    let written = std::fs::read_to_string(&overlay)
+        .expect("the recorder wrote the games file in the home it was given");
+    assert!(
+        written.contains(&registered),
+        "the user's own file holds the entry: {written}"
+    );
+
+    // And a second connection sees it, which is what proves the recorder
+    // published the edit rather than answering from what the caller sent.
+    let mut second = recorder.client();
+    let after = match second.call(&IpcCommand::CatalogueGames) {
+        Ok(Reply::CatalogueGames { games }) => games,
+        other => panic!("`catalogue_games` was answered with {other:?}"),
+    };
+    let mine = after
+        .iter()
+        .find(|game| game.game_id == registered)
+        .expect("a connection that made no edit still sees it");
+    assert_eq!(mine.source, CatalogueEntrySource::User);
+
+    match second.call(&IpcCommand::ForgetGame(ForgetGame {
+        game_id: registered.clone(),
+    })) {
+        Ok(Reply::CatalogueEdited { games, .. }) => assert!(
+            !games.iter().any(|game| game.game_id == registered),
+            "an entry the user added and then dropped is gone"
+        ),
+        other => panic!("`forget_game` was answered with {other:?}"),
+    }
+
+    assert_still_serving(&recorder);
+}
+
 fn scratch_home(label: &str) -> std::path::PathBuf {
     let home =
         std::env::temp_dir().join(format!("clipped-ipc-home-{label}-{}", std::process::id()));
