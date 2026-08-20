@@ -1,0 +1,27 @@
+[package]
+name = "clipped-test-exclusion"
+description = "Test-only cross-process locks for the machine resources hardware tests cannot share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Test machinery, not a product crate. Nothing in the recorder takes a lock on
+# the foreground window or the default audio endpoint; only tests do, and only
+# because two `cargo test` binaries on one machine are competitors rather than
+# independent observers (issue #194, docs/testing.md).
+publish = false
+
+[dependencies]
+# A named mutex is the mechanism: it is visible to every process in the session
+# and Windows releases it when the holder dies, which an in-process `Mutex`
+# cannot do and a lock file does not do reliably.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

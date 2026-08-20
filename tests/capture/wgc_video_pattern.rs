@@ -57,6 +57,7 @@ use clipped_capture::{
     CaptureMethodSetting, CaptureTarget, CaptureTimestamp, FrameSize, TargetHandle, TargetKind,
     TargetProperties,
 };
+use clipped_test_exclusion::{Exclusive, Resource};
 use clipped_video_pattern::harness::TestApp;
 use clipped_video_pattern::pattern::{self, Region, Surface};
 use clipped_video_pattern::sequence::CounterRun;
@@ -95,6 +96,12 @@ const ACCEPTABLE_DROP_FRACTION: f64 = 0.05;
 #[test]
 #[ignore = "needs a GPU, a desktop session and about fifteen seconds; see the module docs"]
 fn a_borderless_window_is_captured_frame_for_frame() {
+    // One capture measurement on this machine at a time (issue #194). This test
+    // counts dropped, duplicated and out-of-order frames, and a second capture
+    // suite running beside it changes every one of those numbers.
+    let _measuring = Exclusive::acquire(Resource::CaptureMeasurement)
+        .unwrap_or_else(|contended| panic!("{contended}"));
+
     let app = TestApp::start(
         env!("CARGO_BIN_EXE_video-pattern"),
         [
@@ -138,6 +145,12 @@ fn a_borderless_window_is_captured_frame_for_frame() {
 #[test]
 #[ignore = "needs a GPU, a desktop session and about fifteen seconds; see the module docs"]
 fn a_window_with_a_border_is_captured_with_its_chrome_around_the_pattern() {
+    // One capture measurement on this machine at a time (issue #194). This test
+    // counts dropped, duplicated and out-of-order frames, and a second capture
+    // suite running beside it changes every one of those numbers.
+    let _measuring = Exclusive::acquire(Resource::CaptureMeasurement)
+        .unwrap_or_else(|contended| panic!("{contended}"));
+
     // The case a borderless capture cannot exercise: Windows Graphics Capture
     // captures a *window*, so the frame includes the title bar and the border
     // and the client area is offset inside it. Anything downstream that assumed
