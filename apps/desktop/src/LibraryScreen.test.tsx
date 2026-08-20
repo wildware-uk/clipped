@@ -432,9 +432,36 @@ describe('the Library screen', () => {
    * something it already does — and #301, which that row named as the open
    * question about how bytes reach this window, is answered.
    */
+  it('filters to favourites with one control, and says so in the search box', async () => {
+    // SPEC.md section 17 asks for the filter; issue #695 is that marking worked
+    // and nothing surfaced it. The term goes into the box as well as into the
+    // query, so a person can see it, learn it and edit it into a longer search
+    // -- and so the box and the list never disagree about what is shown.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve({ sessions: [] }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(await screen.findByRole('button', { name: 'Favourites only' }));
+
+    await waitFor(() => {
+      const queries = runtime.invocations
+        .filter((call) => call.command === 'library_sessions')
+        .map((call) => String(call.args['query'] ?? ''));
+      expect(queries).toContain('favourite');
+    });
+    expect(screen.getByLabelText(/search your library/i)).toHaveValue('favourite');
+
+    // And back, because a filter that cannot be cleared is a screen somebody
+    // has to reload to escape.
+    await user.click(screen.getByRole('button', { name: 'All sittings' }));
+    expect(screen.getByLabelText(/search your library/i)).toHaveValue('');
+  });
+
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
-    ['filtering by favourite', /^filtering the list down to favourites/i, [695]],
     ['waveforms', /^a waveform under each/i, [448, 694]],
     // Playing a *recording* is no longer on this list: Play is a control on
     // every row since issue #304, and a row promising what the screen already

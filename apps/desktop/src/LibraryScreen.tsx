@@ -94,11 +94,6 @@ const WAITING: readonly Waiting[] = [
       'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
   },
   {
-    shows: 'Filtering the list down to favourites with one control',
-    needs:
-      'A control on this screen. Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`). Issue #695',
-  },
-  {
     shows: 'A waveform under each of a recording’s sound tracks',
     needs:
       'Peaks reach this window already, by the same command a thumbnail arrives on (#448 landed it). What is missing is the surface that draws them: a waveform belongs under a track on the playback screen rather than in a row of this table, which is issue #694',
@@ -395,6 +390,22 @@ export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
   const [typed, setTyped] = useState('');
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
+
+  // Read from what is typed rather than from what is applied, so pressing the
+  // button never discards something half-written. `favourite` is a bare term in
+  // the query language rather than a field, which is why this is a word in the
+  // list and not `favourite:true` (`docs/search.md`).
+  const typedTerms = typed.split(/\s+/).filter((term) => term !== '');
+  const filteringToFavourites = typedTerms.includes('favourite');
+
+  function toggleFavourites(): void {
+    const without = typedTerms.filter((term) => term !== 'favourite');
+    const next = (filteringToFavourites ? without : [...without, 'favourite']).join(' ');
+    // Both, because a box that said one thing while the list showed another
+    // would be the screen disagreeing with itself.
+    setTyped(next);
+    setQuery(next);
+  }
   const actions = useRecordingActions(link);
   const favourites = useFavourites();
   const locks = useLocks();
@@ -443,6 +454,16 @@ export function LibraryScreen({ link }: LibraryScreenProps): ReactNode {
           }}
         />
         <button type="submit">Search</button>
+        {/*
+         * One control for the filter SPEC.md section 17 asks for, rather than
+         * expecting somebody to know the word. It writes `favourite` into the
+         * box as well as applying it, so what is searched and what is shown in
+         * the box never disagree -- and so that a person can see the term,
+         * learn it, and edit it into a longer query (issue #695).
+         */}
+        <button type="button" onClick={toggleFavourites}>
+          {filteringToFavourites ? 'All sittings' : 'Favourites only'}
+        </button>
         <p className="clipped-panel__body clipped-muted">
           Words match anywhere; <code>game:</code>, <code>tag:</code>, <code>date:</code>,{' '}
           <code>duration:</code> and <code>favourite</code> narrow it, and <code>-</code> in front
