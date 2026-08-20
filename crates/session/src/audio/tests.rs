@@ -1356,6 +1356,60 @@ fn a_video_only_recording_declares_no_audio_track_at_all() {
     );
 }
 
+/*
+ * What a recording made with the shipped settings actually declares.
+ *
+ * Every other layout case above passes `compatibility_mix` explicitly, which
+ * makes each of them a test of `declare` and none of them a test of what a user
+ * gets. Turning `COMPATIBILITY_MIX_BY_DEFAULT` off passed all 507 tests of this
+ * crate — so the track that makes a recording sound right when it is
+ * double-clicked (SPEC.md section 13) could have been lost to a refactor with
+ * nothing going red (issue #735).
+ *
+ * The assertion is on the declared layout and the input is derived, which is
+ * what keeps the two able to disagree: a test that compared the constant with
+ * itself would pass whichever way it was set.
+ */
+#[test]
+fn a_recording_made_with_the_shipped_settings_puts_a_mix_of_its_sources_first() {
+    // A handle nothing opens. This reads a setting and declares a layout; it
+    // never reaches a capture, which is the one thing a fabricated handle would
+    // get wrong (issue #581).
+    use crate::settings::CaptureTargetSettings;
+
+    let settings = RecordingSettings::new(
+        CaptureTargetSettings::window(1, WIDTH, HEIGHT),
+        std::path::PathBuf::from("shipped-defaults.mkv"),
+    );
+
+    let layout = declare(
+        VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT),
+        &[
+            scripted(AudioSource::Game, 1, Vec::new()).source,
+            scripted(AudioSource::Microphone, 2, Vec::new()).source,
+        ],
+        // Read from the settings rather than written here, so this is a
+        // question about the shipped default and not about `declare`.
+        settings.compatibility_mix(),
+    );
+
+    let tracks = layout.audio_tracks();
+    assert_eq!(
+        tracks
+            .iter()
+            .map(clipped_muxer::AudioTrack::name)
+            .collect::<Vec<_>>(),
+        [Some("Compatibility Mix"), Some("Game"), Some("Microphone")],
+        "a recording somebody makes without saying anything carries a mix of its sources, and \
+         carries it first"
+    );
+    assert!(
+        tracks[0].is_default(),
+        "and the mix is the track a player that takes one arbitrarily takes, which is the whole \
+         point of having it"
+    );
+}
+
 #[test]
 fn a_buffer_the_writer_has_no_room_for_is_dropped_and_counted_rather_than_waited_on() {
     // AGENTS.md section 20: a capture thread may not wait on the filesystem, and

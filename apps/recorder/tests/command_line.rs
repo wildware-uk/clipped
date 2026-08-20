@@ -223,13 +223,23 @@ fn capabilities_reports_encoders_and_codecs() {
         "AV1",
         "Automatic would choose",
         "Encoding in this build:",
-        "no audio track",
+        // What a recording carries, which is the difference SPEC.md section 46
+        // says the product exists for. The binary said the opposite of this for
+        // months after it stopped being true, and a test asserting the old
+        // string is what held it there (issue #735).
+        "a track for each audio source it opened",
     ] {
         assert!(
             report.contains(expected),
             "the report should mention {expected}:\n{report}"
         );
     }
+    assert!(
+        !report.contains("no audio track"),
+        "a recording has carried audio since #180, and this is the command somebody runs to \
+         find out what their machine can do:\n{report}"
+    );
+
     // Asserted through the binary because the binary is what a user runs: the
     // software fallback (#18) and NVENC (#15) are implemented, and the shipped
     // report went on saying the opposite of both until #167. A unit test on

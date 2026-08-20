@@ -350,6 +350,24 @@ impl Destination {
     }
 }
 
+/// Whether a recording carries a mix of its audio sources by default.
+///
+/// Named rather than written into the constructor, because two places have to
+/// agree about it and one of them is a **sentence shown to the user**:
+/// `clipped-recorder capabilities` describes what a recording carries, and a
+/// report that describes a build other than the one printing it is worse than
+/// no report ([issue #735](https://github.com/wildware-uk/clipped/issues/735),
+/// AGENTS.md section 27). That report said a recording had no audio track at
+/// all for as long as it took anybody to run it, because the claim was a string
+/// and nothing tied it to this.
+///
+/// On, because SPEC.md section 13 asks for a track that sounds like the
+/// recording for a player that takes one arbitrarily; the isolated tracks are
+/// beside it and are what an editor sees
+/// ([issue #29](https://github.com/wildware-uk/clipped/issues/29),
+/// `docs/audio-routing.md`).
+pub const COMPATIBILITY_MIX_BY_DEFAULT: bool = true;
+
 /// Everything a recording needs to be told before it starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingSettings {
@@ -420,7 +438,7 @@ impl RecordingSettings {
             capture_cursor: false,
             capture_method: CaptureMethodSetting::Automatic,
             remembered_capture_method: None,
-            compatibility_mix: true,
+            compatibility_mix: COMPATIBILITY_MIX_BY_DEFAULT,
             system_audio: AudioSourceSetting::Off,
             microphone: AudioSourceSetting::Off,
             overwrite: false,

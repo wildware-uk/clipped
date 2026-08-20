@@ -214,7 +214,11 @@ large:
   target, captures the window, encodes its frames and writes them into a
   Matroska file, and finishes that file when Ctrl+C stops it
   ([#126](https://github.com/wildware-uk/clipped/issues/126)). A recording has a
-  video track and no audio track. `watch` does the same thing without being
+  video track, a track for each audio source it opened, and a mix of those
+  sources first so it sounds right double-clicked
+  ([#180](https://github.com/wildware-uk/clipped/issues/180),
+  [#29](https://github.com/wildware-uk/clipped/issues/29),
+  [audio-routing.md](audio-routing.md)). `watch` does the same thing without being
   asked: it waits on the process watcher, matches what launched against the game
   catalogue, and records a game from its launch to its exit
   ([#46](https://github.com/wildware-uk/clipped/issues/46),

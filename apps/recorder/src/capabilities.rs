@@ -563,9 +563,21 @@ fn measurement_lines(report: &CapabilityReport) -> String {
 /// encode a frame on real hardware — so the second line says "not proven"
 /// rather than "no backend", which would be false for that one
 /// ([`EncoderKind::is_implemented`]'s doc explains why it still counts as not
-/// implemented). And whichever encoder is chosen, a recording made today has a
-/// video track and no audio track, which a report listing working encoders
-/// would otherwise let a reader assume the opposite of.
+/// implemented). And whichever encoder is chosen, the sound a recording carries
+/// is what somebody reading a report about encoders wants to know next, since it
+/// is the difference SPEC.md section 46 says the product exists for.
+///
+/// **Both audio claims are derived, and deliberately so.** This footer told
+/// every user that "a recording has a video track and no audio track: capturing
+/// audio into a session is not written yet (issue #180)" for as long as it took
+/// anybody to run the command after #180 closed
+/// ([issue #735](https://github.com/wildware-uk/clipped/issues/735)). The
+/// encoder half of the same sentence had been derived from
+/// [`EncoderKind::is_implemented`] after #167, "so that this copy cannot drift
+/// from the code again"; the audio half was a string, and it drifted. So the
+/// mix comes from [`COMPATIBILITY_MIX_BY_DEFAULT`], which is the value the
+/// recording path reads, and whether the sources are on comes from
+/// [`AudioDeviceSetting`]'s own default.
 fn implementation_lines() -> String {
     let (implemented, detected_only): (Vec<EncoderKind>, Vec<EncoderKind>) = EncoderKind::ALL
         .iter()
@@ -589,11 +601,51 @@ fn implementation_lines() -> String {
     }
     out.push_str(
         "`record` uses the first of these that will open a session on the device the\n    \
-         frames are captured on, and falls back to the next when one refuses. A\n    \
-         recording has a video track and no audio track: capturing audio into a\n    \
-         session is not written yet (issue #180).\n\n",
+         frames are captured on, and falls back to the next when one refuses.\n",
     );
+    out.push_str(&audio_lines());
     out
+}
+
+/// What sound a recording carries, in the words a reader of this report needs.
+///
+/// Two facts, and neither is written out here twice
+/// ([issue #735](https://github.com/wildware-uk/clipped/issues/735)):
+///
+/// - whether the sources are captured unless the caller says otherwise, from
+///   [`AudioDeviceSetting`]'s default, which is what every layer above resolves
+///   through;
+/// - whether the tracks are joined by a mix, from
+///   [`COMPATIBILITY_MIX_BY_DEFAULT`], which is what `crate::record` hands to
+///   `audio::declare`.
+///
+/// How *many* tracks there are is not said, because it depends on what a given
+/// recording managed to open and this report is printed before any recording
+/// exists. Saying "one for each source" is the true form of it.
+fn audio_lines() -> String {
+    use clipped_session::config::AudioDeviceSetting;
+
+    let sources_on = !matches!(AudioDeviceSetting::default(), AudioDeviceSetting::Disabled);
+    let sources = if sources_on {
+        "A recording carries a track for each audio source it opened, and both\n    \
+         `--microphone` and `--system-audio` are captured unless one is set to\n    \
+         `none`."
+    } else {
+        "A recording carries a track for each audio source it opened, and neither\n    \
+         `--microphone` nor `--system-audio` is captured unless it is asked for by\n    \
+         name."
+    };
+
+    let mix = if clipped_session::COMPATIBILITY_MIX_BY_DEFAULT {
+        " A mix of them comes first and is the track a player picks\n    \
+         by default, so a recording sounds right double-clicked and stays\n    \
+         separable in an editor."
+    } else {
+        " They are not mixed together, so a player that takes one track\n    \
+         arbitrarily may get any single source."
+    };
+
+    format!("    {sources}{mix}\n\n")
 }
 
 /// Encoder names as a sentence-ready list, with the issue numbers a reader
@@ -1332,11 +1384,43 @@ mod tests {
             !footer.contains("Nothing records yet"),
             "`record` writes a file now, so the footer must not deny it: {footer}"
         );
-        // What is genuinely still missing has to be said, or the corrected
-        // footer reads as "this build records everything".
+        // The claim this file used to make, and made for months after it stopped
+        // being true (issue #735). Asserted as an absence *and* as a
+        // relationship below, because "does not say the wrong thing" is
+        // satisfied by a footer that says nothing at all.
         assert!(
-            footer.contains("no audio track"),
-            "the footer must say a recording has no sound in it yet: {footer}"
+            !footer.contains("no audio track"),
+            "recordings have carried audio since #180, so the footer must not deny it: {footer}"
+        );
+
+        // The relationship, which is what stops this going stale again: the
+        // footer describes the build printing it. A build that stopped mixing
+        // its sources fails here rather than printing a sentence that has
+        // quietly become false.
+        if clipped_session::COMPATIBILITY_MIX_BY_DEFAULT {
+            assert!(
+                footer.contains("A mix of them comes first"),
+                "this build mixes its sources, so the footer has to say so: {footer}"
+            );
+        } else {
+            assert!(
+                footer.contains("not mixed together"),
+                "this build does not mix its sources, so the footer must not claim it does: \
+                 {footer}"
+            );
+        }
+
+        // And the sources, from the same default every layer above resolves
+        // through.
+        let captured_unless_declined = !matches!(
+            clipped_session::config::AudioDeviceSetting::default(),
+            clipped_session::config::AudioDeviceSetting::Disabled
+        );
+        assert_eq!(
+            footer.contains("are captured unless one is set to"),
+            captured_unless_declined,
+            "the footer and `AudioDeviceSetting`'s default disagree about whether a recording \
+             captures audio without being asked: {footer}"
         );
         assert!(
             footer.contains(INFERRED_MARKER),
