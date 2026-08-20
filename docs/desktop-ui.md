@@ -52,16 +52,35 @@ protocol, surviving in the one place a user sees on every screen. While
 recording it names the **game**, from the sitting the recording carries, and
 falls back to the capture selector where there is no game to name (issue #241).
 
-**Almost every control is in the notification area, not in the window** — see
-[The tray](#the-tray). No screen drives the recorder: one of the seven is not
-built, and none of the six that are draws anything that would, because nothing
-they would drive can be reached from here. The Editor draws none of the editing
-controls for the same reason — the operations exist in `crates/edit` and this
-window cannot reach them. A button with nothing behind it is exactly what
-AGENTS.md section 27 forbids, which is also why Diagnostics has no Export Support
-Bundle button ([diagnostics.md](diagnostics.md)). A "Try again" control for a link
-that has given up is
+**Most controls are in the notification area, not in the window** — see
+[The tray](#the-tray). Three screens do reach the recorder now, and each of them
+does it with a command the protocol carries:
+
+- **Settings** writes with `apply_settings` ([issue #51](https://github.com/wildware-uk/clipped/issues/51)).
+- **Library** restores from the trash and empties it (`restore_from_trash`,
+  `empty_trash`).
+- **Games** registers, renames, excludes and forgets a game
+  (`register_game`, `rename_game`, `set_game_excluded`, `forget_game`,
+  [issue #245](https://github.com/wildware-uk/clipped/issues/245)) — behind the
+  `catalogue_editing` capability, so a recorder that cannot perform them has the
+  controls drawn for it at all.
+
+What is still not drawn is drawn nowhere for the same reason it always was: a
+button with nothing behind it is what AGENTS.md section 27 forbids. The Editor
+opens a clip and saves the document back (`save_clip_document`) and draws **no
+editing control**, because trimming, splitting and the rest exist in
+`crates/edit` and nothing carries them to this window
+([issue #84](https://github.com/wildware-uk/clipped/issues/84)). Diagnostics has
+no Export Support Bundle button ([diagnostics.md](diagnostics.md)). A "Try again"
+control for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
+
+This paragraph has been wrong twice. It once said the IPC protocol "does not
+exist yet", which #49 falsified; it then said no screen drives the recorder,
+which #51, #450 and #245 falsified one after another
+([issue #219](https://github.com/wildware-uk/clipped/issues/219)). What stays
+true is the rule, not the inventory — when a screen gains a control, this list
+is what has to move with it.
 
 The controls a screen does draw change nothing outside the window: the Settings
 screen's rail, which moves between that screen's own sections — see
