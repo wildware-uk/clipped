@@ -537,7 +537,11 @@ fn a_microphone_chosen_in_the_window_reaches_the_settings_file_the_recorder_reco
     // the answer the next window gets. Until issue #51 the window could not
     // read or write a setting at all — `apply_settings` was refused by every
     // build with `not_implemented`.
-    let home = scratch_home("settings");
+    // Pristine, because the assertion below is precisely "a machine whose
+    // settings file does not exist has configured nothing". Safe here and
+    // nowhere near a recording: this test reads and writes settings and never
+    // asks for one, so nothing opens an audio device (`ScratchHome::pristine`).
+    let home = ScratchHome::pristine("settings");
     let recorder = ServedRecorder::start_under("settings", Some(&home));
     let mut client = recorder.client();
 
@@ -2278,32 +2282,6 @@ name = "Clipped Video Pattern"
 name = "video-pattern.exe"
 "#;
 
-/// Writes that overlay into a scratch home, where the recorder reads one.
-/// Writes a settings file into `home` that records neither audio source.
-///
-/// For a `serve --watch-for-games` test, which is the one shape that cannot say
-/// this on a command line: that subcommand deliberately takes no recording
-/// options of its own and reads the same defaults `watch` does
-/// (`crate::cli::WatchArgs`), and the recorder's defaults are both sources
-/// **on**. So a watcher test with nothing configured opens whatever endpoints
-/// the machine has — which on a runner is nothing and on a developer's machine
-/// is a real microphone in a real room.
-///
-/// A test that asserts nothing about audio must not switch a microphone on to
-/// do it (AGENTS.md section 14). `tests/automatic_sessions.rs` says the same and
-/// says it with `--microphone none`, which is the same intent through the door
-/// that subcommand has; [issue #715](https://github.com/wildware-uk/clipped/issues/715)
-/// is about making the isolation general rather than per-test.
-fn recording_no_audio(home: &Path) {
-    let application_directory = home.join("AppData").join("Local").join("Clipped");
-    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
-    std::fs::write(
-        application_directory.join(clipped_session::config::FILE_NAME),
-        r#"{"version":1,"global":{"microphone":"none","system_audio":"none"}}"#,
-    )
-    .expect("the settings file can be written");
-}
-
 fn overlay_naming_the_pattern(home: &Path) {
     let application_directory = home.join("AppData").join("Local").join("Clipped");
     std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
@@ -2690,8 +2668,6 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
     let home = scratch_home("watcher-sitting");
     overlay_naming_the_pattern(&home);
 
-    recording_no_audio(&home);
-
     let recorder =
         ServedRecorder::started_with("watcher-sitting", Some(&home), &["--watch-for-games"]);
     let mut client = recorder.client();
@@ -2768,8 +2744,8 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
         other => panic!("expected a summary, got {other:?}"),
     }
 
-    // And that it recorded no audio, which is what `recording_no_audio` above
-    // is for. Asserted rather than assumed: the settings file is the only way a
+    // And that it recorded no audio, which is what every scratch home is set up
+    // for (`ScratchHome::record_no_audio`). Asserted rather than assumed: the settings file is the only way a
     // `serve --watch-for-games` test can say this, and a file the recorder
     // failed to read would leave the defaults standing — both sources on — with
     // every other assertion here still passing. That is a microphone opened in
@@ -2891,7 +2867,7 @@ impl Drop for WindowlessSubject {
 /// for a four-second test. `clipped_replay::MINIMUM_WINDOW` is the floor the
 /// buffer itself enforces, so this asks for the smallest thing the product
 /// supports rather than a figure invented here (AGENTS.md section 55).
-fn recording_no_audio_with_the_shortest_buffer(home: &Path) {
+fn keeping_the_shortest_buffer(home: &Path) {
     let application_directory = home.join("AppData").join("Local").join("Clipped");
     std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
     std::fs::write(
@@ -2940,7 +2916,7 @@ fn a_replay_saved_out_of_a_watched_game_lands_in_that_games_sitting() {
 
     let home = scratch_home("watched-replay");
     overlay_naming_the_pattern(&home);
-    recording_no_audio_with_the_shortest_buffer(&home);
+    keeping_the_shortest_buffer(&home);
 
     let recorder =
         ServedRecorder::started_with("watched-replay", Some(&home), &["--watch-for-games"]);
@@ -4617,9 +4593,79 @@ impl ScratchHome {
         ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("a scratch home can be made");
-        Self(home)
+        let home = Self(home);
+        home.record_no_audio();
+        home
+    }
+
+    /// A home with **no settings file in it at all**.
+    ///
+    /// For the one thing [`Self::new`] cannot be used to test: what a recorder
+    /// says on a machine that has configured nothing, which is what a fresh
+    /// user has and what step 3 of SPEC.md section 45 starts from.
+    ///
+    /// # Only for a test that never starts a recording
+    ///
+    /// The shipped audio defaults are both sources on, so a recording made
+    /// under this home opens the machine's real microphone and its real
+    /// speakers (AGENTS.md section 14). A test that reads settings, writes
+    /// settings and reads them back never reaches an audio device; one that
+    /// records does, and must take a [`Self::new`] home instead.
+    fn pristine(label: &str) -> Self {
+        let home = Self::new(label);
+        std::fs::remove_file(
+            home.0
+                .join("AppData")
+                .join("Local")
+                .join("Clipped")
+                .join(clipped_session::config::FILE_NAME),
+        )
+        .expect("the settings file this home was given can be removed again");
+        home
+    }
+
+    /// Writes the settings file that keeps this suite off the machine's real
+    /// audio hardware.
+    ///
+    /// **Done for every scratch home, not asked for by each test**, and that is
+    /// the whole point. [Issue #715](https://github.com/wildware-uk/clipped/issues/715)
+    /// stopped a recorder here reading the settings of whoever is running the
+    /// suite, which fixed a *named* device leaking in. It did not fix the
+    /// shipped defaults, and those are both sources **on** — so a scratch home
+    /// with no settings file in it still opens the default microphone the
+    /// moment any test starts a recording. That is a microphone opened in
+    /// somebody's room to assert something about video (AGENTS.md section 14),
+    /// and it is what happened.
+    ///
+    /// Eight of the ten hardware tests in this file had no settings file of
+    /// their own. Each of them was one `#[ignore]` away from doing it, and
+    /// every test added later would have been too, because nothing about
+    /// writing a test makes it obvious that not writing a settings file means
+    /// opening a microphone. So the safe thing is what happens when an author
+    /// does nothing, and a test that wants a real source has to say so —
+    /// [`recording_with_audio`].
+    fn record_no_audio(&self) {
+        let application_directory = self.0.join("AppData").join("Local").join("Clipped");
+        std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+        std::fs::write(
+            application_directory.join(clipped_session::config::FILE_NAME),
+            SILENT_SETTINGS,
+        )
+        .expect("the settings file can be written");
     }
 }
+
+/// What every scratch home starts with: no microphone, no system audio.
+///
+/// A constant because two places assert against it — the recorder is told this,
+/// and `a_recorder_this_suite_starts_reads_no_settings_of_the_user_running_it`
+/// checks that these two keys and no others were overridden, which is what
+/// distinguishes this file from a leaked one.
+const SILENT_SETTINGS: &str =
+    r#"{"version":1,"global":{"microphone":"none","system_audio":"none"}}"#;
+
+/// The two settings keys [`SILENT_SETTINGS`] speaks to.
+const SILENCED: [&str; 2] = ["microphone", "system_audio"];
 
 impl std::ops::Deref for ScratchHome {
     type Target = Path;
@@ -5205,18 +5251,49 @@ fn a_recorder_this_suite_starts_reads_no_settings_of_the_user_running_it() {
          having isolated anything",
     );
 
-    let inherited: Vec<&str> = view
+    let overridden: Vec<&str> = view
         .settings
         .iter()
         .filter(|entry| entry.overridden)
         .map(|entry| entry.key.as_str())
         .collect();
 
+    // The two this suite pins itself, and nothing else. Written out rather than
+    // compared as sets so that a failure names the stray key.
+    let inherited: Vec<&str> = overridden
+        .iter()
+        .copied()
+        .filter(|key| !SILENCED.contains(key))
+        .collect();
+
+    // And the two are actually there. Without this the assertion below passes
+    // on a recorder that overrode nothing at all — which is the state this file
+    // used to be in, and the one that opened a microphone.
+    for key in SILENCED {
+        assert!(
+            overridden.contains(&key),
+            "every scratch home writes `{key}`, so a recorder that did not find it overridden \
+             read no settings file at all and is about to record from a real audio endpoint \
+             (AGENTS.md section 14):\n{:#?}",
+            view.settings,
+        );
+        assert_eq!(
+            view.settings
+                .iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| entry.value.as_str()),
+            Some("none"),
+            "`{key}` is pinned off for this suite, and a value other than `none` is a settings \
+             file that is not the one written here:\n{:#?}",
+            view.settings,
+        );
+    }
+
     assert!(
         inherited.is_empty(),
-        "this recorder was started with a scratch home and should have found no settings there, \
-         so a setting some layer has overridden came from the machine running the suite: \
-         {inherited:?}\n\nEvery setting it reported:\n{:#?}",
+        "this recorder was started with a scratch home and should have found nothing there but \
+         the audio this suite pins, so a setting some other layer has overridden came from the \
+         machine running the suite: {inherited:?}\n\nEvery setting it reported:\n{:#?}",
         view.settings,
     );
 }
