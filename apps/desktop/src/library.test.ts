@@ -1,6 +1,7 @@
+import type { LibraryClip, LibrarySession } from '@clipped/shared';
 import { describe, expect, it, vi } from 'vitest';
 
-import { readEvents } from './library';
+import { readEvents, recentClips } from './library';
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
@@ -48,5 +49,86 @@ describe('readEvents', () => {
     const lane = await readEvents('9');
 
     expect(lane.marks).toEqual([]);
+  });
+});
+
+describe('the newest clips across recent sittings', () => {
+  /** A sitting with the clips given, and nothing else that matters here. */
+  function sitting(id: string, clips: readonly Partial<LibraryClip>[]): LibrarySession {
+    return {
+      session_id: id,
+      game_id: 'cs2',
+      game_name: `Game ${id}`,
+      started_at: '2026-08-11T20:14:00+01:00',
+      favourite: false,
+      recordings: [],
+      clips: clips.map((clip, index) => ({
+        clip_id: Number(`${id.replace(/\D/gu, '') || '0'}${String(index)}`),
+        created_at: '2026-08-11T20:20:00+01:00',
+        favourite: false,
+        tags: [],
+        ...clip,
+      })),
+    };
+  }
+
+  it('gathers clips from every sitting, newest first', () => {
+    const gathered = recentClips(
+      [
+        sitting('a', [{ created_at: '2026-08-11T10:00:00+01:00', path: 'old.mkv' }]),
+        sitting('b', [
+          { created_at: '2026-08-13T10:00:00+01:00', path: 'newest.mkv' },
+          { created_at: '2026-08-12T10:00:00+01:00', path: 'middle.mkv' },
+        ]),
+      ],
+      10,
+    );
+
+    expect(gathered.map((each) => each.clip.path)).toEqual(['newest.mkv', 'middle.mkv', 'old.mkv']);
+  });
+
+  /*
+   * A clip can be cut from an old recording long after the sitting ended.
+   * Ordering by the sitting would file it under a date months old and bury it,
+   * which is the opposite of what a "recently clipped" list is for.
+   */
+  it('orders on when the clip was made, not on when the sitting was', () => {
+    const old = {
+      ...sitting('a', [{ created_at: '2026-08-20T10:00:00+01:00', path: 'cut-today.mkv' }]),
+      started_at: '2026-01-01T10:00:00+01:00',
+    };
+    const recent = {
+      ...sitting('b', [{ created_at: '2026-08-19T10:00:00+01:00', path: 'cut-yesterday.mkv' }]),
+      started_at: '2026-08-19T09:00:00+01:00',
+    };
+
+    expect(recentClips([recent, old], 10).map((each) => each.clip.path)).toEqual([
+      'cut-today.mkv',
+      'cut-yesterday.mkv',
+    ]);
+  });
+
+  it('keeps each clip with the sitting it came from', () => {
+    const gathered = recentClips([sitting('a', [{ path: 'one.mkv' }])], 10);
+
+    expect(gathered[0]?.session.game_name).toBe('Game a');
+  });
+
+  it('takes no more than it was asked for', () => {
+    const many = sitting(
+      'a',
+      Array.from({ length: 20 }, (_unused, index) => ({
+        created_at: `2026-08-${String(index + 1).padStart(2, '0')}T10:00:00+01:00`,
+      })),
+    );
+
+    expect(recentClips([many], 3)).toHaveLength(3);
+    expect(recentClips([many], 0)).toHaveLength(0);
+    expect(recentClips([many], -1)).toHaveLength(0);
+  });
+
+  it('is empty when nothing has been clipped', () => {
+    expect(recentClips([sitting('a', [])], 5)).toEqual([]);
+    expect(recentClips([], 5)).toEqual([]);
   });
 });

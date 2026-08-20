@@ -1,17 +1,35 @@
-import type { SessionSummary } from '@clipped/shared';
+import type { LibraryClip, SessionSummary } from '@clipped/shared';
 import type { ReactNode } from 'react';
+import { useNavigate } from 'react-router';
 
+import { clipPath } from './clipPlayback';
 import { GamesTable } from './GamesTable';
-import { describeProblem, useGames, useSessions } from './library';
+import {
+  describeProblem,
+  formatDuration,
+  formatMoment,
+  recentClips,
+  useGames,
+  useSessions,
+} from './library';
+import { fileName } from './recordingActions';
 import { describeRecordControl } from './recording';
 import { describeRecordingNow, describeResizeEnding, WHERE_RECORDINGS_GO } from './recordingNow';
 import { SessionList } from './SessionList';
 import type { RecorderLinkState } from './useRecorderLink';
 import { useRecording } from './useRecording';
-import { WaitingOn, type Waiting } from './WaitingOn';
 
 /** How many sittings Home lists. It is a recent-activity list, not the library. */
 const RECENT = 5;
+
+/**
+ * How many clips Home lists.
+ *
+ * More than the sittings, because one sitting can produce several clips and a
+ * list of five would show one evening's worth. It is still a recent-activity
+ * list rather than the library.
+ */
+const RECENT_CLIPS = 8;
 
 /**
  * The Home screen (issues #60, #301 and #389).
@@ -58,14 +76,6 @@ const RECENT = 5;
  * the reader. The rows for recent sessions and for the per-game figures are
  * gone: both are on the screen now.
  */
-const WAITING: readonly Waiting[] = [
-  {
-    shows: 'Recently clipped, across every sitting',
-    needs:
-      'The Library lists the clips under the sitting they came from, and a saved replay is one of them. What Home does not do is gather the newest across all of them, which needs a query rather than this page’s summary read (#91)',
-  },
-];
-
 /** What the Home screen is given. */
 export interface HomeScreenProps {
   /**
@@ -95,10 +105,36 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
   const now = describeRecordingNow(link, recording.status, recording.problem);
   const resized = describeResizeEnding(ended);
   const control = describeRecordControl(link, recording.status, recording.target);
+  const navigate = useNavigate();
   const { read: sessions } = useSessions('', RECENT);
   // A second read with a query rather than a command of its own: `favourite` is
   // already in the query language, and the library answers it (issue #695).
   const { read: favourites } = useSessions('favourite', RECENT);
+  /*
+   * The clips of the sittings already read, newest first. No second question
+   * asked of the recorder: every sitting carries the clips cut from it.
+   */
+  const clipped = sessions.state === 'read' ? recentClips(sessions.value, RECENT_CLIPS) : [];
+
+  /*
+   * Under its own key in the route state, as the Library does it: the playback
+   * screen reads the identifier in the address as a recording's when handed a
+   * recording, and a clip's identifier means nothing to the index that holds
+   * marks (`clipPlayback.ts`).
+   */
+  const playClip = (clip: LibraryClip): void => {
+    if (clip.path === undefined) {
+      return;
+    }
+    void navigate(clipPath(String(clip.clip_id)), {
+      state: {
+        clip: {
+          path: clip.path,
+          ...(clip.missing_since === undefined ? {} : { missing_since: clip.missing_since }),
+        },
+      },
+    });
+  };
   const games = useGames();
 
   return (
@@ -249,6 +285,62 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
         )}
       </section>
 
+      <section aria-label="Recently clipped">
+        <h2 className="clipped-screen__heading">Recently clipped</h2>
+        {/*
+         * The clips of the sittings above, newest first. No second read: every
+         * sitting Home already asks for carries the clips cut from it, so this
+         * is a flatten and a sort. Until it was drawn, the one thing a player
+         * presses a hotkey for was invisible on the screen the application
+         * opens on.
+         */}
+        {sessions.state === 'reading' && (
+          <p className="clipped-screen__lead clipped-muted" aria-busy="true">
+            Reading your library…
+          </p>
+        )}
+        {/*
+         * No failure message of its own. This section reads nothing the
+         * sittings list above has not already asked for, so a library that
+         * could not be read is reported once rather than in every section that
+         * happens to depend on the same answer.
+         */}
+        {sessions.state === 'read' && clipped.length === 0 && (
+          <p className="clipped-screen__lead">
+            Nothing has been clipped yet. Press the save-replay hotkey while a game is recording and
+            the clip appears here.
+          </p>
+        )}
+        {sessions.state === 'read' && clipped.length > 0 && (
+          <ul aria-label="Recently clipped">
+            {clipped.map(({ clip, session }) => (
+              <li key={clip.clip_id}>
+                {clip.path === undefined ? (
+                  <span>{clip.title ?? 'A clip with no file'}</span>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label={`Play ${clip.title ?? fileName(clip.path)}, ${
+                      session.game_name ?? 'not recognised'
+                    }`}
+                    onClick={() => {
+                      playClip(clip);
+                    }}
+                  >
+                    {clip.title ?? fileName(clip.path)}
+                  </button>
+                )}{' '}
+                <span className="clipped-muted">
+                  {session.game_name ?? 'Not recognised'} · {formatMoment(clip.created_at)}
+                  {clip.duration_seconds !== undefined &&
+                    ` · ${formatDuration(clip.duration_seconds)}`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section aria-label="Games">
         <h2 className="clipped-screen__heading">Games</h2>
         {games.state === 'reading' && (
@@ -272,14 +364,6 @@ export function HomeScreen({ link, ended }: HomeScreenProps): ReactNode {
           <GamesTable games={games.value} showing="summary" label="Games" />
         )}
       </section>
-
-      <h2 className="clipped-screen__heading">What this screen will show</h2>
-      <p className="clipped-screen__lead clipped-muted">
-        None of it is drawn yet, and none of it is invented in the meantime. Each row names the work
-        that supplies it.
-      </p>
-
-      <WaitingOn heading="What the Home screen will show" rows={WAITING} />
     </>
   );
 }
