@@ -41,6 +41,16 @@
 //! slower by the machine, so the lowest of several is the honest estimate and a
 //! regression still shows in every one of them.
 //!
+//! That was not enough on its own, and this file said so before it happened:
+//! the same failure recurred at 15.699 ns against 10.145
+//! ([issue #703](https://github.com/wildware-uk/clipped/issues/703)), on a pull
+//! request that changed only TypeScript, and the same commit passed when it was
+//! re-run. Three attempts of a whole measurement cannot help when the host is
+//! contended across all three. The bound on a disabled `debug!` now also scales
+//! with the measured noise floor, which is the one number that says how well
+//! this machine could measure anything just now; the arithmetic and the three
+//! datasets behind it are at the assertion.
+//!
 //! This binary contains one test, deliberately. Installing a second subscriber
 //! anywhere in the process makes `tracing` abandon its cached per-callsite
 //! decisions, and the disabled `debug!` then costs several times as much —
@@ -90,6 +100,16 @@ const ATTEMPTS: usize = 3;
 /// allocation — and not a single extra branch, which no threshold could
 /// distinguish from a busy machine.
 const DISABLED_DEBUG_TOLERANCE_NS: f64 = 5.0;
+
+/// How many times the measured noise floor a disabled `debug!` may cost, when
+/// that is more than [`DISABLED_DEBUG_TOLERANCE_NS`] and more than the baseline.
+///
+/// The noise floor is two identical loops measured against each other, so it is
+/// this run's own answer to "how well could this machine measure anything just
+/// now". Scaling by it is what lets one bound serve a quiet desktop and a
+/// hosted runner without being chosen for either — the arithmetic, and the
+/// three datasets behind the number, are at the assertion.
+const DISABLED_DEBUG_NOISE_MULTIPLE: f64 = 15.0;
 
 /// The largest per-iteration overhead accepted from `trace_frame!` *above the
 /// measured noise floor*, in nanoseconds.
@@ -256,7 +276,36 @@ fn disabled_logging_costs_nothing_measurable_in_a_hot_loop() {
 
     // On a machine slower than this test's author's, every figure here scales
     // together, so both tolerances have a floor that scales with the baseline.
-    let disabled_debug_tolerance = DISABLED_DEBUG_TOLERANCE_NS.max(baseline);
+    //
+    // And a third floor that scales with the *noise*, which is what a contended
+    // runner actually moves (issue #703). Measured, on this test's own output:
+    //
+    //                   baseline    noise    overhead   ovh/base   ovh/noise
+    //   idle, 5 runs       3.768    0.179       2.650      0.703       14.80
+    //   CI (#631)          9.931    1.787      14.589      1.469        8.16
+    //   CI (#703)         10.145    2.021      15.699      1.547        7.77
+    //
+    // The overhead is a *smaller* multiple of the noise floor when the host is
+    // contended, not a larger one, so a bound that scales with the noise grows
+    // faster than the thing it is bounding. That is the direction a tolerance
+    // wants to be wrong in.
+    //
+    // Fifteen because it gives the same headroom - about 1.9x - on an idle
+    // machine and on both CI runs that failed, so no configuration is being
+    // privileged. On a quiet machine the noise term is 2.7 ns and the constant
+    // still binds; it is only on a runner that cannot measure that this opens
+    // up, which is exactly when it should.
+    //
+    // What this gives up: on a contended runner the bound is around 30 ns, so a
+    // regression smaller than that would not be caught *there*. It is caught on
+    // any machine quiet enough to measure, and the regressions this exists for -
+    // an eagerly evaluated argument, a lock, an allocation - are larger than
+    // that anyway. A bound tight enough to catch 5 ns on a contended host is a
+    // bound that fails when nothing is wrong, which is what these two issues
+    // are.
+    let disabled_debug_tolerance = DISABLED_DEBUG_TOLERANCE_NS
+        .max(baseline)
+        .max(noise_floor * DISABLED_DEBUG_NOISE_MULTIPLE);
 
     // With the feature on, `trace_frame!` is an ordinary `TRACE` event that
     // the subscriber rejects at runtime, so it costs what a disabled `debug!`
