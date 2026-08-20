@@ -517,6 +517,34 @@ impl SessionManager {
         self.configuration = configuration;
     }
 
+    /// Replaces the catalogue launches are identified against.
+    ///
+    /// The same seam as [`Self::set_configuration`], with the same rule:
+    /// **nothing here reaches into a sitting that is running**. A game excluded
+    /// while it is being recorded finishes the recording it is in; what changes
+    /// is whether the *next* launch of it becomes a session.
+    ///
+    /// Called by `Driver::take_the_catalogue_the_user_edited` once a pass, so
+    /// that a `games.toml` somebody edited reaches detection without the
+    /// recorder being restarted (issue #245). Named here because
+    /// [`Self::set_configuration`] spent a long time with no caller but its own
+    /// tests, and `apps/recorder/src/watch.rs` records that as a fault rather
+    /// than as history.
+    ///
+    /// Replaces whole rather than merging: the catalogue handed here is the
+    /// shipped data with the user's overlay already laid over it, and merging a
+    /// second time would be a second place for the precedence order to be got
+    /// wrong (`docs/game-detection.md`).
+    pub fn set_catalogue(&mut self, catalogue: Catalogue) {
+        self.catalogue = catalogue;
+    }
+
+    /// The catalogue launches are currently identified against.
+    #[must_use]
+    pub const fn catalogue(&self) -> &Catalogue {
+        &self.catalogue
+    }
+
     /// The configuration recordings are currently resolved from.
     #[must_use]
     pub const fn configuration(&self) -> &Configuration {

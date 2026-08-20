@@ -857,6 +857,22 @@ struct Driver {
     /// know or care which of the two started the recording it is acting on
     /// (issue #421, AGENTS.md section 55).
     recordings: Option<Arc<RecordingState>>,
+    /// The overlay this driver watches for edits, or [`None`] when the machine
+    /// has no user directory to keep one in.
+    ///
+    /// Held rather than asked for each pass so that a test can point a driver at
+    /// a scratch file: the real answer is the user's own
+    /// `%LOCALAPPDATA%\Clipped\games.toml`, and a test that stat-ed *that*
+    /// would be reading somebody's real catalogue (AGENTS.md section 25).
+    overlay: Option<PathBuf>,
+    /// When the overlay was last modified, as this driver last saw it.
+    ///
+    /// `None` inside the `Some` is a file that is not there, which is an answer
+    /// rather than an absence: an overlay appearing is an edit like any other,
+    /// and comparing `None` against `Some(_)` is what notices it. The outer
+    /// [`Option`] is "this driver has not looked yet", so the first pass loads
+    /// rather than assuming what it started with is current.
+    overlay_seen: Option<Option<SystemTime>>,
 }
 
 /// A recording in progress.
@@ -940,6 +956,8 @@ impl Driver {
             session_epoch: None,
             running: None,
             settings_generation: None,
+            overlay: clipped_game_detection::catalogue::overlay_path(),
+            overlay_seen: None,
             recordings,
         }
     }
@@ -955,6 +973,7 @@ impl Driver {
             // resolved, so a save that has landed since the last pass has to be
             // in the manager before `observe` or `poll` are called, not after.
             self.take_the_settings_the_user_saved();
+            self.take_the_catalogue_the_user_edited();
 
             // The sitting this recorder is in, before anything in this pass can
             // change it, so that what the protocol reports is never more than
@@ -1102,6 +1121,66 @@ impl Driver {
     /// Nothing happens under `watch`, which serves no protocol: there is no
     /// Settings screen to save from, so the start-up configuration is still the
     /// only one there has ever been.
+    /// Re-reads the catalogue when the user's overlay has changed.
+    ///
+    /// A user adds a game, renames one or excludes one by editing
+    /// `games.toml` (`docs/game-detection.md`). Until this, that reached
+    /// detection only when the recorder was restarted: `SessionManager::new`
+    /// was handed a catalogue and held it for the life of the driver, so
+    /// somebody who excluded a game watched it go on being recorded
+    /// ([issue #245](https://github.com/wildware-uk/clipped/issues/245)).
+    ///
+    /// **The modification time and not a generation.** The settings are written
+    /// through this process, so a counter it owns is the honest signal there;
+    /// the overlay is written by a text editor, and the filesystem's own answer
+    /// is the only thing that knows. One `metadata` call a pass, which is the
+    /// same order of cost as the settings' atomic load and is not on any capture
+    /// thread (AGENTS.md section 20).
+    ///
+    /// **A file that is not there is an answer.** An overlay appearing is an
+    /// edit, and `None` compared against `Some(_)` is what notices it. So is one
+    /// being deleted, which puts the shipped catalogue back.
+    ///
+    /// A read that fails leaves the catalogue alone and says so once per change
+    /// rather than once a pass: a half-written file being saved is a state that
+    /// lasts milliseconds, and a driver that dropped every game because it
+    /// caught one would be worse than one that waited for the next pass.
+    fn take_the_catalogue_the_user_edited(&mut self) {
+        let Some(overlay) = self.overlay.clone() else {
+            return;
+        };
+
+        // Read before the catalogue, for the reason the settings' generation is:
+        // an edit landing between the two must leave this driver believing it is
+        // behind — one redundant reload on the next pass — rather than believing
+        // it is current with a catalogue that predates the edit.
+        let modified = std::fs::metadata(&overlay)
+            .and_then(|data| data.modified())
+            .ok();
+        if self.overlay_seen == Some(modified) {
+            return;
+        }
+        self.overlay_seen = Some(modified);
+
+        match Catalogue::load_with_overlay_at(&overlay) {
+            Ok(loaded) => {
+                let catalogue = loaded.into_catalogue();
+                tracing::info!(
+                    overlay = %RedactedPath::new(&overlay),
+                    entries = catalogue.entries().len(),
+                    "the game catalogue was re-read after the user's own file changed"
+                );
+                self.manager.set_catalogue(catalogue);
+            }
+            Err(error) => tracing::warn!(
+                overlay = %RedactedPath::new(&overlay),
+                %error,
+                "the user's game file changed and could not be read, so detection is still \
+                 using the catalogue it had; it will be tried again when the file changes again"
+            ),
+        }
+    }
+
     fn take_the_settings_the_user_saved(&mut self) {
         let Some(recordings) = self.recordings.as_ref() else {
             return;
@@ -3054,6 +3133,124 @@ name = "test-game.exe"
             "a pass that read the settings again would have moved nothing, but this asserts the \
              cheap half was cheap: the generation is what the driver compares, and nothing else \
              may touch it"
+        );
+    }
+
+    #[test]
+    fn a_game_added_to_the_users_own_file_reaches_detection_without_a_restart() {
+        // Issue #245. `SessionManager::new` was handed a catalogue and held it
+        // for the life of the driver, so somebody who added a game to
+        // `games.toml` — the documented way to add one
+        // (`docs/game-detection.md`) — watched it go on not being recorded
+        // until they restarted the recorder.
+        //
+        // The overlay is pointed at a scratch file rather than the real one: a
+        // test that stat-ed `%LOCALAPPDATA%\Clipped\games.toml` would be
+        // reading somebody's own catalogue (AGENTS.md section 25).
+        let directory = TestDirectory::new("overlay-added");
+        let overlay = directory.recordings().join("games.toml");
+
+        let mut driver = Driver::new(
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+            AutomaticSettings::new(directory.recordings()),
+            Configuration::defaults(),
+            RecordingPlan::from(&args()),
+            Vec::new(),
+            None,
+        );
+        driver.overlay = Some(overlay.clone());
+
+        // The first pass, with no overlay there: the driver looks, finds
+        // nothing, and holds the shipped catalogue.
+        driver.take_the_catalogue_the_user_edited();
+        assert!(
+            driver
+                .manager
+                .catalogue()
+                .find_by_id("a-game-i-added")
+                .is_none(),
+            "nothing has been added yet"
+        );
+
+        fs::write(
+            &overlay,
+            "schema_version = 1\n\n\
+             [[game]]\n\
+             game_id = \"a-game-i-added\"\n\
+             name = \"A game I added\"\n\n\
+             [[game.executables]]\n\
+             name = \"mine.exe\"\n",
+        )
+        .expect("the scratch overlay can be written");
+
+        driver.take_the_catalogue_the_user_edited();
+
+        assert!(
+            driver
+                .manager
+                .catalogue()
+                .find_by_id("a-game-i-added")
+                .is_some(),
+            "a game added to the user's own file has to reach detection on the next pass, or \
+             they are told to restart a recorder that is running (issue #245)"
+        );
+    }
+
+    #[test]
+    fn a_game_taken_out_of_the_users_own_file_stops_being_detected() {
+        // The other direction, and the one that matters more: an exclusion or a
+        // deletion the driver never re-read is a game somebody believes is no
+        // longer being recorded and which is still being recorded.
+        //
+        // A file going away is an edit like any other — `None` compared against
+        // `Some(_)` — and this is what proves the comparison is on the answer
+        // rather than on the file existing.
+        let directory = TestDirectory::new("overlay-removed");
+        let overlay = directory.recordings().join("games.toml");
+        fs::write(
+            &overlay,
+            "schema_version = 1\n\n\
+             [[game]]\n\
+             game_id = \"a-game-i-added\"\n\
+             name = \"A game I added\"\n\n\
+             [[game.executables]]\n\
+             name = \"mine.exe\"\n",
+        )
+        .expect("the scratch overlay can be written");
+
+        let mut driver = Driver::new(
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+            AutomaticSettings::new(directory.recordings()),
+            Configuration::defaults(),
+            RecordingPlan::from(&args()),
+            Vec::new(),
+            None,
+        );
+        driver.overlay = Some(overlay.clone());
+
+        driver.take_the_catalogue_the_user_edited();
+        assert!(
+            driver
+                .manager
+                .catalogue()
+                .find_by_id("a-game-i-added")
+                .is_some(),
+            "the overlay was there on the first pass"
+        );
+
+        fs::remove_file(&overlay).expect("the scratch overlay can be removed");
+
+        driver.take_the_catalogue_the_user_edited();
+
+        assert!(
+            driver
+                .manager
+                .catalogue()
+                .find_by_id("a-game-i-added")
+                .is_none(),
+            "a file going away is an edit too, and the shipped catalogue has to come back"
         );
     }
 
