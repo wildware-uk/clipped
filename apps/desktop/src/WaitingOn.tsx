@@ -39,6 +39,17 @@ export interface WaitingOnProps {
 
 /** What a screen owes, against the work that lands each part of it. */
 export function WaitingOn({ heading, rows }: WaitingOnProps): ReactNode {
+  // A screen that has finished its list draws nothing here, rather than a
+  // heading over an empty table. Two headings and no rows reads as a table that
+  // failed to load, which is the opposite of what an empty list means.
+  //
+  // A backstop and not the fix: the Games screen's own section was removed with
+  // its last row (issue #245), because the sentence above the table -- "none of
+  // it is drawn yet" -- is part of the claim and this component cannot see it.
+  if (rows.length === 0) {
+    return null;
+  }
+
   return (
     /*
      * Named, because every screen that draws one of these now draws a second
