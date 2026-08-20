@@ -75,12 +75,41 @@ struct ServedRecorder {
     child: Child,
     endpoint: Endpoint,
     diagnostics: Receiver<String>,
+    /// The directory this recorder's `%LOCALAPPDATA%` and `%USERPROFILE%`
+    /// point at, when it made one for itself.
+    ///
+    /// Declared last on purpose. `Drop for ServedRecorder` runs before any
+    /// field drops and waits for the child, so by the time this one is removed
+    /// the recorder has exited and let go of its library — and a removal while
+    /// it still held the file open would fail, say so, and leave the directory
+    /// behind.
+    ///
+    /// [`None`] when the test supplied a home of its own, which it then owns.
+    home: Option<ScratchHome>,
 }
 
 impl ServedRecorder {
-    /// Starts a recorder and waits until it says it is listening.
+    /// Starts a recorder and waits until it says it is listening, with its
+    /// user directories pointed at a scratch home of its own.
+    ///
+    /// **Isolated by default**, which is the whole point of this function and
+    /// is [issue #715](https://github.com/wildware-uk/clipped/issues/715). It
+    /// used to inherit the environment, so these tests read the settings file
+    /// of whoever ran them — and since the recorder's audio defaults are both
+    /// sources *on*, a test that started a recording opened whatever endpoints
+    /// that person had. On a runner that is nothing. On a developer's machine
+    /// it is a real microphone in a real room, which no test may switch on to
+    /// assert something about video (AGENTS.md section 14). It also wrote to
+    /// their library and their logs.
+    ///
+    /// Nothing here needs the real environment, and a test that did would have
+    /// to say so — by taking [`Self::start_under`] with a home it chose, and
+    /// explaining why in the same breath.
     fn start(label: &str) -> Self {
-        Self::start_under(label, None)
+        let home = ScratchHome::new(label);
+        let mut recorder = Self::started_with(label, Some(&home), &[]);
+        recorder.home = Some(home);
+        recorder
     }
 
     /// The same, with the recorder's idea of this user's directories pointed
@@ -123,6 +152,10 @@ impl ServedRecorder {
             child,
             endpoint,
             diagnostics,
+            // Whatever `home` names belongs to the caller, which is why this is
+            // `None` even when one was passed. `Self::start` is the one caller
+            // that hands over ownership, and it does so after this returns.
+            home: None,
         }
     }
 
@@ -4383,8 +4416,17 @@ struct ScratchHome(std::path::PathBuf);
 
 impl ScratchHome {
     fn new(label: &str) -> Self {
-        let home =
-            std::env::temp_dir().join(format!("clipped-ipc-home-{label}-{}", std::process::id()));
+        // Counted for the same reason `unique_endpoint_name` counts: two homes
+        // that resolved to one path would be a problem rather than a
+        // coincidence, because the first thing this does is remove what is
+        // there. One test would delete another's settings mid-run, and these
+        // run in parallel.
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "clipped-ipc-home-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("a scratch home can be made");
         Self(home)
@@ -4938,4 +4980,55 @@ fn a_client_that_does_not_ask_for_export_progress_is_not_sent_any() {
     );
 
     let _ = std::fs::remove_dir_all(directory.path());
+}
+
+#[test]
+fn a_recorder_this_suite_starts_reads_no_settings_of_the_user_running_it() {
+    // [Issue #715](https://github.com/wildware-uk/clipped/issues/715). Every
+    // recorder `ServedRecorder::start` spawns has `%LOCALAPPDATA%` and
+    // `%USERPROFILE%` pointed at a scratch home, so it reads no settings file
+    // of whoever is running the suite. This is the assertion that says so, and
+    // it is here because the property is invisible when it holds: a test that
+    // leaked would pass, quietly, on every machine with no settings file — that
+    // is to say on CI, and nowhere else.
+    //
+    // `overridden` is the discriminator rather than the value. A setting is
+    // overridden when some layer above the shipped default speaks to it, which
+    // is exactly what a settings file is, so this fails on a leak whatever the
+    // user happens to have chosen — including a user who chose the same value
+    // Clipped ships with.
+    //
+    // What it protects is not tidiness. The recorder's audio defaults are both
+    // sources *on*, so a leaked `microphone` reaches a real endpoint the moment
+    // any test in this file starts a recording, which is a microphone opened in
+    // somebody's room to assert something about video (AGENTS.md section 14).
+    let recorder = ServedRecorder::start("no-inherited-settings");
+    let mut client = recorder.client();
+
+    let view = settings_of(
+        client
+            .call(&IpcCommand::GetSettings(clipped_ipc::GetSettings::default()))
+            .expect("the settings are answered"),
+    );
+
+    assert!(
+        !view.settings.is_empty(),
+        "a recorder that reported no settings at all would pass every assertion below without \
+         having isolated anything",
+    );
+
+    let inherited: Vec<&str> = view
+        .settings
+        .iter()
+        .filter(|entry| entry.overridden)
+        .map(|entry| entry.key.as_str())
+        .collect();
+
+    assert!(
+        inherited.is_empty(),
+        "this recorder was started with a scratch home and should have found no settings there, \
+         so a setting some layer has overridden came from the machine running the suite: \
+         {inherited:?}\n\nEvery setting it reported:\n{:#?}",
+        view.settings,
+    );
 }
