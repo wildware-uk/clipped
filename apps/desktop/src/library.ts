@@ -1,6 +1,7 @@
 import type {
   LibraryEventLane,
   CatalogueGame,
+  LibraryClip,
   LibraryGame,
   LibrarySession,
   LibrarySessionPage,
@@ -569,4 +570,41 @@ export function formatMoment(timestamp: string): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+}
+
+/** A clip, and the sitting it was cut from. */
+export interface ClipInSession {
+  /** The clip itself. */
+  readonly clip: LibraryClip;
+  /** The sitting it belongs to, for naming the game it came from. */
+  readonly session: LibrarySession;
+}
+
+/**
+ * The newest clips across the sittings given, newest first.
+ *
+ * Home reads recent sittings already and every one of them carries its clips,
+ * so "recently clipped" is a flatten and a sort rather than a query. That is
+ * worth saying because the row Home used to draw claimed the opposite — that
+ * this needed work that had not landed — while the answer was in a read the
+ * screen was already making.
+ *
+ * # Why it sorts on the clip and not on the sitting
+ *
+ * A clip can be made long after the sitting it came from: somebody watches an
+ * old recording and cuts a moment out of it. Ordering by the sitting would file
+ * that clip under a date months old and bury it, which is the opposite of what
+ * a "recently clipped" list is for.
+ *
+ * Clips with no `created_at` cannot happen — the protocol requires it — so
+ * there is no third case here for one that sorts nowhere.
+ */
+export function recentClips(
+  sessions: readonly LibrarySession[],
+  limit: number,
+): readonly ClipInSession[] {
+  return sessions
+    .flatMap((session) => session.clips.map((clip) => ({ clip, session })))
+    .sort((left, right) => right.clip.created_at.localeCompare(left.clip.created_at))
+    .slice(0, Math.max(0, limit));
 }

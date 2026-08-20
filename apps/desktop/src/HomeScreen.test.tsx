@@ -5,7 +5,6 @@ import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
-import { HomeScreen } from './HomeScreen';
 import type { RecorderProblem, RecordTarget } from './recording';
 import { describeRecordingNow, describeResizeEnding } from './recordingNow';
 import { A_COUNT, textRuns } from './test/counts';
@@ -1214,39 +1213,102 @@ describe('the Home screen', () => {
    * shape", it is "these four are the four this screen owes, and each is pinned
    * to the work that lands it".
    */
-  const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    // No longer waiting on the clip model (#74, closed) — clips exist and the
-    // Library lists them. Home's own gap is gathering the newest across every
-    // sitting, which needs a query rather than this page's summary read.
-    ['recently clipped', /recently clipped/i, [91]],
-  ];
+  /*
+   * The clips the sittings produced, on the screen the application opens on.
+   *
+   * The point of the feature: a saved replay was created, indexed and carried
+   * in the read Home already makes, and drawn nowhere. Somebody who pressed the
+   * hotkey saw no evidence of it anywhere in the application.
+   */
+  it('lists the clips of the sittings it read, newest first', async () => {
+    stubRecorderLinkRuntime({ link: 'connecting' }, null, {
+      sessions: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              session_id: 'cs2-20260811',
+              game_name: 'Counter-Strike 2',
+              started_at: '2026-08-11T20:14:00+01:00',
+              favourite: false,
+              recordings: [],
+              clips: [
+                {
+                  clip_id: 1,
+                  path: 'D:/clips/older.mkv',
+                  created_at: '2026-08-11T20:20:00+01:00',
+                  duration_seconds: 30,
+                  favourite: false,
+                  tags: [],
+                },
+                {
+                  clip_id: 2,
+                  path: 'D:/clips/newer.mkv',
+                  created_at: '2026-08-11T21:00:00+01:00',
+                  duration_seconds: 15,
+                  favourite: false,
+                  tags: [],
+                },
+              ],
+            },
+          ],
+        }),
+    });
+    renderApp();
 
-  it('names each list it still owes, and the issue that lands it', async () => {
-    // Recent sessions and the per-game figures have left this list, because
-    // both are on the screen now (issue #301). Shrinking it without honouring
-    // that fails here, and the two cases below are what honour it.
+    const list = await screen.findByRole('list', { name: 'Recently clipped' });
+    const items = within(list).getAllByRole('listitem');
+    expect(items.map((item) => item.textContent)).toHaveLength(2);
+    // Newest first, which is what "recently" means and is not the order the
+    // sitting carries them in.
+    expect(items[0]?.textContent).toContain('newer.mkv');
+    expect(items[1]?.textContent).toContain('older.mkv');
+    expect(items[0]?.textContent).toContain('Counter-Strike 2');
+  });
+
+  it('says nothing has been clipped yet rather than drawing an empty list', async () => {
+    stubRecorderLinkRuntime({ link: 'connecting' }, null, {
+      sessions: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              session_id: 'cs2-20260811',
+              game_name: 'Counter-Strike 2',
+              started_at: '2026-08-11T20:14:00+01:00',
+              favourite: false,
+              recordings: [],
+              clips: [],
+            },
+          ],
+        }),
+    });
+    renderApp();
+
+    expect(await screen.findByText(/Nothing has been clipped yet/i)).toBeVisible();
+    expect(screen.queryByRole('list', { name: 'Recently clipped' })).toBeNull();
+  });
+
+  /*
+   * Home used to owe four lists and now owes none. Recent sessions and the
+   * per-game figures left with issue #301; favourites with #695; and
+   * "recently clipped" with the change that drew it — every sitting Home reads
+   * already carries the clips cut from it, so the list it was waiting on a
+   * query for was a flatten and a sort away.
+   *
+   * The case is therefore the other way round from the one it replaces: not
+   * "these are the rows it owes" but "it owes nothing, so it draws no such
+   * list". A screen that keeps a *"what this will show"* heading over an empty
+   * table tells a user the application is unfinished in a way it no longer is.
+   */
+  it('owes nothing, and so draws no list of what it will show', async () => {
     stubRecorderLinkRuntime({ link: 'connecting' });
     renderApp();
 
-    // Neither library command is answered here, so the only table on the screen
-    // is the one that says what it still owes.
-    const waiting = await screen.findByRole('table');
-    const rows = within(waiting).getAllByRole('row').slice(1);
-    expect(rows).toHaveLength(MUST_BE_NAMED.length);
+    await screen.findByRole('heading', { level: 1, name: 'Home' });
 
-    for (const [subject, shows, issues] of MUST_BE_NAMED) {
-      const matching = rows.filter((row) =>
-        shows.test(within(row).getAllByRole('cell')[0]?.textContent ?? ''),
-      );
-      expect(matching, `one row for ${subject}`).toHaveLength(1);
-
-      const needs = within(matching[0] as HTMLElement).getAllByRole('cell')[1]?.textContent ?? '';
-      for (const issue of issues) {
-        expect(needs, `${subject} is waiting on #${String(issue)}`).toMatch(
-          new RegExp(`#${String(issue)}\\b`),
-        );
-      }
-    }
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(
+      screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
+    ).not.toContain('What this screen will show');
   });
 
   /*
@@ -1285,12 +1347,23 @@ describe('the Home screen', () => {
    * heading structure is the subject: a screen whose only heading was its title
    * gives a screen-reader user nothing to navigate between.
    */
-  it('has a heading for each of its two parts', () => {
-    render(<HomeScreen link={null} ended={null} />);
+  it('has a heading for each of its parts', async () => {
+    // Through the application rather than as a bare component: Home navigates
+    // to the playback screen when a clip is pressed, and `useNavigate` outside
+    // a router is an error rather than a no-op.
+    stubRecorderLinkRuntime({ link: 'connecting' });
+    renderApp();
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Home');
-    expect(
-      screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
-    ).toContain('What this screen will show');
+    await screen.findByRole('heading', { level: 1, name: 'Home' });
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map((heading) => heading.textContent);
+
+    // The four the screen draws, and "Recently clipped" among them: a section
+    // with no heading is one a screen-reader user cannot navigate to.
+    expect(headings).toContain('Recent sessions');
+    expect(headings).toContain('Favourites');
+    expect(headings).toContain('Recently clipped');
+    expect(headings).toContain('Games');
   });
 });
