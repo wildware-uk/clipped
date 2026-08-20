@@ -669,6 +669,196 @@ describe('the Games screen, listing what Clipped knows', () => {
     expect(screen.queryByRole('table', { name: 'Games Clipped knows' })).toBeNull();
   });
 
+  /**
+   * The catalogue as it stands after an edit, which is what the recorder
+   * answers with.
+   *
+   * Deliberately *not* the fixture with one field flipped. The screen must draw
+   * what came back rather than what it guessed the edit would do, and a stub
+   * that returned the obvious answer could not tell the two apart. So the reply
+   * below also renames the entry — something no optimistic update would ever
+   * produce — and the assertion is on that name.
+   */
+  const AFTER_THE_EDIT = [
+    CATALOGUE[0],
+    {
+      ...CATALOGUE[1],
+      name: 'What the recorder called it',
+      excluded: false,
+    },
+  ];
+
+  it('draws no controls when the recorder can list the catalogue and not change it', async () => {
+    // The two capabilities are separate, and every build between issue #245's
+    // read half and its write half is exactly this: it lists and refuses every
+    // change. Inferring the controls from the table would draw buttons that
+    // answer `unknown_command` (AGENTS.md section 27).
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached(['catalogue']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+    });
+    renderApp();
+    await openGames(user);
+
+    await screen.findByRole('table', { name: 'Games Clipped knows' });
+    expect(screen.queryByRole('button', { name: 'Exclude' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Register a game' })).toBeNull();
+    // And says so once, rather than leaving somebody looking for controls that
+    // are not coming.
+    expect(screen.getByText(/list its catalogue and not change it/i)).toBeVisible();
+  });
+
+  it('excludes a game and draws what the recorder answered, not what it assumed', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+      catalogueEdit: () => Promise.resolve({ game_id: 'counter-strike-2', games: AFTER_THE_EDIT }),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const shipped = within(table).getAllByRole('row')[1] as HTMLElement;
+    await user.click(within(shipped).getByRole('button', { name: 'Exclude' }));
+
+    const asked = runtime.invocations.filter((call) => call.command === 'set_game_excluded');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.args).toMatchObject({ gameId: 'counter-strike-2', excluded: true });
+
+    // The reply renamed the *other* entry, which nothing about pressing Exclude
+    // would have produced. Finding that name is what proves the table is the
+    // recorder's answer rather than a guess.
+    expect(await screen.findByText('What the recorder called it')).toBeVisible();
+  });
+
+  it('offers Include for a game that is already excluded', async () => {
+    // The verb is what pressing it does, not the state it is in. A button
+    // reading "Excluded" is ambiguous about which way it points, and this is
+    // the control that decides whether a game is recorded at all.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+      catalogueEdit: () => Promise.resolve({ game_id: 'a-game-of-my-own', games: AFTER_THE_EDIT }),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const mine = within(table).getAllByRole('row')[2] as HTMLElement;
+    await user.click(within(mine).getByRole('button', { name: 'Include' }));
+
+    const asked = runtime.invocations.filter((call) => call.command === 'set_game_excluded');
+    expect(asked[0]?.args).toMatchObject({ gameId: 'a-game-of-my-own', excluded: false });
+  });
+
+  it('offers Forget only for entries the user added', async () => {
+    // Forgetting a game Clipped ships would be undone by the next update, which
+    // is why excluding is the operation that lasts. A button that does not last
+    // is worse than no button.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const rows = within(table).getAllByRole('row');
+    expect(within(rows[1] as HTMLElement).queryByRole('button', { name: 'Forget' })).toBeNull();
+    expect(within(rows[2] as HTMLElement).getByRole('button', { name: 'Forget' })).toBeVisible();
+  });
+
+  it('registers a game, sending the fields and no folder when none was typed', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+      catalogueEdit: () => Promise.resolve({ game_id: 'a-new-game', games: AFTER_THE_EDIT }),
+    });
+    renderApp();
+    await openGames(user);
+
+    const form = await screen.findByRole('form', { name: 'Register a game' });
+    await user.type(within(form).getByLabelText('Game'), 'A new game');
+    await user.type(within(form).getByLabelText('Executable'), 'anew.exe');
+    await user.click(within(form).getByRole('button', { name: 'Add game' }));
+
+    const asked = runtime.invocations.filter((call) => call.command === 'register_game');
+    expect(asked).toHaveLength(1);
+    // An empty box is not a qualifier. `Some("")` would be an entry that
+    // matches no path at all, which is worse than the entry not existing.
+    expect(asked[0]?.args).toMatchObject({
+      name: 'A new game',
+      executable: 'anew.exe',
+      pathContains: null,
+    });
+  });
+
+  it('will not register a game with no name or no executable', async () => {
+    // Both are required by the entry the recorder would write, so a button that
+    // sent an incomplete one would be a button whose command is refused.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+    });
+    renderApp();
+    await openGames(user);
+
+    const form = await screen.findByRole('form', { name: 'Register a game' });
+    const add = within(form).getByRole('button', { name: 'Add game' });
+    expect(add).toBeDisabled();
+
+    await user.type(within(form).getByLabelText('Game'), 'A new game');
+    expect(add).toBeDisabled();
+
+    await user.type(within(form).getByLabelText('Executable'), 'anew.exe');
+    expect(add).toBeEnabled();
+
+    expect(runtime.invocations.filter((call) => call.command === 'register_game')).toHaveLength(0);
+  });
+
+  it('clears a rename when the name is emptied, rather than calling the game nothing', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+      catalogueEdit: () => Promise.resolve({ game_id: 'counter-strike-2', games: AFTER_THE_EDIT }),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const shipped = within(table).getAllByRole('row')[1] as HTMLElement;
+    await user.click(within(shipped).getByRole('button', { name: 'Rename' }));
+
+    await user.clear(screen.getByLabelText(/Name for Counter-Strike 2/i));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    const asked = runtime.invocations.filter((call) => call.command === 'rename_game');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.args).toMatchObject({ gameId: 'counter-strike-2', name: null });
+  });
+
+  it('says why when an edit does not happen', async () => {
+    // An edit that failed silently is somebody believing they excluded a game
+    // that is still being recorded, which is what this screen exists to stop.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(attached(['catalogue', 'catalogue_editing']), null, {
+      catalogue: () => Promise.resolve(CATALOGUE),
+      catalogueEdit: () => Promise.reject(new Error('the games file could not be written')),
+    });
+    renderApp();
+    await openGames(user);
+
+    const table = await screen.findByRole('table', { name: 'Games Clipped knows' });
+    const shipped = within(table).getAllByRole('row')[1] as HTMLElement;
+    await user.click(within(shipped).getByRole('button', { name: 'Exclude' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be written/i);
+    // And the row is unchanged, rather than showing a state the recorder never
+    // reached.
+    expect(within(shipped).getByRole('button', { name: 'Exclude' })).toBeVisible();
+  });
+
   it('says why when the catalogue cannot be read', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime(attached(['catalogue']), null, {

@@ -206,6 +206,10 @@ fn main() {
             save_clip_document,
             library_games,
             catalogue_games,
+            register_game,
+            rename_game,
+            set_game_excluded,
+            forget_game,
             library_trash,
             restore_from_trash,
             empty_trash,
@@ -606,6 +610,122 @@ fn catalogue_games(
         clipped_ipc::Reply::CatalogueGames { games } => Ok(games),
         _ => Err(wrong_reply("catalogue_games")),
     }
+}
+
+/// What an edit to the catalogue produced.
+///
+/// The whole catalogue, because that is what the recorder answers with: an edit
+/// that returned only the row it touched would leave this side to work out what
+/// the change did to the rest, and precedence between the shipped data and the
+/// user's overlay is not a thing to reimplement here
+/// (`docs/game-detection.md`).
+#[derive(Debug, Clone, serde::Serialize)]
+struct CatalogueEdit {
+    /// The entry the edit was about, which for a registration is the identifier
+    /// the recorder derived and the caller could not have predicted.
+    game_id: String,
+    /// Every entry, as `catalogue_games` gives them.
+    games: Vec<clipped_ipc::catalogue::CatalogueGame>,
+}
+
+/// Forwards one catalogue edit and reads the reply the four share.
+fn catalogue_edit(
+    link: &tauri::State<'_, RecorderLink>,
+    command: &clipped_ipc::Command,
+    named: &'static str,
+) -> Result<CatalogueEdit, RecorderProblem> {
+    match link.call(command)? {
+        clipped_ipc::Reply::CatalogueEdited { game_id, games } => {
+            Ok(CatalogueEdit { game_id, games })
+        }
+        _ => Err(wrong_reply(named)),
+    }
+}
+
+/// Registers a game the catalogue does not know
+/// ([issue #245](https://github.com/wildware-uk/clipped/issues/245)).
+///
+/// Written to the user's own overlay and never to the data Clipped ships, which
+/// every update replaces wholesale. The recorder derives the identifier from
+/// the name, so the caller learns it from the reply.
+#[tauri::command(async)]
+fn register_game(
+    link: tauri::State<'_, RecorderLink>,
+    name: String,
+    executable: String,
+    path_contains: Option<String>,
+) -> Result<CatalogueEdit, RecorderProblem> {
+    catalogue_edit(
+        &link,
+        &clipped_ipc::Command::RegisterGame(clipped_ipc::catalogue::RegisterGame {
+            name,
+            executable,
+            // An empty box is not a qualifier. A person who opened the field and
+            // typed nothing means "no fragment", and passing `Some("")` would
+            // be an entry that matches no path at all.
+            path_contains: path_contains.filter(|fragment| !fragment.trim().is_empty()),
+        }),
+        "register_game",
+    )
+}
+
+/// Calls a game something else, or puts the shipped name back.
+///
+/// `name` absent is the clearing form. One command rather than two, because
+/// renaming and un-renaming are the same decision from either end.
+#[tauri::command(async)]
+fn rename_game(
+    link: tauri::State<'_, RecorderLink>,
+    game_id: String,
+    name: Option<String>,
+) -> Result<CatalogueEdit, RecorderProblem> {
+    catalogue_edit(
+        &link,
+        &clipped_ipc::Command::RenameGame(clipped_ipc::catalogue::RenameGame {
+            game_id,
+            // Blank is a clearing too: somebody who selects the name and
+            // deletes it means "use the shipped one", not "call it nothing".
+            name: name.filter(|name| !name.trim().is_empty()),
+        }),
+        "rename_game",
+    )
+}
+
+/// Excludes a game from recording, or stops excluding it.
+///
+/// `excluded` is the state to be in rather than a toggle, for the reason
+/// `set_favourite` takes one: two windows open on one catalogue cannot disagree
+/// about which way it points.
+#[tauri::command(async)]
+fn set_game_excluded(
+    link: tauri::State<'_, RecorderLink>,
+    game_id: String,
+    excluded: bool,
+) -> Result<CatalogueEdit, RecorderProblem> {
+    catalogue_edit(
+        &link,
+        &clipped_ipc::Command::SetGameExcluded(clipped_ipc::catalogue::SetGameExcluded {
+            game_id,
+            excluded,
+        }),
+        "set_game_excluded",
+    )
+}
+
+/// Drops an entry the user added.
+///
+/// Not the operation for a game Clipped ships — the next update would bring it
+/// back. Excluding it is the one that lasts.
+#[tauri::command(async)]
+fn forget_game(
+    link: tauri::State<'_, RecorderLink>,
+    game_id: String,
+) -> Result<CatalogueEdit, RecorderProblem> {
+    catalogue_edit(
+        &link,
+        &clipped_ipc::Command::ForgetGame(clipped_ipc::catalogue::ForgetGame { game_id }),
+        "forget_game",
+    )
 }
 
 /// The marks on one recording's timeline.

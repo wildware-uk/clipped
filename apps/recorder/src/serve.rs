@@ -1293,6 +1293,7 @@ impl CommandHandler for RecorderService {
         if self.recordings.overlay.is_some() {
             features.push(features::CATALOGUE_EDITING.to_owned());
         }
+
         features
     }
 }
@@ -6347,13 +6348,18 @@ excluded = true
              wrong thing: {gated:?}"
         );
 
+        // Asked of a real service rather than read from `features_of_this_build`,
+        // because some capabilities are conditional and a list of those here
+        // would be the hand-maintained thing this test exists to replace. This
+        // one has a games file, so it claims `catalogue_editing` too.
+        let (service, _overlay) = service_over_a_scratch_games_file("gates");
         let mut advertised: std::collections::BTreeSet<String> =
-            features_of_this_build().into_iter().collect();
-        // Advertised by this build but not from that list: `automatic` is
-        // conditional on detection having started (`RecorderService::features`)
-        // and `shutdown` is added by `Server::serve` rather than by the
-        // application. Both are capabilities this recorder can claim, which is
-        // what this test is about.
+            service.features().into_iter().collect();
+        // The two a service cannot claim from a standing start. `automatic`
+        // needs detection to have started, which needs a desktop; `shutdown` is
+        // added by `Server::serve` rather than by the application, so no
+        // `CommandHandler` ever returns it. Both are capabilities this build can
+        // claim, so gating on them is not the fault this test looks for.
         advertised.insert(features::AUTOMATIC.to_owned());
         advertised.insert(features::SHUTDOWN.to_owned());
 
