@@ -6,6 +6,7 @@
 //! property of this module is downstream of that distinction.
 
 use core::time::Duration;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -1656,6 +1657,111 @@ fn only_a_setting_somebody_configured_replaces_what_a_caller_already_asked_for()
         applied.unavailable_choice(),
         UnavailableChoice::Refuse,
         "a configured frame rate is not one of the two settings the choice governs, so what the          caller named still refuses rather than substituting"
+    );
+}
+
+#[test]
+fn a_setting_the_request_named_for_itself_survives_a_configured_one() {
+    // `apply_configured_to_except`, and the defect it was written for
+    // ([issue #714](https://github.com/wildware-uk/clipped/issues/714)): a
+    // `start_recording` asking for no microphone recorded a real one, because
+    // the fold laid the user's configured device over the request.
+    //
+    // The distinction the exception draws is between a *standing* answer and
+    // one given for this recording. `watch`'s command line is the first and
+    // keeps the old rule; a request over the protocol is the second.
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1920, 1080),
+        PathBuf::from("out.mkv"),
+    )
+    .with_framerate(144)
+    .with_microphone(AudioSourceSetting::Off);
+
+    // A user who has configured both: a microphone by name, and a frame rate.
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences
+        .set_microphone(Some(AudioDeviceSetting::Named("Shure MV7".to_owned())))
+        .expect("a device name that is in range");
+    preferences.set_framerate(Some(60)).expect("60 is in range");
+    configuration.set_game(game("counter-strike-2"), preferences);
+    let resolved = configuration.resolve_for(&game("counter-strike-2"));
+
+    // Without the exception, which is what `watch` still gets: the configured
+    // device replaces what the caller asked for. This is the behaviour the
+    // issue measured, asserted here so that the exception below is a difference
+    // rather than a hope.
+    assert_eq!(
+        resolved.apply_configured_to(base.clone()).microphone(),
+        &AudioSourceSetting::Named("Shure MV7".to_owned()),
+        "a standing preference still wins for a caller that named nothing"
+    );
+
+    let mut pinned = BTreeSet::new();
+    pinned.insert(SettingKey::Microphone);
+    let applied = resolved.apply_configured_to_except(base.clone(), &pinned);
+
+    assert_eq!(
+        applied.microphone(),
+        &AudioSourceSetting::Off,
+        "a request that asked for no microphone must not be given one"
+    );
+    assert_eq!(
+        applied.framerate(),
+        60,
+        "the frame rate was not pinned, so the configured one still applies - this is the          exception and not `apply_to` by another name"
+    );
+}
+
+#[test]
+fn pinning_a_resolution_keeps_the_refusal_that_comes_with_naming_one() {
+    // The `UnavailableChoice` half. A configured resolution brings
+    // `Substitute` with it, because a setting somebody left in a file months
+    // ago should not fail a recording when the display changed. A resolution
+    // *this request* named is the opposite case: the caller is present, said
+    // what it wanted, and `docs/configuration.md` says such a recording keeps
+    // its caller's refusal.
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1920, 1080),
+        PathBuf::from("out.mkv"),
+    )
+    .with_resolution(ResolutionSetting::Fixed {
+        width: 1280,
+        height: 720,
+    });
+
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences
+        .set_resolution(Some(ResolutionSetting::Fixed {
+            width: 1920,
+            height: 1080,
+        }))
+        .expect("a resolution that is in range");
+    configuration.set_game(game("counter-strike-2"), preferences);
+    let resolved = configuration.resolve_for(&game("counter-strike-2"));
+
+    assert_eq!(
+        resolved
+            .apply_configured_to(base.clone())
+            .unavailable_choice(),
+        UnavailableChoice::Substitute,
+        "a configured resolution substitutes, which is the rule this does not change"
+    );
+
+    let mut pinned = BTreeSet::new();
+    pinned.insert(SettingKey::Resolution);
+    let applied = resolved.apply_configured_to_except(base.clone(), &pinned);
+
+    assert_eq!(
+        applied.resolution(),
+        base.resolution(),
+        "the request named a resolution, so that is the one it records at"
+    );
+    assert_eq!(
+        applied.unavailable_choice(),
+        UnavailableChoice::Refuse,
+        "and it keeps the refusal that naming one carries, rather than the substitution a          configured one would have brought"
     );
 }
 
