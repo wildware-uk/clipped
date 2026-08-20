@@ -95,3 +95,66 @@ pub struct CatalogueGame {
     /// resurrecting a game somebody excluded (`docs/game-detection.md`).
     pub excluded: bool,
 }
+
+/// Register a game the catalogue does not know.
+///
+/// Written to the user's overlay and never to the shipped seed data, which
+/// every update replaces wholesale (`docs/game-detection.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterGame {
+    /// What the person calls it.
+    pub name: String,
+    /// The executable file name, never a path.
+    ///
+    /// A full path here would be a path the recorder cannot use: the catalogue
+    /// matches on the image's file name, and on a fragment of its directory
+    /// where one is needed to tell two games apart.
+    pub executable: String,
+    /// A directory fragment the image path must contain, where one is needed.
+    ///
+    /// Absent unless the executable name is ambiguous — `hl2.exe` is both
+    /// Half-Life 2 and Team Fortress 2 — which is the case this exists for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_contains: Option<String>,
+}
+
+/// Change what a game is called, or put its shipped name back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameGame {
+    /// Which entry, shipped or the user's own.
+    pub game_id: String,
+    /// The new name, or [`None`] to drop the user's name and use the one the
+    /// entry shipped with.
+    ///
+    /// Deliberately one command rather than two: "rename" and "put the name
+    /// back" are the same decision seen from either end, and a client that had
+    /// to choose between two commands would be the place the two could get out
+    /// of step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Exclude a game from recording, or stop excluding it.
+///
+/// An exclusion is a decision *about* an entry and not the deletion of one: the
+/// entry stays and is still listed, which is what stops an update resurrecting a
+/// game somebody excluded (`docs/game-detection.md`). [`ForgetGame`] is the
+/// other operation and is not this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetGameExcluded {
+    /// Which entry.
+    pub game_id: String,
+    /// Whether nothing of it should be recorded.
+    pub excluded: bool,
+}
+
+/// Drop an entry the user added.
+///
+/// Only ever their own: a shipped entry cannot be forgotten, because the next
+/// update would bring it back and the person would have to forget it again.
+/// Excluding it is the operation that lasts ([`SetGameExcluded`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetGame {
+    /// Which entry.
+    pub game_id: String,
+}

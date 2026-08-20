@@ -124,6 +124,7 @@ export const FEATURES = [
   'recording',
   'status_events',
   'catalogue',
+  'catalogue_editing',
   'bookmarks',
   'screenshots',
   'shutdown',
@@ -190,6 +191,10 @@ export const COMMANDS = [
   'get_start_at_login',
   'set_start_at_login',
   'shutdown',
+  'register_game',
+  'rename_game',
+  'set_game_excluded',
+  'forget_game',
 ] as const;
 
 /** A command the protocol defines. */
@@ -269,6 +274,7 @@ export const REPLIES = [
   'library_sessions',
   'library_games',
   'catalogue_games',
+  'catalogue_edited',
   'library_events',
   'library_clip_document',
   'clip_document_saved',
@@ -1377,6 +1383,26 @@ export interface LibraryGamesReply {
   readonly reply: 'library_games';
   /** One row per game, and one for the sittings nothing was attributed to. */
   readonly games: readonly LibraryGame[];
+}
+
+/**
+ * A catalogue edit was written, and what the catalogue holds now.
+ *
+ * Every edit answers with the whole list, so there is no window in which a
+ * client draws a list it knows to be stale.
+ */
+export interface CatalogueEditedReply {
+  /** The tag. */
+  readonly reply: 'catalogue_edited';
+  /**
+   * The entry the edit was about.
+   *
+   * For `register_game` this is the identifier the overlay chose, which the
+   * caller cannot predict.
+   */
+  readonly game_id: string;
+  /** One row per entry, as `catalogue_games` gives them. */
+  readonly games: readonly CatalogueGame[];
 }
 
 /** The games the catalogue knows. */
@@ -2574,6 +2600,7 @@ export type Reply =
   | LibrarySessionsReply
   | LibraryGamesReply
   | CatalogueGamesReply
+  | CatalogueEditedReply
   | LibraryEventsReply
   | LibraryClipDocumentReply
   | ClipDocumentSavedReply

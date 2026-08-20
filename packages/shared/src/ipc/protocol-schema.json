@@ -64,7 +64,11 @@
         "get_microphone_level",
         "get_start_at_login",
         "set_start_at_login",
-        "shutdown"
+        "shutdown",
+        "register_game",
+        "rename_game",
+        "set_game_excluded",
+        "forget_game"
       ],
       "tolerates_unrecognised": true
     },
@@ -137,6 +141,7 @@
         "recording",
         "status_events",
         "catalogue",
+        "catalogue_editing",
         "bookmarks",
         "screenshots",
         "shutdown",
@@ -226,7 +231,8 @@
         "locked",
         "plugins",
         "diagnostics",
-        "storage"
+        "storage",
+        "catalogue_edited"
       ],
       "tolerates_unrecognised": false
     },
@@ -832,6 +838,14 @@
     "reply.bookmark_added": {
       "required": [
         "bookmark",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.catalogue_edited": {
+      "required": [
+        "game_id",
+        "games",
         "reply"
       ],
       "optional": []
@@ -1448,6 +1462,30 @@
       "params": "shutdown",
       "reply": "reply.shutting_down",
       "available_in_this_build": true
+    },
+    {
+      "name": "register_game",
+      "params": "register_game",
+      "reply": "reply.catalogue_edited",
+      "available_in_this_build": true
+    },
+    {
+      "name": "rename_game",
+      "params": "rename_game",
+      "reply": "reply.catalogue_edited",
+      "available_in_this_build": true
+    },
+    {
+      "name": "set_game_excluded",
+      "params": "set_game_excluded",
+      "reply": "reply.catalogue_edited",
+      "available_in_this_build": true
+    },
+    {
+      "name": "forget_game",
+      "params": "forget_game",
+      "reply": "reply.catalogue_edited",
+      "available_in_this_build": true
     }
   ],
   "samples": [
@@ -1679,6 +1717,7 @@
           "recording",
           "status_events",
           "catalogue",
+          "catalogue_editing",
           "bookmarks",
           "screenshots",
           "shutdown",
@@ -2655,6 +2694,63 @@
       },
       "parses": true,
       "discriminant": "response.ok.catalogue_games"
+    },
+    {
+      "name": "a game the user registered, and the catalogue as it now stands",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "game_id": "a-game-of-my-own",
+            "games": [
+              {
+                "excluded": false,
+                "executables": [
+                  {
+                    "name": "cs2.exe",
+                    "path_contains": "steamapps/common/Counter-Strike Global Offensive"
+                  }
+                ],
+                "game_id": "counter-strike-2",
+                "launcher": "steam",
+                "launcher_app_id": "730",
+                "name": "Counter-Strike 2",
+                "source": "shipped"
+              },
+              {
+                "excluded": false,
+                "executables": [
+                  {
+                    "name": "hl2.exe",
+                    "path_contains": "steamapps/common/Half-Life 2"
+                  }
+                ],
+                "game_id": "half-life-2",
+                "launcher": "steam",
+                "launcher_app_id": "220",
+                "name": "Half-Life 2",
+                "source": "shipped"
+              },
+              {
+                "excluded": true,
+                "executables": [
+                  {
+                    "name": "mygame.exe"
+                  }
+                ],
+                "game_id": "a-game-of-my-own",
+                "name": "A game of my own",
+                "source": "user"
+              }
+            ],
+            "reply": "catalogue_edited"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.catalogue_edited"
     },
     {
       "name": "a recording copied into MP4 without everything it held",

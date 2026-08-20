@@ -105,7 +105,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
-use clipped_game_detection::catalogue::{Catalogue, EntrySource as CatalogueEntrySource};
+use clipped_game_detection::catalogue::{
+    Catalogue, CatalogueError, EntrySource as CatalogueEntrySource, Overlay, Registration,
+};
 use clipped_game_detection::launcher::Launchers;
 use clipped_ipc::catalogue::{CatalogueExecutable, CatalogueGame, EntrySource};
 use clipped_ipc::{
@@ -445,6 +447,29 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
 /// deletion of one — a list that hid them would leave somebody unable to find
 /// the thing they excluded in order to stop excluding it
 /// (`docs/game-detection.md`, issue #245).
+/// Turns a refused catalogue edit into the protocol's account of it.
+///
+/// The split is whether the *caller* could have avoided it. A registration
+/// naming an executable with a directory in it, a name no identifier can be
+/// derived from, an edit that would not read back — those are the request, and
+/// a client can fix them and try again, so they are
+/// [`ErrorCode::InvalidParameters`] and carry the loader's own message.
+///
+/// Everything else — the file could not be read, could not be written, is
+/// written in a shape an edit cannot change — is this machine rather than the
+/// request, and answering `invalid_parameters` would send a client off
+/// correcting a request that was never wrong.
+fn catalogue_refused(error: CatalogueError) -> ProtocolError {
+    let code = match &error {
+        CatalogueError::WouldWriteInvalid { .. }
+        | CatalogueError::NoIdentifierFromName { .. }
+        | CatalogueError::InvalidEntry { .. }
+        | CatalogueError::InvalidDecision { .. } => ErrorCode::InvalidParameters,
+        _ => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, format!("the games file was not changed: {error}"))
+}
+
 fn catalogue_games(catalogue: &Catalogue) -> Vec<CatalogueGame> {
     catalogue
         .entries()
@@ -582,6 +607,10 @@ impl RecorderService {
             // filed under the game whichever shop installed it, rather than
             // only when the catalogue knows the executable's name (issue #522).
             Launchers::discover(),
+            // And the file `watch` watches for edits, so that a change made
+            // through the window and a change made in a text editor are the
+            // same change to the same file (issue #245).
+            clipped_game_detection::catalogue::overlay_path(),
         )
     }
 
@@ -613,6 +642,35 @@ impl RecorderService {
             // launchers, for the reason its catalogue is a fixture (AGENTS.md
             // section 25).
             Launchers::none(),
+            // And no games file at all, for the same reason: a test that edited
+            // the catalogue would be editing the catalogue of whoever ran it. A
+            // test that is *about* the edits uses [`Self::with_catalogue_file`].
+            None,
+        )
+    }
+
+    /// The same, over a games file the caller names.
+    ///
+    /// For the tests that are *about* the catalogue edits, which need a file of
+    /// their own rather than the one belonging to whoever is running them. The
+    /// counterpart of [`Self::with_settings`], and it exists for the same
+    /// reason.
+    #[must_use]
+    pub fn with_catalogue_file(
+        events: EventPublisher,
+        library: LibraryReader,
+        indexer: LibraryIndexer,
+        catalogue: Catalogue,
+        overlay: PathBuf,
+    ) -> Self {
+        Self::over(
+            events,
+            library,
+            indexer,
+            Arc::new(crate::settings::SettingsFile::nowhere()),
+            catalogue,
+            Launchers::none(),
+            Some(overlay),
         )
     }
 
@@ -623,6 +681,7 @@ impl RecorderService {
         settings: Arc<crate::settings::SettingsFile>,
         catalogue: Catalogue,
         launchers: Launchers,
+        overlay: Option<PathBuf>,
     ) -> Self {
         let indexer = Arc::new(indexer);
         Self {
@@ -632,6 +691,7 @@ impl RecorderService {
                 Arc::clone(&settings),
                 catalogue,
                 launchers,
+                overlay,
             )),
             settings,
             library,
@@ -660,7 +720,61 @@ impl RecorderService {
             Arc::new(settings),
             catalogue,
             Launchers::none(),
+            None,
         )
+    }
+
+    /// The user's games file, as something an edit can be written to.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::NotImplemented`] when this service has no games file: a
+    /// machine with no user directory, or a service built for a test that is
+    /// not about the catalogue. The window asks for the `catalogue_editing`
+    /// capability before drawing the controls, so a person should never reach
+    /// this — it is the answer for a client that asked anyway, and it says
+    /// which of the two it is.
+    fn overlay(&self) -> Result<Overlay, ProtocolError> {
+        match &self.recordings.overlay {
+            Some(path) => Ok(Overlay::at(path.clone())),
+            None => Err(ProtocolError::new(
+                ErrorCode::NotImplemented,
+                "this recorder has no games file to write, so the catalogue cannot be changed",
+            )),
+        }
+    }
+
+    /// Reads the catalogue back after an edit and answers with all of it.
+    ///
+    /// **Read back rather than reasoned about.** What the window is told has to
+    /// be what a fresh start would find: the overlay is laid over the shipped
+    /// data with a precedence order `docs/game-detection.md` describes, and a
+    /// second implementation of that order here would be a second place for it
+    /// to be got wrong.
+    ///
+    /// The new catalogue is published to [`RecordingState`] as well, so the
+    /// next `catalogue_games` and the next recording started from the window
+    /// both see the edit. `crate::watch`'s driver notices the same file change
+    /// on its next pass and updates the copy detection matches against.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::Internal`] if the file cannot be read back. The edit *was*
+    /// written when that happens, which is why this reports rather than
+    /// pretending: the caller is told the catalogue is in a state this build
+    /// could not load, which is the truth and is worth seeing.
+    fn catalogue_edited(&self, game_id: String) -> Result<Reply, ProtocolError> {
+        let overlay = self.overlay()?;
+        let loaded = Catalogue::load_with_overlay_at(overlay.path()).map_err(|error| {
+            ProtocolError::new(
+                ErrorCode::Internal,
+                format!("the games file was written and could not be read back: {error}"),
+            )
+        })?;
+        let catalogue = loaded.into_catalogue();
+        let games = catalogue_games(&catalogue);
+        self.recordings.set_catalogue(catalogue);
+        Ok(Reply::CatalogueEdited { game_id, games })
     }
 
     /// The settings in force.
@@ -910,8 +1024,52 @@ impl CommandHandler for RecorderService {
             // recorder is actually matching against, and a read of its own could
             // differ from it the moment the user edits their overlay.
             Command::CatalogueGames => Ok(Reply::CatalogueGames {
-                games: catalogue_games(&self.recordings.catalogue),
+                games: catalogue_games(&self.recordings.catalogue()),
             }),
+            // The four edits. Each writes the user's overlay through
+            // `clipped-game-detection`, which validates the document through
+            // the same reader that will load it and leaves the file alone if it
+            // would not read back (AGENTS.md section 56). Then this side reads
+            // the file again, so what the window is answered with is what a
+            // fresh start would find rather than what this process guessed.
+            Command::RegisterGame(request) => {
+                let overlay = self.overlay()?;
+                let mut registration =
+                    Registration::new(request.name.clone(), request.executable.clone());
+                if let Some(fragment) = &request.path_contains {
+                    registration = registration.qualified_by(fragment.clone());
+                }
+                let game_id = overlay.register(&registration).map_err(catalogue_refused)?;
+                self.catalogue_edited(game_id.as_str().to_owned())
+            }
+            Command::RenameGame(request) => {
+                let overlay = self.overlay()?;
+                match &request.name {
+                    Some(name) => overlay.rename(&request.game_id, name),
+                    // The clearing form. One command, because "rename" and "put
+                    // the name back" are the same decision from either end.
+                    None => overlay.clear_rename(&request.game_id),
+                }
+                .map_err(catalogue_refused)?;
+                self.catalogue_edited(request.game_id.clone())
+            }
+            Command::SetGameExcluded(request) => {
+                let overlay = self.overlay()?;
+                if request.excluded {
+                    overlay.exclude(&request.game_id)
+                } else {
+                    overlay.include(&request.game_id)
+                }
+                .map_err(catalogue_refused)?;
+                self.catalogue_edited(request.game_id.clone())
+            }
+            Command::ForgetGame(request) => {
+                let overlay = self.overlay()?;
+                overlay
+                    .forget(&request.game_id)
+                    .map_err(catalogue_refused)?;
+                self.catalogue_edited(request.game_id.clone())
+            }
             Command::LibraryClipDocument(request) => Ok(Reply::LibraryClipDocument {
                 clip: self.library.clip_document(&request)?,
             }),
@@ -1126,6 +1284,15 @@ impl CommandHandler for RecorderService {
         if self.recordings.watches_for_games() {
             features.push(features::AUTOMATIC.to_owned());
         }
+        // Conditional for the same reason `automatic` is: this is a claim about
+        // what this recorder can actually do, and a recorder with no games file
+        // to write cannot do it. A machine with no user directory, and every
+        // service built for a test that is not about the catalogue, both land
+        // here — and a window told otherwise would draw four controls whose
+        // commands are refused (AGENTS.md section 27).
+        if self.recordings.overlay.is_some() {
+            features.push(features::CATALOGUE_EDITING.to_owned());
+        }
         features
     }
 }
@@ -1155,14 +1322,35 @@ pub(crate) struct RecordingState {
     /// saved half way through reaches the *next* recording rather than the
     /// encoder that is running (`clipped_session::config`, issue #61).
     settings: Arc<crate::settings::SettingsFile>,
-    /// What Clipped knows about games, as it stood when this process started
-    /// ([`catalogue_for_recordings`]).
+    /// What Clipped knows about games ([`catalogue_for_recordings`]).
     ///
     /// Asked once per recording — when [`Self::begin`] opens its session — and
-    /// never per frame. Held for the same reason the settings are: the answer
-    /// belongs to the moment the recording started, and a games file edited
-    /// while a recording runs does not change what that recording is of.
-    catalogue: Catalogue,
+    /// never per frame. A games file edited while a recording runs does not
+    /// change what *that* recording is of: the session took its answer when it
+    /// started and keeps it.
+    ///
+    /// **Behind a lock because it can now change.** It was a plain field, read
+    /// once at start-up, until the window could edit the catalogue: the four
+    /// write commands (issue #245) alter it, and so does somebody editing
+    /// `games.toml` in a text editor, which `crate::watch` notices once a pass
+    /// and pushes here through [`Self::set_catalogue`]. Without that this field
+    /// and the driver's copy would drift, and the Games screen would list a
+    /// catalogue the recorder had stopped matching against.
+    ///
+    /// A [`Mutex`] rather than an `RwLock` to match every other shared field on
+    /// this struct, and because this is contended by nothing: one lock per
+    /// command and one per recording start, never per frame (AGENTS.md
+    /// section 20).
+    catalogue: Mutex<Catalogue>,
+    /// The user's games file, which the four catalogue write commands edit.
+    ///
+    /// [`None`] means this service may not change the catalogue and refuses
+    /// those commands. Two things produce it: a machine with no user directory
+    /// to keep the file in, and — the one that matters far more often — a
+    /// service built for a test, which must not write the games file of
+    /// whoever is running it (AGENTS.md section 25). It is the same reason
+    /// [`crate::settings::SettingsFile::nowhere`] exists, and the same shape.
+    overlay: Option<PathBuf>,
     /// The launchers installed on this machine, as they stood when this process
     /// started ([`launchers_for_recordings`]).
     ///
@@ -1467,6 +1655,7 @@ impl RecordingState {
         settings: Arc<crate::settings::SettingsFile>,
         catalogue: Catalogue,
         launchers: Launchers,
+        overlay: Option<PathBuf>,
     ) -> Self {
         Self {
             current: Mutex::new(None),
@@ -1475,7 +1664,8 @@ impl RecordingState {
             next_id: AtomicU64::new(1),
             indexer,
             settings,
-            catalogue,
+            catalogue: Mutex::new(catalogue),
+            overlay,
             launchers,
             // Nothing is watching until something says it is, which is what a
             // `serve` with no `--watch-for-games` reports for its whole life.
@@ -1531,11 +1721,15 @@ impl RecordingState {
 
         // The directory is the recording's own, which is what "beside its
         // recordings" means for an output the caller may have named itself.
+        // The lock is taken for the length of this call and no longer: a
+        // session keeps the catalogue it started with, so what it needs is the
+        // answer as it stands at this instant.
+        let catalogue = self.catalogue();
         let session = ManualSession::start(
             output.parent().unwrap_or_else(|| Path::new(".")),
             output.clone(),
             configuration,
-            &self.catalogue,
+            &catalogue,
             &self.launchers,
             process,
             now,
@@ -1934,9 +2128,34 @@ impl RecordingState {
         self.indexer.request();
     }
 
-    /// What Clipped knows about games, as it stood when this process started.
-    pub(crate) fn catalogue(&self) -> &Catalogue {
-        &self.catalogue
+    /// What Clipped knows about games, as it stands now.
+    ///
+    /// A clone rather than a borrow, because the answer is behind a lock and a
+    /// caller holding it across its own work would be holding it across a
+    /// session start. The catalogue is tens of entries.
+    pub(crate) fn catalogue(&self) -> Catalogue {
+        self.catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces what Clipped knows about games.
+    ///
+    /// Two callers, and they are the reason this field is behind a lock: the
+    /// four catalogue write commands, which have just written the user's
+    /// overlay; and `crate::watch`'s driver, which noticed the overlay change
+    /// underneath the process and is keeping this side in step with its own
+    /// (issue #245).
+    ///
+    /// Nothing here reaches a recording already running. A session took its
+    /// catalogue when it started and keeps it, which is what stops a game being
+    /// re-attributed halfway through.
+    pub(crate) fn set_catalogue(&self, catalogue: Catalogue) {
+        *self
+            .catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalogue;
     }
 
     /// The settings in force, from the one state this process keeps them in.
@@ -3454,6 +3673,9 @@ mod tests {
             // Not the machine's: a test that asked what is installed here would
             // answer differently on another machine (AGENTS.md section 25).
             Launchers::none(),
+            // And no games file: a test that is not about the catalogue edits
+            // must not be able to write one (AGENTS.md section 25).
+            None,
         ))
     }
 
@@ -5173,7 +5395,8 @@ excluded = true
                     "the shipped catalogue is not empty, so this comparison is worth making"
                 );
                 assert_eq!(
-                    service.recordings.catalogue, expected,
+                    service.recordings.catalogue(),
+                    expected,
                     "`serve` has to file recordings through the same catalogue `watch` matches \
                      processes against"
                 );
@@ -5182,7 +5405,7 @@ excluded = true
             // file that cannot be read costs attribution and must cost nothing
             // else (`catalogue_for_recordings`).
             Err(_) => assert!(
-                service.recordings.catalogue.entries().is_empty(),
+                service.recordings.catalogue().entries().is_empty(),
                 "a catalogue that could not be read must not be replaced by the shipped one, \
                  which would ignore what the user decided"
             ),
@@ -6175,5 +6398,322 @@ excluded = true
                 into.push(path);
             }
         }
+    }
+
+    use clipped_ipc::catalogue::{ForgetGame, RegisterGame, RenameGame, SetGameExcluded};
+
+    /// The fixture the catalogue-edit tests match against.
+    ///
+    /// A shipped entry, so that "an entry Clipped ships" is reachable and a
+    /// decision recorded against one can be told from an entry of the user's
+    /// own.
+    const SHIPPED_FOR_EDITS: &str = r#"schema_version = 1
+
+[[game]]
+game_id = "counter-strike-2"
+name = "Counter-Strike 2"
+
+[[game.executables]]
+name = "cs2.exe"
+"#;
+
+    /// A service that may edit a games file of its own, and where that file is.
+    ///
+    /// Never the real one: a test that wrote the user's own games file would be
+    /// editing the catalogue of whoever is running it (AGENTS.md section 25).
+    fn service_over_a_scratch_games_file(name: &str) -> (RecorderService, PathBuf) {
+        let directory = scratch(name);
+        let overlay = directory.join("games.toml");
+        let service = RecorderService::with_catalogue_file(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::parse(SHIPPED_FOR_EDITS, CatalogueEntrySource::Seed)
+                .expect("the shipped fixture is a valid catalogue"),
+            overlay.clone(),
+        );
+        (service, overlay)
+    }
+
+    /// The catalogue as a fresh `catalogue_games` gives it.
+    ///
+    /// Asked after an edit rather than trusting the edit's own reply, because
+    /// the two come from different places: the reply is the file read back, and
+    /// this is what `RecordingState` holds — which is what the next recording
+    /// and the next listing use. An edit that wrote the file and did not
+    /// publish it passes on the reply alone and fails here.
+    fn catalogue_as_the_service_now_holds_it(service: &RecorderService) -> Vec<CatalogueGame> {
+        let Reply::CatalogueGames { games } = service
+            .call(Command::CatalogueGames)
+            .expect("the catalogue reads")
+        else {
+            panic!("`catalogue_games` was answered with something else");
+        };
+        games
+    }
+
+    #[test]
+    fn a_game_registered_through_the_window_reaches_the_file_and_the_listing() {
+        // Issue #245's second criterion. `Overlay::register` has existed since
+        // #45 with no caller in the product at all — only its own integration
+        // test — so the Games screen drew no controls, because a button that
+        // writes nothing may not be drawn (AGENTS.md section 27).
+        let (service, overlay) = service_over_a_scratch_games_file("register-game");
+
+        let Reply::CatalogueEdited { game_id, games } = service
+            .call(Command::RegisterGame(RegisterGame {
+                name: "A game of my own".to_owned(),
+                executable: "mygame.exe".to_owned(),
+                path_contains: None,
+            }))
+            .expect("the registration is accepted")
+        else {
+            panic!("`register_game` was answered with something else");
+        };
+
+        assert_eq!(
+            game_id, "a-game-of-my-own",
+            "the identifier the overlay derived, which the caller could not have predicted"
+        );
+
+        let registered = games
+            .iter()
+            .find(|game| game.game_id == game_id)
+            .expect("the new entry is in the reply");
+        assert_eq!(registered.name, "A game of my own");
+        assert_eq!(
+            registered.source,
+            clipped_ipc::catalogue::EntrySource::User,
+            "an entry the user added is theirs, and no update may replace it"
+        );
+        assert_eq!(registered.executables[0].name, "mygame.exe");
+        assert!(
+            games.iter().any(|game| game.game_id == "counter-strike-2"),
+            "the shipped half is still there: an edit adds to the catalogue rather than \
+             replacing it"
+        );
+
+        // The file, because the reply could have been assembled without ever
+        // writing one — and a catalogue that vanishes on restart is the defect
+        // this whole issue is about.
+        let written = std::fs::read_to_string(&overlay).expect("the games file was written");
+        assert!(
+            written.contains("a-game-of-my-own") && written.contains("mygame.exe"),
+            "the user's own file holds the entry: {written}"
+        );
+
+        // And the copy the next recording and the next listing use.
+        assert!(
+            catalogue_as_the_service_now_holds_it(&service)
+                .iter()
+                .any(|game| game.game_id == "a-game-of-my-own"),
+            "an edit that wrote the file and did not publish it would leave the window \
+             listing a catalogue the recorder had already stopped agreeing with"
+        );
+    }
+
+    #[test]
+    fn a_shipped_game_can_be_renamed_and_the_shipped_name_put_back() {
+        // A rename of a shipped entry is stored as a decision rather than as a
+        // copy of the entry, so a later release may correct that game's
+        // executables and the user still sees the name they chose
+        // (`docs/game-detection.md`).
+        let (service, _overlay) = service_over_a_scratch_games_file("rename-game");
+
+        let Reply::CatalogueEdited { games, .. } = service
+            .call(Command::RenameGame(RenameGame {
+                game_id: "counter-strike-2".to_owned(),
+                name: Some("CS2".to_owned()),
+            }))
+            .expect("the rename is accepted")
+        else {
+            panic!("`rename_game` was answered with something else");
+        };
+        assert_eq!(
+            games
+                .iter()
+                .find(|game| game.game_id == "counter-strike-2")
+                .expect("the shipped entry is still listed")
+                .name,
+            "CS2"
+        );
+
+        // The clearing form: the same command with no name.
+        let Reply::CatalogueEdited { games, .. } = service
+            .call(Command::RenameGame(RenameGame {
+                game_id: "counter-strike-2".to_owned(),
+                name: None,
+            }))
+            .expect("the rename is cleared")
+        else {
+            panic!("`rename_game` was answered with something else");
+        };
+        assert_eq!(
+            games
+                .iter()
+                .find(|game| game.game_id == "counter-strike-2")
+                .expect("the shipped entry is still listed")
+                .name,
+            "Counter-Strike 2",
+            "clearing a rename puts the shipped name back rather than leaving the entry nameless"
+        );
+    }
+
+    #[test]
+    fn an_excluded_game_stays_in_the_catalogue_marked_excluded() {
+        // The distinction the feature turns on. An exclusion is a decision
+        // about an entry and not the deletion of one: the entry stays and is
+        // still listed, which is what stops the next update resurrecting a game
+        // somebody excluded.
+        let (service, _overlay) = service_over_a_scratch_games_file("exclude-game");
+
+        let Reply::CatalogueEdited { games, .. } = service
+            .call(Command::SetGameExcluded(SetGameExcluded {
+                game_id: "counter-strike-2".to_owned(),
+                excluded: true,
+            }))
+            .expect("the exclusion is accepted")
+        else {
+            panic!("`set_game_excluded` was answered with something else");
+        };
+
+        let excluded = games
+            .iter()
+            .find(|game| game.game_id == "counter-strike-2")
+            .expect("an excluded game is still listed, or nobody could ever un-exclude it");
+        assert!(excluded.excluded, "and it is marked");
+
+        let Reply::CatalogueEdited { games, .. } = service
+            .call(Command::SetGameExcluded(SetGameExcluded {
+                game_id: "counter-strike-2".to_owned(),
+                excluded: false,
+            }))
+            .expect("the inclusion is accepted")
+        else {
+            panic!("`set_game_excluded` was answered with something else");
+        };
+        assert!(
+            !games
+                .iter()
+                .find(|game| game.game_id == "counter-strike-2")
+                .expect("still listed")
+                .excluded,
+            "and the decision can be taken back"
+        );
+    }
+
+    #[test]
+    fn a_game_the_user_added_can_be_forgotten() {
+        let (service, overlay) = service_over_a_scratch_games_file("forget-game");
+
+        service
+            .call(Command::RegisterGame(RegisterGame {
+                name: "A game of my own".to_owned(),
+                executable: "mygame.exe".to_owned(),
+                path_contains: None,
+            }))
+            .expect("the registration is accepted");
+
+        let Reply::CatalogueEdited { games, .. } = service
+            .call(Command::ForgetGame(ForgetGame {
+                game_id: "a-game-of-my-own".to_owned(),
+            }))
+            .expect("the entry is forgotten")
+        else {
+            panic!("`forget_game` was answered with something else");
+        };
+
+        assert!(
+            !games.iter().any(|game| game.game_id == "a-game-of-my-own"),
+            "an entry the user added and then dropped is gone, unlike an exclusion"
+        );
+        assert!(
+            games.iter().any(|game| game.game_id == "counter-strike-2"),
+            "and the shipped half is untouched"
+        );
+        assert!(
+            !std::fs::read_to_string(&overlay)
+                .unwrap_or_default()
+                .contains("a-game-of-my-own"),
+            "and the entry is gone from the file, not merely absent from the reply: a forget              that left it there would come back on the next start"
+        );
+    }
+
+    #[test]
+    fn a_registration_that_names_a_path_is_refused_as_the_callers_mistake() {
+        // The executable is matched by file name, so a path here is a request
+        // that cannot be satisfied rather than a machine that failed. The
+        // difference is what the error code says, and a client told `internal`
+        // would show "something went wrong" for a field the person can correct.
+        let (service, overlay) = service_over_a_scratch_games_file("register-path");
+
+        let error = service
+            .call(Command::RegisterGame(RegisterGame {
+                name: "A game of my own".to_owned(),
+                executable: "C:\\Games\\Mine\\mygame.exe".to_owned(),
+                path_contains: None,
+            }))
+            .expect_err("an executable with a directory in it is not an executable name");
+
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidParameters,
+            "the request was wrong and can be corrected: {error}"
+        );
+        assert!(
+            !std::fs::read_to_string(&overlay)
+                .unwrap_or_default()
+                .contains("mygame"),
+            "a refused edit leaves the file alone"
+        );
+    }
+
+    #[test]
+    fn a_recorder_with_no_games_file_refuses_the_edits_rather_than_writing_somewhere() {
+        // `with_library` builds a service with no games file, which is what
+        // every test that is not about the catalogue gets, and what a machine
+        // with no user directory gets. The refusal is the point: the
+        // alternative is a service that quietly writes the catalogue of
+        // whoever is running the test.
+        let directory = scratch("no-games-file");
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::parse(SHIPPED_FOR_EDITS, CatalogueEntrySource::Seed)
+                .expect("the shipped fixture is a valid catalogue"),
+        );
+
+        let error = service
+            .call(Command::ForgetGame(ForgetGame {
+                game_id: "counter-strike-2".to_owned(),
+            }))
+            .expect_err("a service with no games file cannot change the catalogue");
+
+        assert_eq!(
+            error.code,
+            ErrorCode::NotImplemented,
+            "this recorder cannot do it at all, which is not the same as the request being \
+             wrong: {error}"
+        );
+
+        assert!(
+            !service
+                .features()
+                .contains(&features::CATALOGUE_EDITING.to_owned()),
+            "and it does not claim it can, so the window draws no control that would be \
+             refused (AGENTS.md section 27)"
+        );
+    }
+
+    #[test]
+    fn a_recorder_with_a_games_file_claims_it_can_change_the_catalogue() {
+        let (service, _overlay) = service_over_a_scratch_games_file("claims-editing");
+        assert!(
+            service
+                .features()
+                .contains(&features::CATALOGUE_EDITING.to_owned()),
+            "the four commands work on this service, so the window may draw their controls"
+        );
     }
 }

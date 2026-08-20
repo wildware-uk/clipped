@@ -103,6 +103,7 @@ import type {
   LibraryClipDocument,
   LibraryClipDocumentReply,
   SaveClipDocument,
+  CatalogueEditedReply,
   CatalogueGamesReply,
   LibraryGame,
   LibraryEventsReply,
@@ -694,6 +695,11 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     games: 'required',
   }),
+  'reply.catalogue_edited': fields<CatalogueEditedReply>({
+    reply: 'required',
+    game_id: 'required',
+    games: 'required',
+  }),
   'reply.library_events': fields<LibraryEventsReply>({
     reply: 'required',
     lane: 'required',
@@ -1104,6 +1110,30 @@ const TYPESCRIPT_COMMANDS: readonly {
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
+  {
+    name: 'register_game',
+    params: 'register_game',
+    reply: 'reply.catalogue_edited',
+    available_in_this_build: true,
+  },
+  {
+    name: 'rename_game',
+    params: 'rename_game',
+    reply: 'reply.catalogue_edited',
+    available_in_this_build: true,
+  },
+  {
+    name: 'set_game_excluded',
+    params: 'set_game_excluded',
+    reply: 'reply.catalogue_edited',
+    available_in_this_build: true,
+  },
+  {
+    name: 'forget_game',
+    params: 'forget_game',
+    reply: 'reply.catalogue_edited',
+    available_in_this_build: true,
+  },
 ];
 
 /** Which structure each envelope's payload takes, as the types here compose it. */
@@ -1146,6 +1176,8 @@ function replyDiscriminant(reply: Reply): string {
       return 'library_games';
     case 'catalogue_games':
       return 'catalogue_games';
+    case 'catalogue_edited':
+      return 'catalogue_edited';
     case 'plugins':
       return 'plugins';
     case 'library_clip_document':

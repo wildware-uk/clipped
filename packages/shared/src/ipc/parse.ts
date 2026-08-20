@@ -419,6 +419,12 @@ function readReply(value: JsonValue | undefined): Reply {
         reply: 'catalogue_games',
         games: arrayField(reply['games'], 'a catalogue list', readCatalogueGame),
       };
+    case 'catalogue_edited':
+      return {
+        reply: 'catalogue_edited',
+        game_id: stringField(reply, 'game_id', 'a game identifier'),
+        games: arrayField(reply['games'], 'a catalogue list', readCatalogueGame),
+      };
     case 'library_events':
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
     case 'library_clip_document':
