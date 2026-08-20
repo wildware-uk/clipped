@@ -40,7 +40,8 @@
     "longDescription": "Clipped records your games in the background and keeps the moments worth keeping.",
     "windows": {
       "nsis": {
-        "installerHooks": "installer.nsh"
+        "installerHooks": "installer.nsh",
+        "installMode": "perMachine"
       }
     }
   }

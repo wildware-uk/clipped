@@ -17,6 +17,23 @@
 ;
 ; Both obstacles are checked here, before anything is written, because a
 ; refusal that has already copied half a payload is not a refusal.
+;
+; ISSUE #700. This check fired on every update of the maintainer's machine and
+; could not be cleared. tauri.conf.json declared no install mode, so Tauri
+; defaulted it to `currentUser` and the installer ran RequestExecutionLevel
+; user - it never asked for elevation - while RestorePreviousInstallLocation
+; sent it to C:\Program Files\Clipped, where an earlier per-machine build had
+; put it. A personal installation, in a machine-wide directory, unable to
+; elevate into it. Before #663 that combination exited 0 having copied nothing.
+;
+; tauri.conf.json now says perMachine, which is both where this application
+; already lives and where it belongs: the per-user default is
+; $LOCALAPPDATA\Clipped, and that is the *data* directory - library.db, the
+; logs, games.toml - so a per-user install would put the executables and seven
+; FFmpeg DLLs among somebody's recordings index.
+;
+; So the refusal below is honest again rather than unclearable: an installer
+; that reaches it is one whose elevation was declined.
 
 !macro NSIS_HOOK_PREINSTALL
   ; 1. Can this account write into the install directory at all?
@@ -53,6 +70,10 @@
   Goto clipped_checks_passed
 
   clipped_cannot_write:
+    ; Reachable now only when elevation was declined, which is why the advice
+    ; below is the whole of it. Before the install mode was declared (#700) this
+    ; was unclearable: a per-user installer that could not elevate, pointed at a
+    ; machine-wide directory by the location the last install left behind.
     SetErrorLevel 1
     IfSilent +2
     MessageBox MB_ICONSTOP "Clipped cannot be installed into:$\r$\n$\r$\n    $INSTDIR$\r$\n$\r$\nThis account cannot write there. Run the installer as an administrator, or install into a folder you own.$\r$\n$\r$\nNothing has been changed."
