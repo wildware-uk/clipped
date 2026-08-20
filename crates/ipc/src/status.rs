@@ -778,6 +778,44 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_waiting_for_its_game_to_draw_crosses_the_wire_as_a_started_one() {
+        // The state a window has to be able to tell from an idle recorder
+        // (issue #739). Both are `watching`; only this field separates them, so
+        // a field that did not survive serialisation would leave the window
+        // reading the same status it read before and saying the same wrong
+        // sentence.
+        let status = RecorderStatus::Watching(Watching {
+            session: Some(Box::new(a_sitting())),
+            pending: Some(PendingRecording {
+                game_name: "Garry's Mod".to_owned(),
+                waiting_ms: 48_000,
+            }),
+        });
+
+        let json = serde_json::to_string(&status).expect("it serialises");
+        let back: RecorderStatus = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(back, status);
+
+        // Read off the JSON as well as the round trip, because a round trip
+        // agrees with itself: two fields renamed the same way on both sides
+        // would pass it and reach a window that reads neither.
+        let wire: serde_json::Value = serde_json::from_str(&json).expect("it is an object");
+        assert_eq!(wire["state"], "watching");
+        assert_eq!(wire["pending"]["game_name"], "Garry's Mod");
+        assert_eq!(wire["pending"]["waiting_ms"], 48_000);
+
+        // And a watcher that is genuinely idle carries no such key, rather than
+        // a null a window would have to test for. The absence is the state, as
+        // it is for every other optional field here.
+        let idle = RecorderStatus::Watching(Watching {
+            session: None,
+            pending: None,
+        });
+        let json = serde_json::to_string(&idle).expect("it serialises");
+        assert_eq!(json, r#"{"state":"watching"}"#);
+    }
+
+    #[test]
     fn a_sitting_that_is_still_open_says_nothing_about_having_ended() {
         // The absence is the state, exactly as `LibrarySession` has it: a null
         // `ended_at` would make every open sitting look like it carried the
