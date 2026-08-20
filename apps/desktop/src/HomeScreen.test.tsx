@@ -1144,7 +1144,7 @@ describe('the Home screen', () => {
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
     ['recently clipped', /recently clipped/i, [74, 91]],
-    ['favourites', /^favourites/i, [58]],
+    ['favourites', /^favourites/i, [58, 695]],
   ];
 
   it('names each list it still owes, and the issue that lands it', async () => {

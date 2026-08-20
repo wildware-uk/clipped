@@ -66,7 +66,7 @@ const WAITING: readonly Waiting[] = [
   {
     shows: 'Favourites, which are also what storage cleanup protects',
     needs:
-      'A read that asks for them. Marking works on the Library screen (#58) and `favourite` is already in the query language, so this is a `library_sessions` call with a query (`docs/search.md`)',
+      'A read that asks for them. Marking works on the Library screen (#58 landed it) and `favourite` is already in the query language, so this is a `library_sessions` call with a query (`docs/search.md`). Issue #695',
   },
 ];
 
