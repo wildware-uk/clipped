@@ -126,13 +126,83 @@ struct SupervisorFixture {
     /// child and nothing else would ever end it. Ending the fixture first, in
     /// one destructor, is the only ordering that holds however a test finishes.
     recorders: Vec<u32>,
+    /// The per-user directory this fixture's processes read, removed with it.
+    ///
+    /// Held rather than dropped at the end of `start`, because the recorder
+    /// reads its settings when a recording *starts*, which is after the
+    /// supervisor has been spawned.
+    home: FixtureHome,
+}
+
+/// Where the supervisor and the recorder under it look for per-user state.
+///
+/// Pointed at a directory of this suite's own, which is what stops these tests
+/// reading the settings of whoever is running them.
+const PER_USER_ROOT_VARIABLE: &str = "LOCALAPPDATA";
+
+/// A per-user directory for one fixture, with the settings this suite needs.
+///
+/// **Both audio sources off.** `clipped-recorder` is a product surface and it
+/// defaults both sources *on* — deliberately, since that is what a user wants —
+/// so a recorder started here with no settings file records from the machine's
+/// real microphone and its real speakers. These tests are about a supervisor
+/// being killed; opening somebody's microphone to assert that is exactly what
+/// AGENTS.md section 14 forbids, and unlike the sibling suites this one passed
+/// the recorder no audio flags and gave it no home of its own.
+///
+/// `automatic_sessions.rs` and `record_end_to_end.rs` say `--microphone none` on
+/// the command line instead. This suite cannot: the arguments here are the
+/// *supervisor's*, and it builds the recorder's own. So it is said through the
+/// settings file, which is the other place the recorder reads it from.
+struct FixtureHome(std::path::PathBuf);
+
+impl FixtureHome {
+    fn new() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "clipped-supervision-home-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let application_directory = home.join("Clipped");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&application_directory)
+            .expect("a per-user directory can be made for the fixture");
+        std::fs::write(
+            application_directory.join(clipped_session::config::FILE_NAME),
+            r#"{"version":1,"global":{"microphone":"none","system_audio":"none"}}"#,
+        )
+        .expect("the settings file can be written");
+        Self(home)
+    }
+}
+
+impl Drop for FixtureHome {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("fixture home kept for diagnosis: {}", self.0.display());
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "fixture home could not be removed: {} ({error})",
+                self.0.display()
+            );
+        }
+    }
 }
 
 impl SupervisorFixture {
     /// Starts the fixture with the arguments given.
     fn start(arguments: &[&str]) -> Self {
+        let home = FixtureHome::new();
         let mut child = Command::new(example_binary("supervised_ui_fixture"))
             .args(arguments)
+            // Before the spawn, so the recorder this supervisor starts inherits
+            // it: a recorder that read the machine's own settings would record
+            // from whatever audio hardware is plugged into it (see
+            // [`FixtureHome`]).
+            .env(PER_USER_ROOT_VARIABLE, &home.0)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -141,6 +211,7 @@ impl SupervisorFixture {
         let stdout = child.stdout.take().expect("stdout was piped");
         Self {
             child,
+            home,
             lines: read_lines(stdout),
             seen: Vec::new(),
             cursor: 0,
