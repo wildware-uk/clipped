@@ -342,7 +342,7 @@ export const MISSING: readonly Missing[] = [
   {
     shows: 'A playhead across the waveform, and something to scrub',
     needs:
-      'The recording’s marks are drawn and clicking one seeks (issue #65), but the transport is still the media element’s own: there is no playhead over the peaks and nothing to drag. Issue #66 is the waveform that would carry one',
+      'The recording’s marks are drawn and clicking one seeks (issue #65), but the transport is still the media element’s own: there is no playhead over the peaks and nothing to drag. Issue #694 is the interaction that would carry one',
   },
   {
     shows: 'Bookmarks, screenshots, saved clips and microphone activity on the timeline',
@@ -352,6 +352,6 @@ export const MISSING: readonly Missing[] = [
   {
     shows: 'A waveform that follows the track being played',
     needs:
-      'What is drawn is every sound track of the recording, which is what the recorder computed. Highlighting the one the element is playing, and zooming into it, is issue #66',
+      'What is drawn is every sound track of the recording, which is what the recorder computed. Highlighting the one the element is playing, and zooming into it, is issue #694',
   },
 ];

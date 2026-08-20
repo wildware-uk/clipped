@@ -33,7 +33,7 @@ import { bucketCount, envelope, LANE } from './waveformOutline';
  *
  * It is not a timeline. There is no playhead over it and nothing to scrub; a
  * control drawn here that did nothing would be AGENTS.md section 27, and the
- * screen that puts peaks under a playhead is the Editor (issue #66). What is
+ * screen that puts peaks under a playhead is the Editor (issue #694). What is
  * drawn is what the peaks say and nothing else. The recording's marks are a
  * strip of their own below this one — `RecordingTimeline.tsx`, issue #65 —
  * because they are placed by the recorder in the file's own time and have

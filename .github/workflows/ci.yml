@@ -437,6 +437,13 @@ jobs:
     name: Desktop UI (lint, test and build)
     runs-on: windows-latest
 
+    # `issues: read` for the waiting-on check below, which asks GitHub which
+    # issues are closed. Declared on this job rather than at the top of the
+    # file, because a permission granted there is granted to every job.
+    permissions:
+      contents: read
+      issues: read
+
     steps:
       - name: Keep git from rewriting line endings
         run: |
@@ -526,6 +533,35 @@ jobs:
       # and the icon is bytes.
       - name: Test the desktop crate
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      # A row in a screen's "what has to exist first" table that names only
+      # closed issues is telling a user that finished work is tracked when
+      # nothing tracks it. The Library screen asked for a waveform under each
+      # sound track and named issue #66, which had closed having done a
+      # different thing, so nobody was going to build it (issues #694, #695).
+      #
+      # Here rather than in the Rust job because it reads the window's source,
+      # and it needs `issues: read`, which is why this job declares it.
+      - name: The waiting-on rows name work that is still open
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $closed = Join-Path $env:RUNNER_TEMP 'closed-issues.json'
+          gh issue list --state closed --limit 1000 --json number > $closed
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'Could not read the closed issues.' -ForegroundColor Red
+              Write-Host 'This check refuses rather than skipping: a skip here looks exactly like'
+              Write-Host 'a pass, and the thing it guards is a claim shown to users.'
+              exit 1
+          }
+          & powershell -ExecutionPolicy Bypass -File scripts/check-waiting-rows.ps1 `
+              -ClosedIssuesJson $closed
+          $code = $LASTEXITCODE
+          # Explicit, because a `powershell` step ends with `exit $LASTEXITCODE`
+          # and the last native command above is the one whose code we want.
+          exit $code
 
       # The third acceptance criterion of issue #226, exercised rather than
       # asserted about: this job has never built the recorder and never fetched

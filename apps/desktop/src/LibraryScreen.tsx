@@ -84,7 +84,7 @@ const PAGE = 25;
  * they are no longer waiting on the same thing. Issue #448 built the transport
  * and a thumbnail is drawn against every recording here; peaks come back over
  * that same command, and what they are still waiting for is a place to be drawn
- * — under a track on the playback screen, which is issue #66 and is not this
+ * — under a track on the playback screen, which is issue #694 and is not this
  * screen.
  */
 const WAITING: readonly Waiting[] = [
@@ -96,12 +96,12 @@ const WAITING: readonly Waiting[] = [
   {
     shows: 'Filtering the list down to favourites with one control',
     needs:
-      'A control on this screen (#60). Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`)',
+      'A control on this screen. Marking is done and `favourite` is already in the query language, so this is a button that types it into the search box (`docs/search.md`). Issue #695',
   },
   {
     shows: 'A waveform under each of a recording’s sound tracks',
     needs:
-      'Peaks reach this window already, by the same command a thumbnail arrives on (#448). What is missing is the surface that draws them: a waveform belongs under a track on the playback screen rather than in a row of this table, which is issue #66',
+      'Peaks reach this window already, by the same command a thumbnail arrives on (#448 landed it). What is missing is the surface that draws them: a waveform belongs under a track on the playback screen rather than in a row of this table, which is issue #694',
   },
   {
     shows: 'Playing a clip, from the list',
