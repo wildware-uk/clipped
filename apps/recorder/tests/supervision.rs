@@ -130,7 +130,12 @@ struct SupervisorFixture {
     ///
     /// Held rather than dropped at the end of `start`, because the recorder
     /// reads its settings when a recording *starts*, which is after the
-    /// supervisor has been spawned.
+    /// supervisor has been spawned. Dropping it there would remove the settings
+    /// file before the thing it is for had read it.
+    ///
+    /// Never read, and that is the whole of its job: what it does is happen at
+    /// the right moment, in [`FixtureHome`]'s own [`Drop`].
+    #[allow(dead_code)]
     home: FixtureHome,
 }
 
