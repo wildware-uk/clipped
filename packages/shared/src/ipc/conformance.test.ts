@@ -880,7 +880,11 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   apply_settings: fields<ApplySettingsParams>({ game: 'optional', values: 'optional' }),
   get_settings: fields<GetSettingsParams>({ game: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
-  'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
+  'recorder_status.watching': fields<WatchingStatus>({
+    state: 'required',
+    session: 'optional',
+    pending: 'optional',
+  }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
     recording_id: 'required',

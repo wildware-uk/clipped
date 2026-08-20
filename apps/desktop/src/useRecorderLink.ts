@@ -332,6 +332,25 @@ export interface RecorderStatusText {
 }
 
 /**
+ * How long a recording has been waiting for its game to draw, as a sentence.
+ *
+ * Whole seconds, and minutes once there are some. Not `formatElapsed`, which is
+ * a transport's `mm:ss` and reads as a timestamp rather than a duration when it
+ * lands mid-sentence — `waiting 00:48` is a position in a video, `waiting 48
+ * seconds` is how long something has taken.
+ */
+function waitedFor(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 60) {
+    return seconds === 1 ? '1 second' : `${seconds} seconds`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  const said = minutes === 1 ? '1 minute' : `${minutes} minutes`;
+  return rest === 0 ? said : `${said} ${rest}s`;
+}
+
+/**
  * The game the recorder's sitting is of, when the catalogue named one.
  *
  * Asked of the whole status rather than of each state, because a sitting spans
@@ -405,6 +424,19 @@ function describeRecorderStatus(status: RecorderStatus): RecorderStatusText {
         detail: `Recording ${gameIn(status) ?? status.target}.`,
       };
     case 'watching': {
+      // A recording that has been started and is waiting for the game to draw
+      // is answered first, because it is the one case where the other two
+      // sentences are false: the game *has* started and a recording *has* been
+      // started for it (issue #739). A real Garry's Mod launch spent 48 seconds
+      // here being described as a recorder waiting for something to happen.
+      const pending = status.pending;
+      if (pending !== undefined) {
+        return {
+          state: 'Starting',
+          detail: `Recording ${pending.game_name} as soon as it opens its window (waiting ${waitedFor(pending.waiting_ms)}).`,
+        };
+      }
+
       const game = gameIn(status);
       return {
         state: 'Watching',

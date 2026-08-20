@@ -2190,7 +2190,10 @@ fn a_watching_recorder_moves_through_all_three_states_over_the_protocol() {
         ServedRecorder::started_with("three-states", Some(&home), &["--watch-for-games"]);
     let mut client = recorder.client();
 
-    let watching = RecorderStatus::Watching(clipped_ipc::Watching { session: None });
+    let watching = RecorderStatus::Watching(clipped_ipc::Watching {
+        session: None,
+        pending: None,
+    });
     assert_eq!(
         status_of(&mut client),
         watching,
@@ -2697,7 +2700,10 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
     let mut client = recorder.client();
     assert_eq!(
         status_of(&mut client),
-        RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+        RecorderStatus::Watching(clipped_ipc::Watching {
+            session: None,
+            pending: None
+        }),
         "nothing has launched yet, so this recorder is watching and in no sitting",
     );
 
@@ -4015,7 +4021,10 @@ fn a_recorder_watching_for_games_serves_the_protocol_and_stops_cleanly() {
         // below is about.
         Reply::Status { status } => assert_eq!(
             status,
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
         ),
         other => panic!("expected a status, got {other:?}"),
     }
@@ -4091,12 +4100,14 @@ fn a_recorder_watching_for_games_is_told_apart_from_one_that_is_not() {
         .call(&IpcCommand::GetStatus)
         .expect("status is answered")
     {
-        Reply::Status { status } => assert_eq!(
+        Reply::Status { status } => {
+            assert_eq!(
             status,
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None, pending: None }),
             "a recorder that will record the next game to launch says so, and carries no sitting \
              until it is in one",
-        ),
+        )
+        }
         other => panic!("expected a status, got {other:?}"),
     }
 
@@ -4125,7 +4136,10 @@ fn a_recorder_watching_for_games_is_told_apart_from_one_that_is_not() {
     match events.next_event().expect("an event arrives") {
         Event::StatusChanged { status } => assert_eq!(
             status,
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "a window that attaches to a watching recorder is told what it is, or it draws \
              \"not recording\" over a recorder that is about to record",
         ),

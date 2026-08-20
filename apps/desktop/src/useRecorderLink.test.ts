@@ -136,6 +136,61 @@ describe('what the status block says about the recorder', () => {
     expect(inASitting.state).toBe('Watching');
     expect(inASitting.detail).toContain('Counter-Strike 2');
 
+    /*
+     * The interval this window used to describe as its own opposite.
+     *
+     * A game is recognised, a recording is started for it, and the recorder
+     * waits for the game to draw something worth capturing. On a real Garry's
+     * Mod launch that took 48 seconds, and for all of it this window said the
+     * recorder "will record it again if it starts" — of a game that had started,
+     * with a recording already running for it (issue #739). The user read that,
+     * reasonably concluded nothing was happening, and went looking for a manual
+     * control.
+     *
+     * So the assertion is not only that the new sentence is right. It is that
+     * the old one is *gone*: a build that appended the wait to the existing
+     * sentence would pass a `toContain` and still tell somebody their game is
+     * not being recorded.
+     */
+    const starting = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: ['automatic'],
+      status: {
+        state: 'watching',
+        session: {
+          session_id: 'garrys-mod-20260821-000426',
+          game_name: "Garry's Mod",
+          started_at: '2026-08-21T00:04:26+01:00',
+          recordings: [],
+        },
+        pending: { game_name: "Garry's Mod", waiting_ms: 48_000 },
+      },
+    });
+
+    expect(starting.state).toBe('Starting');
+    expect(starting.detail).toContain("Garry's Mod");
+    expect(starting.detail).not.toMatch(/if it starts/);
+    expect(starting.detail).not.toMatch(/watching for a game/);
+    // And it says how long, because 48 seconds and 2 seconds call for different
+    // patience and the recorder is the only side that knows which this is.
+    expect(starting.detail).toContain('48 seconds');
+
+    // A wait that has only just begun reads as a duration rather than as a
+    // timestamp: "waiting 00:01" is a position in a video.
+    const justStarted = describeRecorderLink({
+      link: 'attached',
+      recorder_process_id: 4242,
+      features: ['automatic'],
+      status: {
+        state: 'watching',
+        pending: { game_name: "Garry's Mod", waiting_ms: 1_000 },
+      },
+    });
+
+    expect(justStarted.detail).toContain('1 second');
+    expect(justStarted.detail).not.toContain('1 seconds');
+
     // The other direction: an idle recorder is not described as one that is
     // about to record something.
     const idle = describeRecorderLink({
