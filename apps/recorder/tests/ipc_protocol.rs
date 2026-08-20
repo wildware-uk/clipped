@@ -2883,6 +2883,194 @@ impl Drop for WindowlessSubject {
     }
 }
 
+/// A settings file that records no audio and keeps the shortest buffer there is.
+///
+/// The window matters as much as the audio does. The shipped default is five
+/// minutes, and a buffer spills to disk continuously for the length of the
+/// recording — about 700 MB for that window — which is a lot of somebody's disk
+/// for a four-second test. `clipped_replay::MINIMUM_WINDOW` is the floor the
+/// buffer itself enforces, so this asks for the smallest thing the product
+/// supports rather than a figure invented here (AGENTS.md section 55).
+fn recording_no_audio_with_the_shortest_buffer(home: &Path) {
+    let application_directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+    std::fs::write(
+        application_directory.join(clipped_session::config::FILE_NAME),
+        format!(
+            r#"{{"version":1,"global":{{"microphone":"none","system_audio":"none","replay_window_seconds":{}}}}}"#,
+            clipped_replay::MINIMUM_WINDOW.as_secs()
+        ),
+    )
+    .expect("the settings file can be written");
+}
+
+/// SPEC.md section 45, steps 5 to 12, in one test.
+///
+/// A game launches, the recorder records it **unasked**, the replay key is
+/// pressed, and the clip is in that game's sitting — filed against the recording
+/// it was cut from, so the library lists it under the game.
+///
+/// # Why this is one test and not four
+///
+/// Because every part of this journey already had one and the *sequence* had
+/// none, which is how the gap survived to [issue
+/// #731](https://github.com/wildware-uk/clipped/issues/731): the replay tests
+/// save out of a recording they asked for themselves, and the watcher tests
+/// watch a game launch and never save one. A build in which no watcher-started
+/// recording ever armed a buffer passes both — and that build shipped, refusing
+/// the hotkey with "this recording is not keeping a replay buffer" on the only
+/// path a new user takes.
+///
+/// # What would still pass if the fix were only half made
+///
+/// Arming the buffer without routing the save is the state this was found in,
+/// and it fails here at `SaveReplay` rather than silently: a recording adopted
+/// from the driver holds no session of its own, so naming the clip has to reach
+/// the driver's `SessionManager` over
+/// `clipped_session::automatic::clip_request`. Routing the save without
+/// entering the clip in the sitting would pass the `SaveReplay` assertion and
+/// fail the sidecar ones below — which is why the clip is looked for in the
+/// session record and not merely on disk.
+#[test]
+#[ignore = "records a game with a replay buffer; run on a machine with a display"]
+fn a_replay_saved_out_of_a_watched_game_lands_in_that_games_sitting() {
+    let Some(_tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let home = scratch_home("watched-replay");
+    overlay_naming_the_pattern(&home);
+    recording_no_audio_with_the_shortest_buffer(&home);
+
+    let recorder =
+        ServedRecorder::started_with("watched-replay", Some(&home), &["--watch-for-games"]);
+    let mut client = recorder.client();
+
+    // A process that starts between the watcher's baseline snapshot and its
+    // subscription is invisible to it for its lifetime, and that window is a
+    // few tens of milliseconds (`tests/automatic_sessions.rs` says the same).
+    std::thread::sleep(Duration::from_secs(1));
+    let pattern = support::PatternApp::start(SOURCE_FPS, 240);
+
+    let session = the_sitting_being_recorded(&mut client, DETECTION_PATIENCE);
+    let recording_id = match status_of(&mut client) {
+        RecorderStatus::Recording(active) => active.recording_id,
+        other => panic!("the watcher should be recording the pattern by now, not {other:?}"),
+    };
+    assert_eq!(
+        session.game_name.as_deref(),
+        Some("Clipped Video Pattern"),
+        "nothing asked for this recording; the watcher started it because the game launched",
+    );
+
+    // Let the buffer fill. A save is bought at keyframe granularity, so a press
+    // in the first moments of a recording produces whatever there is — which is
+    // a legitimate answer the recorder reports as incomplete, and a poor thing
+    // to assert a journey on. Four seconds is the same figure the sibling
+    // watcher tests record for, and by it there are frames in both the file and
+    // the buffer.
+    std::thread::sleep(RECORD_FOR);
+
+    let summary = match client
+        .call(&IpcCommand::SaveReplay(SaveReplay {
+            recording_id: Some(recording_id.clone()),
+            duration_seconds: Some(2.0),
+            output: None,
+        }))
+        .expect("the replay saves out of the recording the watcher started")
+    {
+        Reply::ReplaySaved { clip } => clip,
+        other => panic!("expected a clip, got {other:?}"),
+    };
+
+    // Step 7 itself: the press produced a file, and one with something in it.
+    // A zero-byte clip is what a save that reached the writer and found an
+    // empty buffer would leave.
+    let clip_on_disk = Path::new(&summary.path).to_path_buf();
+    assert!(
+        clip_on_disk.is_file(),
+        "the recorder reported a clip at {} and there is no file there",
+        summary.path,
+    );
+    assert!(
+        summary.bytes > 0 && clip_on_disk.metadata().expect("the clip can be read").len() > 0,
+        "a clip of no bytes is not a clip: {summary:?}",
+    );
+    assert_eq!(
+        summary.recording_id, recording_id,
+        "the clip says which recording it came out of, and it is the one the watcher started",
+    );
+
+    // Steps 8 to 12: the sitting. Stop first, because the sidecar is rewritten
+    // by the driver and the assertion is about what a later reader — the
+    // library indexer — finds, not about a moment mid-recording.
+    match client
+        .call(&IpcCommand::StopRecording(StopRecording {
+            recording_id: None,
+        }))
+        .expect("the recording stops")
+    {
+        Reply::RecordingStopped { summary } => assert!(
+            summary.frames_encoded > 0,
+            "a recording of no frames is not a recording: {summary:?}"
+        ),
+        other => panic!("expected a summary, got {other:?}"),
+    }
+
+    let clips = home.join("Videos").join("Clipped");
+    let (_, sitting) = the_sitting_with_recordings_in(&[&clips], 1, DETECTION_PATIENCE);
+    let recorded = sitting["clips"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the clip has to be in the sitting the game produced, or the library never lists it \
+         under the game:\n{sitting:#}",
+    );
+    assert_eq!(
+        recorded[0]["path"].as_str().map(Path::new),
+        Some(clip_on_disk.as_path()),
+        "and it is the file that was actually written:\n{sitting:#}",
+    );
+    // The part a save routed to the wrong session would get wrong while still
+    // producing a clip: which recording of the sitting it was cut from. Marks
+    // and events are read through this, so a clip filed against nothing — or
+    // against the wrong recording — draws another recording's history on its
+    // timeline.
+    //
+    // Compared with the recording's own number rather than a literal, because a
+    // literal here would be this test's opinion of how a sitting numbers its
+    // recordings and the sidecar's is the one that matters. Both being absent
+    // is the way that comparison can pass while saying nothing, so the number
+    // is asserted to exist first.
+    let numbered = sitting["recordings"][0]["index"].as_u64();
+    assert!(
+        numbered.is_some(),
+        "the sitting has to number its recordings for a clip to point at one:\n{sitting:#}",
+    );
+    assert_eq!(
+        recorded[0]["source_recording"].as_u64(),
+        numbered,
+        "the clip is filed against the recording it came from, which is the only one here:\n\
+         {sitting:#}",
+    );
+    // And it covers a span of that recording rather than an empty one, which is
+    // what a clip filed with the offsets of a save that found nothing would be.
+    let (from, to) = (
+        recorded[0]["source_start_seconds"].as_f64(),
+        recorded[0]["source_end_seconds"].as_f64(),
+    );
+    assert!(
+        matches!((from, to), (Some(from), Some(to)) if to > from),
+        "the clip has to say what part of the recording it is: {from:?} to {to:?}",
+    );
+
+    drop(pattern);
+    recorder.stop();
+}
+
 /// The first recording of the one sitting under `home`, once there is one.
 ///
 /// Polled, because the session record appears in two steps: it is written when

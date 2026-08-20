@@ -54,7 +54,35 @@ there has ever been of it (`apps/recorder/src/serve.rs`):
 | `take_screenshot` | Writes a still from a frame the recording already captured |
 | `stop_recording` | Finishes the file, and the sitting starts no further recording of a game that is still running — pressing stop is not undone five seconds later |
 | `get_status` | Reports it, **with the sitting it belongs to**, so a window can say "Counter-Strike 2, the second file of this sitting" rather than "process 4242" ([#241]). Between recordings it reports `watching` and carries the same sitting while it is still open, which is what stops a window blanking the game's name across a restart grace ([#584]) |
-| `save_replay` | Refused: an automatic recording keeps no replay buffer. Whether it should is [#427] |
+| `save_replay` | Saves a clip out of the buffer the recording keeps, and enters it in the sitting — so the library lists it under the game, filed against the recording it was cut from ([#731]). The buffer is the one `replay_window_seconds` asks for, and setting that to `0` declines it, at which point the save is refused in the recorder's own words |
+
+**Which session a clip goes into, when the recording is not the session.** A
+recording `start_recording` started is the whole of its own session and the
+connection thread answering `save_replay` holds it. An automatic recording is
+not: it belongs to a sitting the `SessionManager` on the driver's thread owns,
+which may already hold earlier files of the same sitting and is what writes the
+sidecar. So the two things a save needs a session for — a name for the clip, and
+a record of it once it exists — are asked of that thread over
+`clipped_session::automatic::clip_request`, and the clip itself is still written
+by whoever pressed the key:
+
+```text
+ connection thread                       driver thread
+ ─────────────────                       ─────────────
+ next_clip_path() ──── ask ─────────────▶ names it from the sitting
+                  ◀─── answer ───────────
+ save_last(keep, &path)
+   …as long as the disk takes…            carries on watching for games
+ clip_saved(…) ─────── ask ─────────────▶ enters it in the session record
+                  ◀─── answer ───────────
+```
+
+Not the other way round, because a driver that wrote the clip itself would stop
+watching for the length of the write — up to a replay window of footage — and a
+game launching or exiting in that gap would be seen late. Both callers reach
+those two operations through one `ClipDestination`, so what a clip is called and
+whether the library ever hears about it have a single implementation between
+them ([#731]).
 
 And the sitting itself reaches a window when it is over: a `session_ended` event
 on the `status` stream, carrying the sitting with the files it produced rather
@@ -75,6 +103,7 @@ ends.
 [#241]: https://github.com/wildware-uk/clipped/issues/241
 [#421]: https://github.com/wildware-uk/clipped/issues/421
 [#427]: https://github.com/wildware-uk/clipped/issues/427
+[#731]: https://github.com/wildware-uk/clipped/issues/731
 [#561]: https://github.com/wildware-uk/clipped/issues/561
 [#584]: https://github.com/wildware-uk/clipped/issues/584
 
@@ -143,12 +172,27 @@ rather than offered and doing nothing. Match Recording needs an integration that
 can say when a match begins, which is the highlight provider API in M9.
 Highlights Only and Manual/Replay Buffer need a replay buffer a clip can be
 *saved* from: the buffer exists, fills from the same encoder and can be written
-out as a clip (`docs/replay-buffer.md`, [#37]). The command exists ([#38]) and
-the hotkey now reaches an automatic recording ([#421]) — what is still missing is
-a *buffer* on one. An automatic recording keeps none, because nothing has decided
-to spend a rolling window on every game somebody launches; that is [#427]. So
-`save_replay` is refused during an automatic session, in the recorder's own
-words, rather than being a key that quietly does nothing.
+out as a clip (`docs/replay-buffer.md`, [#37]). The command exists ([#38]), the
+hotkey reaches an automatic recording ([#421]), and an automatic recording keeps
+a buffer of its own ([#731]) — so pressing the replay key during a game nobody
+asked the recorder to record produces a clip, filed in that game's sitting.
+
+**How much it keeps is the user's decision, not this document's.** It is the
+window `replay_window_seconds` resolves to for that game, which is the same
+setting and the same seam every other recording reads
+(`ResolvedSettings::replay_buffer_window`). That value was already written into
+every automatic recording's settings summary, so a recorder that reported keeping
+five minutes of history and kept none was a control that does nothing — the
+reason [#427]'s deferral could not stand once the summary said otherwise
+(AGENTS.md section 27). Setting it to `0` declines the buffer, and then
+`save_replay` is refused in the recorder's own words rather than being a key that
+quietly does nothing.
+
+What these two modes still need is not the buffer but the *policy* around it:
+Highlights Only means keeping only what was clipped, and Manual/Replay Buffer as
+an automatic session's mode means writing no continuous file for a game the
+watcher started. Both are decisions about what to do with a buffer that now
+exists on every automatic recording.
 
 **Manual/Replay Buffer exists as a sitting somebody starts**, which is the other
 way a session begins. `clipped-recorder replay --no-recording` captures, encodes

@@ -186,10 +186,18 @@ support bundle needs in order to answer "the hotkey does nothing"
 recording detection started. Two of those rows behave a little differently
 against one:
 
-- **`save_replay`** is refused, because an automatic recording keeps no rolling
-  window — that costs about 140 MiB a minute and nothing has decided to spend it
-  ([#427](https://github.com/wildware-uk/clipped/issues/427)). The refusal is the
-  same one a window-started recording without a buffer gets.
+- **`save_replay`** writes a clip out of the rolling window the recording keeps,
+  and enters it in the sitting the game produced — so a press during a game
+  nobody asked the recorder to record is filed under that game
+  ([#731](https://github.com/wildware-uk/clipped/issues/731)). The window is
+  whatever `replay_window_seconds` resolves to for that game, and setting it to
+  `0` declines the buffer, at which point the press is refused in the same words
+  a window-started recording without one gets.
+
+  Naming the clip and entering it are asked of the thread that owns the sitting,
+  because an automatic recording is not the whole of its own session; the clip
+  itself is still written on the thread handling the press
+  (`docs/sessions.md`).
 - **`toggle_recording`** stops the file *and* tells the sitting, so that the
   session does not start a fresh recording of the game five seconds later. A
   stop that undid itself would be worse than a key that did nothing (AGENTS.md

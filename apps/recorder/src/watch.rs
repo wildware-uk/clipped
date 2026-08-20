@@ -108,6 +108,7 @@ use clipped_logging::RedactedPath;
 use clipped_plugins::{
     discover, InstalledPlugin, ObservedProcess, SessionDetails, SupervisionEvent, SupervisionPolicy,
 };
+use clipped_session::automatic::clip_request::{Answer, Ask, ClipRequests};
 use clipped_session::automatic::{
     rfc3339, AutomaticSettings, GameIdentity, RecordingId, RecordingOutcome,
     RecordingOutcomeSummary, RecordingRequest, Session, SessionAction, SessionManager,
@@ -118,7 +119,8 @@ use clipped_session::config::{
 };
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
 use clipped_session::{
-    RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, SessionError,
+    RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, ReplayRecording,
+    SessionError,
 };
 use clipped_windows::WindowInfo;
 
@@ -809,6 +811,15 @@ fn report_interrupted_recordings(directory: &Path) {
 #[derive(Debug)]
 struct Driver {
     manager: SessionManager,
+    /// Where a `save_replay` for an automatic recording arrives.
+    ///
+    /// Held by the driver because the driver owns the sitting: naming a clip
+    /// and recording it are the sitting's business, and a connection thread
+    /// cannot do either without holding the session across a disk write
+    /// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+    /// Served in the loop, beside the events, so one thread touches the
+    /// session and it is this one.
+    saves: ClipRequests,
     plan: RecordingPlan,
     /// What was found under the plugins directory when this command started.
     ///
@@ -950,6 +961,7 @@ impl Driver {
             .with_launchers(launchers);
         Self {
             manager,
+            saves: ClipRequests::new(),
             plan,
             installed_plugins,
             plugin_consents,
@@ -1029,6 +1041,11 @@ impl Driver {
                 thread::sleep(SHUTDOWN_POLL_INTERVAL);
                 continue;
             }
+
+            // Before the events, because somebody is waiting on the other end
+            // of it. A press held until the next launch or the next idle tick
+            // would be a hotkey that answers when something else happens.
+            self.serve_clip_requests();
 
             match watcher.next_event(POLL_INTERVAL) {
                 Next::Event(event) => {
@@ -1505,6 +1522,54 @@ impl Driver {
     }
 
     /// Carries out what the session manager decided.
+    /// Answers whatever a clip being saved needs of this driver's sitting.
+    ///
+    /// The whole reason a save is a request rather than a call: naming a clip
+    /// and entering it in the sitting are the sitting's business, and the
+    /// sitting is this thread's ([issue
+    /// #731](https://github.com/wildware-uk/clipped/issues/731)).
+    ///
+    /// Both asks are cheap — a path built from fields already in hand, or one
+    /// sidecar rewrite. The clip itself is written by whoever asked, on their
+    /// thread, because a driver that wrote it here would stop watching for
+    /// games for as long as the disk took.
+    fn serve_clip_requests(&mut self) {
+        while let Some((id, ask)) = self.saves.claim() {
+            let answer = match ask {
+                Ask::NameNextClip => {
+                    self.manager
+                        .next_clip_path()
+                        .map(Answer::Named)
+                        .ok_or_else(|| {
+                            "nothing is being recorded, so there is nothing to save a clip out of"
+                                .to_owned()
+                        })
+                }
+                Ask::ClipSaved(clip) => {
+                    if self.manager.clip_saved(
+                        clip.path,
+                        clip.source_start,
+                        clip.source_end,
+                        clip.requested,
+                        clip.complete,
+                        clip.now,
+                    ) {
+                        Ok(Answer::Recorded)
+                    } else {
+                        // The clip is on disk; what has gone is the sitting it
+                        // would have been filed under, because the recording
+                        // ended while it was being written. Said rather than
+                        // swallowed: the user pressed a key and is owed an
+                        // answer about what became of it.
+                        Err("the recording ended while that clip was being written, so it is \n                             on disk but not in this session"
+                            .to_owned())
+                    }
+                }
+            };
+            self.saves.serve(id, answer);
+        }
+    }
+
     fn apply(&mut self, actions: Vec<SessionAction>) {
         for action in actions {
             match action {
@@ -1630,6 +1695,7 @@ impl Driver {
         let reachable = self.recordings.as_ref().map(|recordings| Reachable {
             recordings: Arc::clone(recordings),
             asked_to_stop: Arc::clone(&asked_to_stop),
+            saves: self.saves.clone(),
         });
 
         let thread = thread::Builder::new()
@@ -1945,6 +2011,9 @@ struct RecordingPlan {
 struct Reachable {
     recordings: Arc<RecordingState>,
     asked_to_stop: Arc<AtomicBool>,
+    /// Where a `save_replay` for this recording arrives, for the driver's loop
+    /// to answer ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+    saves: ClipRequests,
 }
 
 impl Reachable {
@@ -1956,6 +2025,7 @@ impl Reachable {
         progress: &RecordingProgress,
         stop: &ShutdownSignal,
         settings: Vec<clipped_session::config::EffectiveSetting>,
+        replay: Option<Arc<ReplayRecording>>,
     ) -> Result<Adopted, String> {
         self.recordings.adopt(
             output,
@@ -1964,6 +2034,14 @@ impl Reachable {
             stop,
             &self.asked_to_stop,
             settings,
+            // Only when there is something to save from. A channel handed over
+            // for a recording with no buffer would take a press, wait, and be
+            // answered "there is no buffer" a second later — where `save_replay`
+            // says so at once.
+            replay.map(|buffer| crate::serve::AdoptedReplay {
+                buffer,
+                saves: self.saves.clone(),
+            }),
         )
     }
 }
@@ -2164,6 +2242,35 @@ where
     // `add_bookmark`, `take_screenshot`, `stop_recording` and `get_status` all
     // reach it — through the one implementation of each, which does not know
     // this recording was started by anything unusual (issue #421).
+    // The buffer this recording keeps, from the window `replay_window_seconds`
+    // resolves to for *this game* — the same seam `serve` uses for the window's
+    // own recordings, so that "the user declined the buffer" has one definition
+    // and it is the settings layer's (issue #731, AGENTS.md section 55).
+    let replay = match request.settings.replay_buffer_window() {
+        Some(window) => match ReplayRecording::new(window) {
+            Ok(replay) => Some(Arc::new(replay)),
+            // A window `clipped-replay` will not take cannot come from a
+            // `Configuration` built through its own API, so this is a settings
+            // file that reached the disk another way. The recording goes ahead
+            // without a buffer and says so: losing the footage would be a worse
+            // answer than losing the ability to clip from it.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_seconds = window.as_secs_f64(),
+                    "this recording keeps no replay buffer: the configured window is one the \n                     buffer will not take, so a save will have nothing to save from"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::info!(
+                "this recording keeps no replay buffer, because replay_window_seconds is 0 \n                 for the game it is of"
+            );
+            None
+        }
+    };
+
     let adopted = match reachable
         .map(|reachable| {
             reachable.adopt(
@@ -2176,6 +2283,7 @@ where
                 // not the configuration on its own, which says nothing about
                 // the flags no layer overrode (issue #61, criterion 3).
                 clipped_session::config::effective_settings(&settings, &request.settings),
+                replay.clone(),
             )
         })
         .transpose()
@@ -2193,6 +2301,12 @@ where
     // recording is reachable — where a `take_screenshot` asks it for a frame it
     // has already captured. Both are stores the capture thread cannot wait on.
     let mut outputs = RecordingOutputs::default().with_progress(progress);
+    // What actually fills the buffer. Without this the recording holds a
+    // `ReplayRecording` nothing ever pushes a packet into, which is the same
+    // refusal one hop later.
+    if let Some(replay) = replay.as_deref() {
+        outputs = outputs.with_replay(replay);
+    }
     if let Some(adopted) = adopted.as_ref() {
         outputs = outputs.with_screenshots(adopted.screenshots());
         // And where it says which capture backend it settled on, so that a
@@ -2550,6 +2664,7 @@ name = "test-game.exe"
         let reachable = Reachable {
             recordings: Arc::clone(service.recordings()),
             asked_to_stop: Arc::new(AtomicBool::new(false)),
+            saves: ClipRequests::new(),
         };
         let progress = RecordingProgress::new();
 

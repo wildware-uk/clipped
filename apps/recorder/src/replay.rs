@@ -75,7 +75,7 @@ use std::time::{Duration, SystemTime};
 use clipped_hotkeys::{Handlers, HotkeyAction, HotkeyError, HotkeyService, Registration};
 use clipped_logging::RedactedPath;
 use clipped_replay::SavedClip;
-use clipped_session::automatic::ManualSession;
+use clipped_session::automatic::{ClipDestination, ClipDestinationError, ManualSession};
 use clipped_session::config::SettingError;
 use clipped_session::{record_with_replay, ReplayRecording, ReplaySaveError};
 
@@ -455,7 +455,13 @@ pub fn handlers_for(
     let replay = Arc::clone(replay);
     let session = Arc::clone(session);
     Handlers::new().on(HotkeyAction::SaveReplay, move |_press| {
-        report_save(&save(&replay, &session, keep, None, SystemTime::now()));
+        report_save(&save(
+            &replay,
+            session.as_ref(),
+            keep,
+            None,
+            SystemTime::now(),
+        ));
     })
 }
 
@@ -502,39 +508,51 @@ fn conflict_report(registration: &Registration) -> Vec<String> {
 /// not be written.
 pub fn save(
     replay: &ReplayRecording,
-    session: &Mutex<ManualSession>,
+    session: &dyn ClipDestination,
     keep: Duration,
     destination: Option<PathBuf>,
     now: SystemTime,
 ) -> Result<SavedReplay, ReplaySaveError> {
     // The name comes out of the session, so a clip is called after the sitting
-    // it belongs to and numbered within it. The lock is held for that and
-    // released before the write: writing a clip takes as long as the disk takes,
-    // and a second press must not queue behind the first holding a mutex.
+    // it belongs to and numbered within it. Whatever the session costs to reach
+    // — a mutex this thread may take, or a driver thread that has to be asked —
+    // is paid here and let go of before the write: writing a clip takes as long
+    // as the disk takes, and a second press must not queue behind the first.
     let path = match destination {
         Some(chosen) => chosen,
-        None => session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .next_clip_path(),
+        None => session.next_clip_path().map_err(no_sitting)?,
     };
 
     let clip = replay.save_last(keep, &path)?;
 
-    let complete = clip.is_complete();
+    // The clip is on disk from here. A failure below is a clip the library does
+    // not know about, which `recover` can find; it is not a lost recording, and
+    // the order is what makes that true (AGENTS.md section 54).
     session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clip_saved(
             clip.path().to_path_buf(),
             clip.covered().start(),
             clip.covered().end(),
             clip.requested_length(),
-            complete,
+            clip.is_complete(),
             now,
-        );
+        )
+        .map_err(no_sitting)?;
 
     Ok(SavedReplay { clip })
+}
+
+/// Which failure a session that could not be reached is.
+///
+/// Kept apart all the way to the wire: a sitting that said no is a recording
+/// that cannot be clipped, and a sitting that said nothing is this recorder
+/// failing to reach its own driver — and a window told the first stops offering
+/// a control, where the second is worth retrying.
+fn no_sitting(error: ClipDestinationError) -> ReplaySaveError {
+    match error {
+        ClipDestinationError::Refused(reason) => ReplaySaveError::NoSitting(reason),
+        ClipDestinationError::Unreachable(reason) => ReplaySaveError::SessionUnreachable(reason),
+    }
 }
 
 /// A clip that was written and entered in its session's record.

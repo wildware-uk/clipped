@@ -897,10 +897,15 @@ control; the `replay` feature says only that the build has the command.
 Refusals: `not_recording` when nothing is being recorded, when a named recording
 is not the one running, or when the recording that is running keeps no buffer —
 which is a different sentence, because the answer to it is to start one that
-does. `invalid_parameters` for a `duration_seconds` that is not a number of
-seconds or a blank `output`. `internal` when the clip could not be written,
-naming the file: a destination that already exists is refused rather than
-replaced.
+does. It also covers a recording that ended while the clip was being written,
+which is the same answer for the same reason: by the time the clip existed there
+was no longer a recording to file it against. `invalid_parameters` for a
+`duration_seconds` that is not a number of seconds or a blank `output`.
+`internal` when the clip could not be written, naming the file: a destination
+that already exists is refused rather than replaced — and when the recorder could
+not reach the session an automatic recording belongs to, which is a fault of the
+recorder rather than an answer about the recording, and is worth retrying where
+the refusals above are not (`docs/sessions.md`).
 
 ### `start_recording`
 

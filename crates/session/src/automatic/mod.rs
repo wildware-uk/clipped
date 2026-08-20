@@ -129,6 +129,7 @@
 //!
 //! [ADR 0001]: ../../../docs/adr/0001-mkv-archival-container.md
 
+pub mod clip_request;
 pub(crate) mod clock;
 mod manual;
 pub mod recovery;
@@ -163,6 +164,114 @@ pub use settings::{
 pub use sidecar::SCHEMA_VERSION as SESSION_SCHEMA_VERSION;
 
 use crate::report::{EndReason, RecordingReport};
+
+/// Why a clip could not be named, or could not be recorded.
+///
+/// Two cases and not one string, because a caller has to say something
+/// different about each and the protocol has to answer with a different code
+/// (AGENTS.md section 45): a sitting that said no is a recording that cannot be
+/// clipped, and a sitting that said nothing is this recorder failing to reach
+/// its own driver. Reporting the second as the first would tell a window to stop
+/// offering a control that is working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipDestinationError {
+    /// The sitting answered, and the answer was no — nothing is being recorded,
+    /// or the recording ended while the clip was being written.
+    Refused(String),
+    /// Nothing answered at all. The driver may have stopped, or be busy.
+    Unreachable(String),
+}
+
+impl core::fmt::Display for ClipDestinationError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Refused(reason) | Self::Unreachable(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for ClipDestinationError {}
+
+/// Somewhere a saved clip is named and recorded.
+///
+/// The two things saving a replay needs a sitting for, and the reason there is
+/// one `save` rather than two. What a clip is called — after the sitting it
+/// belongs to, numbered within it — and whether the session record ever hears
+/// about it are the parts that are easy to get subtly different, so both
+/// callers reach them through this and neither reimplements either (AGENTS.md
+/// section 55, issue #731).
+///
+/// Two implementations: a [`ManualSession`] behind a mutex, for a recording the
+/// caller's own thread owns; and
+/// [`ClipRequests`](clip_request::ClipRequests), for a sitting another thread
+/// owns and has to be asked. `save` cannot tell them apart, which is the point.
+///
+/// # Why `&self` when recording a clip mutates the sitting
+///
+/// Because the mutation is the implementation's business. One takes a mutex and
+/// the other sends a message; neither can offer `&mut self` to a caller holding
+/// it behind an `Arc`, and a `&mut` here would rule out the shared-handle case
+/// that is the whole reason this exists.
+pub trait ClipDestination {
+    /// Where the next clip of this sitting goes.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for the user when there is no sitting to name a clip in, or
+    /// when the thread that owns it could not be reached.
+    fn next_clip_path(&self) -> Result<PathBuf, ClipDestinationError>;
+
+    /// Records a clip that has been written, so the library files it under the
+    /// game.
+    ///
+    /// Called **after** the clip exists on disk, which is the whole of the crash
+    /// safety: a recorder killed between the two leaves a clip nothing indexed
+    /// rather than an index entry for a file that was never written (AGENTS.md
+    /// section 54).
+    ///
+    /// # Errors
+    ///
+    /// As [`next_clip_path`](Self::next_clip_path). The clip is on disk either
+    /// way; what failed is the filing of it.
+    fn clip_saved(
+        &self,
+        path: PathBuf,
+        source_start: Duration,
+        source_end: Duration,
+        requested: Duration,
+        complete: bool,
+        now: SystemTime,
+    ) -> Result<(), ClipDestinationError>;
+}
+
+/// A sitting this thread owns outright.
+///
+/// The lock is taken for the one call and released, never held across the
+/// write — `save` does the writing between the two, which is what stops a
+/// second press queueing behind the first.
+impl ClipDestination for std::sync::Mutex<ManualSession> {
+    fn next_clip_path(&self) -> Result<PathBuf, ClipDestinationError> {
+        Ok(self
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_clip_path())
+    }
+
+    fn clip_saved(
+        &self,
+        path: PathBuf,
+        source_start: Duration,
+        source_end: Duration,
+        requested: Duration,
+        complete: bool,
+        now: SystemTime,
+    ) -> Result<(), ClipDestinationError> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clip_saved(path, source_start, source_end, requested, complete, now);
+        Ok(())
+    }
+}
 
 /// Which recording of which session.
 ///
@@ -661,6 +770,83 @@ impl SessionManager {
     #[must_use]
     pub fn active_session(&self) -> Option<&Session> {
         self.active.as_ref().map(|active| &active.session)
+    }
+
+    /// Where the next clip saved out of the open sitting goes.
+    ///
+    /// [`None`] when no sitting is open or no recording is running in it: a
+    /// clip is cut from a recording, and one saved against a sitting that is
+    /// not recording would name a file with nothing in it to point at.
+    ///
+    /// Here rather than on the caller because the ordinal is the sitting's own
+    /// count, and two threads deciding it separately would eventually name two
+    /// clips the same and have the second overwrite the first
+    /// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+    #[must_use]
+    pub fn next_clip_path(&self) -> Option<PathBuf> {
+        let active = self.active.as_ref()?;
+        active.recording?;
+        Some(
+            active
+                .session
+                .clip_path(self.settings.directory(), active.session.clips_saved() + 1),
+        )
+    }
+
+    /// Records a clip that was saved out of the open sitting's recording.
+    ///
+    /// Returns whether the sitting took it. [`false`] means no sitting was open
+    /// or nothing was recording by the time the clip was written — which can
+    /// happen, because writing a clip takes as long as the disk takes and a
+    /// game can close while it happens. The file is still on disk and the
+    /// caller still reports it; what is lost is the sitting's record of it, and
+    /// saying so is better than a silent discrepancy between the folder and the
+    /// sidecar (AGENTS.md section 27).
+    ///
+    /// `source_start` and `source_end` are offsets into the recording, on the
+    /// recording's own timeline, which is the timeline the buffer's packets are
+    /// stamped on.
+    pub fn clip_saved(
+        &mut self,
+        path: PathBuf,
+        source_start: Duration,
+        source_end: Duration,
+        requested: Duration,
+        complete: bool,
+        now: SystemTime,
+    ) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let Some(recording) = active.recording else {
+            return false;
+        };
+
+        active.session.add_clip(SessionClip {
+            path,
+            created_at: now,
+            source_index: Some(recording),
+            source_start,
+            source_end,
+            requested,
+            complete,
+        });
+        // The sidecar, for the reason every other mutation here writes it: a
+        // clip the session record never mentions is one the library never files
+        // under the game, and the library is rebuilt from these files.
+        persist(self.settings.directory(), &active.session);
+
+        if let Some(clip) = active.session.clips().last() {
+            tracing::info!(
+                session = active.session.id().as_str(),
+                clip = %RedactedPath::new(clip.path()),
+                seconds = clip.duration().as_secs_f64(),
+                requested_seconds = clip.requested().as_secs_f64(),
+                complete = clip.is_complete(),
+                "a replay clip was saved out of this sitting's recording"
+            );
+        }
+        true
     }
 
     /// Says where a recording of the open session starts on the session's
