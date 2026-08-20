@@ -357,11 +357,16 @@ describe('the Games screen', () => {
   });
 
   /*
-   * The screen's one table is what it cannot show and why, not a list of games.
    * An empty Game / Recording / Last played table is indistinguishable from a
-   * machine that has played nothing, and this build has not looked.
+   * machine that has played nothing, so a screen that cannot look must say so
+   * rather than draw the headings over nothing.
+   *
+   * This was once asserted by requiring a "what is missing" table in its place.
+   * That table is gone — the screen owes nothing now — so the claim is made
+   * directly: no table of games, and a sentence saying which of the two silences
+   * this is.
    */
-  it('draws a table of what is missing rather than an empty table of games', async () => {
+  it('draws no table of games when it has not been able to look', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime({
       link: 'attached',
@@ -372,63 +377,59 @@ describe('the Games screen', () => {
     renderApp();
     await openGames(user);
 
-    const headers = within(screen.getByRole('table'))
-      .getAllByRole('columnheader')
-      .map((header) => header.textContent);
-    expect(headers).toEqual(['What the Games screen will show', 'What has to exist first']);
+    expect(screen.queryByRole('table', { name: 'Games Clipped knows' })).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Games recorded' })).toBeNull();
+    expect(await screen.findByText(/cannot list its catalogue/i)).toBeVisible();
   });
 
   /*
-   * What SPEC.md sections 6 and 17 ask this screen for, and the issue that
-   * supplies each — written out here rather than mapped from the screen's own
-   * `MISSING` array.
+   * The replacement for "names each thing it owes, and the issue that lands
+   * it", and the regression that case would not have caught.
    *
-   * That distinction is the whole test. A case that walked the rendered rows
-   * and asserted "two cells, and the second names some issue" is satisfied by a
-   * table holding one invented row, which is what a review demonstrated by
-   * replacing all four with `{ shows: 'x', needs: 'Issue #1' }` and watching the
-   * suite stay green. The claim being made is not "the rows have the right
-   * shape", it is "these four things are the four this screen owes and each is
-   * pinned to the work that lands it", and only a list kept independently of the
-   * implementation can say that.
+   * That case asserted the screen listed its remaining work with an issue
+   * against each. Its last row was the catalogue controls — registering,
+   * renaming, excluding — which #245 landed. The controls were drawn and the
+   * row stayed, so the screen offered four working buttons and told the reader
+   * underneath that none of them existed.
    *
-   * Adding a fifth row is a new promise to the reader, so it belongs here too;
-   * the count is asserted for that reason rather than for tidiness.
+   * Stale in exactly one direction, which is the direction that needs a guard:
+   * a screen is far more likely to keep claiming it cannot do something than to
+   * claim it can. So the assertion is on the absence of the claim, wherever it
+   * is worded, rather than on the table that used to carry it.
    */
-  const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    ['registering, renaming, excluding and disabling', /adding an unknown executable/i, [45, 245]],
-  ];
-
-  it('names each thing it owes, and the issue that lands it', async () => {
+  it('does not say the catalogue controls are missing while it is drawing them', async () => {
     const user = userEvent.setup();
-    stubRecorderLinkRuntime({
-      link: 'attached',
-      recorder_process_id: 7,
-      features: [],
-      status: { state: 'idle' },
-    });
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['catalogue', 'catalogue_editing'],
+        status: { state: 'idle' },
+      },
+      null,
+      {
+        catalogue: () =>
+          Promise.resolve([
+            {
+              game_id: 'counter-strike-2',
+              name: 'Counter-Strike 2',
+              source: 'shipped',
+              executables: [{ name: 'cs2.exe' }],
+              excluded: false,
+            },
+          ]),
+      },
+    );
     renderApp();
     await openGames(user);
 
-    // By name: this screen now draws a second table, of what has actually been
-    // recorded, and an unqualified `getByRole('table')` would be ambiguous.
-    const owed = screen.getByRole('table', { name: 'What the Games screen will show' });
-    const rows = within(owed).getAllByRole('row').slice(1);
-    expect(rows).toHaveLength(MUST_BE_NAMED.length);
+    // The controls are there.
+    expect(await screen.findByRole('form', { name: 'Register a game' })).toBeVisible();
 
-    for (const [subject, shows, issues] of MUST_BE_NAMED) {
-      const matching = rows.filter((row) =>
-        shows.test(within(row).getAllByRole('cell')[0]?.textContent ?? ''),
-      );
-      expect(matching, `one row for ${subject}`).toHaveLength(1);
-
-      const needs = within(matching[0] as HTMLElement).getAllByRole('cell')[1]?.textContent ?? '';
-      for (const issue of issues) {
-        expect(needs, `${subject} is waiting on #${String(issue)}`).toMatch(
-          new RegExp(`#${String(issue)}\\b`),
-        );
-      }
-    }
+    // And nothing on the screen describes them as work still to come.
+    expect(screen.queryByText(/adding an unknown executable/i)).toBeNull();
+    expect(screen.queryByText(/what this screen will show/i)).toBeNull();
+    expect(screen.queryByRole('table', { name: 'What the Games screen will show' })).toBeNull();
   });
 
   /*
@@ -461,13 +462,17 @@ describe('the Games screen', () => {
    * heading structure is the subject: a screen whose only heading was its title
    * gives a screen-reader user nothing to navigate between.
    */
-  it('has a heading for each of its two parts', () => {
+  it('has a heading for each of its parts', () => {
     render(<GamesScreen link={null} />);
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Games');
+    // The two the screen has now. "What this screen will show" was the third
+    // and went with the work it was waiting on (issue #245); a screen whose
+    // only heading is its title gives a screen-reader user nothing to navigate
+    // between, which is what this guards.
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
-    ).toContain('What this screen will show');
+    ).toEqual(expect.arrayContaining(['Every game Clipped knows', 'What has been recorded']));
   });
 });
 
@@ -568,9 +573,12 @@ describe('the Games screen, listing what has been recorded', () => {
     await waitFor(() => {
       expect(screen.queryByRole('table', { name: 'Games recorded' })).toBeNull();
     });
-    // The screen still stands: the detection block and the owed table are
-    // unaffected by a library that would not open.
-    expect(screen.getByRole('table', { name: 'What the Games screen will show' })).toBeVisible();
+    // The screen still stands: the detection block is unaffected by a library
+    // that would not open, and the failure is stated rather than left as an
+    // absence. Asserted on the detection heading rather than on the table this
+    // case used to look for, which went with the work it was waiting on.
+    expect(screen.getByRole('region', { name: 'Game detection' })).toBeVisible();
+    expect(screen.getByText(/locked/i)).toBeVisible();
   });
 });
 

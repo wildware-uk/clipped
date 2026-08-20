@@ -7,7 +7,6 @@ import { useCatalogueEditor } from './catalogueEdits';
 import { describeProblem, useCatalogue, useGames } from './library';
 import { recorderCanDo } from './useRecorderLink';
 import type { RecorderLinkState } from './useRecorderLink';
-import { WaitingOn, type Waiting } from './WaitingOn';
 
 /**
  * The Games screen (issue #107).
@@ -45,36 +44,6 @@ import { WaitingOn, type Waiting } from './WaitingOn';
  * drawn from the recorder link, it changes when the link does, and it is the
  * whole of what this screen claims.
  */
-
-/**
- * Everything SPEC.md sections 6 and 17 ask of this screen, against what each
- * one is waiting for.
- *
- * One row left here when issue #55 closed and nobody came back: "sessions,
- * clips, favourites and storage against each game", waiting on "the library
- * index that counts them". That index has existed for some time, `library_games`
- * carries exactly those figures to this window, and `useGames` — whose own
- * documentation says "the figures on the Games screen" — was being used by Home
- * and by the per-game settings and not by this screen. The table below is that
- * row, drawn.
- *
- * This table is the alternative to drawing four convincing empty columns. An
- * empty table headed Game / Recording / Last played is indistinguishable from a
- * machine that has played nothing, and this screen would be claiming to have
- * looked. It has not, because it cannot.
- *
- * The table itself is `WaitingOn`, shared with Home and Library (issue #60),
- * which draw one for the same reason. The rows below stay here: they are this
- * screen's promise, not the component's.
- */
-const MISSING: readonly Waiting[] = [
-  {
-    shows:
-      'Adding an unknown executable, renaming a game, excluding an application, and disabling capture per game',
-    needs:
-      'The same command, able to write the user overlay rather than the shipped seed data. Issues #45 and #245',
-  },
-];
 
 /** What the Games screen is given. */
 export interface GamesScreenProps {
@@ -197,14 +166,6 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
           <GamesTable games={games.value} showing="everything" label="Games recorded" />
         )}
       </section>
-
-      <h2 className="clipped-screen__heading">What this screen will show</h2>
-      <p className="clipped-screen__lead clipped-muted">
-        None of it is drawn yet, and none of it is invented in the meantime. Each row names the work
-        that supplies it.
-      </p>
-
-      <WaitingOn heading="What the Games screen will show" rows={MISSING} />
     </>
   );
 }
