@@ -56,9 +56,17 @@ windows = { workspace = true, features = [
 # synthesises input, and nothing in Clipped may: reading the keyboard is what
 # `docs/hotkeys.md` rules out, and this is the opposite direction of the same
 # API. It is a dev-dependency for exactly that reason.
+# `examples/process_table_apis.rs` measures `NtQuerySystemInformation` against
+# the `CreateToolhelp32Snapshot` the library ships with, which is the
+# measurement issue #288 is waiting on. It is a dev-dependency because that is
+# the whole extent of the dependency: nothing in the library calls into
+# `ntdll`, and whether anything ever should is the question the example exists
+# to answer.
 [dev-dependencies]
 windows = { workspace = true, features = [
+    "Wdk_System_SystemInformation",
     "Win32_System_LibraryLoader",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 

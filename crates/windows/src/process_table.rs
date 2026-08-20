@@ -12,6 +12,36 @@
 //! `OpenProcess` per row and only the watcher's baseline wants to pay for it
 //! ([`process_image_path`](crate::process_image_path) is the call that does).
 //!
+//! # Whether the call below is the cheap one
+//!
+//! It is, near enough, and [issue #288](https://github.com/wildware-uk/clipped/issues/288)
+//! is where that was settled. A snapshot costs around 12–16 ms for a few
+//! hundred rows, which at `ProcessTree`'s one-second rescan is between 1% and
+//! 2% of one core for the whole length of a recording — enough of SPEC.md
+//! section 38's budget to be worth an afternoon.
+//!
+//! `NtQuerySystemInformation`, asked for `SystemProcessInformation`, is the
+//! call this one is built on and was the obvious candidate. (Written without
+//! its brackets deliberately: `QUERY_SITES`, named below, reads an open bracket
+//! as a call, and this paragraph is about one rather than making one.) Measured against it, interleaved,
+//! over 150 rounds on a machine running 448 processes, it came out at **0.88x
+//! the speed** — slightly slower, not several times faster.
+//!
+//! The measurement also says what it is buying: the class returns a
+//! `SYSTEM_THREAD_INFORMATION` for every thread of every process — 13,155 of
+//! them in 1.28 MB, for a question about 448 — and offers no way to decline
+//! them. That the same walk is what the snapshot pays for too is the reading
+//! that fits, given the documented relationship between the two calls and how
+//! close the timings are, but it is an explanation of the measurement rather
+//! than a second measurement: only one side of it was counted.
+//!
+//! Either way the conclusion holds. The expensive part is asking the question
+//! at all, so anything that makes this cheaper has to ask it less often, or ask
+//! something smaller, rather than ask the same thing through a different door.
+//! `crates/windows/examples/process_table_apis.rs` is the measurement, and
+//! `QUERY_SITES` in `tests/integration/tests/process_table_reads.rs` keeps it
+//! from being repeated by accident.
+//!
 //! # The other read, which is not in this workspace
 //!
 //! The recorder's, and not the repository's. `apps/desktop/src-tauri` is a

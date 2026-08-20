@@ -877,10 +877,28 @@ every recording, against SPEC.md section 38's 3% budget for the entire recorder.
 That is affordable and it is not nothing, and the honest reading is that the
 mechanism is more expensive than the job: reading a 412-row list should not take
 twelve milliseconds.
-[Issue #288](https://github.com/wildware-uk/clipped/issues/288) is the way out —
-measuring `NtQuerySystemInformation` against the snapshot call — rather than
-tuning the interval, because halving the cost by doubling the interval doubles
-how long a helper's audio spends in the wrong track.
+
+**The obvious way out was measured and does not exist.**
+[Issue #288](https://github.com/wildware-uk/clipped/issues/288) proposed
+`NtQuerySystemInformation` — the call the snapshot is built on, documented as
+subject to change, and expected to be several times cheaper. Asked the same
+question, interleaved with the snapshot over 150 rounds against 448 processes,
+it came out at **0.88x the speed**: slightly slower, repeated to two decimal
+places across three runs. `crates/windows/examples/process_table_apis.rs` is
+that measurement, and it checks the two answers row by row as well as timing
+them — they agree on every identifier, parent and name.
+
+The same output says what the query is paying for. `SystemProcessInformation`
+describes every *thread* of every process, 13,155 of them in 1.28 MB, and gives
+no way to decline them. Whether the snapshot pays for that same walk is the
+reading that fits — the calls are related and the timings are close — but only
+the query's side was counted, so it is an explanation rather than a second
+measurement.
+
+So the twelve milliseconds is the price of the question, not of the door it is
+asked through, and a cheaper process tree has to ask less often or ask for less.
+Tuning the interval remains the thing not to do: halving the cost by doubling
+the interval doubles how long a helper's audio spends in the wrong track.
 
 The numbers are not exactly inverse in the interval, and the machine being busy
 is why: the two-second run should be about 0.6% and measured 0.77%. Read the
