@@ -778,6 +778,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     encoders: 'required',
     settings: 'optional',
     ffmpeg: 'optional',
+    library_refusal: 'optional',
   }),
   ffmpeg_build: fields<FfmpegBuild>({
     identifier: 'required',

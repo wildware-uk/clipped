@@ -76,6 +76,7 @@ const FRAMERATE_REFERENCE: Resolution = Resolution::HD_1080P;
 pub(crate) fn diagnostics(
     capture: Option<&clipped_session::CaptureAccount>,
     settings: Option<&[clipped_session::config::EffectiveSetting]>,
+    library_refusal: Option<String>,
 ) -> Result<Diagnostics, ProtocolError> {
     let detection = crate::capabilities::detection().map_err(|error| {
         ProtocolError::new(
@@ -97,6 +98,11 @@ pub(crate) fn diagnostics(
 
     Ok(Diagnostics {
         capture: capture.map(capture_account),
+        // Whether the library index is running at all. Handed in rather than
+        // read here, because this module knows nothing about the indexer and
+        // the caller holds it — the same arrangement `settings` uses (issue
+        // #738).
+        library_refusal,
         encoders: encoder_account(&detection),
         settings: settings.map(effective_settings),
         ffmpeg: Some(Box::new(FfmpegBuild {

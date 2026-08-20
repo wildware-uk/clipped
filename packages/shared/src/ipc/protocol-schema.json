@@ -379,6 +379,7 @@
       "optional": [
         "capture",
         "ffmpeg",
+        "library_refusal",
         "settings"
       ]
     },
@@ -3331,6 +3332,7 @@
                 "identifier": "n8.1.2-34-g9b6c8969e0-20260809",
                 "licence": "LGPL version 3 or later"
               },
+              "library_refusal": "database migration 7 (locked_media) failed and was rolled back: duplicate column              name: locked_at",
               "settings": [
                 {
                   "setting": "resolution",

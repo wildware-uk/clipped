@@ -1085,6 +1085,79 @@ describe('the Diagnostics screen', () => {
     expect(document.activeElement).toHaveTextContent('Copy report');
   });
 
+  /*
+   * A library that will not open, said where somebody can see it.
+   *
+   * Issue #738. On a real machine a renumbered migration stopped the library
+   * opening for four days. Recordings were made and written correctly the whole
+   * time and none was indexed, so the Library screen was empty and the recent
+   * clips were empty — and the only evidence anywhere was one `WARN` an hour in
+   * a log file. The user concluded the recorder did not work.
+   *
+   * Both directions are asserted. A screen that always drew the section would
+   * tell every healthy user their library is broken, which is a worse failure
+   * than the silence it replaces.
+   */
+  it('says when recordings are not reaching the library, and says nothing when they are', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: { state: 'idle' as const },
+      },
+      null,
+      {
+        recorderDiagnostics: () => ({
+          encoders: ENCODERS,
+          library_refusal:
+            'database migration 7 (locked_media) failed and was rolled back: duplicate column name: locked_at',
+        }),
+      },
+    );
+
+    render(<DiagnosticsScreen view={view()} notice={undefined} />);
+
+    const table = await screen.findByRole('table', { name: 'Library index' });
+    // The recorder's own sentence, verbatim: it names the migration that
+    // failed, which is what anybody diagnosing this needs.
+    expect(table).toHaveTextContent('migration 7 (locked_media)');
+    expect(table).toHaveTextContent('duplicate column name');
+    // And it says recording itself is fine, because the reasonable conclusion
+    // from "the library is broken" is that nothing is being kept.
+    expect(
+      screen.getByRole('heading', { name: 'Recordings are not reaching the library' }),
+    ).toBeInTheDocument();
+
+    void user;
+  });
+
+  it('draws no library warning for a recorder whose index is working', async () => {
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: { state: 'idle' as const },
+      },
+      null,
+      { recorderDiagnostics: () => ({ encoders: ENCODERS }) },
+    );
+
+    render(<DiagnosticsScreen view={view()} notice={undefined} />);
+
+    // Waited for, so the absence is asserted against a screen that has read its
+    // diagnostics rather than one that has not answered yet — which would pass
+    // this whatever the recorder said.
+    expect(
+      await screen.findByRole('heading', { name: 'What this machine can encode' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Recordings are not reaching the library' }),
+    ).toBeNull();
+  });
+
   it('has a heading for each of its three parts', () => {
     render(<DiagnosticsScreen view={view()} notice={undefined} />);
 
