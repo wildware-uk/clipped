@@ -39,18 +39,19 @@ impl GameKey {
     /// `[a-z0-9-]`. The rule is not tidiness: an identifier that differs from
     /// another only by case or by a space is one that two files will disagree
     /// about, and this one ends up as a key in the user's settings file.
+    /// The rule itself lives in `GameId::parse` and is not repeated here
+    /// (issue #246). What this adds is the typed rejection a settings file
+    /// needs: the catalogue's parser answers `None`, and a person editing
+    /// `settings.json` has to be told which key was refused.
+    ///
+    /// A key is deliberately **not** required to name a game the catalogue
+    /// knows. Settings for a game that is not listed — one added by a later
+    /// build, or one somebody registered and then removed — must still load,
+    /// resolve and save (AGENTS.md section 56), so this checks the shape of the
+    /// name and nothing else.
     pub fn parse(value: &str) -> Result<Self, InvalidGameKey> {
-        if value.is_empty() {
-            return Err(InvalidGameKey {
-                value: value.to_owned(),
-            });
-        }
-        value
-            .chars()
-            .all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            })
-            .then(|| Self(value.to_owned()))
+        clipped_game_detection::catalogue::GameId::parse(value)
+            .map(|identifier| Self(identifier.as_str().to_owned()))
             .ok_or_else(|| InvalidGameKey {
                 value: value.to_owned(),
             })
@@ -147,12 +148,75 @@ mod tests {
         );
     }
 
+    /// A game the catalogue does not list still has usable settings.
+    ///
+    /// The second acceptance criterion of
+    /// [issue #246](https://github.com/wildware-uk/clipped/issues/246), and the
+    /// property that decides how `GameKey::parse` is allowed to be implemented:
+    /// it checks the *shape* of a name and never asks the catalogue whether the
+    /// game exists.
+    ///
+    /// Delegating the rule to `GameId::parse` would be the obvious place to
+    /// acquire a catalogue lookup by accident, and doing so would silently
+    /// discard the settings of a game added by a later build, or one somebody
+    /// registered and then removed (AGENTS.md section 56).
+    #[test]
+    fn settings_for_a_game_the_catalogue_does_not_list_still_load_and_resolve() {
+        let catalogue = clipped_game_detection::catalogue::Catalogue::seed()
+            .expect("the shipped catalogue parses");
+        let stranger = GameKey::parse("a-game-no-catalogue-lists")
+            .expect("a well-formed name is a key whether or not a game has it");
+        assert!(
+            catalogue.find_by_id(stranger.as_str()).is_none(),
+            "this test is worthless if the catalogue happens to list it"
+        );
+
+        let mut configuration = crate::config::Configuration::defaults();
+        let mut preferences = crate::config::Preferences::default();
+        preferences
+            .set_framerate(Some(120))
+            .expect("120 is a framerate the settings accept");
+        configuration.set_game(stranger.clone(), preferences);
+
+        // Held.
+        assert_eq!(
+            configuration
+                .game(&stranger)
+                .and_then(crate::config::Preferences::framerate),
+            Some(120),
+            "settings for an unlisted game have to be readable back"
+        );
+
+        // Resolved, rather than falling through to the global answer.
+        assert_eq!(
+            configuration.resolve_for(&stranger).framerate().get(),
+            120,
+            "and they have to win over the global setting for that game"
+        );
+
+        // And survive being written and read again, which is where a lookup
+        // against the catalogue would quietly drop them.
+        let written = crate::config::document::render(&configuration);
+        let (reloaded, _) =
+            crate::config::document::parse(std::path::Path::new("settings.json"), &written)
+                .expect("what render wrote, parse reads");
+        assert_eq!(
+            reloaded
+                .game(&stranger)
+                .and_then(crate::config::Preferences::framerate),
+            Some(120),
+            "a game the catalogue does not know must not lose its settings on a save"
+        );
+    }
+
     #[test]
     fn every_catalogue_identifier_is_a_valid_settings_key() {
-        // The one thing holding the duplicated character rule to the
-        // catalogue's. If `GameId` ever admits a character this rejects, a
-        // user's per-game settings would become unnameable, and this fails
-        // first.
+        // There is no longer a duplicated rule for this to hold together —
+        // `GameKey::parse` delegates to `GameId::parse` (issue #246) — so what
+        // it now guards is the shipped data rather than the agreement: an entry
+        // whose `game_id` the rule rejects would be a game whose settings
+        // nobody could name, and that is a defect in the catalogue file rather
+        // than in either parser.
         let catalogue = clipped_game_detection::catalogue::Catalogue::seed()
             .expect("the shipped catalogue parses");
         assert!(
