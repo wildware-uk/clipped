@@ -138,6 +138,18 @@ pub mod features {
         /// and an empty table is indistinguishable from a machine that knows no
         /// games, which is the confusion this list exists to prevent.
         CATALOGUE = "catalogue";
+        /// The recorder can *change* the catalogue: register, rename, exclude
+        /// and forget.
+        ///
+        /// Separate from [`CATALOGUE`] on purpose. A recorder that can list
+        /// games cannot necessarily change them — every build between #245's
+        /// read half and its write half could do exactly the first and not the
+        /// second — so a window that inferred the controls from the list would
+        /// draw four buttons that answer
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand).
+        /// AGENTS.md section 27 is explicit that a button which writes nothing
+        /// may not be drawn.
+        CATALOGUE_EDITING = "catalogue_editing";
         /// The recorder can mark a moment in the recording it is making.
         ///
         /// A UI asks for this before offering an "Add Bookmark" control,

@@ -38,7 +38,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalogue::CatalogueGame;
+use crate::catalogue::{CatalogueGame, ForgetGame, RegisterGame, RenameGame, SetGameExcluded};
 use crate::diagnostics::Diagnostics;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
@@ -91,6 +91,19 @@ pub enum Command {
     /// most of them, and a sitting can be recorded under no catalogue entry at
     /// all (issue #245).
     CatalogueGames,
+    /// Register a game the catalogue does not know.
+    ///
+    /// The four commands below write the user's overlay and never the shipped
+    /// seed data (`docs/game-detection.md`). `clipped-game-detection` has been
+    /// able to perform all of them since #45; until #245 nothing in the product
+    /// called any of them, so the Games screen drew no controls.
+    RegisterGame(RegisterGame),
+    /// Change what a game is called, or put its shipped name back.
+    RenameGame(RenameGame),
+    /// Exclude a game from recording, or stop excluding it.
+    SetGameExcluded(SetGameExcluded),
+    /// Drop an entry the user added.
+    ForgetGame(ForgetGame),
 
     /// The game events of one recording, placed in its file.
     LibraryEvents(LibraryEvents),
@@ -247,6 +260,10 @@ impl Command {
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
             Self::CatalogueGames => "catalogue_games",
+            Self::RegisterGame(_) => "register_game",
+            Self::RenameGame(_) => "rename_game",
+            Self::SetGameExcluded(_) => "set_game_excluded",
+            Self::ForgetGame(_) => "forget_game",
             Self::LibraryEvents(_) => "library_events",
             Self::LibraryClipDocument(_) => "library_clip_document",
             Self::SaveClipDocument(_) => "save_clip_document",
@@ -292,6 +309,10 @@ impl Command {
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
             "catalogue_games" => Ok(Self::CatalogueGames),
+            "register_game" => Ok(Self::RegisterGame(parse_params(request)?)),
+            "rename_game" => Ok(Self::RenameGame(parse_params(request)?)),
+            "set_game_excluded" => Ok(Self::SetGameExcluded(parse_params(request)?)),
+            "forget_game" => Ok(Self::ForgetGame(parse_params(request)?)),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
             "library_clip_document" => Ok(Self::LibraryClipDocument(parse_params(request)?)),
             "save_clip_document" => Ok(Self::SaveClipDocument(parse_params(request)?)),
@@ -364,6 +385,10 @@ impl Command {
             Self::ApplySettings(settings) => serde_json::to_value(settings),
             Self::SetStartAtLogin(request) => serde_json::to_value(request),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
+            Self::RegisterGame(request) => serde_json::to_value(request),
+            Self::RenameGame(request) => serde_json::to_value(request),
+            Self::SetGameExcluded(request) => serde_json::to_value(request),
+            Self::ForgetGame(request) => serde_json::to_value(request),
         }
         .map_err(|error| {
             ProtocolError::new(
@@ -839,6 +864,23 @@ pub enum Reply {
         /// One row per game, and one for the sittings nothing was attributed
         /// to.
         games: Vec<LibraryGame>,
+    },
+    /// A catalogue edit was written, and what the catalogue holds now.
+    ///
+    /// **Every edit answers with the whole list.** The catalogue is small — tens
+    /// of entries, not thousands — and a client that had to re-ask after each
+    /// change would have a window between the write and the re-read where it
+    /// draws a list it knows to be wrong. Returning the new truth closes it.
+    CatalogueEdited {
+        /// The entry the edit was about.
+        ///
+        /// For `register_game` this is the identifier the overlay chose, which
+        /// the caller cannot predict: `GameKey::parse` derives it from the name
+        /// and appends a suffix where that collides with an entry already
+        /// there.
+        game_id: String,
+        /// One row per entry, as [`Self::CatalogueGames`] gives them.
+        games: Vec<CatalogueGame>,
     },
     /// The games the catalogue knows.
     CatalogueGames {

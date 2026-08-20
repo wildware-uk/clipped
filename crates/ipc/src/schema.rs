@@ -65,7 +65,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::catalogue::{CatalogueExecutable, CatalogueGame, EntrySource};
+use crate::catalogue::{
+    CatalogueExecutable, CatalogueGame, EntrySource, ForgetGame, RegisterGame, RenameGame,
+    SetGameExcluded,
+};
 use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
 use crate::diagnostics::{
     AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
@@ -789,6 +792,10 @@ fn commands() -> Vec<CommandSchema> {
                 Command::GetMicrophoneLevel(_) => Some("microphone_level_request".to_owned()),
                 Command::SetStartAtLogin(_) => Some("set_start_at_login".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
+                Command::RegisterGame(_) => Some("register_game".to_owned()),
+                Command::RenameGame(_) => Some("rename_game".to_owned()),
+                Command::SetGameExcluded(_) => Some("set_game_excluded".to_owned()),
+                Command::ForgetGame(_) => Some("forget_game".to_owned()),
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
@@ -810,6 +817,14 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::CatalogueGames => Some("reply.catalogue_games".to_owned()),
+                // All four edits answer with the same reply: what a change
+                // produced is the catalogue as it now stands, whole, so the
+                // client never draws a list it knows to be stale
+                // (`crate::catalogue`).
+                Command::RegisterGame(_)
+                | Command::RenameGame(_)
+                | Command::SetGameExcluded(_)
+                | Command::ForgetGame(_) => Some("reply.catalogue_edited".to_owned()),
                 Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
                 Command::LibraryClipDocument(_) => Some("reply.library_clip_document".to_owned()),
                 Command::SaveClipDocument(_) => Some("reply.clip_document_saved".to_owned()),
@@ -1473,6 +1488,16 @@ fn samples() -> Vec<Sample> {
             ServerMessage::Response(Response {
                 id: 12,
                 outcome: Outcome::Ok(Reply::CatalogueGames {
+                    games: exemplar_catalogue_games(),
+                }),
+            }),
+        ),
+        (
+            "a game the user registered, and the catalogue as it now stands",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::CatalogueEdited {
+                    game_id: "a-game-of-my-own".to_owned(),
                     games: exemplar_catalogue_games(),
                 }),
             }),
@@ -2173,6 +2198,38 @@ fn exemplar_catalogue_games() -> Vec<CatalogueGame> {
     ]
 }
 
+/// A registration of a game the catalogue does not know.
+fn exemplar_register_game() -> RegisterGame {
+    RegisterGame {
+        name: "A game of my own".to_owned(),
+        executable: "mygame.exe".to_owned(),
+        path_contains: Some("MyGame".to_owned()),
+    }
+}
+
+/// A rename. The clearing form carries `name: None` and is the same command.
+fn exemplar_rename_game() -> RenameGame {
+    RenameGame {
+        game_id: "a-game-of-my-own".to_owned(),
+        name: Some("What I call it".to_owned()),
+    }
+}
+
+/// An exclusion. Including again carries `excluded: false`.
+fn exemplar_set_game_excluded() -> SetGameExcluded {
+    SetGameExcluded {
+        game_id: "a-game-of-my-own".to_owned(),
+        excluded: true,
+    }
+}
+
+/// Dropping an entry the user added.
+fn exemplar_forget_game() -> ForgetGame {
+    ForgetGame {
+        game_id: "a-game-of-my-own".to_owned(),
+    }
+}
+
 /// What a reply turned out to be, including the wire strings underneath it.
 fn reply_discriminant(reply: &Reply) -> String {
     match reply {
@@ -2264,6 +2321,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
         Reply::CatalogueGames { .. } => "catalogue_games".to_owned(),
+        Reply::CatalogueEdited { .. } => "catalogue_edited".to_owned(),
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
         // Whether a recording is being captured is part of the path, for the
         // reason `shutting_down`'s `finalising` is: a mirror that dropped
@@ -3462,6 +3520,10 @@ fn every_built_command() -> Vec<Command> {
         Command::GetStartAtLogin,
         Command::SetStartAtLogin(exemplar_set_start_at_login()),
         Command::Shutdown(Shutdown::default()),
+        Command::RegisterGame(exemplar_register_game()),
+        Command::RenameGame(exemplar_rename_game()),
+        Command::SetGameExcluded(exemplar_set_game_excluded()),
+        Command::ForgetGame(exemplar_forget_game()),
     ];
     for command in &commands {
         match command {
@@ -3475,6 +3537,10 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::CatalogueGames
+            | Command::RegisterGame(_)
+            | Command::RenameGame(_)
+            | Command::SetGameExcluded(_)
+            | Command::ForgetGame(_)
             | Command::LibraryEvents(_)
             | Command::LibraryClipDocument(_)
             | Command::SaveClipDocument(_)
@@ -3814,6 +3880,10 @@ fn every_reply() -> Vec<Reply> {
         Reply::Storage {
             storage: exemplar_storage_report(),
         },
+        Reply::CatalogueEdited {
+            game_id: "a-game-of-my-own".to_owned(),
+            games: exemplar_catalogue_games(),
+        },
     ];
     for reply in &replies {
         match reply {
@@ -3827,6 +3897,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
             | Reply::CatalogueGames { .. }
+            | Reply::CatalogueEdited { .. }
             | Reply::LibraryEvents { .. }
             | Reply::LibraryClipDocument { .. }
             | Reply::ClipDocumentSaved { .. }

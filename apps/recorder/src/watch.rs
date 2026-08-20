@@ -3049,6 +3049,10 @@ name = "test-game.exe"
             Arc::clone(&settings),
             Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
             Launchers::none(),
+            // No games file: these are about the settings seam, not the
+            // catalogue, and must not be able to write one (AGENTS.md
+            // section 25).
+            None,
         ));
 
         let mut driver = Driver::new(
@@ -3110,6 +3114,10 @@ name = "test-game.exe"
             Arc::clone(&settings),
             Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
             Launchers::none(),
+            // No games file: these are about the settings seam, not the
+            // catalogue, and must not be able to write one (AGENTS.md
+            // section 25).
+            None,
         ));
 
         let mut driver = Driver::new(
