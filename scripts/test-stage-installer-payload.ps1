@@ -215,6 +215,39 @@ try {
         -ExpectedExitCode 1 `
         -ExpectedStaged @('clipped-recorder.exe')
 
+    # Issue #690: existence was the whole check, and it is not enough. `tauri
+    # build` compiles clipped-desktop and never clipped-recorder — they are
+    # separate Cargo workspaces — so a bundle succeeds without consulting the
+    # recorder's sources at all. That shipped an installer in 47 seconds
+    # carrying a recorder seven merged pull requests old, reported as a success.
+    #
+    # The fixture recorder is dated to 2020 rather than the sources being
+    # touched, because the comparison is against this repository's real `.rs`
+    # files: a test that wrote to `crates/` to make a point would be editing the
+    # tree it is being run from.
+    $staleRecorder = New-Fixture -Name 'stale-recorder' -WithRecorder -Libraries @('avcodec-62.dll')
+    (Get-Item -LiteralPath $staleRecorder.Recorder).LastWriteTime = [datetime]'2020-01-01 00:00'
+    Assert-Case `
+        -Name 'a recorder older than the sources stops the build, rather than being shipped' `
+        -Result (Invoke-Stage -Fixture $staleRecorder) `
+        -ExpectedExitCode 1 `
+        -Contains @(
+        'a current clipped-recorder.exe',
+        'cargo build --release -p clipped-recorder'
+    ) `
+        -ExpectedStaged @()
+
+    # The other direction, which is what stops the check above being a refusal
+    # nobody can clear: a recorder newer than every source stages exactly as it
+    # did before. Without this the previous case passes just as well against a
+    # script that refuses every build.
+    $freshRecorder = New-Fixture -Name 'fresh-recorder' -WithRecorder -Libraries @('avcodec-62.dll')
+    Assert-Case `
+        -Name 'a recorder newer than the sources is staged, so the check is not a blanket refusal' `
+        -Result (Invoke-Stage -Fixture $freshRecorder) `
+        -ExpectedExitCode 0 `
+        -ExpectedStaged @('clipped-recorder.exe', 'avcodec-62.dll')
+
     $noLibraries = New-Fixture -Name 'no-ffmpeg' -WithRecorder
     Assert-Case `
         -Name 'an FFmpeg build with no DLLs in it stops the build, naming the fetch script' `

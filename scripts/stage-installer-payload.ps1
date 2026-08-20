@@ -166,6 +166,48 @@ if (-not (Test-Path -LiteralPath $RecorderExecutable -PathType Leaf)) {
     exit 1
 }
 
+# And then whether it is the recorder for *this* tree.
+#
+# Existence was the whole check until issue #690, because absence is what issue
+# #226 was about. It is not enough. `tauri build` compiles `clipped-desktop` and
+# not this one — `apps/desktop/src-tauri` is a Cargo workspace of its own — so a
+# bundle succeeds without ever consulting the recorder's sources. That produced
+# an installer in 47 seconds carrying a recorder seven merged pull requests old,
+# reported as a success, and it is the mechanism behind a week of green CI over
+# a five-day-old build.
+#
+# The comparison is against the newest source of the recorder and the crates it
+# is built from, which is the same question `cargo build` asks and is why the
+# remedy below is a no-op when this refuses wrongly.
+#
+# Not built here. A script that silently ran a release build would take a
+# refusal somebody relies on — issue #226's third acceptance criterion, which CI
+# exercises through `npm run build:app` — and turn it into a five-minute
+# compile. Saying what is wrong and how to fix it is the same shape as every
+# other refusal in this file.
+$recorderBuiltAt = (Get-Item -LiteralPath $RecorderExecutable).LastWriteTime
+$sourceRoots = @(
+    (Join-Path $repositoryRoot 'crates'),
+    (Join-Path $repositoryRoot 'apps\recorder')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+
+$newestSource = $sourceRoots |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter '*.rs' -ErrorAction SilentlyContinue } |
+    Where-Object { $_.FullName -notmatch '\\target\\' } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($newestSource -and $newestSource.LastWriteTime -gt $recorderBuiltAt) {
+    $behind = [int]($newestSource.LastWriteTime - $recorderBuiltAt).TotalMinutes
+    Write-Refusal `
+        -Missing ('a current clipped-recorder.exe: it was built {0:yyyy-MM-dd HH:mm} and {1} changed {2:yyyy-MM-dd HH:mm}, {3} minutes later' -f `
+            $recorderBuiltAt, $newestSource.Name, $newestSource.LastWriteTime, $behind) `
+        -LookedIn $RecorderExecutable `
+        -Remedy 'cargo build --release -p clipped-recorder' `
+        -Consequence ('An installer carrying it would look complete and run code this tree has already moved past, which is what issue #690 is about. Nothing about a successful bundle implies the recorder in it is current: `tauri build` never compiles it.')
+    exit 1
+}
+
 # Checked with the recorder and the DLLs rather than after them, so a build
 # missing its notices fails before it has written anything.
 $licenceText = Join-Path $LicenceDirectory 'LICENSE.txt'
@@ -239,6 +281,23 @@ foreach ($file in $staged) {
 }
 
 Write-Host ("  {0,-24} {1,12}  {2}" -f 'licences', "$licenceFileCount files", $LicenceDirectory)
+
+# When the recorder this installer will carry was built.
+#
+# The build log is where "which recorder is in this installer" has to be
+# answerable, because the alternative is stat-ing a file after the fact — which
+# is how issue #690 was found, seven merged pull requests after the binary in
+# the payload was built. `tauri build` compiles the desktop crate and not this
+# one: `apps/desktop/src-tauri` is a separate Cargo workspace, so nothing about
+# a successful bundle implies the recorder in it is current.
+#
+# `beforeBuildCommand` now builds it first, so this line should read as minutes
+# old. It is printed rather than enforced because this script is also run by
+# hand and with `-RecorderExecutable` naming a binary from somewhere else, and
+# refusing those would be refusing a build somebody meant.
+$recorderBuilt = (Get-Item -LiteralPath $RecorderExecutable).LastWriteTime
+Write-Host ''
+Write-Host ("  Recorder built: {0:yyyy-MM-dd HH:mm}" -f $recorderBuilt)
 
 # Which FFmpeg this is, recorded by the fetch script when it installed the pin.
 # A build log that says only "seven DLLs" does not say which build shipped, and
