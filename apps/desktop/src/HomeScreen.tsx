@@ -60,8 +60,9 @@ const RECENT = 5;
  */
 const WAITING: readonly Waiting[] = [
   {
-    shows: 'Recently clipped, and the clips a session produced',
-    needs: 'The virtual clip model (#74) and clip creation (#91). The read carries clips already',
+    shows: 'Recently clipped, across every sitting',
+    needs:
+      'The Library lists the clips under the sitting they came from, and a saved replay is one of them. What Home does not do is gather the newest across all of them, which needs a query rather than this page’s summary read (#91)',
   },
 ];
 
