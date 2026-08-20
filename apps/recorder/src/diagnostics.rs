@@ -51,6 +51,7 @@ use clipped_encoder::{
     Adapter, AdapterId, Availability, CapabilityReport, CodecSupport, Detection, DetectionSource,
     EncoderKind, EncoderReport, Resolution, Vendor,
 };
+use clipped_ipc::diagnostics::FfmpegBuild;
 use clipped_ipc::{
     AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
     EffectiveSetting, EncoderAccount, EncoderSummary, ErrorCode, ProtocolError,
@@ -83,10 +84,28 @@ pub(crate) fn diagnostics(
         )
     })?;
 
+    // Asked of the loaded libraries, not of the pin in
+    // `scripts/fetch-ffmpeg.ps1`. The DLLs beside the binaries are replaceable
+    // by design — the LGPL relinking permission, which `docs/licensing.md`
+    // records testing — so which FFmpeg is in use is a run-time fact, and a
+    // window reporting the pin would report what was intended rather than what
+    // is loaded (issue #256).
+    //
+    // Cheap enough for this path: `linked_build` reads four strings the
+    // libraries already hold and starts nothing (AGENTS.md sections 17 and 20).
+    let ffmpeg = clipped_muxer::linkage::linked_build();
+
     Ok(Diagnostics {
         capture: capture.map(capture_account),
         encoders: encoder_account(&detection),
         settings: settings.map(effective_settings),
+        ffmpeg: Some(Box::new(FfmpegBuild {
+            identifier: ffmpeg.identifier.into_owned(),
+            licence: ffmpeg.licence.into_owned(),
+            avformat: ffmpeg.avformat.to_string(),
+            avcodec: ffmpeg.avcodec.to_string(),
+            avutil: ffmpeg.avutil.to_string(),
+        })),
     })
 }
 

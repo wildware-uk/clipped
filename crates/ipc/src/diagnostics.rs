@@ -60,6 +60,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The FFmpeg a recorder has loaded, as it reports itself.
+///
+/// Every field is asked of the loaded libraries rather than taken from the pin
+/// in `scripts/fetch-ffmpeg.ps1`: a machine running an FFmpeg of its own —
+/// which `.cargo/config.toml` deliberately allows — has to say so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FfmpegBuild {
+    /// FFmpeg's own name for the build, such as
+    /// `n8.1.2-34-g9b6c8969e0-20260809`.
+    ///
+    /// The release tag, the commit and whatever the packager appended, so it
+    /// identifies the artefact far more precisely than the library versions do.
+    pub identifier: String,
+    /// The licence the libraries report for themselves.
+    ///
+    /// Reported rather than assumed. A substituted GPL build carries the same
+    /// version numbers and a different licence, and LGPL v3 section 4(c) is
+    /// about what is *displayed*, so a hardcoded "LGPL" here would be the one
+    /// thing this must not be.
+    pub licence: String,
+    /// The loaded `libavformat`, such as `62.12.102`.
+    pub avformat: String,
+    /// The loaded `libavcodec`.
+    pub avcodec: String,
+    /// The loaded `libavutil`.
+    pub avutil: String,
+}
+
 /// What the recorder can say about capture and encoding, right now.
 ///
 /// The reply to `get_diagnostics`. Both halves are answered from state the
@@ -84,6 +112,29 @@ pub struct Diagnostics {
     /// software one and still has adapters, and "no encoder was found" is a
     /// report somebody with a problem needs rather than an empty answer.
     pub encoders: EncoderAccount,
+    /// Which FFmpeg the recorder actually loaded.
+    ///
+    /// The recorder logs this at start-up, which answers it for anybody with the
+    /// log file. It is here so that it is answerable *without a terminal*, which
+    /// is the third acceptance criterion of
+    /// [issue #256](https://github.com/wildware-uk/clipped/issues/256) and the
+    /// one that was outstanding.
+    ///
+    /// It is not only a convenience. The DLLs beside the binaries are
+    /// replaceable by design — that is the LGPL relinking permission, and
+    /// `docs/licensing.md` records the substitution test — so which FFmpeg is
+    /// in use is a *run-time* fact. A window that reported the pin would be
+    /// reporting what was intended rather than what is loaded.
+    ///
+    /// Absent from a recorder built before this, which is why it is optional
+    /// rather than a field every build must fill.
+    ///
+    /// Boxed because `Reply` is the largest variant of `Outcome` and five more
+    /// strings put it past what clippy's `large_enum_variant` will accept —
+    /// every reply of every kind would otherwise carry the space. `serde` sees
+    /// through a `Box`, so the wire is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg: Option<Box<FfmpegBuild>>,
     /// What the recording in progress is running with, setting by setting.
     ///
     /// Absent when nothing is being recorded, for the reason
@@ -412,6 +463,9 @@ mod tests {
             capture: None,
             encoders: encoders(),
             settings: None,
+            // Not the subject here. A recorder that could not ask its libraries
+            // answers this way, so it is also the honest fixture (issue #256).
+            ffmpeg: None,
         };
 
         let json = serde_json::to_value(&diagnostics).expect("it serialises");
@@ -453,6 +507,8 @@ mod tests {
                     source: "request".to_owned(),
                 },
             ]),
+            // Not the subject here (issue #256).
+            ffmpeg: None,
         };
 
         let json = serde_json::to_value(&diagnostics).expect("it serialises");

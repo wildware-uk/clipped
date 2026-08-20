@@ -39,6 +39,7 @@ import type {
   CaptureMethodChange,
   CodecSummary,
   Diagnostics,
+  FfmpegBuild,
   EffectiveSetting,
   DiagnosticsReply,
   EncoderAccount,
@@ -776,6 +777,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     capture: 'optional',
     encoders: 'required',
     settings: 'optional',
+    ffmpeg: 'optional',
+  }),
+  ffmpeg_build: fields<FfmpegBuild>({
+    identifier: 'required',
+    licence: 'required',
+    avformat: 'required',
+    avcodec: 'required',
+    avutil: 'required',
   }),
   effective_setting: fields<EffectiveSetting>({
     setting: 'required',

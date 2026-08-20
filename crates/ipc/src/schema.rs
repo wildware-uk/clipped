@@ -70,6 +70,7 @@ use crate::catalogue::{
     SetGameExcluded,
 };
 use crate::command::{Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording};
+use crate::diagnostics::FfmpegBuild;
 use crate::diagnostics::{
     AdapterSummary, CaptureAccount, CaptureMethodChange, CodecSummary, Diagnostics,
     EffectiveSetting, EncoderAccount, EncoderSummary,
@@ -703,6 +704,10 @@ fn structures() -> BTreeMap<String, Structure> {
     structures.insert(
         "capture_account".to_owned(),
         structure_of(&exemplar_capture_account(), &[]),
+    );
+    structures.insert(
+        "ffmpeg_build".to_owned(),
+        structure_of(&exemplar_ffmpeg_build(), &[]),
     );
     structures.insert(
         "effective_setting".to_owned(),
@@ -1759,6 +1764,11 @@ fn samples() -> Vec<Sample> {
                         // Absent for the same reason `capture` is: these are
                         // one recording's answers, and there is no recording.
                         settings: None,
+                        // Present, unlike those two: which FFmpeg is loaded is
+                        // a fact about the process rather than about a
+                        // recording, so a recorder answers it whether or not
+                        // anything is being recorded (issue #256).
+                        ffmpeg: Some(Box::new(exemplar_ffmpeg_build())),
                         encoders: EncoderAccount {
                             probed: true,
                             detected_at: None,
@@ -4016,6 +4026,7 @@ fn exemplar_diagnostics() -> Diagnostics {
         capture: Some(exemplar_capture_account()),
         encoders: exemplar_encoder_account(),
         settings: Some(exemplar_effective_settings()),
+        ffmpeg: Some(Box::new(exemplar_ffmpeg_build())),
     }
 }
 
@@ -4041,6 +4052,20 @@ fn exemplar_effective_settings() -> Vec<EffectiveSetting> {
 
 /// How a recording is capturing, with a backend that fell back so that the
 /// change list is not empty here.
+/// The FFmpeg a recorder reports having loaded.
+///
+/// The real pin at the time of writing, so the shape of an identifier is what a
+/// reader sees rather than a placeholder that would not parse anywhere.
+fn exemplar_ffmpeg_build() -> FfmpegBuild {
+    FfmpegBuild {
+        identifier: "n8.1.2-34-g9b6c8969e0-20260809".to_owned(),
+        licence: "LGPL version 3 or later".to_owned(),
+        avformat: "62.12.102".to_owned(),
+        avcodec: "62.28.102".to_owned(),
+        avutil: "60.26.102".to_owned(),
+    }
+}
+
 fn exemplar_capture_account() -> CaptureAccount {
     CaptureAccount {
         setting: "Automatic".to_owned(),

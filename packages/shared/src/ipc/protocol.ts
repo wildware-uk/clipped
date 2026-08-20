@@ -2527,6 +2527,24 @@ export interface EffectiveSetting {
 }
 
 /** What the recorder can say about capture and encoding, right now. */
+export interface FfmpegBuild {
+  /** FFmpeg's own name for the build, such as `n8.1.2-34-g9b6c8969e0-20260809`. */
+  readonly identifier: string;
+  /**
+   * The licence the libraries report for themselves.
+   *
+   * Reported rather than assumed: a substituted GPL build carries the same
+   * version numbers and a different licence.
+   */
+  readonly licence: string;
+  /** The loaded `libavformat`, such as `62.12.102`. */
+  readonly avformat: string;
+  /** The loaded `libavcodec`. */
+  readonly avcodec: string;
+  /** The loaded `libavutil`. */
+  readonly avutil: string;
+}
+
 export interface Diagnostics {
   /**
    * How the recording in progress is capturing.
@@ -2538,6 +2556,14 @@ export interface Diagnostics {
   readonly capture?: CaptureAccount;
   /** What this machine can encode. Never absent. */
   readonly encoders: EncoderAccount;
+  /**
+   * Which FFmpeg the recorder loaded.
+   *
+   * Absent from a recorder built before issue #256. The DLLs beside the
+   * binaries are replaceable by design — the LGPL relinking permission — so
+   * this is a run-time fact and not the pinned version.
+   */
+  readonly ffmpeg?: FfmpegBuild;
   /**
    * What the recording in progress is running with, setting by setting.
    *
