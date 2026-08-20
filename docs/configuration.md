@@ -1087,11 +1087,14 @@ survives it"](#failure-and-what-survives-it)).
 - **`replay_window_seconds`** becomes a `clipped_replay::ReplayConfig` when a
   recording opens a replay buffer, which needs the bitrate the encoder session
   was opened with; `record_with_replay` is where that meets. Who reads it:
-  `clipped-recorder replay` with no `--duration`, and any `start_recording` that
+  `clipped-recorder replay` with no `--duration`, any `start_recording` that
   sent `replay` without a length — which is every recording the desktop starts,
   because that window cannot read a setting and the answer inherits per game
   anyway ([`docs/ipc.md`](ipc.md), issue
-  [#427](https://github.com/wildware-uk/clipped/issues/427)). Both read it
+  [#427](https://github.com/wildware-uk/clipped/issues/427)) — and every
+  recording `serve --watch-for-games` starts by itself, which asks for nothing
+  and so gets exactly what this setting says
+  ([#731](https://github.com/wildware-uk/clipped/issues/731)). All three read it
   through `ResolvedSettings::replay_buffer_window`, which is `None` for `0` —
   the one place the off value becomes the absence the rest of the workspace
   spells `Option`, so that no caller decides for itself what off means.

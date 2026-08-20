@@ -358,6 +358,21 @@ pub enum ReplaySaveError {
     NotBuffering,
     /// The buffer holds nothing that covers the request.
     NothingBuffered(LeaseError),
+    /// The sitting the clip belongs to could not be reached, so the clip was
+    /// not named or was not recorded.
+    ///
+    /// A recording the watcher started belongs to a session another thread owns
+    /// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)), and
+    /// asking it is a thing that can fail — the driver may have stopped between
+    /// the press and the ask. Carries that thread's own sentence rather than a
+    /// second description of it.
+    NoSitting(String),
+    /// The thread that owns the sitting did not answer at all.
+    ///
+    /// Not [`Self::NoSitting`], which is that thread saying no: this is a
+    /// recorder that could not reach its own driver, and it is worth retrying
+    /// where the other is not.
+    SessionUnreachable(String),
     /// The clip could not be written.
     NotWritten {
         /// Where it was going.
@@ -374,6 +389,9 @@ impl fmt::Display for ReplaySaveError {
                 "this recording is not keeping a replay buffer, so there is nothing to save from",
             ),
             Self::NothingBuffered(error) => write!(formatter, "{error}"),
+            Self::NoSitting(reason) | Self::SessionUnreachable(reason) => {
+                write!(formatter, "{reason}")
+            }
             Self::NotWritten { source, .. } => write!(formatter, "{source}"),
         }
     }
@@ -384,6 +402,7 @@ impl Error for ReplaySaveError {
         match self {
             Self::NotBuffering => None,
             Self::NothingBuffered(error) => Some(error),
+            Self::NoSitting(_) | Self::SessionUnreachable(_) => None,
             Self::NotWritten { source, .. } => Some(source),
         }
     }

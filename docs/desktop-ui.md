@@ -1621,9 +1621,12 @@ explanation" is the failure AGENTS.md section 27 names.
   which is a fact about when the recording started and not about anything going
   wrong.
 
-  A recording started **from this window** keeps a buffer, so in practice the
-  item is live whenever this application is the thing recording
-  ([#427](https://github.com/wildware-uk/clipped/issues/427)). Both controls
+  A recording started **from this window** keeps a buffer
+  ([#427](https://github.com/wildware-uk/clipped/issues/427)), and so does one
+  the recorder started by itself when a game launched
+  ([#731](https://github.com/wildware-uk/clipped/issues/731)) — so in practice
+  the item is live whenever anything is being recorded, whoever started it,
+  unless `replay_window_seconds` is `0`. Both controls
   that start one — the Record button and Start Recording below — send the same
   request, and it carries `replay` without a length: how long a buffer keeps is
   `replay_window_seconds`, and this window has no way to read a setting.

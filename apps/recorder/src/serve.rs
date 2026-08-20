@@ -104,7 +104,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use clipped_game_detection::catalogue::{
     Catalogue, CatalogueError, EntrySource as CatalogueEntrySource, Overlay, Registration,
@@ -119,7 +119,10 @@ use clipped_ipc::{
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
-use clipped_session::automatic::{ManualSession, RecordedProcess, RecordingOutcome};
+use clipped_session::automatic::clip_request::ClipRequests;
+use clipped_session::automatic::{
+    ClipDestination, ClipDestinationError, ManualSession, RecordedProcess, RecordingOutcome,
+};
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
 use clipped_session::config::{Configuration, EffectiveSetting, SettingKey};
 use clipped_session::screenshot::{
@@ -1417,6 +1420,66 @@ pub(crate) struct RecordingState {
     automatic_directory: Mutex<Option<PathBuf>>,
 }
 
+/// The buffer an adopted recording keeps, and the way back to its sitting.
+///
+/// One value rather than two parameters because they are one decision: a
+/// recording that keeps a buffer is one a save can be made from, and a save from
+/// an adopted recording has to reach the driver that owns the sitting. Passing
+/// them separately would admit a recording with a buffer nobody can save from,
+/// and a channel for a recording with nothing to save
+/// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+pub(crate) struct AdoptedReplay {
+    /// The rolling window of the last few minutes.
+    pub(crate) buffer: Arc<ReplayRecording>,
+    /// Where a `save_replay` for it goes, for the driver's loop to answer.
+    pub(crate) saves: ClipRequests,
+}
+
+/// Where a clip saved out of a recording is named and recorded.
+///
+/// Both are a [`ClipDestination`], and `crate::replay::save` cannot tell them
+/// apart — which is what keeps one implementation of what a clip is called and
+/// whether the library ever hears about it (AGENTS.md section 55).
+enum ClipsGoTo {
+    /// The session this connection owns, for a recording it started.
+    Here(Arc<Mutex<ManualSession>>),
+    /// The sitting the automatic recorder's driver owns, for one it adopted.
+    TheDriver(ClipRequests),
+}
+
+impl ClipDestination for ClipsGoTo {
+    fn next_clip_path(&self) -> Result<PathBuf, ClipDestinationError> {
+        match self {
+            Self::Here(session) => session.as_ref().next_clip_path(),
+            Self::TheDriver(saves) => saves.next_clip_path(),
+        }
+    }
+
+    fn clip_saved(
+        &self,
+        path: PathBuf,
+        source_start: Duration,
+        source_end: Duration,
+        requested: Duration,
+        complete: bool,
+        now: SystemTime,
+    ) -> Result<(), ClipDestinationError> {
+        match self {
+            Self::Here(session) => session.as_ref().clip_saved(
+                path,
+                source_start,
+                source_end,
+                requested,
+                complete,
+                now,
+            ),
+            Self::TheDriver(saves) => {
+                saves.clip_saved(path, source_start, source_end, requested, complete, now)
+            }
+        }
+    }
+}
+
 /// A recording that has been started.
 ///
 /// It stays here after it has finished, holding its outcome, until whoever
@@ -1510,6 +1573,16 @@ struct Running {
     /// it. Shared for the reason the session is — a save runs on the connection
     /// thread while this one carries on recording.
     replay: Option<Arc<ReplayRecording>>,
+    /// How a save reaches the sitting, when the sitting is not here.
+    ///
+    /// [`Some`] exactly when this recording was adopted from the driver, which
+    /// is the same case as [`Self::session`] being [`None`]. The two are the
+    /// two ways of naming a clip and recording it, and a recording has one or
+    /// the other: a recording the window started is the whole of its own
+    /// session and does it here; an automatic one belongs to a sitting the
+    /// driver owns, and asks it
+    /// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+    saves: Option<ClipRequests>,
     /// Present when the automatic recorder started this recording, and the flag
     /// its driver reads.
     ///
@@ -1623,14 +1696,46 @@ impl Running {
     ///
     /// And on a recording [`RecordingState::adopt`] handed over, which holds no
     /// session of its own — the automatic recorder's manager owns that sitting.
-    /// The one caller is `save_replay`, which is reached only by a recording
-    /// with a replay buffer, and an adopted recording never has one
-    /// ([issue #427](https://github.com/wildware-uk/clipped/issues/427) is what
-    /// would give it one, and would have to give it a session here too).
+    /// Every caller here is on the `start_recording` path, which always has one.
+    /// Saving a clip is deliberately **not** among them: it goes through
+    /// [`clips_go_to`](Self::clips_go_to), which answers for both kinds of
+    /// recording, because an adopted recording has kept a replay buffer since
+    /// [issue #731](https://github.com/wildware-uk/clipped/issues/731) and so
+    /// reaches that path in earnest.
     fn session(&self) -> &Arc<Mutex<ManualSession>> {
         self.session
             .as_ref()
             .expect("a recording that has not ended still holds its session")
+    }
+
+    /// Where a clip saved out of this recording is named and recorded.
+    ///
+    /// The two kinds of recording keep their sitting in two places, and this is
+    /// the one function that knows which: a recording `start_recording` started
+    /// is the whole of its own session and holds it here; a recording the
+    /// watcher started belongs to a sitting the driver's `SessionManager` owns
+    /// and has to be asked for both
+    /// ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+    ///
+    /// # Errors
+    ///
+    /// When there is neither — a recording that has ended, whose session
+    /// [`RecordingState::finish`] has already taken to close. A refusal rather
+    /// than a panic, because this is now reached in earnest by every automatic
+    /// recording rather than being unreachable by construction, and a save
+    /// arriving as a recording ends is a race a user can lose by pressing a key
+    /// at the wrong moment (AGENTS.md section 16).
+    fn clips_go_to(&self) -> Result<ClipsGoTo, ProtocolError> {
+        if let Some(session) = self.session.as_ref() {
+            return Ok(ClipsGoTo::Here(Arc::clone(session)));
+        }
+        if let Some(saves) = self.saves.as_ref() {
+            return Ok(ClipsGoTo::TheDriver(saves.clone()));
+        }
+        Err(ProtocolError::new(
+            ErrorCode::NotRecording,
+            "that recording has ended, so there is no longer a session to save a clip into",
+        ))
     }
 
     /// The settings this recording's session resolved, copied out of it.
@@ -1761,6 +1866,10 @@ impl RecordingState {
             screenshots: ScreenshotRequests::new(),
             capture: CaptureAccounting::new(),
             session: Some(Arc::new(Mutex::new(session))),
+            // None, and that is the pair with the session above: a recording
+            // the window started is the whole of its own session and names its
+            // clips here, so it has nothing to ask a driver for.
+            saves: None,
             sitting: Some(sitting),
             // Attached afterwards by [`Running::with_replay`], because it is the
             // one thing about a recording that is optional.
@@ -1800,6 +1909,12 @@ impl RecordingState {
     /// this process's rule whoever asked for the recording, and a game launching
     /// while the user is recording something by hand does not take the encoder
     /// away from them.
+    // Eight, because every one of them is a fact about the recording being
+    // handed over that only the driver has. Bundling them into a struct would
+    // be the same eight fields written twice, which is why the two that *are*
+    // one decision — the buffer and the way back to its sitting — are already
+    // an [`AdoptedReplay`] and the rest are not.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn adopt(
         self: &Arc<Self>,
         output: &Path,
@@ -1808,6 +1923,7 @@ impl RecordingState {
         stop: &crate::shutdown::ShutdownSignal,
         asked_to_stop: &Arc<AtomicBool>,
         settings: Vec<EffectiveSetting>,
+        replay: Option<AdoptedReplay>,
     ) -> Result<Adopted, String> {
         let mut current = self
             .current
@@ -1844,15 +1960,22 @@ impl RecordingState {
             // be a second answer that stopped changing the moment the recording
             // started — which is the moment the sitting gains this file.
             sitting: None,
-            // No buffer, so `save_replay` refuses an automatic recording in the
-            // recorder's own words.
-            // [Issue #427](https://github.com/wildware-uk/clipped/issues/427)
-            // gave the recordings the *window* starts one, through
-            // [`StartRecording::replay`](clipped_ipc::StartRecording::replay);
-            // an automatic recording is one nobody asked for, and whether it
-            // should spend roughly 140 MiB a minute on a buffer nobody asked
-            // for is a decision about memory that issue did not make.
-            replay: None,
+            // The buffer the driver armed, which for an automatic recording is
+            // whatever `replay_window_seconds` resolves to for the game
+            // ([issue #731](https://github.com/wildware-uk/clipped/issues/731)).
+            //
+            // This was `None` on the grounds that an automatic recording is one
+            // nobody asked for. The setting is what asked for it: it defaults to
+            // five minutes and is written into every automatic recording's own
+            // settings summary, so a recorder that reported keeping five minutes
+            // of history and kept none was a control that does nothing
+            // (AGENTS.md section 27). `REPLAY_WINDOW_OFF` is how somebody
+            // declines it, and then this is `None` again.
+            replay: replay.as_ref().map(|kept| Arc::clone(&kept.buffer)),
+            // How a `save_replay` reaches the sitting this recording belongs
+            // to. The session itself is not here and must not be (see above),
+            // so the driver that owns it is asked and answers.
+            saves: replay.map(|kept| kept.saves),
             asked_to_stop: Some(Arc::clone(asked_to_stop)),
             // Handed over rather than read here, and that is the point: an
             // automatic recording's settings were resolved by a session manager
@@ -2546,7 +2669,7 @@ impl RecordingState {
                      with `replay_seconds` to choose the length, to be able to save from it",
                 ));
             };
-            (running.id.clone(), replay, Arc::clone(running.session()))
+            (running.id.clone(), replay, running.clips_go_to()?)
         };
 
         // Nothing asked for means the whole window the recording was started
@@ -3301,9 +3424,17 @@ fn nothing_to_save() -> ProtocolError {
 /// message.
 fn replay_not_saved(error: ReplaySaveError) -> ProtocolError {
     let code = match &error {
-        ReplaySaveError::NotBuffering | ReplaySaveError::NothingBuffered(_) => {
-            ErrorCode::NotRecording
-        }
+        ReplaySaveError::NotBuffering
+        | ReplaySaveError::NothingBuffered(_)
+        // The sitting itself said no: nothing is being recorded, or the
+        // recording ended while the clip was being written. The same answer as
+        // a recording that is not there, because by then it is not.
+        | ReplaySaveError::NoSitting(_) => ErrorCode::NotRecording,
+        // And this one is not: the recording may well still be running, and
+        // what failed is this recorder reaching the thread that owns its
+        // sitting. Reported as the fault it is, so a window does not take down
+        // a control that is working.
+        ReplaySaveError::SessionUnreachable(_) => ErrorCode::Internal,
         ReplaySaveError::NotWritten { .. } => ErrorCode::Internal,
         // `ReplaySaveError` is `#[non_exhaustive]`, and a variant added there is
         // a decision to make here rather than a silent `Internal`. It cannot be
@@ -4177,6 +4308,76 @@ mod tests {
             matches!(state.status(), RecorderStatus::Recording(active) if active.replay_seconds.is_none()),
             "and the status has to say the same thing, so a window never offers the control"
         );
+    }
+
+    /*
+     * And when it does keep one, the save reaches the sitting rather than the
+     * connection thread's own state — which is what used to panic.
+     *
+     * The recording here never opens an encoder, so the buffer has nothing in it
+     * and the save fails at the writer. That is deliberate: what is being
+     * asserted is *where the save went*, and a buffer with real packets in it
+     * would need a capture session for no additional claim. The clip landing in
+     * a real sitting is `tests/ipc_protocol.rs`.
+     *
+     * Before issue #731 this could not be written at all. `Running::session` was
+     * an `expect` and an adopted recording has none, so a save that got this far
+     * took the connection with it.
+     */
+    #[test]
+    fn a_replay_saved_out_of_an_automatic_recording_is_named_by_the_driver_that_owns_the_sitting() {
+        let directory = scratch("adopted-replay-routed");
+        let output = directory.join("clipped-a-test-game.mkv");
+        let state = idle_state(&directory);
+        let (adopted, _progress, _stop, _asked, saves) = adopted_recording_keeping(
+            &state,
+            &output,
+            Some(Duration::from_secs(30)),
+            Some(Duration::from_secs(60)),
+        );
+
+        // Playing the driver, because there is no `watch` loop here to do it.
+        // Started first: `save_replay` blocks until this answers.
+        let serving = saves.clone();
+        let named = directory.join("clipped-a-test-game-replay-1.mkv");
+        let driver = std::thread::spawn({
+            let named = named.clone();
+            move || {
+                for _ in 0..600 {
+                    if let Some((id, ask)) = serving.claim() {
+                        serving.serve(
+                            id,
+                            Ok(clipped_session::automatic::clip_request::Answer::Named(
+                                named,
+                            )),
+                        );
+                        return Some(ask);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None
+            }
+        });
+
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("this recording's buffer never opened an encoder");
+
+        assert_eq!(
+            driver.join().expect("the driver thread does not panic"),
+            Some(clipped_session::automatic::clip_request::Ask::NameNextClip),
+            "a save out of an automatic recording has to ask the thread that owns the sitting \
+             what the clip is called; nothing else can name it",
+        );
+        // And it failed for the buffer's reason rather than for want of a
+        // session, which is the failure this routing exists to prevent.
+        assert!(
+            !error.message.contains("session"),
+            "the save reached the buffer, so the refusal is the buffer's: {}",
+            error.message,
+        );
+
+        drop(adopted);
     }
 
     #[test]
@@ -6032,12 +6233,46 @@ excluded = true
         crate::shutdown::ShutdownSignal,
         Arc<AtomicBool>,
     ) {
+        let (adopted, progress, stop, asked_to_stop, _) =
+            adopted_recording_keeping(state, output, position, Some(Duration::from_secs(300)));
+        (adopted, progress, stop, asked_to_stop)
+    }
+
+    /// The same, saying how much of a buffer the recording keeps.
+    ///
+    /// [`None`] is a recording whose `replay_window_seconds` is
+    /// `REPLAY_WINDOW_OFF` — the one way an automatic recording keeps no buffer
+    /// since [issue #731](https://github.com/wildware-uk/clipped/issues/731),
+    /// and the reason the two cases need telling apart here at all.
+    ///
+    /// The channel comes back so a case can answer on the driver's behalf. In a
+    /// running recorder that is `watch`'s loop; there is no loop here, so a test
+    /// that wants a save to succeed has to be the driver itself.
+    fn adopted_recording_keeping(
+        state: &Arc<RecordingState>,
+        output: &Path,
+        position: Option<Duration>,
+        window: Option<Duration>,
+    ) -> (
+        Adopted,
+        RecordingProgress,
+        crate::shutdown::ShutdownSignal,
+        Arc<AtomicBool>,
+        ClipRequests,
+    ) {
         let progress = RecordingProgress::new();
         if let Some(position) = position {
             progress.reached(position);
         }
         let stop = crate::shutdown::ShutdownSignal::new();
         let asked_to_stop = Arc::new(AtomicBool::new(false));
+        let saves = ClipRequests::new();
+        let replay = window.map(|window| AdoptedReplay {
+            buffer: Arc::new(
+                clipped_session::ReplayRecording::new(window).expect("a supported window"),
+            ),
+            saves: saves.clone(),
+        });
         let adopted = state
             .adopt(
                 output,
@@ -6048,10 +6283,11 @@ excluded = true
                 // Nothing: what these cases are about is the handover, and the
                 // one that reads the settings back builds its own.
                 Vec::new(),
+                replay,
             )
             .expect("nothing else is being recorded");
 
-        (adopted, progress, stop, asked_to_stop)
+        (adopted, progress, stop, asked_to_stop, saves)
     }
 
     #[test]
@@ -6073,9 +6309,11 @@ excluded = true
         };
         assert_eq!(active.target, "A Test Game");
         assert_eq!(active.output, output.to_string_lossy());
-        assert!(
-            active.replay_seconds.is_none(),
-            "an automatic recording keeps no buffer, so nothing may offer Save Replay for it"
+        assert_eq!(
+            active.replay_seconds,
+            Some(300),
+            "an automatic recording keeps the buffer its settings ask for, and the status is \
+             where a window reads whether to offer Save Replay (issue #731)"
         );
 
         let summary = state
@@ -6167,6 +6405,7 @@ excluded = true
                 &crate::shutdown::ShutdownSignal::new(),
                 &Arc::new(AtomicBool::new(false)),
                 clipped_session::config::effective_settings(&running_with, &resolved),
+                None,
             )
             .expect("nothing else is being recorded");
 
@@ -6245,6 +6484,7 @@ excluded = true
                 &crate::shutdown::ShutdownSignal::new(),
                 &Arc::new(AtomicBool::new(false)),
                 Vec::new(),
+                None,
             )
             .expect_err("this recorder is already recording something");
 
@@ -6295,17 +6535,21 @@ excluded = true
     }
 
     #[test]
-    fn a_replay_asked_for_of_an_automatic_recording_is_refused_rather_than_taken() {
-        // An automatic recording keeps no buffer: `start_recording`'s `replay`
-        // is what asks for one (issue #427) and nothing asks on detection's
-        // behalf, so `save_replay` has to refuse it in the same words it
-        // refuses a window-started recording without one, and must not reach
-        // for a session it does not have.
+    fn a_replay_asked_for_of_an_automatic_recording_that_declined_a_buffer_is_refused() {
+        // Issue #731's third criterion. An automatic recording keeps the buffer
+        // its `replay_window_seconds` asks for, and `REPLAY_WINDOW_OFF` is how
+        // somebody declines it — at which point `save_replay` has to refuse in
+        // the same words it refuses a window-started recording without one, and
+        // must not reach for a session it does not have.
+        //
+        // The refusal, not the buffer, is what this is about: the case where
+        // there *is* one is the sibling below, and the whole journey is
+        // `tests/ipc_protocol.rs`.
         let directory = scratch("adopted-replay");
         let output = directory.join("clipped-a-test-game.mkv");
         let state = idle_state(&directory);
-        let (adopted, _progress, _stop, _asked) =
-            adopted_recording(&state, &output, Some(Duration::from_secs(30)));
+        let (adopted, _progress, _stop, _asked, _saves) =
+            adopted_recording_keeping(&state, &output, Some(Duration::from_secs(30)), None);
 
         let error = state
             .save_replay(&SaveReplay::default(), moment())
