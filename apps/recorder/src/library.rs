@@ -401,13 +401,30 @@ fn trashed_item(entry: clipped_library::trash::TrashEntry) -> TrashedItem {
 impl LibraryReader {
     /// A reader for the library at Clipped's usual place:
     /// `%LOCALAPPDATA%\Clipped\library.db`, beside the logs (`docs/storage.md`).
+    ///
+    /// The trash comes from `configuration`, through the same
+    /// `clipped_session::config::trash_directory` that a deletion uses, so that
+    /// `library_trash` reports **the directory actually in use**.
+    ///
+    /// It used to be derived from `default_output_directory` alone, which
+    /// ignored both a configured recording directory and a configured
+    /// `trash_directory` — so a window could be shown a path nothing deletes
+    /// into ([issue #646](https://github.com/wildware-uk/clipped/issues/646)).
+    /// One question, one answer, which is what AGENTS.md section 55 asks for and
+    /// what `cleanup::trash_directory`'s own documentation says it exists to
+    /// keep.
     #[must_use]
-    pub fn for_this_user() -> Self {
+    pub fn for_this_user(configuration: &clipped_session::config::Configuration) -> Self {
         let mut reader = Self::at(
             clipped_logging::application_directory().map(|directory| directory.join(LIBRARY_FILE)),
         );
-        reader.trash_directory = crate::config::default_output_directory()
-            .map(|recordings| clipped_session::config::trash_beside(&recordings));
+        reader.trash_directory = crate::config::default_output_directory().map(|default| {
+            let recordings = configuration
+                .storage()
+                .recording_directory()
+                .map_or(default, std::path::Path::to_path_buf);
+            clipped_session::cleanup::trash_directory(configuration, &recordings)
+        });
         reader
     }
 
@@ -2734,6 +2751,55 @@ mod tests {
             stored_edit(&library, 3),
             None,
             "and the clip is still the one nobody has edited"
+        );
+    }
+
+    /// The trash a reader reports is the one a deletion goes to.
+    ///
+    /// `for_this_user` derived it from `default_output_directory` alone, so a
+    /// configured recording directory or a configured `trash_directory` was
+    /// ignored and `library_trash` could name a path nothing deletes into
+    /// ([issue #646](https://github.com/wildware-uk/clipped/issues/646)).
+    ///
+    /// Asserted against `clipped_session::cleanup::trash_directory` rather than
+    /// against a path spelled out here: that function is the one a deletion
+    /// uses, and a second spelling of the rule in this test is how the two
+    /// would start disagreeing again (AGENTS.md section 55).
+    #[test]
+    fn the_trash_a_reader_reports_is_the_one_a_deletion_uses() {
+        use clipped_session::config::{Configuration, StorageSettings};
+
+        let recordings = std::path::Path::new(r"D:\Somewhere\Clips");
+        let elsewhere = std::path::Path::new(r"E:\A trash of my own");
+
+        // A configured recording directory, with no trash named: the trash sits
+        // beside the recordings, wherever those are.
+        let mut storage = StorageSettings::default();
+        storage
+            .set_recording_directory(Some(recordings.to_path_buf()))
+            .expect("a plain directory is a valid recording directory");
+        let mut configuration = Configuration::defaults();
+        configuration.set_storage(storage.clone());
+
+        assert_eq!(
+            LibraryReader::for_this_user(&configuration).trash_directory,
+            Some(clipped_session::cleanup::trash_directory(
+                &configuration,
+                recordings
+            )),
+            "a reader has to name the trash the configured recordings deletion goes to"
+        );
+
+        // And a trash named outright, which beats the recordings entirely.
+        storage
+            .set_trash_directory(Some(elsewhere.to_path_buf()))
+            .expect("a plain directory is a valid trash directory");
+        configuration.set_storage(storage);
+
+        assert_eq!(
+            LibraryReader::for_this_user(&configuration).trash_directory,
+            Some(elsewhere.to_path_buf()),
+            "a trash directory somebody chose is the one to report"
         );
     }
 

@@ -593,7 +593,9 @@ impl RecorderService {
         let settings = Arc::new(crate::settings::SettingsFile::for_this_user());
         Self::over(
             events,
-            LibraryReader::for_this_user(),
+            // The configured trash, not a derived one:  has to
+            // report the directory a deletion actually goes to (issue #646).
+            LibraryReader::for_this_user(&settings.configuration()),
             // The storage limits come from the same settings file the recording
             // settings do. Without them the indexer sweeps nothing, which is
             // what an unconfigured machine gets (issue #111).
