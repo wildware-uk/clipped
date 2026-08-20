@@ -698,10 +698,6 @@ Stated rather than left to be discovered (AGENTS.md section 54):
   audible on each track — and against nothing else. No editor is installed on the
   machine this was written on, and issue #28's second criterion asks for exactly
   that check, so it remains unmet and unclaimed.
-- **The audio a recording carries is not a capture's yet.** The samples that have
-  been through `AudioTrackWriter` are generated tones, not WASAPI's; joining
-  `clipped-audio` to a session is
-  [issue #180](https://github.com/wildware-uk/clipped/issues/180).
 - **No packet has come from a hardware encoder.** NVENC is
   [issue #15](https://github.com/wildware-uk/clipped/issues/15) and is not on
   this branch. The Annex B handling is what a Windows hardware encoder produces

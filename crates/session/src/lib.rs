@@ -293,7 +293,8 @@ pub use report::{
 };
 pub use settings::{
     AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
-    RecordingSettings, ResolutionSetting, UnavailableChoice, DEFAULT_FRAMERATE,
+    RecordingSettings, ResolutionSetting, UnavailableChoice, COMPATIBILITY_MIX_BY_DEFAULT,
+    DEFAULT_FRAMERATE,
 };
 pub use stop::StopSignal;
 
