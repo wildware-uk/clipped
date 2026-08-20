@@ -161,6 +161,18 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
    * that again from a fresh element.
    */
   const [durationSeconds, setDurationSeconds] = useState<number | null>(null);
+  /*
+   * Where the element is, for the playhead over the waveform (issue #694). In
+   * state rather than read off the ref for the reason the length is: a ref
+   * changing is not a render, and a playhead that only moved when something
+   * else happened to redraw would be worse than none.
+   *
+   * `timeupdate` fires a few times a second rather than per frame, which is the
+   * rate this wants: a playhead over a whole recording moves less than a pixel
+   * between frames, and a `requestAnimationFrame` loop would be a render loop
+   * for the life of the screen.
+   */
+  const [positionSeconds, setPositionSeconds] = useState<number | null>(null);
 
   /*
    * The marks the library holds for this recording (issue #65). Asked for by the
@@ -236,6 +248,9 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
               controls
               aria-label={`Playing ${fileName(source.file)}`}
               {...posterOf(poster)}
+              onTimeUpdate={() => {
+                setPositionSeconds(video.current?.currentTime ?? null);
+              }}
               onLoadedMetadata={() => {
                 // Choosing a track is a different file, so the element starts
                 // at zero; putting it back where it was is what makes the
@@ -257,13 +272,28 @@ export function ClipPlaybackScreen({ view }: ClipPlaybackScreenProps): ReactNode
 
             {/*
              * Under the transport, because that is where a waveform belongs and
-             * because it describes the recording rather than the track being
-             * played: `tracks` is every sound track of the file, which is what
-             * the selector below chooses between.
+             * because it describes the whole recording: `tracks` is every sound
+             * track of the file, one lane each, which is what the selector
+             * below chooses between.
+             *
+             * The lane for the track being played is marked and the playhead
+             * runs across all of them, so the picture says both what is in the
+             * file and which part of it you are hearing (issue #694).
              */}
             <Waveform
               preview={peaks.state === 'answered' ? peaks.preview : null}
               of={fileName(source.file)}
+              durationSeconds={durationSeconds}
+              positionSeconds={positionSeconds}
+              playingTrack={playback.stream.audio_track ?? null}
+              onSeek={(seconds) => {
+                if (video.current !== null) {
+                  video.current.currentTime = seconds;
+                  // So the playhead lands where it was pointed rather than
+                  // waiting for the element's next `timeupdate`.
+                  setPositionSeconds(seconds);
+                }
+              }}
             />
 
             {/*

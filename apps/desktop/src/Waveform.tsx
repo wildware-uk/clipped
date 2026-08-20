@@ -29,15 +29,23 @@ import { bucketCount, envelope, LANE } from './waveformOutline';
  * empty lane, which is `docs/desktop-ui.md`'s "No waveform" contract for the
  * Editor's lanes, kept here.
  *
- * # What this does not do
+ * # The playhead, and seeking (issue #694)
  *
- * It is not a timeline. There is no playhead over it and nothing to scrub; a
- * control drawn here that did nothing would be AGENTS.md section 27, and the
- * screen that puts peaks under a playhead is the Editor (issue #694). What is
- * drawn is what the peaks say and nothing else. The recording's marks are a
- * strip of their own below this one — `RecordingTimeline.tsx`, issue #65 —
- * because they are placed by the recorder in the file's own time and have
- * nothing to do with what a bucket of peaks says.
+ * Drawn only when a caller gives it a length and a position, and clickable only
+ * when a caller gives it somewhere to seek to. That is not defensiveness: this
+ * component is also drawn for a recording nothing is playing — the Library
+ * screen's rows, a poster with no element behind it — and a playhead over
+ * peaks nothing is moving through would be a control that lies about what it
+ * is. A picture without those props is exactly what it was before.
+ *
+ * The lane whose track is being played is marked, because a media element plays
+ * one track at a time and a screen showing four identical lanes says nothing
+ * about which one you are hearing.
+ *
+ * What is still not here: the recording's marks are a strip of their own below
+ * this one — `RecordingTimeline.tsx`, issue #65 — because they are placed by
+ * the recorder in the file's own time and have nothing to do with what a bucket
+ * of peaks says.
  *
  * # The other screen that draws these
  *
@@ -59,10 +67,42 @@ export interface WaveformProps {
   readonly preview: Preview | null;
   /** What to call the recording, for a screen reader. */
   readonly of: string;
+  /**
+   * How long the recording is, in seconds, or `null` when nothing knows.
+   *
+   * The playhead needs it to place itself and seeking needs it to say where to
+   * go, so without it neither is drawn. A container still being written reports
+   * no usable length, which is one of the ways this is legitimately absent.
+   */
+  readonly durationSeconds?: number | null;
+  /** Where the recording is being played, in seconds, or `null`. */
+  readonly positionSeconds?: number | null;
+  /**
+   * The index of the track being played, or `null`.
+   *
+   * The track's own index as the file numbers them, not its position in the
+   * list, because that is what the selector above chooses by and what the
+   * recorder answers with.
+   */
+  readonly playingTrack?: number | null;
+  /**
+   * Called when somebody clicks or drags a lane, with where they pointed.
+   *
+   * Absent for a waveform with nothing to seek — then no lane takes a pointer
+   * at all, rather than taking one and doing nothing.
+   */
+  readonly onSeek?: (seconds: number) => void;
 }
 
 /** One recording's sound, in whichever state its peaks are in. */
-export function Waveform({ preview, of }: WaveformProps): ReactNode {
+export function Waveform({
+  preview,
+  of,
+  durationSeconds = null,
+  positionSeconds = null,
+  playingTrack = null,
+  onSeek,
+}: WaveformProps): ReactNode {
   if (preview === null) {
     return null;
   }
@@ -104,7 +144,16 @@ export function Waveform({ preview, of }: WaveformProps): ReactNode {
         nothing here has decoded any audio.
       </figcaption>
       {tracks.map((track, position) => (
-        <TrackLane key={track.index} track={track} of={of} position={position} />
+        <TrackLane
+          key={track.index}
+          track={track}
+          of={of}
+          position={position}
+          durationSeconds={durationSeconds}
+          positionSeconds={positionSeconds}
+          playing={playingTrack !== null && track.index === playingTrack}
+          onSeek={onSeek}
+        />
       ))}
     </figure>
   );
@@ -115,10 +164,18 @@ function TrackLane({
   track,
   of,
   position,
+  durationSeconds,
+  positionSeconds,
+  playing,
+  onSeek,
 }: {
   readonly track: PreviewTrack;
   readonly of: string;
   readonly position: number;
+  readonly durationSeconds: number | null;
+  readonly positionSeconds: number | null;
+  readonly playing: boolean;
+  readonly onSeek?: ((seconds: number) => void) | undefined;
 }): ReactNode {
   // A track the recording did not name is shown by its position, the same way
   // the track selector above it does, rather than being given a name here:
@@ -126,8 +183,35 @@ function TrackLane({
   const label = track.name ?? `Audio ${position + 1}`;
   const outline = envelope(track);
 
+  // A length of zero would put every position at the start and make seeking a
+  // division by nothing, so it is treated as no length at all.
+  const seekable = durationSeconds !== null && durationSeconds > 0;
+  const buckets = bucketCount(track);
+  const at =
+    seekable && positionSeconds !== null && durationSeconds !== null
+      ? Math.min(Math.max(positionSeconds / durationSeconds, 0), 1) * buckets
+      : null;
+
+  function seekFrom(event: { clientX: number; currentTarget: Element }): void {
+    if (onSeek === undefined || !seekable || durationSeconds === null) {
+      return;
+    }
+    const box = event.currentTarget.getBoundingClientRect();
+    if (box.width === 0) {
+      return;
+    }
+    const across = Math.min(Math.max((event.clientX - box.left) / box.width, 0), 1);
+    onSeek(across * durationSeconds);
+  }
+
   return (
-    <div className="clipped-waveform__lane">
+    <div
+      className={
+        playing
+          ? 'clipped-waveform__lane clipped-waveform__lane--playing'
+          : 'clipped-waveform__lane'
+      }
+    >
       <span className="clipped-waveform__name">{label}</span>
       {outline === null ? (
         // No peaks at all in a track the recorder called ready. Nothing is
@@ -135,13 +219,49 @@ function TrackLane({
         <span className="clipped-muted">No waveform for this track</span>
       ) : (
         <svg
-          className="clipped-waveform__lane-picture"
-          viewBox={`0 0 ${bucketCount(track)} ${LANE}`}
+          className={
+            onSeek !== undefined && seekable
+              ? 'clipped-waveform__lane-picture clipped-waveform__lane-picture--seekable'
+              : 'clipped-waveform__lane-picture'
+          }
+          viewBox={`0 0 ${buckets} ${LANE}`}
           preserveAspectRatio="none"
           role="img"
-          aria-label={`Sound of ${label} in ${of}`}
+          aria-label={
+            playing ? `Sound of ${label} in ${of}, playing` : `Sound of ${label} in ${of}`
+          }
+          onPointerDown={
+            onSeek === undefined || !seekable
+              ? undefined
+              : (event): void => {
+                  // Captured so a drag that leaves the lane keeps seeking, the
+                  // way a scrubber behaves everywhere else.
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  seekFrom(event);
+                }
+          }
+          onPointerMove={
+            onSeek === undefined || !seekable
+              ? undefined
+              : (event): void => {
+                  if (event.buttons !== 0) {
+                    seekFrom(event);
+                  }
+                }
+          }
         >
           <path d={outline} />
+          {at === null ? null : (
+            // A line in the picture's own units, so it stretches with it. Drawn
+            // last so it is over the outline rather than under it.
+            <rect
+              className="clipped-waveform__playhead"
+              x={at}
+              y={0}
+              width={Math.max(buckets / 400, 1)}
+              height={LANE}
+            />
+          )}
         </svg>
       )}
     </div>

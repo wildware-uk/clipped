@@ -984,6 +984,39 @@ code {
 }
 
 /*
+ * The lane whose track is being played (issue #694). A media element plays one
+ * track at a time, and four identical lanes say nothing about which one is in
+ * your ears. The mark is on the row rather than on the picture so it reaches
+ * the name too, and it is a border rather than a fill because the fill is
+ * already carrying what the peaks say.
+ */
+.clipped-waveform__lane--playing {
+  border-left: var(--space-1) solid var(--color-accent-600);
+  padding-left: var(--space-2);
+}
+
+/*
+ * The playhead. In the picture's own coordinates, so it stretches with the
+ * outline instead of needing a width in pixels that would be wrong at every
+ * scale but one. `--color-text` rather than the accent, because the accent is
+ * what the waveform itself is drawn in and a playhead the same colour as the
+ * sound is a playhead you cannot find.
+ */
+.clipped-waveform__playhead {
+  fill: var(--color-text);
+}
+
+/*
+ * A lane that can be seeked says so with the pointer, and only that lane. The
+ * same component draws waveforms with nothing playing behind them — the
+ * Library's rows, a recording with no element — and a pointer cursor over a
+ * picture that does nothing is the cursor lying about what is there.
+ */
+.clipped-waveform__lane-picture--seekable {
+  cursor: pointer;
+}
+
+/*
  * Filled rather than stroked. A stroke of a fixed width would thicken as the
  * picture is stretched horizontally, and a shape is what the outline is: the
  * maxima along the top and the minima along the bottom of one closed path.
