@@ -41,8 +41,36 @@ import { inTauriWindow, recorderCanDo, type RecorderLinkState } from './useRecor
  */
 
 /** Whether anything can be done with this recording. */
-export function canActOn(recording: LibraryRecording): boolean {
+export function canActOn(recording: OnDisk): boolean {
   return recording.missing_since === undefined;
+}
+
+/**
+ * Something of the user's on disk that a row can act on.
+ *
+ * A recording and a clip cut from one differ in almost everything and in none
+ * of what opening or revealing a file needs: a path, and whether the library
+ * has noticed it is gone. Typing these two actions against the pair of fields
+ * they actually read is what lets the Library show a saved replay beside the
+ * recording it came from — which is MVP step 12, *see the replay*, and was
+ * unreachable while every control insisted on a `LibraryRecording`.
+ *
+ * Export is deliberately not here. It resolves a destination and asks the
+ * recorder to transcode, and whether that is the right thing to offer for a
+ * clip is a question rather than a widening.
+ */
+export interface OnDisk {
+  /**
+   * Where the file is.
+   *
+   * Required, unlike a clip's own `path`, which the protocol makes optional
+   * because the library can hold a clip it has never seen a file for. There is
+   * nothing to open or reveal in that case, so a caller with an optional path
+   * checks it before offering a control rather than offering one that fails.
+   */
+  readonly path: string;
+  /** When the library first found the file gone. */
+  readonly missing_since?: string;
 }
 
 /**
@@ -316,9 +344,9 @@ export interface RecordingActions {
    */
   readonly canExport: ExportOffer;
   /** Opens the recording in the system player. */
-  readonly open: (recording: LibraryRecording) => void;
+  readonly open: (item: OnDisk) => void;
   /** Shows the recording in Explorer, selected. */
-  readonly reveal: (recording: LibraryRecording) => void;
+  readonly reveal: (item: OnDisk) => void;
   /** Asks where the MP4 should go, and then writes it. */
   readonly exportToMp4: (recording: LibraryRecording) => void;
 }
@@ -341,7 +369,7 @@ export function useRecordingActions(link: RecorderLinkState | null): RecordingAc
 
   /** Runs one action, reporting what it did or why it did not. */
   const run = useCallback(
-    (recording: LibraryRecording, what: string, act: () => Promise<string | null>): void => {
+    (recording: OnDisk, what: string, act: () => Promise<string | null>): void => {
       setOutcome({ state: 'working', path: recording.path, what, progress: null });
       act()
         .then((message) => {
@@ -358,7 +386,7 @@ export function useRecordingActions(link: RecorderLinkState | null): RecordingAc
   );
 
   const open = useCallback(
-    (recording: LibraryRecording): void => {
+    (recording: OnDisk): void => {
       run(recording, 'Opening', async () => {
         await openRecording(recording.path);
         return `Opened ${fileName(recording.path)}.`;
@@ -368,7 +396,7 @@ export function useRecordingActions(link: RecorderLinkState | null): RecordingAc
   );
 
   const reveal = useCallback(
-    (recording: LibraryRecording): void => {
+    (recording: OnDisk): void => {
       run(recording, 'Showing', async () => {
         await revealRecording(recording.path);
         return `Showed ${fileName(recording.path)} in Explorer.`;

@@ -1,4 +1,4 @@
-import type { LibraryRecording, LibrarySession } from '@clipped/shared';
+import type { LibraryClip, LibraryRecording, LibrarySession } from '@clipped/shared';
 import { useRef, type ReactNode } from 'react';
 
 import { footageSeconds, formatBytes, formatDuration, formatMoment, presentBytes } from './library';
@@ -250,6 +250,23 @@ export function SessionList({
                 {...(locks === undefined ? {} : { locks })}
               />
             ))}
+          {/*
+           * The clips the sitting produced, under the recordings they were cut
+           * from. Until this, a saved replay was created, indexed, carried in
+           * this very read as `session.clips` — and drawn nowhere, so the one
+           * thing a player presses a hotkey *for* was invisible in the
+           * application (SPEC.md section 45, step 12).
+           */}
+          {actions !== undefined &&
+            session.clips.map((clip) => (
+              <ClipRow
+                key={clip.clip_id}
+                clip={clip}
+                actions={actions}
+                session={session}
+                thumbnails={thumbnails}
+              />
+            ))}
         </tbody>
       ))}
       {window_.bottomSpacerPx > 0 && (
@@ -260,6 +277,114 @@ export function SessionList({
         </tbody>
       )}
     </table>
+  );
+}
+
+/**
+ * One clip of a sitting, and what can be done with it.
+ *
+ * Drawn like a recording because that is what it is to somebody looking for
+ * footage — a file, a length, a size — and marked as a clip in words rather
+ * than by position, since a row's meaning must not depend on which rows happen
+ * to be above it (AGENTS.md section 46).
+ *
+ * # Why it offers less than a recording does
+ *
+ * No Play and no Export. Playing happens on the playback screen, which resolves
+ * what it shows from a *recording* identifier and the recorder's link — a clip
+ * is not one, and handing it a clip would need that resolution to grow a second
+ * kind rather than this row to grow a button. Export is the same question:
+ * whether transcoding a clip is a thing to offer is a decision, not a widening.
+ *
+ * Open and Show in Explorer need a path and nothing else, so those are here,
+ * and they are the whole of what "see the replay" requires.
+ *
+ * A clip the library has never seen a file for has no path at all, which is not
+ * the same as one whose file has gone: the first has nothing to open and the
+ * second has something to explain.
+ */
+function ClipRow({
+  clip,
+  actions,
+  session,
+  thumbnails,
+}: {
+  readonly clip: LibraryClip;
+  readonly actions: RecordingActions;
+  readonly session: LibrarySession;
+  readonly thumbnails: boolean;
+}): ReactNode {
+  const of = `${clip.title ?? (clip.path === undefined ? 'a clip' : fileName(clip.path))}, ${
+    session.game_name ?? 'not recognised'
+  }`;
+  const available = clip.path !== undefined && clip.missing_since === undefined;
+  const busy =
+    actions.outcome.state === 'working' && actions.outcome.path === clip.path
+      ? actions.outcome.what
+      : undefined;
+  const why =
+    clip.path === undefined
+      ? 'The library holds this clip but has never seen a file for it.'
+      : clip.missing_since === undefined
+        ? undefined
+        : 'The file is gone from where the library last saw it.';
+
+  return (
+    <tr>
+      {thumbnails && (
+        <td>{clip.path === undefined ? null : <Thumbnail source={clip.path} of={of} />}</td>
+      )}
+      <td colSpan={thumbnails ? 3 : 4}>
+        {/*
+         * The word "Clip", every row, rather than an icon or an indent. A
+         * screen reader announces this row on its own, and "20260820-171203.mkv"
+         * says nothing about which of the two kinds of file it is.
+         */}
+        <span className="clipped-tag clipped-tag--outline">Clip</span>{' '}
+        {clip.title ?? (clip.path === undefined ? 'Not on disk' : fileName(clip.path))}
+        {clip.duration_seconds !== undefined && (
+          <span className="clipped-muted"> · {formatDuration(clip.duration_seconds)}</span>
+        )}
+        {clip.size_bytes !== undefined && available && (
+          <span className="clipped-muted"> · {formatBytes(clip.size_bytes)}</span>
+        )}
+        {why !== undefined && <span className="clipped-muted"> · {why}</span>}
+      </td>
+      <td>
+        <button
+          type="button"
+          disabled={!available || busy !== undefined}
+          title={why}
+          aria-label={`Open ${of}`}
+          onClick={() => {
+            if (clip.path !== undefined) {
+              actions.open({
+                path: clip.path,
+                ...(clip.missing_since === undefined ? {} : { missing_since: clip.missing_since }),
+              });
+            }
+          }}
+        >
+          Open
+        </button>{' '}
+        <button
+          type="button"
+          disabled={!available || busy !== undefined}
+          title={why}
+          aria-label={`Show ${of} in Explorer`}
+          onClick={() => {
+            if (clip.path !== undefined) {
+              actions.reveal({
+                path: clip.path,
+                ...(clip.missing_since === undefined ? {} : { missing_since: clip.missing_since }),
+              });
+            }
+          }}
+        >
+          Show in Explorer
+        </button>
+      </td>
+    </tr>
   );
 }
 

@@ -89,14 +89,14 @@ const PAGE = 25;
  */
 const WAITING: readonly Waiting[] = [
   {
-    shows: 'Clips, and the highlights a session produced',
+    shows: 'Highlights a session produced',
     needs:
-      'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
+      'Clips are drawn now — a sitting lists the ones cut from it, and a saved replay is one. What is still missing is a *highlight*: nothing scores a moment, which is issue #76',
   },
   {
-    shows: 'Playing a clip, from the list',
+    shows: 'Playing a clip in this window',
     needs:
-      'Clips themselves: the virtual clip model (#74) and clip creation (#91). A recording plays from here already (#304)',
+      'A sitting lists its clips now, and each opens in whatever plays video here. What this window cannot do is play one *itself*: the playback screen resolves what it shows from a recording identifier and the recorder’s link, and a clip is not one — that is issue #91',
   },
 ];
 

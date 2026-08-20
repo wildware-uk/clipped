@@ -461,12 +461,16 @@ describe('the Library screen', () => {
   });
 
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
+    // Clips have left this list: a sitting lists the ones cut from it since
+    // step 12 of SPEC.md section 45 was built, and a saved replay is one. What
+    // is still owed is a *highlight* — something that scores a moment — which
+    // is a different feature and a different issue.
+    ['highlights', /^highlights a session/i, [76]],
     // Playing a *recording* is no longer on this list: Play is a control on
     // every row since issue #304, and a row promising what the screen already
     // does is worse than no row. Playing a **clip** is still waiting, and on
     // clips existing rather than on a player.
-    ['playing a clip', /^playing a clip/i, [74, 91]],
+    ['playing a clip', /^playing a clip in this window/i, [91]],
   ];
 
   it('names each part it still owes, and the issue that lands it', async () => {

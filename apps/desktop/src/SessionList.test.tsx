@@ -1,5 +1,6 @@
-import type { LibraryRecording, LibrarySession } from '@clipped/shared';
-import { act, render } from '@testing-library/react';
+import type { LibraryClip, LibraryRecording, LibrarySession } from '@clipped/shared';
+import { act, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { SessionList } from './SessionList';
@@ -297,5 +298,135 @@ describe('a recording with no file says which kind of no file it is', () => {
 
     const text = container.textContent ?? '';
     expect(text).toContain('3 recordings, 2 did not record, 1 file missing');
+  });
+});
+
+/**
+ * The clips a sitting produced (SPEC.md section 45, step 12).
+ *
+ * Until these rows existed, a saved replay was created by the recorder, indexed
+ * by the library and carried in this very read as `session.clips` — and drawn
+ * nowhere. The one thing a player presses a hotkey *for* was invisible in the
+ * application, while two screens told them clips were not built yet.
+ */
+describe('the clips a sitting produced', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  /** A sitting with one recording and one clip cut from it. */
+  function withClip(clip: Partial<LibraryClip> = {}): LibrarySession {
+    return {
+      ...session(1),
+      clips: [
+        {
+          clip_id: 7,
+          path: 'D:/clips/session-1-replay-1.mkv',
+          created_at: '2026-08-11T20:24:00+01:00',
+          duration_seconds: 30,
+          size_bytes: 4_000_000,
+          favourite: false,
+          tags: [],
+          ...clip,
+        },
+      ],
+    };
+  }
+
+  it('draws a clip with its length and size, marked as a clip in words', () => {
+    render(<SessionList sessions={[withClip()]} label="Sessions" actions={ACTIONS} />);
+
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('session-1-replay-1.mkv');
+    expect(text).toContain('Clip');
+    expect(text).toContain('30 s');
+  });
+
+  /*
+   * The two controls a clip has, and the reason it has exactly these: opening
+   * and revealing need a path and nothing else. Play resolves against a
+   * *recording* identifier and Export is a decision rather than a widening,
+   * which is why neither is offered here.
+   */
+  it('offers Open and Show in Explorer, naming the clip', async () => {
+    const opened: string[] = [];
+    const revealed: string[] = [];
+    const user = userEvent.setup();
+    render(
+      <SessionList
+        sessions={[withClip()]}
+        label="Sessions"
+        actions={{
+          ...ACTIONS,
+          open: (item) => opened.push(item.path),
+          reveal: (item) => revealed.push(item.path),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^Open session-1-replay-1\.mkv/ }));
+    await user.click(
+      screen.getByRole('button', { name: /^Show session-1-replay-1\.mkv.* in Explorer/ }),
+    );
+
+    expect(opened).toEqual(['D:/clips/session-1-replay-1.mkv']);
+    expect(revealed).toEqual(['D:/clips/session-1-replay-1.mkv']);
+  });
+
+  it('prefers the clip’s own title when it has one', () => {
+    render(
+      <SessionList
+        sessions={[withClip({ title: 'That triple' })]}
+        label="Sessions"
+        actions={ACTIONS}
+      />,
+    );
+
+    expect(document.body.textContent ?? '').toContain('That triple');
+  });
+
+  /*
+   * Two absences that read the same and are not: a clip the library has never
+   * seen a file for has nothing to open, and one whose file has gone has
+   * something to explain. Offering a control for either would be a control
+   * that fails when pressed.
+   */
+  it('says why a clip cannot be opened, and disables the controls', () => {
+    const { unmount } = render(
+      <SessionList
+        sessions={[withClip({ missing_since: '2026-08-12T09:00:00+01:00' })]}
+        label="Sessions"
+        actions={ACTIONS}
+      />,
+    );
+
+    expect(document.body.textContent ?? '').toContain('gone from where the library last saw it');
+    expect(screen.getByRole('button', { name: /^Open session-1-replay-1\.mkv/ })).toBeDisabled();
+    unmount();
+    document.body.replaceChildren();
+
+    const noFile = withClip();
+    const clipWithoutPath = { ...noFile.clips[0] } as Record<string, unknown>;
+    delete clipWithoutPath['path'];
+    render(
+      <SessionList
+        sessions={[{ ...noFile, clips: [clipWithoutPath as unknown as LibraryClip] }]}
+        label="Sessions"
+        actions={ACTIONS}
+      />,
+    );
+
+    expect(document.body.textContent ?? '').toContain('never seen a file for it');
+    expect(screen.getByRole('button', { name: /^Open a clip/ })).toBeDisabled();
+  });
+
+  /*
+   * Home passes no actions — it is a summary, and a list of files under each
+   * sitting would bury it. The clips follow the recordings in that.
+   */
+  it('draws no clip rows where the recordings are not drawn either', () => {
+    render(<SessionList sessions={[withClip()]} label="Sessions" />);
+
+    expect(document.body.textContent ?? '').not.toContain('session-1-replay-1.mkv');
   });
 });

@@ -1215,7 +1215,10 @@ describe('the Home screen', () => {
    * to the work that lands it".
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    ['recently clipped', /recently clipped/i, [74, 91]],
+    // No longer waiting on the clip model (#74, closed) — clips exist and the
+    // Library lists them. Home's own gap is gathering the newest across every
+    // sitting, which needs a query rather than this page's summary read.
+    ['recently clipped', /recently clipped/i, [91]],
   ];
 
   it('names each list it still owes, and the issue that lands it', async () => {
