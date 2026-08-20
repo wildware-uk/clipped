@@ -27,6 +27,7 @@
 
 use core::fmt;
 use core::time::Duration;
+use std::collections::BTreeSet;
 
 use clipped_replay::{MAXIMUM_WINDOW, MINIMUM_WINDOW};
 
@@ -810,9 +811,10 @@ impl ResolvedSettings {
     /// that records a device the user asked not to record.
     ///
     /// A setting a user *did* configure wins over the same setting on the
-    /// command line, which is the layering the settings screen assumes
-    /// ([issue #61](https://github.com/wildware-uk/clipped/issues/61) records
-    /// the question of whether a flag typed at that moment should beat it).
+    /// command line, which is the layering the settings screen assumes. Whether
+    /// an instruction given *at that moment* should beat a standing one is
+    /// [`Self::apply_configured_to_except`], which is where the answer and its
+    /// argument live.
     ///
     /// [`UnavailableChoice::Substitute`] is given only when the resolution or
     /// the encoder is one of the configured settings, because those are the two
@@ -821,32 +823,104 @@ impl ResolvedSettings {
     /// a stale setting does, and why it is not what a flag does").
     #[must_use]
     pub fn apply_configured_to(&self, recording: RecordingSettings) -> RecordingSettings {
+        self.apply_configured_to_except(recording, &BTreeSet::new())
+    }
+
+    /// The same, except for the settings `pinned` names, which the recording
+    /// keeps whatever a user configured.
+    ///
+    /// # Why there is an exception at all
+    ///
+    /// [`Self::apply_configured_to`] is written for a caller whose recording
+    /// carries a *standing* answer — `watch`'s command line, settled before any
+    /// game launched — and there a configured setting rightly wins: it is the
+    /// more recent instruction of the two.
+    ///
+    /// A `start_recording` over the protocol is the other way round. Its
+    /// parameters are the more recent instruction, given for this recording and
+    /// no other, and folding a standing preference over them makes a field that
+    /// parses, validates, reaches the session's settings, and then does nothing
+    /// — which is the defect the doc comment above already names for
+    /// [`Self::apply_to`], in the same words, and for the same reason. In the
+    /// microphone's case it is the one that matters most: a request asking for
+    /// no microphone recorded 378 packets of a real one
+    /// ([issue #714](https://github.com/wildware-uk/clipped/issues/714)).
+    ///
+    /// # Why this is not a way in
+    ///
+    /// The obvious objection is that it works in the dangerous direction too: a
+    /// request naming the default microphone now beats a user whose standing
+    /// setting is to record none. It grants nothing, and `docs/ipc.md` is why —
+    /// the pipe's DACL admits only the account the recorder runs as, and "a
+    /// process running as this user could already send the real recorder any
+    /// command". Something able to send this could open the device itself.
+    ///
+    /// So the exception costs no ground, and honouring the request is what the
+    /// user asked for in both directions.
+    ///
+    /// A setting `pinned` does **not** name is untouched by this: it takes the
+    /// configured value exactly as before. This is not [`Self::apply_to`] by
+    /// another route, and the caller has to say which parameters were named
+    /// rather than assert that all of them were.
+    #[must_use]
+    pub fn apply_configured_to_except(
+        &self,
+        recording: RecordingSettings,
+        pinned: &BTreeSet<SettingKey>,
+    ) -> RecordingSettings {
         let mut recording = recording;
-        if let Some(preset) = configured(&self.quality_preset) {
+        if let Some(preset) = taken(pinned, SettingKey::QualityPreset, &self.quality_preset) {
             recording = recording.with_quality(preset);
         }
-        if let Some(resolution) = configured(&self.resolution) {
+        if let Some(resolution) = taken(pinned, SettingKey::Resolution, &self.resolution) {
             recording = recording.with_resolution(resolution);
         }
-        if let Some(framerate) = configured(&self.framerate) {
+        if let Some(framerate) = taken(pinned, SettingKey::Framerate, &self.framerate) {
             recording = recording.with_framerate(framerate);
         }
-        if let Some(codec) = configured(&self.codec) {
+        if let Some(codec) = taken(pinned, SettingKey::Codec, &self.codec) {
             recording = recording.with_codec(codec);
         }
-        if let Some(encoder) = configured(&self.encoder) {
+        if let Some(encoder) = taken(pinned, SettingKey::Encoder, &self.encoder) {
             recording = recording.with_encoder(encoder);
         }
-        if let Some(microphone) = configured(&self.microphone) {
+        if let Some(microphone) = taken(pinned, SettingKey::Microphone, &self.microphone) {
             recording = recording.with_microphone(audio_source(&microphone));
         }
-        if let Some(system_audio) = configured(&self.system_audio) {
+        if let Some(system_audio) = taken(pinned, SettingKey::SystemAudio, &self.system_audio) {
             recording = recording.with_system_audio(audio_source(&system_audio));
         }
-        if configured(&self.resolution).is_some() || configured(&self.encoder).is_some() {
+        // Only for a resolution or an encoder this fold actually applied. A
+        // recording still encoding at what its caller named keeps that caller's
+        // refusal, which is the rule `docs/configuration.md` states under "What
+        // a stale setting does, and why it is not what a flag does" — and a
+        // pinned parameter is exactly a parameter the caller named.
+        if taken(pinned, SettingKey::Resolution, &self.resolution).is_some()
+            || taken(pinned, SettingKey::Encoder, &self.encoder).is_some()
+        {
             recording = recording.with_unavailable_choice(UnavailableChoice::Substitute);
         }
         recording
+    }
+}
+
+/// The value, when a layer above the shipped default supplied it *and* the
+/// caller did not pin that setting itself.
+///
+/// One helper rather than a condition repeated on each arm of the fold, so that
+/// a setting added to [`ResolvedSettings::apply_configured_to_except`] cannot be
+/// given the fold without the exception by accident — which would be a
+/// parameter that is honoured for six settings and silently dropped for the
+/// seventh.
+fn taken<T: Clone>(
+    pinned: &BTreeSet<SettingKey>,
+    key: SettingKey,
+    resolved: &Resolved<T>,
+) -> Option<T> {
+    if pinned.contains(&key) {
+        None
+    } else {
+        configured(resolved)
     }
 }
 

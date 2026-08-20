@@ -96,6 +96,7 @@
 //! makes a recorder started detached — with no console to receive Ctrl+C —
 //! stoppable at all ([issue #220](https://github.com/wildware-uk/clipped/issues/220)).
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
@@ -120,7 +121,7 @@ use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
 use clipped_session::automatic::{ManualSession, RecordedProcess, RecordingOutcome};
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
-use clipped_session::config::{Configuration, EffectiveSetting};
+use clipped_session::config::{Configuration, EffectiveSetting, SettingKey};
 use clipped_session::screenshot::{
     Screenshot, ScreenshotError, ScreenshotFormat, ScreenshotRequests, ScreenshotSettings,
     StillFrame,
@@ -2286,7 +2287,18 @@ impl RecordingState {
         // every parameter the request named, so a `start_recording` asking for
         // 144 frames per second would record at 60 on every machine with no
         // settings file. Two callers, one rule (AGENTS.md section 55).
-        let settings = running.resolved_settings().apply_configured_to(asked_for);
+        //
+        // Except for the parameters *this* request named, which it keeps. That
+        // is the one place the two callers differ and it is why this is
+        // `_except`: `watch`'s settings are a standing answer, so a preference
+        // configured later is rightly the more recent instruction, whereas a
+        // `start_recording` is the more recent instruction and folding a
+        // standing preference over it makes its parameters parse, validate and
+        // then do nothing. The microphone is the case that made it visible
+        // (issue #714): a request asking for none recorded one.
+        let settings = running
+            .resolved_settings()
+            .apply_configured_to_except(asked_for, &pinned_by(request));
         // And what that folding produced, for `get_diagnostics` to answer with.
         // Read from the settings the encoder is about to be opened with rather
         // than from the configuration they were folded from, because a
@@ -3077,6 +3089,46 @@ fn record_args(request: &StartRecording) -> Result<RecordArgs, ProtocolError> {
         microphone: parsed(&request.microphone, "microphone")?.unwrap_or_default(),
         system_audio: parsed(&request.system_audio, "system_audio")?.unwrap_or_default(),
     })
+}
+
+/// Which settings this request named for itself.
+///
+/// The set [`ResolvedSettings::apply_configured_to_except`] leaves alone, so
+/// that a parameter somebody asked for reaches the encoder rather than being
+/// replaced by a standing preference (issue #714).
+///
+/// Read from the request's own `Option`s and not from [`RecordArgs`], and that
+/// is the whole reason this reads `request` twice. `record_args` resolves each
+/// field with `unwrap_or_default`, which is right for building a recording and
+/// destroys exactly the distinction needed here: after it, "asked for the
+/// default microphone" and "said nothing about the microphone" are the same
+/// value.
+///
+/// [`SettingKey::QualityPreset`] is never in this set, because it is not a
+/// parameter of `start_recording` at all — `record_args` says why, and a key
+/// that could never be pinned would read as an oversight rather than as the
+/// deliberate absence it is.
+fn pinned_by(request: &StartRecording) -> BTreeSet<SettingKey> {
+    let mut pinned = BTreeSet::new();
+    if request.resolution.is_some() {
+        pinned.insert(SettingKey::Resolution);
+    }
+    if request.framerate.is_some() {
+        pinned.insert(SettingKey::Framerate);
+    }
+    if request.codec.is_some() {
+        pinned.insert(SettingKey::Codec);
+    }
+    if request.encoder.is_some() {
+        pinned.insert(SettingKey::Encoder);
+    }
+    if request.microphone.is_some() {
+        pinned.insert(SettingKey::Microphone);
+    }
+    if request.system_audio.is_some() {
+        pinned.insert(SettingKey::SystemAudio);
+    }
+    pinned
 }
 
 /// Parses an optional textual parameter through the same `FromStr` the command

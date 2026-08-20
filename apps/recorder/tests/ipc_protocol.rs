@@ -2246,6 +2246,31 @@ name = "video-pattern.exe"
 "#;
 
 /// Writes that overlay into a scratch home, where the recorder reads one.
+/// Writes a settings file into `home` that records neither audio source.
+///
+/// For a `serve --watch-for-games` test, which is the one shape that cannot say
+/// this on a command line: that subcommand deliberately takes no recording
+/// options of its own and reads the same defaults `watch` does
+/// (`crate::cli::WatchArgs`), and the recorder's defaults are both sources
+/// **on**. So a watcher test with nothing configured opens whatever endpoints
+/// the machine has — which on a runner is nothing and on a developer's machine
+/// is a real microphone in a real room.
+///
+/// A test that asserts nothing about audio must not switch a microphone on to
+/// do it (AGENTS.md section 14). `tests/automatic_sessions.rs` says the same and
+/// says it with `--microphone none`, which is the same intent through the door
+/// that subcommand has; [issue #715](https://github.com/wildware-uk/clipped/issues/715)
+/// is about making the isolation general rather than per-test.
+fn recording_no_audio(home: &Path) {
+    let application_directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+    std::fs::write(
+        application_directory.join(clipped_session::config::FILE_NAME),
+        r#"{"version":1,"global":{"microphone":"none","system_audio":"none"}}"#,
+    )
+    .expect("the settings file can be written");
+}
+
 fn overlay_naming_the_pattern(home: &Path) {
     let application_directory = home.join("AppData").join("Local").join("Clipped");
     std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
@@ -2632,6 +2657,8 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
     let home = scratch_home("watcher-sitting");
     overlay_naming_the_pattern(&home);
 
+    recording_no_audio(&home);
+
     let recorder =
         ServedRecorder::started_with("watcher-sitting", Some(&home), &["--watch-for-games"]);
     let mut client = recorder.client();
@@ -2673,6 +2700,28 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
         "the recording on the wire cannot name the game: {frame}",
     );
 
+    // Let it record something before stopping it.
+    //
+    // Everything above happens the moment the sitting appears, which is before
+    // the capture backend has produced its first frame: the session announces
+    // itself when it *starts*, and opening Windows Graphics Capture on the
+    // game's window took a further 208 ms on the machine this was fixed on.
+    // Stopping in that gap is refused, correctly and unhelpfully —
+    //
+    //     WGC started   09:46:25.392700
+    //     WGC stopped   09:46:25.394876
+    //     ERROR capture-lost: capture never produced a frame
+    //
+    // — two milliseconds, against 33 for a frame at this fixture's rate. The
+    // recorder is right to call that nothing; the test was wrong to ask.
+    //
+    // A sleep rather than a poll for the same reason the sibling test above
+    // uses one: what is being waited for is *frames in a file*, and the only
+    // status field that speaks to it is elapsed time, which advances whether or
+    // not capture ever started. Waiting on it would be waiting on the wrong
+    // thing and would go green again the day this breaks.
+    std::thread::sleep(RECORD_FOR);
+
     match client
         .call(&IpcCommand::StopRecording(StopRecording {
             recording_id: None,
@@ -2684,6 +2733,22 @@ fn a_recording_the_watcher_started_names_the_game_over_the_protocol() {
             "a recording of no frames is not a recording: {summary:?}"
         ),
         other => panic!("expected a summary, got {other:?}"),
+    }
+
+    // And that it recorded no audio, which is what `recording_no_audio` above
+    // is for. Asserted rather than assumed: the settings file is the only way a
+    // `serve --watch-for-games` test can say this, and a file the recorder
+    // failed to read would leave the defaults standing — both sources on — with
+    // every other assertion here still passing. That is a microphone opened in
+    // somebody's room by a test about naming a game (AGENTS.md section 14).
+    let recorded = the_recording_the_watcher_started(&home, DETECTION_PATIENCE);
+    for source in ["microphone", "system_audio"] {
+        assert_eq!(
+            recorded["settings"][source]["value"].as_str(),
+            Some("none"),
+            "this test records no {source}, and the settings file that says so was not read:\n\
+             {recorded:#}",
+        );
     }
 
     // And the sitting outlives the recording, which is the flicker
