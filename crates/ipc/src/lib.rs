@@ -171,8 +171,9 @@ pub use settings::{
 };
 pub use startup::{SetStartAtLogin, StartAtLogin};
 pub use status::{
-    ActiveRecording, BookmarkSummary, EndReason, ExportProgress, ExportSummary, RecorderStatus,
-    RecordingSummary, ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,
+    ActiveRecording, BookmarkSummary, EndReason, ExportProgress, ExportSummary, PendingRecording,
+    RecorderStatus, RecordingSummary, ReplaySummary, ScreenshotSummary, SessionRecording,
+    SessionSummary, Watching,
 };
 pub use storage::{
     CategoryUsage, GetStorage, ProtectedGroup, RecordingList, StorageLimits, StorageRecording,

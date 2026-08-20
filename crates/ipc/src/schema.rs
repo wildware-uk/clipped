@@ -91,8 +91,8 @@ use crate::preview::{
 };
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
 use crate::status::{
-    ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary, SessionRecording,
-    SessionSummary, Watching,
+    ActiveRecording, EndReason, ExportSummary, PendingRecording, RecorderStatus, RecordingSummary,
+    SessionRecording, SessionSummary, Watching,
 };
 use crate::storage::{
     CategoryUsage, GetStorage, ProtectedGroup, RecordingList, StorageLimits, StorageRecording,
@@ -2779,6 +2779,14 @@ fn exemplar_recording() -> RecorderStatus {
 fn exemplar_watching() -> RecorderStatus {
     RecorderStatus::Watching(Watching {
         session: Some(Box::new(exemplar_session())),
+        // Present for the reason the sitting is: a `watching` exemplar with this
+        // absent describes a status that has no such field, and the TypeScript
+        // mirror is then checked against a shape that cannot express the one
+        // state issue #739 is about.
+        pending: Some(PendingRecording {
+            game_name: "Counter-Strike 2".to_owned(),
+            waiting_ms: 4_800,
+        }),
     })
 }
 

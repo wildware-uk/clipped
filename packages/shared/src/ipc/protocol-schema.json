@@ -796,6 +796,7 @@
         "state"
       ],
       "optional": [
+        "pending",
         "session"
       ]
     },
@@ -1840,6 +1841,10 @@
           "ok": {
             "reply": "status",
             "status": {
+              "pending": {
+                "game_name": "Counter-Strike 2",
+                "waiting_ms": 4800
+              },
               "session": {
                 "game_id": "cs2",
                 "game_name": "Counter-Strike 2",
@@ -3739,6 +3744,10 @@
       "frame": {
         "event": "status_changed",
         "status": {
+          "pending": {
+            "game_name": "Counter-Strike 2",
+            "waiting_ms": 4800
+          },
           "session": {
             "game_id": "cs2",
             "game_name": "Counter-Strike 2",

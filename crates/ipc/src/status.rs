@@ -96,6 +96,48 @@ pub struct Watching {
     /// Behind a pointer for the reason [`ActiveRecording::session`] is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Box<SessionSummary>>,
+    /// A recording that has been started for this sitting and has not begun
+    /// capturing yet.
+    ///
+    /// Present for the interval between a game being recognised and its window
+    /// being one there is anything to capture — a game that is still loading, or
+    /// one that starts minimised. It is not a moment: a real Garry's Mod launch
+    /// spent **48 seconds** here, and for all of it the window said the recorder
+    /// was watching and would record the game "if it starts", which was the
+    /// opposite of what was happening
+    /// ([issue #739](https://github.com/wildware-uk/clipped/issues/739)).
+    ///
+    /// So a `watching` that carries this is not idle, and a window must not
+    /// describe it as waiting for something to happen. The recording is already
+    /// started; what has not happened is the game drawing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingRecording>,
+}
+
+/// A recording that is started and waiting for the game to draw.
+///
+/// There is one reason a started recording has not begun, and it is this one:
+/// Windows hands over no frames for a window it is not drawing, so the recorder
+/// waits rather than opening an encoder and writing a container header no frame
+/// ever arrives for ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+/// That is why this carries no reason field — a second reason would need a
+/// discriminant, and there is not a second reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRecording {
+    /// The game it is of, named as the catalogue names it.
+    ///
+    /// Not a capture selector. A window cannot turn `process 4242` into "Garry's
+    /// Mod" without the catalogue, which lives in the recorder — the same reason
+    /// [`ActiveRecording::game_name`] carries it.
+    pub game_name: String,
+    /// How long it has been waiting.
+    ///
+    /// Measured here rather than left to the reader to work out from a
+    /// timestamp, for the reason [`ActiveRecording::elapsed_ms`] is: the
+    /// recorder holds the clock the wait started on, and a window that
+    /// subtracted its own would be answering with the difference between two
+    /// machines' idea of now.
+    pub waiting_ms: u64,
 }
 
 /// The recording that is running.
@@ -721,6 +763,7 @@ mod tests {
         // a game off a *recording* would blank the name for those seconds.
         let status = RecorderStatus::Watching(Watching {
             session: Some(Box::new(a_sitting())),
+            pending: None,
         });
 
         let json = serde_json::to_string(&status).expect("it serialises");
