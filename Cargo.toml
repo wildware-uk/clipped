@@ -138,7 +138,7 @@ clipped-windows = { path = "crates/windows", version = "0.1.0" }
 # because the crates that *produce* media take it as a dev-dependency, so it has
 # to sit underneath all of them — it depends on nothing in this workspace, and
 # nothing but a `[dev-dependencies]` entry may name it.
-clipped-test-exclusion = { path = "tests/exclusion" }
+clipped-test-exclusion = { path = "tests/exclusion", version = "0.1.0" }
 clipped-media-validation = { path = "tests/media", version = "0.1.0" }
 
 # The controlled test applications (AGENTS.md section 26, docs/testing.md). They
