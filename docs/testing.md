@@ -424,6 +424,52 @@ recorder's own unit tests can say about a sitting on a status and a sitting
 ending, which they say over a real pipe rather than by calling the publisher
 (`apps/recorder/src/test_events.rs`).
 
+## Which tests cannot share the machine
+
+Some of what these tests use is exclusive **per process** or **machine-wide**,
+so a second `cargo test` binary is not another observer — it is a competitor
+([#194](https://github.com/wildware-uk/clipped/issues/194)).
+
+| Resource | Scope | What the loser sees |
+| --- | --- | --- |
+| Desktop Duplication of an output | one per process | `DuplicateOutput` refused, `E_INVALIDARG` |
+| Exclusive fullscreen on an output | one per machine | `SetFullscreenState` refused, DXGI `0x887A0022` |
+| The foreground window | one per machine | `SetForegroundWindow` refused |
+| The default audio endpoint | one per machine | another suite's tones in the capture |
+| Capturing and encoding while counting frames | one per machine, in practice | a frame accounting that reads as a defect in the recorder |
+
+Every one of those reads as a limitation of the machine rather than as a busy
+one, which is the damage. `clipped-test-exclusion` is the answer: a Windows
+named mutex per resource, which is visible to every process in the session and
+which Windows releases when the holder dies. A test takes what it needs:
+
+```rust
+let _measuring = Exclusive::acquire(Resource::CaptureMeasurement)
+    .unwrap_or_else(|contended| panic!("{contended}"));
+```
+
+and a run that cannot have it says so, naming the resource, instead of going on
+to fail as though the hardware were at fault.
+
+**The last row is the one that was measured.** `tests/capture/recorded_frames.rs`
+reads the source's own frame counters back out of a finished recording. Alone it
+reports 228 of 228 with nothing duplicated; run beside a second capture suite it
+reported *"the recording holds the same source frame more than once"* — a bug
+report about the recorder that would have been wrong. It now takes
+`Resource::CaptureMeasurement` first, and the two suites pass together.
+
+### What still is not covered
+
+`crates/capture`'s own Desktop Duplication tests do not take these locks, and
+the three that fail intermittently under a second suite are the reason #194 is
+still open. They are below `clipped-test-exclusion`'s consumers in the layering
+but not below the crate itself, which is at layer 0 — so this is work rather
+than an obstacle.
+
+Measurement tests do not yet declare themselves as measurements, which is #194's
+second acceptance criterion: a figure taken while five suites run is measuring
+the machine.
+
 ### Running one of them on its own
 
 `supervision.rs` and `ctrl_c.rs` drive a fixture from `apps/recorder/examples/`,

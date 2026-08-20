@@ -181,6 +181,8 @@ clipped-session.workspace = true
 # copy, and folding that one in is issue #152. Nothing here runs ffprobe: this
 # is the sample-analysis half of the harness, which needs no tools at all.
 clipped-media-validation.workspace = true
+# Two capture suites at once perturb each other's frame counts (issue #194).
+clipped-test-exclusion.workspace = true
 
 # `av_sync.rs`'s drift measurement holds a render stream open and hands the audio
 # engine buffers marked silent, so that the endpoint's clock keeps running for

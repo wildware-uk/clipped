@@ -493,6 +493,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-test-exclusion"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "clipped-video-pattern"
 version = "0.1.0"
 dependencies = [
@@ -501,6 +508,7 @@ dependencies = [
  "clipped-capture",
  "clipped-media-validation",
  "clipped-session",
+ "clipped-test-exclusion",
  "clipped-windows",
  "windows",
 ]

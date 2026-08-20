@@ -75,6 +75,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-hotkeys",
         "clipped-edit",
         "clipped-media-validation",
+        "clipped-test-exclusion",
         "clipped-ffmpeg-runtime",
         "clipped-background",
     ],
@@ -314,7 +315,12 @@ fn every_dependency_points_down_the_stack() {
 /// output with it, which means the layering test above is satisfied by a normal
 /// `[dependencies]` entry from anywhere in the stack — and a normal entry would
 /// put a test harness, and `serde_json`, inside the recorder.
-const TEST_ONLY_PACKAGES: &[&str] = &["clipped-media-validation"];
+///
+/// `clipped-test-exclusion` is here for the same reason and one of its own:
+/// nothing in the product takes a machine-wide lock on the foreground window
+/// or the default audio endpoint, and a normal entry would put a named mutex
+/// the recorder never wants into whatever linked it (issue #194).
+const TEST_ONLY_PACKAGES: &[&str] = &["clipped-media-validation", "clipped-test-exclusion"];
 
 #[test]
 fn test_only_packages_are_never_linked_into_the_product() {

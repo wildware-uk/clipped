@@ -50,6 +50,7 @@ use std::process::{Command, Stdio};
 use clipped_session::{
     record_into, CaptureTargetSettings, RecordingOutputs, RecordingSettings, StopSignal,
 };
+use clipped_test_exclusion::{Exclusive, Resource};
 use clipped_video_pattern::harness::TestApp;
 use clipped_video_pattern::pattern::{self, Region, Surface};
 use clipped_video_pattern::sequence::CounterRun;
@@ -130,6 +131,17 @@ fn counters_in(
     let mut child = Command::new(ffmpeg)
         .args(["-v", "error", "-i"])
         .arg(recording)
+        // Exactly the frames the file holds, and no others.
+        //
+        // Without this ffmpeg resamples to a constant rate on the way out and
+        // **pads with duplicates** wherever the timestamps are further apart
+        // than the declared rate — so a recording made while the machine was
+        // busy comes back with thousands of repeated pictures that were never
+        // in it. Measured: a contended run of this test reported 3568
+        // duplicates against 228 distinct counters, which reads as the recorder
+        // writing every frame fifteen times and is entirely this flag
+        // (issue #194).
+        .args(["-fps_mode", "passthrough"])
         // Raw BGRA, which is the shape `Surface` reads and the shape the
         // pattern was drawn in. Anything with chroma subsampling would decide
         // the pattern's fate before the decoder saw it.
@@ -199,6 +211,14 @@ fn the_frames_in_a_recording_are_the_frames_the_source_drew_in_order() {
     let Some(tools) = clipped_media_validation::require_media_tools() else {
         return;
     };
+
+    // One capture measurement on this machine at a time (issue #194). Held for
+    // the whole test, because what it protects is the frame accounting at the
+    // end rather than the recording at the start: run beside a second capture
+    // suite, this test reports the recorder writing a frame twice, which is a
+    // bug report about the recorder and would be wrong.
+    let _measuring = Exclusive::acquire(Resource::CaptureMeasurement)
+        .unwrap_or_else(|contended| panic!("{contended}"));
 
     let app = TestApp::start(
         env!("CARGO_BIN_EXE_video-pattern"),
