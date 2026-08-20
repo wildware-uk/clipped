@@ -91,8 +91,16 @@ impl GameId {
     /// [`super::schema`] turns that into an error naming the file and the
     /// entry; this returns an option so that the character rule lives in one
     /// place rather than being repeated by every caller.
+    ///
+    /// **Public because one rule may have one implementation.**
+    /// `clipped_session::config::GameKey` names games in a settings file before
+    /// the catalogue is consulted, and carried a verbatim copy of the check
+    /// until [issue #246](https://github.com/wildware-uk/clipped/issues/246).
+    /// Two copies are two places to change and one chance to disagree about
+    /// what a game is called — and a disagreement here makes somebody's
+    /// per-game settings unreachable rather than merely inconsistent.
     #[must_use]
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         if value.is_empty() {
             return None;
         }
