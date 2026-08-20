@@ -289,6 +289,43 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
         </>
       )}
 
+      {/*
+       * Which FFmpeg is loaded, where somebody can read it without a terminal
+       * (issue #256). The recorder logs it at start-up, which answers it for
+       * anybody who can find the log file; this is the same fact for everybody
+       * else, and it is the acceptance criterion that was outstanding.
+       *
+       * The licence comes from the libraries rather than from a constant here.
+       * The DLLs beside the binaries are replaceable by design — the LGPL
+       * relinking permission — and a substituted GPL build reports the same
+       * version numbers and a different licence, so a hardcoded "LGPL" would be
+       * the one thing this must not say.
+       */}
+      {recorder.state === 'read' && recorder.value.ffmpeg !== undefined && (
+        <>
+          <h2 className="clipped-screen__heading">The FFmpeg this recorder loaded</h2>
+          <table className="clipped-table" aria-label="FFmpeg build">
+            <tbody>
+              <tr>
+                <th scope="row">Build</th>
+                <td>{recorder.value.ffmpeg.identifier}</td>
+              </tr>
+              <tr>
+                <th scope="row">Licence</th>
+                <td>{recorder.value.ffmpeg.licence}</td>
+              </tr>
+              <tr>
+                <th scope="row">Libraries</th>
+                <td>
+                  avformat {recorder.value.ffmpeg.avformat}, avcodec {recorder.value.ffmpeg.avcodec}
+                  , avutil {recorder.value.ffmpeg.avutil}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </>
+      )}
+
       <h2 className="clipped-screen__heading">Support report</h2>
       <p className="clipped-screen__lead">
         This is the whole of it. Nothing is collected that is not below, nothing is sent anywhere,

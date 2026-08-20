@@ -50,6 +50,7 @@ import type {
   ClientMessage,
   CodecSummary,
   Diagnostics,
+  FfmpegBuild,
   EncoderAccount,
   EncoderSummary,
   ErrorDetail,
@@ -760,12 +761,37 @@ function readHotkeyBinding(value: JsonValue | undefined): HotkeyBinding {
 function readDiagnostics(value: JsonValue | undefined): Diagnostics {
   const diagnostics = object(value, 'the diagnostics');
   const capture = diagnostics['capture'];
+  const ffmpeg = diagnostics['ffmpeg'];
   return {
     // Absent means nothing is being recorded, which is a fact rather than a gap:
     // there is no capture backend running between recordings, and an empty
     // account here would read as a recording that had chosen none.
     ...(capture === undefined || capture === null ? {} : { capture: readCaptureAccount(capture) }),
     encoders: readEncoderAccount(diagnostics['encoders']),
+    // Absent from a recorder built before issue #256, which is a version
+    // difference rather than a fault, so it is left out rather than defaulted
+    // to something that would read as an answer.
+    ...(ffmpeg === undefined || ffmpeg === null ? {} : { ffmpeg: readFfmpegBuild(ffmpeg) }),
+  };
+}
+
+/**
+ * Which FFmpeg a recorder loaded.
+ *
+ * Every field required: a recorder that sends this at all has asked its
+ * libraries, and a half-filled answer would be worse than none — somebody
+ * checking which build they are running needs to know they are seeing all of
+ * it (issue #256).
+ */
+function readFfmpegBuild(value: JsonValue | undefined): FfmpegBuild {
+  const build = object(value, 'an FFmpeg build');
+  const what = 'an FFmpeg build';
+  return {
+    identifier: stringField(build, 'identifier', what),
+    licence: stringField(build, 'licence', what),
+    avformat: stringField(build, 'avformat', what),
+    avcodec: stringField(build, 'avcodec', what),
+    avutil: stringField(build, 'avutil', what),
   };
 }
 

@@ -612,6 +612,81 @@ describe('the Diagnostics screen', () => {
     window.location.hash = '';
   });
 
+  it('names the FFmpeg the recorder loaded, so it can be read without a terminal', async () => {
+    // Issue #256's third acceptance criterion. The recorder logged this at
+    // start-up from the beginning; what was missing was anywhere a person
+    // without a log file could see it.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: { state: 'idle' as const },
+      },
+      null,
+      {
+        recorderDiagnostics: () => ({
+          encoders: ENCODERS,
+          ffmpeg: {
+            identifier: 'n8.1.2-34-g9b6c8969e0-20260809',
+            // Deliberately not the licence Clipped ships with. The DLLs are
+            // replaceable — that is the LGPL relinking permission — and a
+            // substituted GPL build reports the same version numbers and a
+            // different licence. A fixture saying "LGPL" would pass against a
+            // screen that hardcoded the word, which is the one thing issue #256
+            // says this must not do.
+            // Version 2, not 3, and deliberately: "LGPL version 3 or later"
+            // *contains* "GPL version 3 or later", and `toHaveTextContent`
+            // matches substrings, so a version-3 fixture passes against a
+            // screen that hardcoded the LGPL string. This one does not.
+            licence: 'GPL version 2 or later',
+            avformat: '62.12.102',
+            avcodec: '62.28.102',
+            avutil: '60.26.102',
+          },
+        }),
+      },
+    );
+    renderApp();
+    await openDiagnostics(user);
+
+    const table = await screen.findByRole('table', { name: 'FFmpeg build' });
+    expect(table).toHaveTextContent('n8.1.2-34-g9b6c8969e0-20260809');
+    // The licence the libraries reported, not a constant: a substituted GPL
+    // build carries the same version numbers and a different licence, and it is
+    // what is *displayed* that LGPL v3 section 4(c) is about.
+    expect(table).toHaveTextContent('GPL version 2 or later');
+    expect(table).toHaveTextContent('62.12.102');
+  });
+
+  it('draws no FFmpeg section for a recorder too old to report one', async () => {
+    // A version difference rather than a fault, so the section is absent rather
+    // than present and empty — an empty one would read as a recorder that had
+    // loaded nothing.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(
+      {
+        link: 'attached',
+        recorder_process_id: 7,
+        features: ['diagnostics'],
+        status: { state: 'idle' as const },
+      },
+      null,
+      {
+        recorderDiagnostics: () => ({ encoders: ENCODERS }),
+      },
+    );
+    renderApp();
+    await openDiagnostics(user);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('table').length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByRole('table', { name: 'FFmpeg build' })).toBeNull();
+    expect(screen.queryByText(/The FFmpeg this recorder loaded/i)).toBeNull();
+  });
+
   it('follows the recorder link rather than showing a sentence that was typed once', async () => {
     const user = userEvent.setup();
     const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
