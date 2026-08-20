@@ -677,4 +677,118 @@ describe('the marks on a recording', () => {
     expect(within(main).getByText(/not the one the library indexes it under/)).toBeVisible();
     expect(within(main).queryByRole('list', { name: /^Marks on / })).toBeNull();
   });
+
+  /**
+   * The screen's keyboard shortcuts (SPEC.md section 42, issue #52).
+   *
+   * `<video controls>` answers these keys already — but only while the transport
+   * has focus, which is exactly when nobody needs a shortcut. What was missing is
+   * the rest of the screen: after pressing a track button or a mark, space did
+   * nothing.
+   *
+   * These cases are about the wiring rather than the mapping. `playback.test.ts`
+   * covers which key means what, on a pure function; what could still be wrong
+   * after that is a handler bound to the wrong thing, or one that never reaches
+   * the element — which is a tested function that does nothing.
+   */
+  describe('the playback screen’s keyboard shortcuts', () => {
+    afterEach(() => {
+      cleanup();
+      vi.unstubAllGlobals();
+      window.location.hash = '';
+    });
+
+    it('seeks with the arrow keys from anywhere on the screen', async () => {
+      answering();
+
+      const { user, player } = await playFromLibrary();
+      reportLength(player, 60);
+      player.currentTime = 10;
+
+      // Focus deliberately not on the transport: that case is the element's own
+      // and worked before this.
+      await user.keyboard('{ArrowRight}');
+      expect(player.currentTime).toBe(15);
+
+      await user.keyboard('{ArrowLeft}');
+      expect(player.currentTime).toBe(10);
+
+      await user.keyboard('{Shift>}{ArrowRight}{/Shift}');
+      expect(player.currentTime).toBe(11);
+    });
+
+    it('goes to the start and the end', async () => {
+      answering();
+
+      const { user, player } = await playFromLibrary();
+      reportLength(player, 60);
+      player.currentTime = 30;
+
+      await user.keyboard('{End}');
+      expect(player.currentTime).toBe(60);
+
+      await user.keyboard('{Home}');
+      expect(player.currentTime).toBe(0);
+    });
+
+    /*
+     * A seek past either end is a seek to the end, not an exception and not a
+     * position outside the recording. The clamp is the element's own length,
+     * which is the only measurement of it this window has.
+     */
+    it('does not seek past either end of the recording', async () => {
+      answering();
+
+      const { user, player } = await playFromLibrary();
+      reportLength(player, 8);
+      player.currentTime = 6;
+
+      await user.keyboard('{ArrowRight}');
+      expect(player.currentTime).toBe(8);
+
+      player.currentTime = 2;
+      await user.keyboard('{ArrowLeft}');
+      expect(player.currentTime).toBe(0);
+    });
+
+    /*
+     * The trade this screen must not make: a screen-wide space that plays the
+     * recording, bought by a focused track button no longer being pressable by
+     * keyboard, is a worse screen than one with no shortcuts.
+     */
+    it('leaves space to a button that has focus', async () => {
+      answering();
+
+      const { user, main, player } = await playFromLibrary();
+      reportLength(player, 60);
+      player.currentTime = 20;
+
+      const lane = await within(main).findByRole('list', { name: /^Marks on / });
+      const marker = within(lane).getAllByRole('button')[1];
+      marker?.focus();
+      const wherePressingItPutUs = (SAMPLE_MARKS[1]?.at ?? 0) / 1_000_000_000;
+
+      await user.keyboard(' ');
+
+      // The button was activated, which is what space on a focused button does.
+      expect(player.currentTime).toBe(wherePressingItPutUs);
+    });
+
+    /*
+     * `Ctrl+Left` is a word jump and `Alt+Left` is Back. A screen that swallowed
+     * them would break navigation to add a seek nobody asked for.
+     */
+    it('leaves a modified arrow alone', async () => {
+      answering();
+
+      const { user, player } = await playFromLibrary();
+      reportLength(player, 60);
+      player.currentTime = 10;
+
+      await user.keyboard('{Control>}{ArrowRight}{/Control}');
+      await user.keyboard('{Alt>}{ArrowRight}{/Alt}');
+
+      expect(player.currentTime).toBe(10);
+    });
+  });
 });
