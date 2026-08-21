@@ -301,6 +301,45 @@ export function DiagnosticsScreen({ view, notice }: DiagnosticsScreenProps): Rea
        * version numbers and a different licence, so a hardcoded "LGPL" would be
        * the one thing this must not say.
        */}
+      {/*
+       * A library that will not open, said where somebody can see it.
+       *
+       * This is first on the screen, above the encoders and the FFmpeg build,
+       * because it is the one reading here that means something is wrong *now*.
+       * The others describe a working recorder; this one says recordings are
+       * being made and none of them is reaching the library — the Library
+       * screen empty, the recent clips empty, and automatic cleanup not running,
+       * because all three read the index.
+       *
+       * On the machine that raised issue #738 a renumbered migration stopped the
+       * library opening for four days, and the only evidence anywhere was one
+       * `WARN` an hour in a log file. The user concluded the recorder did not
+       * work while it was recording perfectly (AGENTS.md section 27).
+       *
+       * The recorder's sentence is shown verbatim. It names the migration that
+       * failed, which is what anybody diagnosing this needs, and a summary
+       * written here would be a second description of a fault this screen
+       * cannot diagnose.
+       */}
+      {recorder.state === 'read' && recorder.value.library_refusal !== undefined && (
+        <>
+          <h2 className="clipped-screen__heading">Recordings are not reaching the library</h2>
+          <p className="clipped-screen__lead">
+            Recording itself is unaffected and the files are being written. What has stopped is the
+            index the Library screen reads, so recordings made while this is true will not be listed
+            until it is working again.
+          </p>
+          <table className="clipped-table" aria-label="Library index">
+            <tbody>
+              <tr>
+                <th scope="row">Why</th>
+                <td>{recorder.value.library_refusal}</td>
+              </tr>
+            </tbody>
+          </table>
+        </>
+      )}
+
       {recorder.state === 'read' && recorder.value.ffmpeg !== undefined && (
         <>
           <h2 className="clipped-screen__heading">The FFmpeg this recorder loaded</h2>

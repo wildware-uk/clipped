@@ -1622,6 +1622,21 @@ struct Indexer {
     /// it at the top of every run.
     storage: Mutex<clipped_session::config::StorageSettings>,
     control: IndexControl,
+    /// Why the index is not being kept up to date, when it is not.
+    ///
+    /// A library that will not open is a whole subsystem stopped, and until
+    /// [issue #738](https://github.com/wildware-uk/clipped/issues/738) the only
+    /// evidence was one `WARN` an hour in a log file. On the machine that raised
+    /// it, a renumbered migration meant the library had not opened for **four
+    /// days**: nothing recorded in that time was indexed, the Library screen was
+    /// empty, and nothing anywhere said why (AGENTS.md section 27).
+    ///
+    /// So the reason is kept, and `get_diagnostics` reports it. [`None`] is a
+    /// library that opened — set on every successful open as well as every
+    /// failure, because a reason that outlived the fault would be its own
+    /// untruth: a user who plugged the drive back in would go on being told the
+    /// index was broken.
+    refusal: Mutex<Option<String>>,
     state: Mutex<IndexerState>,
     woken: Condvar,
     /// Makes the pictures the library screens draw, or [`None`] on a machine
@@ -1698,6 +1713,8 @@ impl LibraryIndexer {
                 roots,
                 storage: Mutex::new(clipped_session::config::StorageSettings::none()),
                 control: IndexControl::new(),
+                // Nothing has tried to open it yet, so nothing has refused.
+                refusal: Mutex::new(None),
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
                 thumbnails: None,
@@ -1705,6 +1722,25 @@ impl LibraryIndexer {
             }),
             thread: Mutex::new(None),
         }
+    }
+
+    /// Why the index is not being kept up to date, when it is not.
+    ///
+    /// [`None`] is an index that is working. A sentence here means recordings
+    /// are still being made and written correctly, and none of them is reaching
+    /// the library — the Library screen is empty, "Recently clipped" has nothing
+    /// in it, and automatic cleanup is not running, because all three read the
+    /// index ([issue #738](https://github.com/wildware-uk/clipped/issues/738)).
+    ///
+    /// Read by `get_diagnostics`, so that a user can be told rather than having
+    /// to find one `WARN` an hour in a log file.
+    #[must_use]
+    pub fn refusal(&self) -> Option<String> {
+        self.shared
+            .refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The same indexer, enforcing these storage limits after each run.
@@ -1974,6 +2010,14 @@ impl Indexer {
     /// A failure to open is reported and *retried* on the next run, for the
     /// reason [`LibraryReader`] retries: the usual cause is a drive that is not
     /// plugged in, and that stops being true without restarting anything.
+    /// Records why the index is not running, or that it is.
+    fn refused_with(&self, reason: Option<String>) {
+        *self
+            .refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+    }
+
     fn reconcile_once(&self, database: &mut Option<Database>) {
         let Some(path) = self.path.as_ref() else {
             tracing::warn!(
@@ -1997,10 +2041,19 @@ impl Indexer {
                         "the recording library could not be opened, so the index was not brought \
                          up to date; the next recording will try again"
                     );
+                    // Kept as well as logged, so that a window can say it
+                    // (issue #738). The error's own sentence, not one invented
+                    // here: it is what names the migration that failed, and a
+                    // summary of it would be a second description to drift from
+                    // the first (AGENTS.md section 55).
+                    self.refused_with(Some(error.to_string()));
                     return;
                 }
             }
         }
+
+        // It opened, so whatever was wrong is not wrong now.
+        self.refused_with(None);
 
         let open = database.as_mut().expect("the database was just opened");
         match reconcile(open, &self.settings, &self.control, SystemTime::now()) {

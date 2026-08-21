@@ -1761,6 +1761,9 @@ fn samples() -> Vec<Sample> {
                 outcome: Outcome::Ok(Reply::Diagnostics {
                     diagnostics: Diagnostics {
                         capture: None,
+                        // A healthy index says nothing, which is the state a
+                        // window draws no warning for.
+                        library_refusal: None,
                         // Absent for the same reason `capture` is: these are
                         // one recording's answers, and there is no recording.
                         settings: None,
@@ -4027,6 +4030,14 @@ fn exemplar_diagnostics() -> Diagnostics {
         encoders: exemplar_encoder_account(),
         settings: Some(exemplar_effective_settings()),
         ffmpeg: Some(Box::new(exemplar_ffmpeg_build())),
+        // Present here so that `structure_of` sees the field at all: an
+        // exemplar without it describes a diagnostics reply that cannot report
+        // a stopped library, and the TypeScript mirror is then checked against
+        // that shape (issue #738).
+        library_refusal: Some(
+            "database migration 7 (locked_media) failed and was rolled back: duplicate column              name: locked_at"
+                .to_owned(),
+        ),
     }
 }
 

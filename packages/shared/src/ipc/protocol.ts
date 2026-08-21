@@ -2572,6 +2572,21 @@ export interface Diagnostics {
    * which says what the *next* recording would be made with.
    */
   readonly settings?: readonly EffectiveSetting[];
+  /**
+   * Why the recording library is not being kept up to date, when it is not.
+   *
+   * Absent is the healthy state and should draw nothing. Present means
+   * recordings are still being made and written correctly and none of them is
+   * reaching the library: the Library screen is empty, the recent clips are
+   * empty, and automatic cleanup is not running, because all three read the
+   * index.
+   *
+   * The recorder's own sentence, which names the cause. It is here because the
+   * failure is otherwise invisible — on one machine a renumbered migration
+   * stopped the library opening for four days and the only evidence was a log
+   * file (issue #738).
+   */
+  readonly library_refusal?: string;
 }
 
 /** How the recorder is capturing, and what this machine can encode. */

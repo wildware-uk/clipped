@@ -151,6 +151,26 @@ pub struct Diagnostics {
     /// the files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Vec<EffectiveSetting>>,
+    /// Why the recording library is not being kept up to date, when it is not.
+    ///
+    /// Absent is the healthy state, and is what a window should draw nothing
+    /// for. Present means recordings are still being made and written correctly
+    /// and **none of them is reaching the library**: the Library screen is
+    /// empty, the home screen's recent clips are empty, and automatic cleanup is
+    /// not running, because all three read the index.
+    ///
+    /// It is here because that failure is otherwise invisible. On the machine
+    /// that raised [issue #738](https://github.com/wildware-uk/clipped/issues/738)
+    /// a renumbered migration stopped the library opening for four days, and the
+    /// only evidence anywhere was one `WARN` an hour in a log file — so the user
+    /// concluded the recorder did not work, while it was recording perfectly
+    /// (AGENTS.md section 27).
+    ///
+    /// The recorder's own sentence, which names the cause. A window that
+    /// summarised it would be a second description of a fault it cannot
+    /// diagnose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_refusal: Option<String>,
 }
 
 /// One setting the recording in progress is running with.
@@ -460,6 +480,7 @@ mod tests {
     #[test]
     fn a_recorder_with_nothing_recording_leaves_capture_out_rather_than_sending_an_empty_account() {
         let diagnostics = Diagnostics {
+            library_refusal: None,
             capture: None,
             encoders: encoders(),
             settings: None,
@@ -493,6 +514,7 @@ mod tests {
         // recording following the global settings from one following the
         // command line it was started with, and those are different bugs.
         let diagnostics = Diagnostics {
+            library_refusal: None,
             capture: None,
             encoders: encoders(),
             settings: Some(vec![

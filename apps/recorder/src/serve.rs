@@ -1167,6 +1167,10 @@ impl CommandHandler for RecorderService {
                 diagnostics: crate::diagnostics::diagnostics(
                     self.recordings.capture_account().as_ref(),
                     self.recordings.effective_settings().as_deref(),
+                    // A library that will not open is a subsystem that has
+                    // stopped, and a user who is never told concludes the
+                    // recorder is broken while it records perfectly (#738).
+                    self.indexer.refusal(),
                 )?,
             }),
             // The one read here that walks the filesystem, and still on the
@@ -6224,6 +6228,69 @@ excluded = true
 
         assert_eq!(diagnostics.settings, None);
         assert_eq!(diagnostics.capture, None);
+        // A working index says nothing, so a window draws no warning. The
+        // sibling below is what happens when it stops.
+        assert_eq!(diagnostics.library_refusal, None);
+    }
+
+    /*
+     * A library that will not open is a subsystem that has stopped, and until
+     * issue #738 the only evidence was one `WARN` an hour in a log file.
+     *
+     * On the machine that raised it, a renumbered migration meant the library
+     * had not opened for four days. Recordings were still being made and
+     * written correctly; none of them was indexed, the Library screen was
+     * empty, and the user reasonably concluded the recorder did not work.
+     *
+     * The database here is broken the way a file on a real disk is broken —
+     * bytes that are not a database — rather than by stubbing the indexer, so
+     * what is asserted is that a real failure to open reaches the wire.
+     */
+    #[test]
+    fn a_library_that_will_not_open_is_reported_rather_than_only_logged() {
+        let directory = scratch("library-refusal");
+        std::fs::write(directory.join("library.db"), b"this is not a database")
+            .expect("the scratch directory can be written to");
+
+        // Held, so the run can be asked for and waited on. The service takes a
+        // clone of the same shared indexer, which is what makes the reading
+        // below the one `get_diagnostics` answers from.
+        let indexer = indexer_over(&directory);
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer,
+            Catalogue::default(),
+        );
+
+        // On its own thread, so this is the moment it has tried and failed
+        // rather than the moment it was created. Waited on by the run counter
+        // the indexer keeps for exactly this.
+        service.indexer.start();
+        service.indexer.request();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service.indexer.runs() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            service.indexer.runs() > 0,
+            "the indexer never ran, so nothing has tried to open the library and this test              would pass for the wrong reason"
+        );
+
+        let Reply::Diagnostics { diagnostics } = service
+            .call(Command::GetDiagnostics)
+            .expect("a recorder whose library is broken still answers")
+        else {
+            panic!("`get_diagnostics` was answered with something else");
+        };
+
+        let refusal = diagnostics
+            .library_refusal
+            .expect("the library did not open, and a window has to be able to say so");
+        assert!(
+            !refusal.is_empty(),
+            "an empty sentence is the same silence this exists to end"
+        );
     }
 
     #[test]
