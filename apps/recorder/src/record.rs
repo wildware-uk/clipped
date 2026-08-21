@@ -75,7 +75,9 @@ impl fmt::Display for RecordError {
             Self::TargetMinimised { window } => write!(
                 formatter,
                 "{window} is minimised, so there would be nothing to record: Windows hands \
-                 over no frames for a window it is not drawing. Restore it and start again"
+                 over no frames for a window it is not drawing. Bring it back to the \
+                 foreground and start again, or bind the start/stop hotkey in Settings, \
+                 which works without leaving a fullscreen game"
             ),
             Self::Session(error) => write!(formatter, "{error}"),
         }
@@ -275,6 +277,21 @@ pub(crate) fn choose_window(
     // because this is the layer that knows what the window is called, and
     // "Spotify Premium is minimised" is an answer where "no capture backend can
     // capture this target" is a puzzle (AGENTS.md section 45).
+    //
+    // **The advice names the hotkey for a reason.** "Restore it and start
+    // again" is right for an application somebody minimised, and impossible for
+    // the case this product is actually for: reaching the control that starts a
+    // recording takes the foreground away from a fullscreen game, which is what
+    // minimises it, so restoring it takes the foreground back and the loop
+    // closes ([issue #740](https://github.com/wildware-uk/clipped/issues/740)).
+    // A global hotkey is the one route that never leaves the game.
+    //
+    // It says *bind* rather than naming a combination, because
+    // `toggle_recording` ships unbound: `Bindings::defaults` gives keys to the
+    // two actions SPEC.md sections 7 and 25 name and to nothing else, on the
+    // grounds that binding seven takes seven combinations from every other
+    // application before the user has asked for any. Naming a key here would be
+    // this message inventing a default the rest of the build does not have.
     if window.is_minimised() {
         return Err(RecordError::TargetMinimised {
             window: describe(window),
@@ -658,9 +675,19 @@ mod tests {
             "and has to say why, or restoring it is a guess: {message}"
         );
         assert!(
-            message.contains("Restore it"),
+            message.contains("foreground"),
             "a refusal with nothing to do about it is an error code with a sentence around \
              it (AGENTS.md section 45): {message}"
+        );
+        // And a route that works from inside a fullscreen game, which is the
+        // case this product is for. Bringing the window back is impossible on
+        // its own there: reaching the control that starts a recording is what
+        // minimised the game, so restoring it takes the foreground back and the
+        // loop closes (issue #740). A global hotkey never leaves the game.
+        assert!(
+            message.contains("hotkey"),
+            "the only advice that works for a fullscreen game is the hotkey, and this refusal \
+             is the moment somebody needs telling it exists: {message}"
         );
     }
 
