@@ -1948,6 +1948,19 @@ struct Reachable {
 }
 
 impl Reachable {
+    /// Says a recording has been started and is waiting for `game` to draw.
+    ///
+    /// Paired with [`Self::window_appeared`], which every path out of the wait
+    /// calls ([issue #739](https://github.com/wildware-uk/clipped/issues/739)).
+    fn waiting_for_a_window(&self, game: &str) {
+        self.recordings.waiting_for_a_window(Some(game.to_owned()));
+    }
+
+    /// Says the wait is over, however it ended.
+    fn window_appeared(&self) {
+        self.recordings.waiting_for_a_window(None);
+    }
+
     /// Hands the recording over, or says why it could not be.
     fn adopt(
         &self,
@@ -2129,7 +2142,28 @@ where
         Err(error) => return failure(&error, game),
     };
 
-    let window = match find_window(&config.target, plan.window_timeout, stop) {
+    // Said before the wait and taken back after it, so a window can tell a
+    // recording that is starting from a recorder that is idle. They are the same
+    // status otherwise, and the interval is not short: a real Garry's Mod launch
+    // spent 48 seconds here while the window said the recorder would record the
+    // game "if it starts" ([issue
+    // #739](https://github.com/wildware-uk/clipped/issues/739)).
+    //
+    // Announced here rather than inside `find_window` because this is the layer
+    // that has both the game's name and the way back to the recorder's state —
+    // `find_window` is a function of a target and a timeout, deliberately, so it
+    // can be tested against desktops a test constructed.
+    if let Some(reachable) = reachable {
+        reachable.waiting_for_a_window(game);
+    }
+    let found = find_window(&config.target, plan.window_timeout, stop);
+    // On every path out, including the failure: a recorder that gave up waiting
+    // must not go on saying it is about to record something.
+    if let Some(reachable) = reachable {
+        reachable.window_appeared();
+    }
+
+    let window = match found {
         Ok(window) => window,
         Err(detail) => return RecordingOutcome::NoWindow { detail },
     };
@@ -2620,6 +2654,80 @@ name = "test-game.exe"
         );
     }
 
+    /*
+     * The interval a window used to describe as an idle recorder.
+     *
+     * A game is recognised, a recording is started for it, and the recorder
+     * waits for the game to draw. On a real Garry's Mod launch that was 48
+     * seconds, and `get_status` answered `watching` throughout -- the same
+     * answer a recorder with nothing to do gives (issue #739).
+     *
+     * Asserted *during* the wait rather than around it, which is what
+     * `attempt_with` taking its window-finder as an argument is for: the
+     * closure is the wait, so asking the recorder what it is doing from inside
+     * it is asking at the only moment the answer matters. A test that looked
+     * before and after would pass on a build that never set the state at all.
+     */
+    #[test]
+    fn a_recording_waiting_for_its_game_to_draw_says_so_while_it_waits() {
+        let directory = TestDirectory::new("waiting-says-so");
+        let service = a_recorder(&directory);
+        let request = recording_asked_for(&directory, &directory.settings_file());
+        let reachable = Reachable {
+            recordings: Arc::clone(service.recordings()),
+            asked_to_stop: Arc::new(AtomicBool::new(false)),
+        };
+        let watching = service.recordings().watch_for_games();
+
+        let mut during = None;
+        let outcome = attempt_with(
+            &request,
+            &RecordingPlan::from(&args()),
+            &ShutdownSignal::new(),
+            &RecordingProgress::new(),
+            Some(&reachable),
+            |_, _, _| {
+                during = Some(service.status());
+                Ok(window())
+            },
+            |_settings, _stop, _outputs| Err(SessionError::TargetHasNoPixels),
+        );
+
+        let during = during.expect("the window was looked for");
+        let RecorderStatus::Watching(waiting) = during else {
+            panic!("a recorder waiting for a game's window is watching, not {during:?}");
+        };
+        let pending = waiting
+            .pending
+            .expect("a recording has been started and is waiting for the game to draw");
+        assert_eq!(
+            pending.game_name,
+            request.game.display_name(),
+            "the wait names the game as the catalogue names it, because a window cannot turn a \
+             process identifier into one"
+        );
+
+        // And it is taken back. A recorder that went on saying it was about to
+        // record something it is already recording is the same untruth pointing
+        // the other way.
+        let RecorderStatus::Watching(after) = service.status() else {
+            panic!("this recorder is still watching once the attempt is over");
+        };
+        assert!(
+            after.pending.is_none(),
+            "the wait is over, so nothing is waiting for a window: {:?}",
+            after.pending
+        );
+        drop(watching);
+        // Cleared on the failure path too, which is the one that matters most:
+        // a recorder that gave up waiting must not go on saying it is about to
+        // record something.
+        assert!(
+            matches!(outcome, RecordingOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
+    }
+
     #[test]
     fn a_recording_nothing_can_reach_is_still_made_and_still_reports_its_own_timeline() {
         // The other side of the seam, which is what `watch` is. Handing over
@@ -2717,7 +2825,10 @@ name = "test-game.exe"
         driver.report_the_sitting();
         assert_eq!(
             service.status(),
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "a recorder watching for anything at all is `watching` and nothing more: an empty \
              sitting invented to fill the field would be a game name a window could draw",
         );
@@ -2801,7 +2912,10 @@ name = "test-game.exe"
         driver.report_the_sitting();
         assert_eq!(
             service.status(),
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "once the sitting is over the recorder is watching for anything again, and a window \
              that went on showing the game would be naming one nobody is playing",
         );
@@ -2916,7 +3030,10 @@ name = "test-game.exe"
 
         assert_eq!(
             service.status(),
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "and the sitting comes off the status in the same breath: a window that went on \
              naming the game after being told the sitting ended would be showing two answers",
         );

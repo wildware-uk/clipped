@@ -1392,6 +1392,22 @@ pub(crate) struct RecordingState {
     /// answering `get_status`. Neither is a capture thread and neither waits on
     /// the other for longer than a `memcpy`.
     watching: Mutex<Option<Watching>>,
+    /// A recording that has been started for the watcher's sitting and is
+    /// waiting for the game to draw.
+    ///
+    /// Held apart from [`Self::watching`] rather than inside it because the wait
+    /// has a *length*, and a length has to be measured when it is asked for
+    /// rather than stored — the same reason
+    /// [`ActiveRecording::elapsed_ms`](clipped_ipc::ActiveRecording) is computed
+    /// in [`status_of`] from an [`Instant`] and not kept as a number that would
+    /// be wrong a second later. [`Self::watching_now`] is where the two are put
+    /// together.
+    ///
+    /// [Issue #739](https://github.com/wildware-uk/clipped/issues/739): without
+    /// this the interval between a game being recognised and its window
+    /// appearing is reported as an idle watcher, which is what a real Garry's
+    /// Mod launch looked like for 48 seconds.
+    pending: Mutex<Option<PendingWait>>,
     /// Where the launch watcher is currently writing recordings and session
     /// records, as its session manager holds it.
     ///
@@ -1422,6 +1438,15 @@ pub(crate) struct RecordingState {
 /// It stays here after it has finished, holding its outcome, until whoever
 /// stops it collects it — which is what lets `stop_recording` return the real
 /// report of a recording that had already ended by itself.
+/// A started recording that has not begun capturing, and when the wait began.
+#[derive(Debug, Clone)]
+struct PendingWait {
+    /// The game it is of, as the catalogue names it.
+    game_name: String,
+    /// When the recorder started waiting for its window.
+    since: Instant,
+}
+
 #[derive(Debug)]
 struct Running {
     id: String,
@@ -1674,6 +1699,8 @@ impl RecordingState {
             // Nothing is watching until something says it is, which is what a
             // `serve` with no `--watch-for-games` reports for its whole life.
             watching: Mutex::new(None),
+            // Nor is any recording waiting for a window, for the same reason.
+            pending: Mutex::new(None),
             // And so nothing has a recording directory of its own yet. The
             // watcher's thread fills this in on its first pass.
             automatic_directory: Mutex::new(None),
@@ -1947,6 +1974,49 @@ impl RecordingState {
         }
     }
 
+    /// Says that a recording has been started and is waiting for the game to
+    /// draw, or that it no longer is.
+    ///
+    /// Called by the watcher's recording thread on both sides of the wait, so
+    /// the state cannot outlive it: a recording that started capturing clears
+    /// this by reporting [`None`], and so does one that gave up. A window that
+    /// kept saying "waiting for Garry's Mod" after the recording began would be
+    /// the same class of untruth this exists to fix
+    /// ([issue #739](https://github.com/wildware-uk/clipped/issues/739)).
+    ///
+    /// Published, because it changes what a window says about the recorder and
+    /// nothing polls for it.
+    pub(crate) fn waiting_for_a_window(&self, game_name: Option<String>) {
+        let changed = {
+            let mut held = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match (held.as_ref(), game_name) {
+                (None, None) => false,
+                // The clock starts once. A second report for the same game is
+                // the same wait, and restarting it would make the figure a
+                // window shows count from the last time anything asked.
+                (Some(waiting), Some(game)) if waiting.game_name == game => false,
+                (_, Some(game_name)) => {
+                    *held = Some(PendingWait {
+                        game_name,
+                        since: Instant::now(),
+                    });
+                    true
+                }
+                (Some(_), None) => {
+                    *held = None;
+                    true
+                }
+            }
+        };
+
+        if changed {
+            self.publish_what_the_watcher_changed();
+        }
+    }
+
     /// Records where the launch watcher is writing recordings now.
     ///
     /// Nothing is published: this is not part of a status, and a window learns
@@ -2092,7 +2162,19 @@ impl RecordingState {
     /// behind it is an owned value a panic cannot leave half written, and the
     /// worst a poisoned read can be is out of date.
     fn watching_now(&self) -> Option<Watching> {
-        self.watching_lock().clone()
+        let mut watching = self.watching_lock().clone()?;
+        // Measured here rather than stored, so the figure is how long the wait
+        // has actually been at the moment somebody asked (issue #739).
+        watching.pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|waiting| clipped_ipc::PendingRecording {
+                game_name: waiting.game_name.clone(),
+                waiting_ms: u64::try_from(waiting.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+            });
+        Some(watching)
     }
 
     /// Whether this recorder will record a game by itself.
@@ -3807,7 +3889,10 @@ mod tests {
         let watching = state.watch_for_games();
         assert_eq!(
             state.status(),
-            RecorderStatus::Watching(Watching { session: None }),
+            RecorderStatus::Watching(Watching {
+                session: None,
+                pending: None
+            }),
             "and now the next game to launch will be recorded, which a window cannot be told by \
              the same word as `idle`",
         );

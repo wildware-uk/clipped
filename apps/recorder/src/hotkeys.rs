@@ -721,7 +721,10 @@ mod tests {
         fn watching() -> Self {
             Self {
                 asked: Mutex::new(Vec::new()),
-                status: RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+                status: RecorderStatus::Watching(clipped_ipc::Watching {
+                    session: None,
+                    pending: None,
+                }),
             }
         }
 
@@ -1035,7 +1038,10 @@ mod tests {
 
         assert_eq!(
             recorder.status(),
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "a recorder watching for games has to say so, or a press reads `idle` and this test \
              is about a different arm",
         );
@@ -1090,7 +1096,10 @@ mod tests {
         );
         assert_eq!(
             recorder.status(),
-            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            RecorderStatus::Watching(clipped_ipc::Watching {
+                session: None,
+                pending: None
+            }),
             "and a refused press leaves the recorder watching, rather than claiming a recording \
              it did not start",
         );

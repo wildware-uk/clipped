@@ -2673,6 +2673,38 @@ export interface WatchingStatus {
    * those few seconds would flicker.
    */
   readonly session?: SessionSummary;
+  /**
+   * A recording that has been started for this sitting and has not begun
+   * capturing yet.
+   *
+   * Present for the interval between a game being recognised and its window
+   * being one there is anything to capture — a game that is still loading, or
+   * one that starts minimised. It is not a moment: a real Garry's Mod launch
+   * spent 48 seconds here, and an interface must not describe a `watching` that
+   * carries this as waiting for something to happen. The recording is already
+   * started; what has not happened is the game drawing (issue #739).
+   */
+  readonly pending?: PendingRecording;
+}
+
+/**
+ * A recording that is started and waiting for the game to draw.
+ *
+ * There is one reason a started recording has not begun — Windows hands over no
+ * frames for a window it is not drawing — which is why this carries no reason
+ * field (issue #383).
+ */
+export interface PendingRecording {
+  /** The game it is of, named as the recorder's catalogue names it. */
+  readonly game_name: string;
+  /**
+   * How long it has been waiting.
+   *
+   * Measured by the recorder, which holds the clock the wait started on. An
+   * interface that subtracted its own would be answering with the difference
+   * between two machines' idea of now.
+   */
+  readonly waiting_ms: number;
 }
 
 /**

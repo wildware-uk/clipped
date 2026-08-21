@@ -591,9 +591,13 @@ mod tests {
         vec![
             RecorderLinkState::Connecting,
             attached(RecorderStatus::Idle),
-            attached(RecorderStatus::Watching(Watching { session: None })),
+            attached(RecorderStatus::Watching(Watching {
+                session: None,
+                pending: None,
+            })),
             attached(RecorderStatus::Watching(Watching {
                 session: Some(sitting(1)),
+                pending: None,
             })),
             recording(),
             attached(RecorderStatus::Recording(active_in(Some(sitting(2))))),
@@ -901,6 +905,7 @@ mod tests {
         let waiting = tray_model(
             &attached(RecorderStatus::Watching(Watching {
                 session: Some(sitting(1)),
+                pending: None,
             })),
             Some(&game()),
         );
@@ -908,7 +913,10 @@ mod tests {
         assert_eq!(waiting.mark, TrayMark::Idle, "nothing is being recorded");
 
         let anything = tray_model(
-            &attached(RecorderStatus::Watching(Watching { session: None })),
+            &attached(RecorderStatus::Watching(Watching {
+                session: None,
+                pending: None,
+            })),
             Some(&game()),
         );
         assert_eq!(anything.status.label, "Watching for a game");
