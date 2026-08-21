@@ -1412,7 +1412,19 @@ both backends' reasons attached — for every caller of `clipped-session`,
 including the automatic session manager. The recorder refuses one step earlier,
 in `apps/recorder`'s `choose_window`, so that the sentence a user reads names the
 window: *"Counter-Strike 2 (cs2.exe) is minimised, so there would be nothing to
-record… Restore it and start again"*. That refusal reaches the desktop
+record… Bring it back to the foreground and start again, or bind the start/stop
+hotkey in Settings, which works without leaving a fullscreen game"*.
+
+The second half of that advice is not a nicety. Bringing the window back is
+impossible on its own for the case this product is for: reaching the control that
+starts a recording takes the foreground away from a fullscreen game, which is
+what minimises it, so restoring it takes the foreground back and the loop closes
+([#740](https://github.com/wildware-uk/clipped/issues/740)). A global hotkey is
+the one route that never leaves the game. It says *bind* rather than naming a
+key because `toggle_recording` ships unbound — `Bindings::defaults` gives keys
+only to the two actions SPEC.md sections 7 and 25 name.
+
+That refusal reaches the desktop
 application verbatim as `target_not_capturable` (`docs/ipc.md`) and reaches
 `watch` as a reason to keep waiting for the window rather than to give up on the
 game.
