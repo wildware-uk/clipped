@@ -509,7 +509,22 @@ fn each_track_holds_the_tone_of_the_source_it_belongs_to_and_not_the_other_ones(
         // tail — to a drain that hung, a capture stopped early, a shutdown
         // reordered — is a file that looks perfect by every other measurement in
         // this test.
-        .synchronised_within(ENDS_WITHIN)
+        //
+        // **Ends, not starts.** The sources here are real captures and do not
+        // begin together: the complement cannot emit a sample until both the
+        // captures it subtracts are running, so it starts last, every run, by
+        // 43-60 ms against a bound of 40. That is not desync. `docs/av-sync.md`
+        // says a packet older than the epoch is "normal rather than a fault"
+        // and that "the epoch does not have to be the earliest moment in the
+        // recording" — a source beginning *after* it is the same thing pointing
+        // the other way, and the packet counts show nothing is dropped: each
+        // track's count accounts for its own span to the millisecond.
+        //
+        // What a start spread cannot do is tell "this source had nothing yet"
+        // from "this source's audio is shifted", and only the second is a
+        // fault. The tone assertions below measure exactly that, on content, and
+        // they are what carries the claim (issue #737).
+        .ends_synchronised_within(ENDS_WITHIN)
         .assert_valid();
 
     assert_every_source_reaches_the_mix(&media);
