@@ -205,7 +205,56 @@ impl<'a> Validation<'a> {
 
         let starts = self.stream_starts("A/V synchronisation");
         self.report_spread("start", &starts, bound_seconds);
+        self.report_end_spread(bound_seconds)
+    }
 
+    /// That the tracks **end** within `bound` of each other, saying nothing
+    /// about where each one began.
+    ///
+    /// The half of [`Self::synchronised_within`] that applies to a recording of
+    /// *real* captures, where the sources do not begin together and are not
+    /// supposed to.
+    ///
+    /// `docs/av-sync.md` settles why: the epoch is the first video frame kept,
+    /// a packet older than it is "normal rather than a fault" — the development
+    /// machine measured the audio track's first buffer landing 293 ms *before*
+    /// the first video frame — and "the epoch does not have to be the earliest
+    /// moment in the recording, and nothing in the model assumes it is". A
+    /// source that begins after the epoch is the same thing pointing the other
+    /// way: it had nothing earlier, and its timestamps say so correctly.
+    ///
+    /// So a start spread is not a synchronisation measurement for such a
+    /// recording. It cannot tell "this source had no audio yet" from "this
+    /// source's audio is shifted", and only the second is a fault. What tells
+    /// them apart is the content — a tone at a known moment — which is what the
+    /// caller of this asserts separately
+    /// ([issue #737](https://github.com/wildware-uk/clipped/issues/737)).
+    ///
+    /// The **end** spread stays, and is the half worth keeping: a track that
+    /// stops early is a fault whatever it did at the beginning, and it is what
+    /// catches a clock that drifted over the length of a recording rather than
+    /// an offset that was there from the first packet.
+    ///
+    /// Every other caller records synthetic packets whose tracks genuinely do
+    /// begin together, and they keep [`Self::synchronised_within`] — the
+    /// stricter of the two — deliberately.
+    #[must_use]
+    pub fn ends_synchronised_within(mut self, bound: Duration) -> Self {
+        let streams = self.media.streams();
+        if streams.len() < 2 {
+            let listing = describe_all(&streams);
+            self.failures.push(format!(
+                "A/V synchronisation: nothing to compare — a recording whose tracks end together \
+                 needs at least two of them, and this file has {} ({listing})",
+                streams.len()
+            ));
+            return self;
+        }
+        self.report_end_spread(bound.as_secs_f64())
+    }
+
+    /// The end-spread measurement both of the above share.
+    fn report_end_spread(mut self, bound_seconds: f64) -> Self {
         let labels = stream_labels(self.media);
         let mut ends: HashMap<i64, f64> = HashMap::new();
         for packet in self.media.packets() {
