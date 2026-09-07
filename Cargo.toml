@@ -110,7 +110,7 @@ windows = "0.62"
 # `::windows_core`. Keep this version in step with `windows` above: `windows
 # 0.62` re-exports `windows-core 0.62`, and the two moving separately is what
 # produces a second copy. Dual MIT/Apache-2.0.
-windows-core = "0.62"
+windows-core = "0.100"
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-background = { path = "crates/background", version = "0.1.0" }
