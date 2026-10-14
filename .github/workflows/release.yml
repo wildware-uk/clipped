@@ -291,7 +291,7 @@ jobs:
       # where a reader can reach it is the point rather than a risk. It runs
       # after the decision above, so a refused tag uploads nothing.
       - name: Keep the corresponding source for the release job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ffmpeg-corresponding-source
           path: ffmpeg-source
